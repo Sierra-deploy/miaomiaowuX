@@ -17,7 +17,7 @@ COPY miaomiaowux-frontend/ ./
 RUN npm run build
 
 # Build stage for backend
-FROM golang:1.24-bookworm AS backend-builder
+FROM golang:1.25-bookworm AS backend-builder
 
 # Declare build arguments for multi-platform support
 ARG TARGETOS
