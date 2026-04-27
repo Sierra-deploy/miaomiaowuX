@@ -66,6 +66,12 @@ jobs:
           - goos: linux
             goarch: arm64
             output: mmwx-linux-arm64
+          - goos: darwin
+            goarch: amd64
+            output: mmwx-darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            output: mmwx-darwin-arm64
           - goos: windows
             goarch: amd64
             output: mmwx-windows-amd64.exe
@@ -180,6 +186,18 @@ jobs:
           name: mmwx-linux-arm64
           path: release
 
+      - name: Download Darwin AMD64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mmwx-darwin-amd64
+          path: release
+
+      - name: Download Darwin ARM64 artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: mmwx-darwin-arm64
+          path: release
+
       - name: Download Windows artifact
         uses: actions/download-artifact@v4
         with:
@@ -190,12 +208,16 @@ jobs:
         run: |
           chmod +x release/mmwx-linux-amd64
           chmod +x release/mmwx-linux-arm64
+          chmod +x release/mmwx-darwin-amd64
+          chmod +x release/mmwx-darwin-arm64
 
       - name: Create checksums
         run: |
           cd release
           sha256sum mmwx-linux-amd64 > checksums.txt
           sha256sum mmwx-linux-arm64 >> checksums.txt
+          sha256sum mmwx-darwin-amd64 >> checksums.txt
+          sha256sum mmwx-darwin-arm64 >> checksums.txt
           sha256sum mmwx-windows-amd64.exe >> checksums.txt
 
       - name: Create Release
@@ -207,6 +229,8 @@ jobs:
           files: |
             release/mmwx-linux-amd64
             release/mmwx-linux-arm64
+            release/mmwx-darwin-amd64
+            release/mmwx-darwin-arm64
             release/mmwx-windows-amd64.exe
             release/checksums.txt
         env:
