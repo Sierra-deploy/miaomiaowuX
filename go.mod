@@ -1,6 +1,6 @@
 module miaomiaowu
 
-go 1.25
+go 1.24
 
 require (
 	github.com/go-acme/lego/v4 v4.31.0
