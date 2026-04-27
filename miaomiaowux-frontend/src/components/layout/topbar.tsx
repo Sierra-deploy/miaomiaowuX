@@ -13,6 +13,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { Button } from '@/components/ui/button'
+import { AnimatedX } from '@/components/animated-x'
 import { useState, useRef, useEffect, useCallback } from 'react'
 
 const baseNavLinks = [
@@ -195,7 +196,7 @@ export function Topbar() {
               alt='妙妙屋 Logo'
               className='h-10 w-10 border-2 border-[color:rgba(241,140,110,0.4)] shadow-[4px_4px_0_rgba(0,0,0,0.2)] shrink-0'
             />
-            {!hideLogoText && <span className='hidden md:inline pixel-text text-primary text-base whitespace-nowrap'>妙妙屋</span>}
+            {!hideLogoText && <span className='hidden md:inline pixel-text text-primary text-base whitespace-nowrap'>妙妙屋<AnimatedX size="sm" /></span>}
           </Link>
 
           {/* Sidebar Toggle Button - Only show in sidebar mode */}
