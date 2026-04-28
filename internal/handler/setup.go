@@ -18,6 +18,7 @@ import (
 
 	"miaomiaowu/internal/logger"
 	"miaomiaowu/internal/storage"
+	"miaomiaowu/templates"
 )
 
 type setupStatusResponse struct {
@@ -302,12 +303,12 @@ func getOutboundIP() string {
 }
 
 func deployLocalNginx(domain string, repo *storage.TrafficRepository) error {
-	nginxConf, err := os.ReadFile("templates/single_nginx.conf")
+	nginxConf, err := templates.ReadFile("single_nginx.conf")
 	if err != nil {
 		return fmt.Errorf("读取 single_nginx.conf 模板失败: %w", err)
 	}
 
-	domainTpl, err := os.ReadFile("templates/mmwx_domain.conf")
+	domainTpl, err := templates.ReadFile("mmwx_domain.conf")
 	if err != nil {
 		return fmt.Errorf("读取 mmwx_domain.conf 模板失败: %w", err)
 	}

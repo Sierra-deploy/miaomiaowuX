@@ -6,23 +6,23 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 
 	"miaomiaowu/internal/storage"
+	"miaomiaowu/templates"
 )
 
 func (h *RemoteManageHandler) deployFallbackConfig(ctx context.Context, server *storage.RemoteServer) error {
 	domain := strings.ToLower(strings.TrimSpace(server.Domain))
 
-	nginxConf, err := os.ReadFile("templates/fallback/nginx.conf")
+	nginxConf, err := templates.ReadFile("fallback/nginx.conf")
 	if err != nil {
 		return fmt.Errorf("读取 fallback/nginx.conf 模板失败: %w", err)
 	}
 
-	domainTpl, err := os.ReadFile("templates/fallback/domain.conf")
+	domainTpl, err := templates.ReadFile("fallback/domain_static.conf")
 	if err != nil {
-		return fmt.Errorf("读取 fallback/domain.conf 模板失败: %w", err)
+		return fmt.Errorf("读取 fallback/domain_static.conf 模板失败: %w", err)
 	}
 	domainConf := strings.ReplaceAll(string(domainTpl), "{domain}", domain)
 
@@ -36,7 +36,7 @@ func (h *RemoteManageHandler) deployFallbackConfig(ctx context.Context, server *
 	}
 	log.Printf("[DeployFallback] Deployed nginx config to server %d (%s)", server.ID, server.Name)
 
-	configTpl, err := os.ReadFile("templates/default/config.json")
+	configTpl, err := templates.ReadFile("default/config.json")
 	if err != nil {
 		return fmt.Errorf("读取 default/config.json 模板失败: %w", err)
 	}

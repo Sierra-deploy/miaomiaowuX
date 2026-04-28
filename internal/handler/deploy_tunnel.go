@@ -6,24 +6,24 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strings"
 
 	"miaomiaowu/internal/storage"
+	"miaomiaowu/templates"
 )
 
 func (h *RemoteManageHandler) deployTunnelConfig(ctx context.Context, server *storage.RemoteServer) error {
 	domain := strings.ToLower(strings.TrimSpace(server.Domain))
 	rootDomain := extractRootDomain(domain)
 
-	nginxConf, err := os.ReadFile("templates/tunnel/nginx.conf")
+	nginxConf, err := templates.ReadFile("tunnel/nginx.conf")
 	if err != nil {
 		return fmt.Errorf("读取 tunnel/nginx.conf 模板失败: %w", err)
 	}
 
-	domainTpl, err := os.ReadFile("templates/tunnel/domain.conf")
+	domainTpl, err := templates.ReadFile("tunnel/domain_static.conf")
 	if err != nil {
-		return fmt.Errorf("读取 tunnel/domain.conf 模板失败: %w", err)
+		return fmt.Errorf("读取 tunnel/domain_static.conf 模板失败: %w", err)
 	}
 	domainConf := strings.ReplaceAll(string(domainTpl), "{domain}", domain)
 	domainConf = strings.ReplaceAll(domainConf, "{root_domain}", rootDomain)
@@ -38,7 +38,7 @@ func (h *RemoteManageHandler) deployTunnelConfig(ctx context.Context, server *st
 	}
 	log.Printf("[DeployTunnel] Deployed nginx config to server %d (%s)", server.ID, server.Name)
 
-	configTpl, err := os.ReadFile("templates/tunnel/config.json")
+	configTpl, err := templates.ReadFile("tunnel/config.json")
 	if err != nil {
 		return fmt.Errorf("读取 tunnel/config.json 模板失败: %w", err)
 	}

@@ -15,6 +15,7 @@ import {
   Server,
   Upload,
   KeyRound,
+  Globe,
 } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
@@ -142,6 +143,7 @@ function CertificatesPage() {
   const [deleteDialogCert, setDeleteDialogCert] = useState<Certificate | null>(null)
   const [isDNSProviderDialogOpen, setIsDNSProviderDialogOpen] = useState(false)
   const [isDeployDialogOpen, setIsDeployDialogOpen] = useState(false)
+  const [isEnableHTTPSDialogOpen, setIsEnableHTTPSDialogOpen] = useState(false)
   const [deployTarget, setDeployTarget] = useState<Certificate | null>(null)
 
   const [formData, setFormData] = useState({
@@ -198,7 +200,7 @@ function CertificatesPage() {
     queryKey: ['master-cert-status'],
     queryFn: async () => {
       const res = await api.get('/api/admin/master-cert-status')
-      return res.data as { success: boolean; pending: boolean; domain: string }
+      return res.data as { success: boolean; pending: boolean; domain: string; https_enabled: boolean }
     },
     enabled: Boolean(auth.accessToken),
     refetchInterval: 10000,
@@ -214,6 +216,21 @@ function CertificatesPage() {
         setTimeout(() => { window.location.href = data.new_master_url }, 2000)
       } else {
         toast.error(data.message || '部署失败')
+      }
+    },
+    onError: handleServerError,
+  })
+
+  const enableHTTPS = useMutation({
+    mutationFn: () => api.post('/api/admin/enable-https'),
+    onSuccess: (res) => {
+      const data = res.data
+      if (data.success) {
+        toast.success('HTTPS 已开启，即将跳转')
+        queryClient.invalidateQueries({ queryKey: ['master-cert-status'] })
+        setTimeout(() => { window.location.href = data.new_master_url }, 2000)
+      } else {
+        toast.error(data.message || '开启失败')
       }
     },
     onError: handleServerError,
@@ -472,6 +489,16 @@ function CertificatesPage() {
           </p>
         </div>
         <div className="flex gap-2">
+          {masterCertStatus?.domain && !masterCertStatus?.https_enabled && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setIsEnableHTTPSDialogOpen(true)}
+            >
+              <Globe className="h-4 w-4 mr-2" />
+              开启 HTTPS
+            </Button>
+          )}
           <Button
             variant="outline"
             size="sm"
@@ -1004,6 +1031,26 @@ function CertificatesPage() {
               onClick={() => deleteDialogCert && deleteMutation.mutate(deleteDialogCert.id)}
             >
               删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={isEnableHTTPSDialogOpen} onOpenChange={setIsEnableHTTPSDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>开启 HTTPS 访问</AlertDialogTitle>
+            <AlertDialogDescription>
+              该操作将安装 Nginx 并反向代理妙妙屋X，为域名 {masterCertStatus?.domain} 开启 HTTPS 访问。确认继续？
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => enableHTTPS.mutate()}
+              disabled={enableHTTPS.isPending}
+            >
+              {enableHTTPS.isPending ? '配置中...' : '确认开启'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

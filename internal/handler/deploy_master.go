@@ -7,6 +7,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
+
+	"miaomiaowu/templates"
 )
 
 // GetMasterCertStatus 返回主控证书是否待部署
@@ -19,12 +23,14 @@ func (h *CertificateHandler) GetMasterCertStatus(w http.ResponseWriter, r *http.
 	ctx := r.Context()
 	pending, _ := h.repo.GetSystemSetting(ctx, "master_cert_pending")
 	domain, _ := h.repo.GetSystemSetting(ctx, "mmwx_domain")
+	masterURL, _ := h.repo.GetSystemSetting(ctx, "master_url")
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"success": true,
-		"pending": pending == "true" && domain != "",
-		"domain":  domain,
+		"success":       true,
+		"pending":       pending == "true" && domain != "",
+		"domain":        domain,
+		"https_enabled": strings.HasPrefix(masterURL, "https://"),
 	})
 }
 
@@ -105,4 +111,105 @@ func installNginxLocal() error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func isXrayInstalled() bool {
+	for _, p := range []string{"/usr/local/bin/xray", "/usr/bin/xray", "/opt/xray/xray"} {
+		if _, err := os.Stat(p); err == nil {
+			return true
+		}
+	}
+	_, err := exec.LookPath("xray")
+	return err == nil
+}
+
+func (h *CertificateHandler) EnableHTTPS(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	ctx := r.Context()
+	domain, err := h.repo.GetSystemSetting(ctx, "mmwx_domain")
+	if err != nil || domain == "" {
+		respondJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "未配置主控域名"})
+		return
+	}
+	domain = strings.ToLower(strings.TrimSpace(domain))
+	rootDomain := extractRootDomain(domain)
+
+	cert, err := h.repo.GetCertificateByDomain(ctx, domain, 0)
+	if err != nil || cert == nil || cert.CertPEM == "" || cert.KeyPEM == "" {
+		respondJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "未找到主控域名的有效证书"})
+		return
+	}
+
+	if !isNginxInstalled() {
+		log.Printf("[EnableHTTPS] Nginx 未安装，开始安装...")
+		if err := installNginxLocal(); err != nil {
+			respondJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": fmt.Sprintf("Nginx 安装失败: %s", err.Error())})
+			return
+		}
+	}
+
+	dirs := []string{"/usr/local/nginx/conf", "/usr/local/nginx/servers", "/usr/local/nginx/stream_servers", "/usr/local/nginx/cert", "/usr/local/nginx/html"}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			respondJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": fmt.Sprintf("创建目录失败: %v", err)})
+			return
+		}
+	}
+
+	nginxConf, err := templates.ReadFile("tunnel/nginx.conf")
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": fmt.Sprintf("读取 nginx.conf 模板失败: %v", err)})
+		return
+	}
+	if err := os.WriteFile("/usr/local/nginx/conf/nginx.conf", nginxConf, 0644); err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": fmt.Sprintf("写入 nginx.conf 失败: %v", err)})
+		return
+	}
+
+	domainTpl, err := templates.ReadFile("tunnel/domain_proxy.conf")
+	if err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": fmt.Sprintf("读取 domain_proxy.conf 模板失败: %v", err)})
+		return
+	}
+	domainConf := strings.ReplaceAll(string(domainTpl), "{domain}", domain)
+	domainConf = strings.ReplaceAll(domainConf, "{root_domain}", rootDomain)
+	if err := os.WriteFile(filepath.Join("/usr/local/nginx/servers", domain+".conf"), []byte(domainConf), 0644); err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": fmt.Sprintf("写入 domain.conf 失败: %v", err)})
+		return
+	}
+
+	if !isXrayInstalled() {
+		fallbackTpl, err := templates.ReadFile("tunnel/xray_fallback_443.conf")
+		if err != nil {
+			respondJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": fmt.Sprintf("读取 xray_fallback_443.conf 模板失败: %v", err)})
+			return
+		}
+		if err := os.WriteFile(filepath.Join("/usr/local/nginx/stream_servers", domain+"_443.conf"), fallbackTpl, 0644); err != nil {
+			respondJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": fmt.Sprintf("写入 443 配置失败: %v", err)})
+			return
+		}
+	}
+
+	deployCertToLocal(rootDomain, h.repo)
+
+	if err := exec.Command("nginx", "-s", "reload").Run(); err != nil {
+		if startErr := exec.Command("systemctl", "start", "nginx").Run(); startErr != nil {
+			respondJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": fmt.Sprintf("Nginx 启动失败: %v", startErr)})
+			return
+		}
+	}
+
+	newMasterURL := "https://" + domain
+	_ = h.repo.SetSystemSetting(ctx, "master_url", newMasterURL)
+	log.Printf("[EnableHTTPS] HTTPS 已启用，master_url=%s, xray_installed=%v", newMasterURL, isXrayInstalled())
+
+	respondJSON(w, http.StatusOK, map[string]any{
+		"success":        true,
+		"message":        fmt.Sprintf("已为 %s 开启 HTTPS 访问", domain),
+		"new_master_url": newMasterURL,
+	})
 }

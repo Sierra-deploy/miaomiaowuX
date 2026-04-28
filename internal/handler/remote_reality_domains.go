@@ -7,10 +7,11 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
+
+	"miaomiaowu/templates"
 )
 
 type realityDomainLatencyProbeRequest struct {
@@ -263,22 +264,22 @@ func (h *RemoteManageHandler) HandleSetupSSL(w http.ResponseWriter, r *http.Requ
 	rootDomain := extractRootDomain(domain)
 
 	// 根据 steal_mode 选择模板路径
-	nginxTplPath := "templates/tunnel/nginx.conf"
-	domainTplPath := "templates/tunnel/domain.conf"
+	nginxTplPath := "tunnel/nginx.conf"
+	domainTplPath := "tunnel/domain_static.conf"
 	if server.StealMode == "fallback" {
-		nginxTplPath = "templates/fallback/nginx.conf"
-		domainTplPath = "templates/fallback/domain.conf"
+		nginxTplPath = "fallback/nginx.conf"
+		domainTplPath = "fallback/domain_static.conf"
 	}
 
 	// 步骤1：读取nginx.conf基本模板（无需域替换）
-	nginxConf, readErr := os.ReadFile(nginxTplPath)
+	nginxConf, readErr := templates.ReadFile(nginxTplPath)
 	if readErr != nil {
 		remoteWriteError(w, http.StatusInternalServerError, fmt.Sprintf("读取 nginx.conf 模板失败: %v", readErr))
 		return
 	}
 
 	// 第2步：读取domain.conf模板并替换占位符
-	domainTpl, readErr := os.ReadFile(domainTplPath)
+	domainTpl, readErr := templates.ReadFile(domainTplPath)
 	if readErr != nil {
 		remoteWriteError(w, http.StatusInternalServerError, fmt.Sprintf("读取 domain.conf 模板失败: %v", readErr))
 		return
