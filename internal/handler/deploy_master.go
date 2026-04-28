@@ -238,6 +238,11 @@ func (h *CertificateHandler) EnableHTTPS(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if output, err := exec.Command("nginx", "-t").CombinedOutput(); err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": fmt.Sprintf("Nginx 配置检测失败: %s", string(output))})
+		return
+	}
+
 	if err := exec.Command("nginx", "-s", "reload").Run(); err != nil {
 		if startErr := exec.Command("systemctl", "start", "nginx").Run(); startErr != nil {
 			respondJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": fmt.Sprintf("Nginx 启动失败: %v", startErr)})
