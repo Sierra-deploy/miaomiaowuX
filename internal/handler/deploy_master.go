@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -151,14 +152,13 @@ func installNginxLocal() error {
 	return cmd.Run()
 }
 
-func isXrayInstalled() bool {
-	for _, p := range []string{"/usr/local/bin/xray", "/usr/bin/xray", "/opt/xray/xray"} {
-		if _, err := os.Stat(p); err == nil {
-			return true
-		}
+func isPort443InUse() bool {
+	ln, err := net.Listen("tcp", ":443")
+	if err != nil {
+		return true
 	}
-	_, err := exec.LookPath("xray")
-	return err == nil
+	ln.Close()
+	return false
 }
 
 func (h *CertificateHandler) EnableHTTPS(w http.ResponseWriter, r *http.Request) {
@@ -220,7 +220,7 @@ func (h *CertificateHandler) EnableHTTPS(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if !isXrayInstalled() {
+	if !isPort443InUse() {
 		fallbackTpl, err := templates.ReadFile("tunnel/xray_fallback_443.conf")
 		if err != nil {
 			respondJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": fmt.Sprintf("读取 xray_fallback_443.conf 模板失败: %v", err)})
@@ -263,7 +263,7 @@ func (h *CertificateHandler) EnableHTTPS(w http.ResponseWriter, r *http.Request)
 
 	newMasterURL := "https://" + domain
 	_ = h.repo.SetSystemSetting(ctx, "master_url", newMasterURL)
-	log.Printf("[EnableHTTPS] HTTPS 已启用，master_url=%s, xray_installed=%v", newMasterURL, isXrayInstalled())
+	log.Printf("[EnableHTTPS] HTTPS 已启用，master_url=%s, port443_in_use=%v", newMasterURL, isPort443InUse())
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"success":        true,
