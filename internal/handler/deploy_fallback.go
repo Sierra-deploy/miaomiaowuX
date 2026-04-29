@@ -14,6 +14,7 @@ import (
 
 func (h *RemoteManageHandler) deployFallbackConfig(ctx context.Context, server *storage.RemoteServer) error {
 	domain := strings.ToLower(strings.TrimSpace(server.Domain))
+	rootDomain := extractRootDomain(domain)
 
 	nginxConf, err := templates.ReadFile("fallback/nginx.conf")
 	if err != nil {
@@ -25,6 +26,7 @@ func (h *RemoteManageHandler) deployFallbackConfig(ctx context.Context, server *
 		return fmt.Errorf("读取 fallback/domain_static.conf 模板失败: %w", err)
 	}
 	domainConf := strings.ReplaceAll(string(domainTpl), "{domain}", domain)
+	domainConf = strings.ReplaceAll(domainConf, "{root_domain}", rootDomain)
 
 	sslPayload, _ := json.Marshal(map[string]any{
 		"domain":        domain,
@@ -50,18 +52,18 @@ func (h *RemoteManageHandler) deployFallbackConfig(ctx context.Context, server *
 	log.Printf("[DeployFallback] Deployed xray config to server %d (%s)", server.ID, server.Name)
 
 	if h.certHandler != nil {
-		cert, certErr := h.repo.GetCertificateByDomain(ctx, domain, server.ID)
+		cert, certErr := h.repo.GetCertificateByDomain(ctx, rootDomain, server.ID)
 		if certErr == nil && cert != nil && cert.CertPEM != "" && cert.KeyPEM != "" {
 			payload := WSCertDeployPayload{
-				Domain:   domain,
+				Domain:   rootDomain,
 				CertPEM:  cert.CertPEM,
 				KeyPEM:   cert.KeyPEM,
-				CertPath: fmt.Sprintf("/usr/local/nginx/cert/%s.pem", domain),
-				KeyPath:  fmt.Sprintf("/usr/local/nginx/cert/%s.key", domain),
+				CertPath: fmt.Sprintf("/usr/local/nginx/cert/%s.pem", rootDomain),
+				KeyPath:  fmt.Sprintf("/usr/local/nginx/cert/%s.key", rootDomain),
 				Reload:   "nginx",
 			}
 			h.certHandler.deployToRemoteServer(server, payload)
-			log.Printf("[DeployFallback] Deployed certificate for %s to server %d", domain, server.ID)
+			log.Printf("[DeployFallback] Deployed certificate for %s to server %d", rootDomain, server.ID)
 		} else {
 			h.certHandler.DeployAutoDeployCertificates(server.ID)
 			log.Printf("[DeployFallback] Triggered auto-deploy certificates for server %d", server.ID)

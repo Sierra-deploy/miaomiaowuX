@@ -15,6 +15,7 @@ import (
 func (h *RemoteManageHandler) deployTunnelConfig(ctx context.Context, server *storage.RemoteServer) error {
 	domain := strings.ToLower(strings.TrimSpace(server.Domain))
 	rootDomain := extractRootDomain(domain)
+	proxyDomain := strings.ToLower(strings.TrimSpace(server.PullAddress))
 
 	nginxConf, err := templates.ReadFile("tunnel/nginx.conf")
 	if err != nil {
@@ -39,15 +40,15 @@ func (h *RemoteManageHandler) deployTunnelConfig(ctx context.Context, server *st
 	log.Printf("[DeployTunnel] Deployed nginx config to server %d (%s)", server.ID, server.Name)
 
 	configFile := "tunnel/config.json"
-	if domain == rootDomain {
+	if proxyDomain == "" || proxyDomain == domain {
 		configFile = "tunnel/config_ip.json"
 	}
 	configTpl, err := templates.ReadFile(configFile)
 	if err != nil {
 		return fmt.Errorf("读取 %s 模板失败: %w", configFile, err)
 	}
-	configJSON := strings.ReplaceAll(string(configTpl), "{proxy_domain}", domain)
-	configJSON = strings.ReplaceAll(configJSON, "{nginx_domain}", rootDomain)
+	configJSON := strings.ReplaceAll(string(configTpl), "{proxy_domain}", proxyDomain)
+	configJSON = strings.ReplaceAll(configJSON, "{nginx_domain}", domain)
 
 	configPayload, _ := json.Marshal(map[string]string{
 		"config": configJSON,
