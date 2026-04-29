@@ -8,7 +8,7 @@ import { cn } from '@/lib/utils'
 
 const baseNavLinks = [
   {
-    title: '首页',
+    title: '流量信息',
     to: '/',
     icon: Activity,
   },

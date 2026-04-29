@@ -18,7 +18,7 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 
 const baseNavLinks = [
   {
-    title: '首页',
+    title: '流量信息',
     to: '/',
     icon: Activity,
   },
