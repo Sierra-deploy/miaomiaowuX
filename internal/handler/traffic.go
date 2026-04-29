@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"strings"
 
-	"miaomiaowu/internal/storage"
-	"miaomiaowu/internal/traffic"
-	"miaomiaowu/internal/version"
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/traffic"
+	"miaomiaowux/internal/version"
 )
 
 // TrafficHandler 处理与流量相关的 API 请求

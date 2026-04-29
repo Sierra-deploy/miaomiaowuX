@@ -3,14 +3,14 @@ package handler
 import (
 	"encoding/json"
 	"errors"
-	"miaomiaowu/internal/logger"
+	"miaomiaowux/internal/logger"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
-	"miaomiaowu/internal/auth"
-	"miaomiaowu/internal/storage"
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/storage"
 )
 
 type externalSubscriptionRequest struct {

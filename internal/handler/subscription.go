@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"miaomiaowu/internal/logger"
+	"miaomiaowux/internal/logger"
 	"net/http"
 	"net/url"
 	"os"
@@ -14,9 +14,9 @@ import (
 	"strings"
 	"time"
 
-	"miaomiaowu/internal/auth"
-	"miaomiaowu/internal/storage"
-	"miaomiaowu/internal/substore"
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/substore"
 
 	"gopkg.in/yaml.v3"
 )

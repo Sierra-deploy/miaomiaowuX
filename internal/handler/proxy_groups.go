@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"miaomiaowu/internal/proxygroups"
-	"miaomiaowu/internal/storage"
+	"miaomiaowux/internal/proxygroups"
+	"miaomiaowux/internal/storage"
 )
 
 // ProxyGroupsHandler 提供代理组配置的读取接口

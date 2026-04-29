@@ -90,7 +90,7 @@ func WithWebrootDir(dir string) ClientOption {
 // 创建一个新的 ACME 客户端。
 func NewClient(opts ...ClientOption) *Client {
 	c := &Client{
-		certDir:  "/etc/miaomiaowu/certs",
+		certDir:  "/etc/mmwx/certs",
 		staging:  false,
 		httpPort: ":80",
 	}
@@ -140,7 +140,7 @@ func (c *Client) ObtainCertificateV2(ctx context.Context, req CertRequest) (*Cer
 		return nil, fmt.Errorf("obtain certificate: %w", err)
 	}
 
-	return c.processCertResult(req.Domain, certificates.Certificate, certificates.PrivateKey)
+	return c.ProcessCertResult(req.Domain, certificates.Certificate, certificates.PrivateKey)
 }
 
 // 续订现有证书（向后兼容）。
@@ -180,7 +180,7 @@ func (c *Client) RenewCertificateV2(ctx context.Context, req CertRequest, certPE
 		return nil, fmt.Errorf("renew certificate: %w", err)
 	}
 
-	return c.processCertResult(req.Domain, newCert.Certificate, newCert.PrivateKey)
+	return c.ProcessCertResult(req.Domain, newCert.Certificate, newCert.PrivateKey)
 }
 
 // 根据请求创建并配置乐高客户端。
@@ -291,7 +291,7 @@ func (c *Client) setupWebrootChallenge(client *lego.Client, req CertRequest) err
 	return nil
 }
 
-func (c *Client) processCertResult(domain string, certPEMBytes, keyPEMBytes []byte) (*CertResult, error) {
+func (c *Client) ProcessCertResult(domain string, certPEMBytes, keyPEMBytes []byte) (*CertResult, error) {
 	expiryDate, issueDate, err := parseCertificateDates(certPEMBytes)
 	if err != nil {
 		return nil, fmt.Errorf("parse certificate: %w", err)

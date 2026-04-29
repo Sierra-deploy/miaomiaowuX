@@ -14,8 +14,8 @@ import (
 	"syscall"
 	"time"
 
-	"miaomiaowu/internal/logger"
-	"miaomiaowu/internal/version"
+	"miaomiaowux/internal/logger"
+	"miaomiaowux/internal/version"
 )
 
 const (

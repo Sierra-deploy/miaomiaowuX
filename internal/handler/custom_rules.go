@@ -5,15 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"miaomiaowu/internal/logger"
+	"miaomiaowux/internal/logger"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 
-	"miaomiaowu/internal/auth"
-	"miaomiaowu/internal/storage"
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/storage"
 
 	"gopkg.in/yaml.v3"
 )

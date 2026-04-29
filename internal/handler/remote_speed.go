@@ -6,9 +6,9 @@ import (
 	"net/http"
 	"strings"
 
-	"miaomiaowu/internal/agentlog"
-	"miaomiaowu/internal/storage"
-	"miaomiaowu/internal/version"
+	"miaomiaowux/internal/agentlog"
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/version"
 )
 
 // RemoteSpeedHandler 通过 HTTP 处理来自远程服务器的速度报告

@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"miaomiaowu/internal/xrpc/client"
+	"miaomiaowux/internal/xrpc/client"
 
 	"github.com/xtls/xray-core/app/proxyman/command"
 	"github.com/xtls/xray-core/infra/conf"

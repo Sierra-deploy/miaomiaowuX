@@ -15,10 +15,10 @@ import (
 	"sync"
 	"time"
 
-	"miaomiaowu/internal/agentlog"
-	"miaomiaowu/internal/storage"
-	"miaomiaowu/internal/traffic"
-	"miaomiaowu/internal/version"
+	"miaomiaowux/internal/agentlog"
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/traffic"
+	"miaomiaowux/internal/version"
 
 	"github.com/gorilla/websocket"
 )

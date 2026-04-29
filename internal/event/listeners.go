@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"log"
 
-	"miaomiaowu/internal/storage"
+	"miaomiaowux/internal/storage"
 )
 
 // InboundToClashFunc 入站转 Clash 配置的函数类型

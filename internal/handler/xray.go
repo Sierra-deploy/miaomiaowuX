@@ -7,10 +7,10 @@ import (
 	stdhttp "net/http"
 	"time"
 
-	"miaomiaowu/internal/auth"
-	"miaomiaowu/internal/storage"
-	"miaomiaowu/internal/xrpc/client"
-	"miaomiaowu/internal/xrpc/services/handler"
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/xrpc/client"
+	"miaomiaowux/internal/xrpc/services/handler"
 
 	statspb "github.com/xtls/xray-core/app/stats/command"
 )

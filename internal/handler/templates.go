@@ -9,8 +9,8 @@ import (
 	"strings"
 	"time"
 
-	"miaomiaowu/internal/storage"
-	"miaomiaowu/internal/substore"
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/substore"
 )
 
 type templateRequest struct {

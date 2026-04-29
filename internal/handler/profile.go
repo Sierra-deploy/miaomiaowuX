@@ -5,8 +5,8 @@ import (
 	"errors"
 	"net/http"
 
-	"miaomiaowu/internal/auth"
-	"miaomiaowu/internal/storage"
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/storage"
 )
 
 type profileResponse struct {

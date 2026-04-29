@@ -3,7 +3,7 @@ package substore
 import (
 	"strings"
 
-	"miaomiaowu/internal/logger"
+	"miaomiaowux/internal/logger"
 
 	"gopkg.in/yaml.v3"
 )

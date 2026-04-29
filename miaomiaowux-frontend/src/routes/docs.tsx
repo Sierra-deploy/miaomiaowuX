@@ -548,7 +548,7 @@ function DocsPage() {
                           <div>
                             <h4 className='font-semibold mb-2'>自动安装为 systemd 服务（Debian/Ubuntu）</h4>
                             <div className='bg-muted/50 rounded p-3 font-mono text-xs mb-2'>
-                              curl -sL https://raw.githubusercontent.com/Jimleerx/miaomiaowu/main/install.sh | bash
+                              curl -sL https://raw.githubusercontent.com/Jimleerx/miaomiaowux/main/install.sh | bash
                             </div>
                             <p className='text-xs text-muted-foreground'>
                               安装完成后，服务将自动启动，访问 http://服务器IP:12889 即可
@@ -558,7 +558,7 @@ function DocsPage() {
                           <div>
                             <h4 className='font-semibold mb-2'>更新到最新版本</h4>
                             <div className='bg-muted/50 rounded p-3 font-mono text-xs'>
-                              curl -sL https://raw.githubusercontent.com/Jimleerx/miaomiaowu/main/install.sh | sudo bash -s update
+                              curl -sL https://raw.githubusercontent.com/Jimleerx/miaomiaowux/main/install.sh | sudo bash -s update
                             </div>
                           </div>
                         </div>
@@ -575,7 +575,7 @@ function DocsPage() {
                             <h4 className='font-semibold mb-2'>一键下载安装</h4>
                             <div className='bg-muted/50 rounded p-3 font-mono text-xs space-y-1'>
                               <div># 下载安装</div>
-                              <div>curl -sL https://raw.githubusercontent.com/Jimleerx/miaomiaowu/main/quick-install.sh | bash</div>
+                              <div>curl -sL https://raw.githubusercontent.com/Jimleerx/miaomiaowux/main/quick-install.sh | bash</div>
                               <div className='mt-2'># 运行服务</div>
                               <div>./mmw</div>
                             </div>
@@ -584,7 +584,7 @@ function DocsPage() {
                           <div>
                             <h4 className='font-semibold mb-2'>更新简易安装版本</h4>
                             <div className='bg-muted/50 rounded p-3 font-mono text-xs'>
-                              curl -sL https://raw.githubusercontent.com/Jimleerx/miaomiaowu/main/quick-install.sh | bash -s update
+                              curl -sL https://raw.githubusercontent.com/Jimleerx/miaomiaowux/main/quick-install.sh | bash -s update
                             </div>
                           </div>
                         </div>
@@ -601,7 +601,7 @@ function DocsPage() {
                             <h4 className='font-semibold mb-2'>Linux</h4>
                             <div className='bg-muted/50 rounded p-3 font-mono text-xs space-y-1'>
                               <div># 下载二进制文件（修改版本号为所需版本）</div>
-                              <div>wget https://github.com/Jimleerx/miaomiaowu/releases/download/v0.0.2/mmw-linux-amd64</div>
+                              <div>wget https://github.com/Jimleerx/miaomiaowux/releases/download/v0.0.2/mmw-linux-amd64</div>
                               <div className='mt-2'># 添加执行权限</div>
                               <div>chmod +x mmw-linux-amd64</div>
                               <div className='mt-2'># 运行</div>
@@ -613,7 +613,7 @@ function DocsPage() {
                             <h4 className='font-semibold mb-2'>Windows</h4>
                             <div className='bg-muted/50 rounded p-3 font-mono text-xs space-y-1'>
                               <div># 从 Releases 页面下载 mmw-windows-amd64.exe</div>
-                              <div># https://github.com/Jimleerx/miaomiaowu/releases</div>
+                              <div># https://github.com/Jimleerx/miaomiaowux/releases</div>
                               <div className='mt-2'># 双击运行或在命令行中执行</div>
                               <div>.\\mmw-windows-amd64.exe</div>
                             </div>

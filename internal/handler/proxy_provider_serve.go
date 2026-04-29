@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"miaomiaowu/internal/logger"
+	"miaomiaowux/internal/logger"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,8 +17,8 @@ import (
 	"sync"
 	"time"
 
-	"miaomiaowu/internal/storage"
-	"miaomiaowu/internal/util"
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/util"
 
 	"gopkg.in/yaml.v3"
 )

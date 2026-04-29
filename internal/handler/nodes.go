@@ -7,15 +7,15 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"miaomiaowu/internal/logger"
+	"miaomiaowux/internal/logger"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
-	"miaomiaowu/internal/auth"
-	"miaomiaowu/internal/storage"
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/storage"
 
 	"gopkg.in/yaml.v3"
 )

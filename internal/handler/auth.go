@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"miaomiaowu/internal/auth"
-	"miaomiaowu/internal/logger"
-	"miaomiaowu/internal/storage"
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/logger"
+	"miaomiaowux/internal/storage"
 )
 
 type loginRequest struct {

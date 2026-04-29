@@ -8,8 +8,8 @@ import (
 	"net/http"
 	"strings"
 
-	"miaomiaowu/internal/storage"
-	"miaomiaowu/templates"
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/templates"
 )
 
 func (h *RemoteManageHandler) deployFallbackConfig(ctx context.Context, server *storage.RemoteServer) error {

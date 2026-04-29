@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"miaomiaowu/internal/logger"
+	"miaomiaowux/internal/logger"
 )
 
 var globalBruteForceProtector *BruteForceProtector

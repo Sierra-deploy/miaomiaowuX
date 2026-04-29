@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"miaomiaowu/internal/storage"
+	"miaomiaowux/internal/storage"
 	"net/http"
 	"strconv"
 	"strings"
@@ -284,8 +284,8 @@ func (h *PackageDeleteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 // PackageUnassignHandler 处理从用户删除包分配
 type PackageUnassignHandler struct {
-	repo          *storage.TrafficRepository
-	remoteManage  *RemoteManageHandler
+	repo         *storage.TrafficRepository
+	remoteManage *RemoteManageHandler
 }
 
 func NewPackageUnassignHandler(repo *storage.TrafficRepository, remoteManage *RemoteManageHandler) *PackageUnassignHandler {

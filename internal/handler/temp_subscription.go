@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"miaomiaowu/internal/util"
+	"miaomiaowux/internal/util"
 
 	"gopkg.in/yaml.v3"
 )

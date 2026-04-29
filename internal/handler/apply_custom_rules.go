@@ -7,13 +7,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"miaomiaowu/internal/logger"
+	"miaomiaowux/internal/logger"
 	"net/http"
 	"strings"
 
-	"miaomiaowu/internal/auth"
-	"miaomiaowu/internal/storage"
-	"miaomiaowu/internal/validator"
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/validator"
 
 	"gopkg.in/yaml.v3"
 )

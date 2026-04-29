@@ -15,7 +15,7 @@ server
 
 # Dependencies
 node_modules/
-miaomiaowu/node_modules/
+miaomiaowux-frontend/node_modules/
 
 # IDE
 .vscode/

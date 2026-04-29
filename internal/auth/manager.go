@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
-	"miaomiaowu/internal/storage"
+	"miaomiaowux/internal/storage"
 )
 
 type Credentials struct {

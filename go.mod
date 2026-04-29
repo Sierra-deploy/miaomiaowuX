@@ -1,4 +1,4 @@
-module miaomiaowu
+module miaomiaowux
 
 go 1.25
 

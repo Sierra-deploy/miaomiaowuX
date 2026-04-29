@@ -12,8 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"miaomiaowu/internal/storage"
-	"miaomiaowu/templates"
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/templates"
 )
 
 func getDomainFromMasterURL(repo *storage.TrafficRepository, ctx context.Context) string {

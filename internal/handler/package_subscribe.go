@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"miaomiaowu/internal/auth"
-	"miaomiaowu/internal/storage"
-	"miaomiaowu/internal/substore"
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/substore"
 
 	"gopkg.in/yaml.v3"
 )

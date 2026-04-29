@@ -8,8 +8,8 @@ import (
 	"net/url"
 	"strings"
 
-	"miaomiaowu/internal/auth"
-	"miaomiaowu/internal/storage"
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/storage"
 )
 
 type userConfigRequest struct {

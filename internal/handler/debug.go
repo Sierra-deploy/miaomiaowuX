@@ -14,9 +14,9 @@ import (
 	"sync"
 	"time"
 
-	"miaomiaowu/internal/auth"
-	"miaomiaowu/internal/logger"
-	"miaomiaowu/internal/storage"
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/logger"
+	"miaomiaowux/internal/storage"
 )
 
 const debugAutoCloseSeconds = 5 * 60
@@ -26,7 +26,7 @@ type debugHandler struct {
 	logManager     *logger.LogManager
 	mu             sync.Mutex
 	autoCloseTimer *time.Timer
-	debugUsername   string
+	debugUsername  string
 }
 
 func NewDebugHandler(repo *storage.TrafficRepository) http.Handler {

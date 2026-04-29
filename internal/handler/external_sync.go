@@ -6,16 +6,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"miaomiaowu/internal/logger"
+	"miaomiaowux/internal/logger"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 
-	"miaomiaowu/internal/auth"
-	"miaomiaowu/internal/storage"
-	"miaomiaowu/internal/util"
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/util"
 
 	"gopkg.in/yaml.v3"
 )

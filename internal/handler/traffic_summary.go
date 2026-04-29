@@ -12,9 +12,9 @@ import (
 	"sort"
 	"time"
 
-	"miaomiaowu/internal/auth"
-	"miaomiaowu/internal/logger"
-	"miaomiaowu/internal/storage"
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/logger"
+	"miaomiaowux/internal/storage"
 )
 
 const bytesPerGigabyte = 1073741824.0

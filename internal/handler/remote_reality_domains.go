@@ -11,7 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"miaomiaowu/templates"
+	"miaomiaowux/templates"
 )
 
 type realityDomainLatencyProbeRequest struct {

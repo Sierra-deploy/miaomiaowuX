@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"miaomiaowu/internal/storage"
+	"miaomiaowux/internal/storage"
 )
 
 type ruleMetadataHandler struct {

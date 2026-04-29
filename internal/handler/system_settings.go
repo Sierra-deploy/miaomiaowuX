@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"miaomiaowu/internal/agentlog"
-	"miaomiaowu/internal/storage"
+	"miaomiaowux/internal/agentlog"
+	"miaomiaowux/internal/storage"
 )
 
 type SystemSettingsHandler struct {

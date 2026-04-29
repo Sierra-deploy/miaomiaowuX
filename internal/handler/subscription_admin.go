@@ -14,8 +14,8 @@ import (
 	"time"
 	"unicode"
 
-	"miaomiaowu/internal/auth"
-	"miaomiaowu/internal/storage"
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/storage"
 )
 
 type subscriptionAdminHandler struct {

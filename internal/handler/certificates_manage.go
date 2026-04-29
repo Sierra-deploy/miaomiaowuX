@@ -2,10 +2,8 @@ package handler
 
 import (
 	"context"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"io"
 	"log"
@@ -15,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"miaomiaowu/internal/acme"
-	"miaomiaowu/internal/auth"
-	"miaomiaowu/internal/storage"
+	"miaomiaowux/internal/acme"
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/storage"
 )
 
 // CertificateHandler 处理证书管理 API 端点。
@@ -36,6 +34,7 @@ func certDeployPaths(domain, dir string) (certPath, keyPath string) {
 	name := certDeployFilename(domain)
 	return filepath.Join(dir, name+".pem"), filepath.Join(dir, name+".key")
 }
+
 type CertificateHandler struct {
 	repo       *storage.TrafficRepository
 	wsHandler  *RemoteWSHandler
@@ -1160,57 +1159,51 @@ func (h *CertificateHandler) UploadCertificate(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	block, _ := pem.Decode(certBytes)
-	if block == nil {
-		respondJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "无效的证书 PEM 格式"})
-		return
-	}
-	x509Cert, err := x509.ParseCertificate(block.Bytes)
+	result, err := h.acmeClient.ProcessCertResult(req.Domain, certBytes, keyBytes)
 	if err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": fmt.Sprintf("证书解析失败: %v", err)})
+		respondJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": fmt.Sprintf("证书处理失败: %v", err)})
 		return
 	}
 
-	issueDate := x509Cert.NotBefore
-	expiryDate := x509Cert.NotAfter
+	deployCertPath, deployKeyPath := certDeployPaths(req.Domain, "/usr/local/nginx/cert")
 
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
 	existing, err := h.repo.GetCertificateByDomain(ctx, req.Domain, 0)
 	if err == nil && existing != nil {
-		if err := h.repo.UpdateCertificateIssued(ctx, existing.ID, existing.CertPath, existing.KeyPath, string(certBytes), string(keyBytes), issueDate, expiryDate); err != nil {
+		if err := h.repo.UpdateCertificateIssued(ctx, existing.ID, result.CertPath, result.KeyPath, result.CertPEM, result.KeyPEM, result.IssueDate, result.ExpiryDate); err != nil {
 			respondJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": fmt.Sprintf("更新证书失败: %v", err)})
 			return
 		}
+		if existing.DeployCertPath == "" {
+			existing.DeployCertPath = deployCertPath
+			existing.DeployKeyPath = deployKeyPath
+			_ = h.repo.UpdateCertificate(ctx, existing)
+		}
+		h.checkMasterCertReady(existing)
 		respondJSON(w, http.StatusOK, map[string]any{"success": true, "message": "证书已更新", "certificate_id": existing.ID})
 		return
 	}
 
 	cert := &storage.Certificate{
-		Domain:        req.Domain,
-		Email:         auth.UsernameFromContext(r.Context()) + "@upload",
-		Provider:      "manual",
-		Status:        storage.CertStatusValid,
-		CertPEM:       string(certBytes),
-		KeyPEM:        string(keyBytes),
-		IssueDate:     &issueDate,
-		ExpiryDate:    &expiryDate,
-		AutoRenew:     false,
-		ChallengeMode: "manual",
-		DeployTarget:  "none",
+		Domain:         req.Domain,
+		Email:          auth.UsernameFromContext(r.Context()) + "@upload",
+		Provider:       "manual",
+		Status:         storage.CertStatusPending,
+		AutoRenew:      false,
+		ChallengeMode:  "manual",
+		DeployTarget:   "none",
+		DeployCertPath: deployCertPath,
+		DeployKeyPath:  deployKeyPath,
 	}
-
-	certPath, keyPath := certDeployPaths(req.Domain, h.acmeClient.GetCertDir())
-	cert.CertPath = certPath
-	cert.KeyPath = keyPath
 
 	if err := h.repo.CreateCertificate(ctx, cert); err != nil {
 		respondJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": fmt.Sprintf("创建证书记录失败: %v", err)})
 		return
 	}
 
-	if err := h.repo.UpdateCertificateIssued(ctx, cert.ID, certPath, keyPath, string(certBytes), string(keyBytes), issueDate, expiryDate); err != nil {
+	if err := h.repo.UpdateCertificateIssued(ctx, cert.ID, result.CertPath, result.KeyPath, result.CertPEM, result.KeyPEM, result.IssueDate, result.ExpiryDate); err != nil {
 		log.Printf("[Certificate] UpdateCertificateIssued after upload failed: %v", err)
 	}
 

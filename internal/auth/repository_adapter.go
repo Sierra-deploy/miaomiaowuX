@@ -2,7 +2,7 @@ package auth
 
 import (
 	"context"
-	"miaomiaowu/internal/storage"
+	"miaomiaowux/internal/storage"
 )
 
 // RepositoryAdapter 适配 storage.TrafficRepository 来实现 UserRepository 接口。

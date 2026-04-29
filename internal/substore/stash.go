@@ -3,7 +3,7 @@ package substore
 import (
 	"encoding/json"
 	"fmt"
-	"miaomiaowu/internal/logger"
+	"miaomiaowux/internal/logger"
 	"regexp"
 	"strings"
 )

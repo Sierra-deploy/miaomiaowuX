@@ -9,8 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"miaomiaowu/internal/auth"
-	"miaomiaowu/internal/logger"
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/logger"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,8 +19,8 @@ import (
 	"strings"
 	"time"
 
-	"miaomiaowu/internal/storage"
-	"miaomiaowu/internal/validator"
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/validator"
 
 	"gopkg.in/yaml.v3"
 )

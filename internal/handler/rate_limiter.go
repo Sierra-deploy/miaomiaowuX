@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"miaomiaowu/internal/logger"
+	"miaomiaowux/internal/logger"
 )
 
 var ErrRateLimited = errors.New("rate limit exceeded")

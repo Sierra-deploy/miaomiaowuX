@@ -12,8 +12,8 @@ import (
 	"net/url"
 	"strings"
 
-	"miaomiaowu/internal/storage"
-	"miaomiaowu/internal/traffic"
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/traffic"
 )
 
 // randReader 是用于生成安全令牌的加密读取器

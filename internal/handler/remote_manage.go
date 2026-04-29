@@ -13,10 +13,10 @@ import (
 	"strings"
 	"time"
 
-	"miaomiaowu/internal/event"
-	"miaomiaowu/internal/storage"
-	"miaomiaowu/internal/version"
-	"miaomiaowu/templates"
+	"miaomiaowux/internal/event"
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/version"
+	"miaomiaowux/templates"
 )
 
 // RemoteManageHandler 处理需要转发到子服务器的管理请求

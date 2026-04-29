@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"miaomiaowu/internal/child"
-	"miaomiaowu/internal/storage"
-	"miaomiaowu/internal/version"
+	"miaomiaowux/internal/child"
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/version"
 )
 
 // ChildAPIHandler 处理来自主服务器的 API 请求（对于pull模式）

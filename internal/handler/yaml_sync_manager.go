@@ -1,7 +1,7 @@
 package handler
 
 import (
-	"miaomiaowu/internal/logger"
+	"miaomiaowux/internal/logger"
 	"sync"
 )
 
