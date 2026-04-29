@@ -126,6 +126,23 @@ func (h *RemoteManageHandler) HandleServiceControl(w http.ResponseWriter, r *htt
 		return
 	}
 
+	// xray 启动/重启时使用带恢复的逻辑
+	var req struct {
+		Service string `json:"service"`
+		Action  string `json:"action"`
+	}
+	if json.Unmarshal(body, &req) == nil && req.Service == "xray" && (req.Action == "start" || req.Action == "restart") {
+		if err := h.restartXrayWithRecovery(r.Context(), id, "ServiceControl"); err != nil {
+			remoteWriteError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		remoteWriteJSON(w, http.StatusOK, map[string]any{
+			"success": true,
+			"message": fmt.Sprintf("Service xray %sed successfully", req.Action),
+		})
+		return
+	}
+
 	result, err := h.forwardToRemoteServer(r.Context(), id, "POST", "/api/child/services/control", body)
 	if err != nil {
 		remoteWriteError(w, http.StatusBadGateway, err.Error())
