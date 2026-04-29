@@ -934,7 +934,6 @@ function CertificatesPage() {
               <Switch
                 id="auto_deploy"
                 checked={formData.auto_deploy}
-                disabled={formData.deploy_target === 'none' && !formData.deploy_cert_path}
                 onCheckedChange={(checked) => setFormData({ ...formData, auto_deploy: checked })}
               />
             </div>

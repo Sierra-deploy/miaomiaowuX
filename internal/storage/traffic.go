@@ -6022,6 +6022,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		COALESCE(listen_port, 0), COALESCE(traffic_limit, 0), COALESCE(traffic_reset_day, 0),
 		COALESCE(agent_token, ''), agent_token_expires_at, last_agent_token_refresh,
 		COALESCE(use_443, 0), COALESCE(steal_mode, 'tunnel'),
+		COALESCE(site_type, ''), COALESCE(site_value, ''),
 		created_at, updated_at
 		FROM remote_servers ORDER BY created_at DESC`
 	rows, err := r.db.QueryContext(ctx, query)
@@ -6047,6 +6048,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 			&server.ListenPort, &server.TrafficLimit, &server.TrafficResetDay,
 			&server.AgentToken, &agentTokenExpiresAt, &lastAgentTokenRefresh,
 			&server.Use443, &server.StealMode,
+			&server.SiteType, &server.SiteValue,
 			&server.CreatedAt, &server.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan remote server: %w", err)
 		}
@@ -6111,6 +6113,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		COALESCE(listen_port, 0),
 		COALESCE(agent_token, ''), agent_token_expires_at, last_agent_token_refresh,
 		COALESCE(use_443, 0), COALESCE(steal_mode, 'tunnel'),
+		COALESCE(site_type, ''), COALESCE(site_value, ''),
 		created_at, updated_at
 		FROM remote_servers WHERE id = ?`
 
@@ -6125,6 +6128,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		&server.ListenPort,
 		&server.AgentToken, &agentTokenExpiresAt, &lastAgentTokenRefresh,
 		&server.Use443, &server.StealMode,
+		&server.SiteType, &server.SiteValue,
 		&server.CreatedAt, &server.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -6173,6 +6177,7 @@ func (r *TrafficRepository) GetRemoteServerByToken(ctx context.Context, token st
 		COALESCE(connection_mode, 'push'), COALESCE(pull_address, ''), COALESCE(pull_port, 0), COALESCE(pull_token, ''), last_pull_at,
 		COALESCE(agent_token, ''), agent_token_expires_at, last_agent_token_refresh,
 		COALESCE(use_443, 0), COALESCE(steal_mode, 'tunnel'),
+		COALESCE(site_type, ''), COALESCE(site_value, ''),
 		created_at, updated_at
 		FROM remote_servers WHERE token = ?`
 
@@ -6186,6 +6191,7 @@ func (r *TrafficRepository) GetRemoteServerByToken(ctx context.Context, token st
 		&server.ConnectionMode, &server.PullAddress, &server.PullPort, &server.PullToken, &lastPullAt,
 		&server.AgentToken, &agentTokenExpiresAt, &lastAgentTokenRefresh,
 		&server.Use443, &server.StealMode,
+		&server.SiteType, &server.SiteValue,
 		&server.CreatedAt, &server.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -6235,6 +6241,7 @@ func (r *TrafficRepository) GetRemoteServerByName(ctx context.Context, name stri
 		COALESCE(listen_port, 0),
 		COALESCE(agent_token, ''), agent_token_expires_at, last_agent_token_refresh,
 		COALESCE(use_443, 0), COALESCE(steal_mode, 'tunnel'),
+		COALESCE(site_type, ''), COALESCE(site_value, ''),
 		created_at, updated_at
 		FROM remote_servers WHERE name = ?`
 
@@ -6249,6 +6256,7 @@ func (r *TrafficRepository) GetRemoteServerByName(ctx context.Context, name stri
 		&server.ListenPort,
 		&server.AgentToken, &agentTokenExpiresAt, &lastAgentTokenRefresh,
 		&server.Use443, &server.StealMode,
+		&server.SiteType, &server.SiteValue,
 		&server.CreatedAt, &server.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -6312,13 +6320,13 @@ func (r *TrafficRepository) CreateRemoteServer(ctx context.Context, server *Remo
 	// 将令牌有效期设置为从现在起 7 天
 	tokenExpiresAt := time.Now().Add(7 * 24 * time.Hour)
 
-	const stmt = `INSERT INTO remote_servers (name, token, status, ip_address, domain, token_expires_at, last_token_refresh, connection_mode, pull_address, pull_port, pull_token, use_443, steal_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+	const stmt = `INSERT INTO remote_servers (name, token, status, ip_address, domain, token_expires_at, last_token_refresh, connection_mode, pull_address, pull_port, pull_token, use_443, steal_mode, site_type, site_value, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
 
 	stealMode := server.StealMode
 	if stealMode == "" {
 		stealMode = "tunnel"
 	}
-	result, err := r.db.ExecContext(ctx, stmt, server.Name, server.Token, server.Status, server.IPAddress, server.Domain, tokenExpiresAt, server.ConnectionMode, server.PullAddress, server.PullPort, server.PullToken, server.Use443, stealMode)
+	result, err := r.db.ExecContext(ctx, stmt, server.Name, server.Token, server.Status, server.IPAddress, server.Domain, tokenExpiresAt, server.ConnectionMode, server.PullAddress, server.PullPort, server.PullToken, server.Use443, stealMode, server.SiteType, server.SiteValue)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return ErrRemoteServerExists
