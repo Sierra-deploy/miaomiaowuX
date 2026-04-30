@@ -1183,10 +1183,14 @@ func (h *RemoteManageHandler) syncInboundsToNodesInternal(ctx context.Context, s
 	// 在循环之前获取现有节点一次
 	existingNodes, _ := h.repo.ListNodes(ctx, username)
 	existingNodeNames := make(map[string]bool)
-	existingNodeKeys := make(map[string]bool) // 键：服务器：协议：端口
+	existingNodeKeys := make(map[string]bool)    // 键：服务器：协议：端口
+	existingInboundTags := make(map[string]bool) // 键：服务器：inboundTag
 
 	for _, n := range existingNodes {
 		existingNodeNames[n.NodeName] = true
+		if n.OriginalServer != "" && n.InboundTag != "" {
+			existingInboundTags[n.OriginalServer+":"+n.InboundTag] = true
+		}
 		// 从现有节点的冲突配置构建重复数据删除密钥
 		var config map[string]interface{}
 		if err := json.Unmarshal([]byte(n.ClashConfig), &config); err == nil {
@@ -1207,6 +1211,12 @@ func (h *RemoteManageHandler) syncInboundsToNodesInternal(ctx context.Context, s
 
 		// 跳过 api 入站
 		if tag == "api" || protocol == "tunnel" {
+			response.SkippedCount++
+			continue
+		}
+
+		// 通过服务器+inboundTag 去重（优先，覆盖 tunnel 端口映射场景）
+		if tag != "" && existingInboundTags[server.Name+":"+tag] {
 			response.SkippedCount++
 			continue
 		}
@@ -1287,6 +1297,9 @@ func (h *RemoteManageHandler) syncInboundsToNodesInternal(ctx context.Context, s
 
 		// 更新重复数据删除映射以防止同一批次出现重复
 		existingNodeKeys[dedupeKey] = true
+		if tag != "" {
+			existingInboundTags[server.Name+":"+tag] = true
+		}
 		existingNodeNames[nodeName] = true
 	}
 
