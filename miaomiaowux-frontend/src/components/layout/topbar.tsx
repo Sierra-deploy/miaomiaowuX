@@ -107,7 +107,7 @@ export function Topbar() {
     // 直接获取窗口宽度
     const windowWidth = window.innerWidth
     // 预留空间：logo图片约60px，右侧按钮区约200px，左右padding约48px，间距约24px
-    const logoTextWidth = 90 // "妙妙屋" 文字宽度
+    const logoTextWidth = 90 // "妙妙屋X" 文字宽度
     const baseReservedSpace = 300
 
     // 每个带文字按钮约115px（4字+图标+padding），纯图标按钮约44px，gap约12px
@@ -129,7 +129,7 @@ export function Topbar() {
       return
     }
 
-    // 空间不够，先隐藏"妙妙屋"文字
+    // 空间不够，先隐藏"妙妙屋X"文字
     setHideLogoText(true)
     const availableWithoutLogoText = windowWidth - baseReservedSpace
 
@@ -193,12 +193,12 @@ export function Topbar() {
           >
             <img
               src='/images/mmwx_light.webp'
-              alt='妙妙屋 Logo'
+              alt='妙妙屋X Logo'
               className='h-10 w-10 border-2 border-[color:rgba(241,140,110,0.4)] shadow-[4px_4px_0_rgba(0,0,0,0.2)] shrink-0 dark:hidden'
             />
             <img
               src='/images/logo.webp'
-              alt='妙妙屋 Logo'
+              alt='妙妙屋X Logo'
               className='h-10 w-10 border-2 border-[color:rgba(241,140,110,0.4)] shadow-[4px_4px_0_rgba(0,0,0,0.2)] shrink-0 hidden dark:block'
             />
             {!hideLogoText && <span className='hidden md:inline pixel-text text-primary text-base whitespace-nowrap'>妙妙屋<AnimatedX size="sm" /></span>}

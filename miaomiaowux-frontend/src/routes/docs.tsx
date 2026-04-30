@@ -186,22 +186,22 @@ function DocsPage() {
             <Link to='/' className='flex items-center gap-2'>
               <img
                 src='/images/mmwx_light.webp'
-                alt='妙妙屋 Logo'
+                alt='妙妙屋X Logo'
                 className='h-8 w-8 border-2 border-[color:rgba(241,140,110,0.4)] shadow-[2px_2px_0_rgba(0,0,0,0.2)] dark:hidden'
               />
               <img
                 src='/images/logo.webp'
-                alt='妙妙屋 Logo'
+                alt='妙妙屋X Logo'
                 className='h-8 w-8 border-2 border-[color:rgba(241,140,110,0.4)] shadow-[2px_2px_0_rgba(0,0,0,0.2)] hidden dark:block'
               />
-              <span className='font-bold text-lg pixel-text text-primary'>妙妙屋文档</span>
+              <span className='font-bold text-lg pixel-text text-primary'>妙妙屋X文档</span>
             </Link>
           </div>
           <div className='flex items-center gap-3'>
             <Button variant='ghost' size='sm' className='gap-2' asChild>
               <Link to='/'>
                 <Home className='size-4' />
-                返回妙妙屋
+                返回妙妙屋X
               </Link>
             </Button>
             <Button variant='ghost' size='sm' className='gap-2' asChild>

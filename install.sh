@@ -213,7 +213,7 @@ show_status() {
 
 # 更新服务
 update_service() {
-    echo_info "开始更新妙妙屋..."
+    echo_info "开始更新妙妙屋X..."
     echo ""
 
     # 检查服务是否已安装
@@ -295,7 +295,7 @@ update_service() {
 
 # 卸载服务
 uninstall_service() {
-    echo_info "开始卸载妙妙屋..."
+    echo_info "开始卸载妙妙屋X..."
     echo ""
 
     # 检查服务是否已安装

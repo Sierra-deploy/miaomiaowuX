@@ -28,7 +28,7 @@ DOWNLOAD_URL="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${B
 
 # 安装函数
 install() {
-    echo "正在下载并安装妙妙屋 $VERSION ($ARCH)..."
+    echo "正在下载并安装妙妙屋X $VERSION ($ARCH)..."
 
     # 下载
     wget -q --show-progress "$DOWNLOAD_URL" -O mmw
@@ -81,7 +81,7 @@ install() {
 
 # 更新函数
 update() {
-    echo "正在更新妙妙屋 ($ARCH)..."
+    echo "正在更新妙妙屋X ($ARCH)..."
     echo ""
 
     # 检查是否已安装
@@ -178,7 +178,7 @@ update() {
 
 # 卸载函数
 uninstall() {
-    echo "正在卸载妙妙屋..."
+    echo "正在卸载妙妙屋X..."
     echo ""
 
     # 检查是否已安装

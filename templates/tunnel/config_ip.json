@@ -38,15 +38,6 @@
                 "inboundTag": [
                     "tunnel-in"
                 ],
-                "domain": [
-                    "{nginx_domain}"
-                ],
-                "outboundTag": "nginx"
-            },
-            {
-                "inboundTag": [
-                    "tunnel-in"
-                ],
                 "outboundTag": "direct"
             },
             {

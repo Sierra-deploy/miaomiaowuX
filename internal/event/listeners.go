@@ -95,6 +95,15 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 		return
 	}
 
+	// 将 Clash 配置中的 name 替换为实际节点名称
+	var clashMap map[string]any
+	if json.Unmarshal([]byte(clashConfig), &clashMap) == nil {
+		clashMap["name"] = nodeName
+		if updated, err := json.Marshal(clashMap); err == nil {
+			clashConfig = string(updated)
+		}
+	}
+
 	// 创建节点
 	node := storage.Node{
 		Username:       "admin",

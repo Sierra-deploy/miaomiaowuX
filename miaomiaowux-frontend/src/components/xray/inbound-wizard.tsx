@@ -604,7 +604,7 @@ export function InboundWizard({
   const getLocalDest = (domain: string, domainOpts?: RealityDomainOption[]) => {
     const opts = domainOpts || realityDomainOptions
     const opt = opts.find((o) => o.domain === domain)
-    const port = opt?.nginx_ssl_port || 58443
+    const port = opt?.nginx_ssl_port || 8001
     return `127.0.0.1:${port}`
   }
 
