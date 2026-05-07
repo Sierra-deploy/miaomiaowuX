@@ -3,7 +3,8 @@ import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, useRef, useEffect } from 'react'
 import { toast } from 'sonner'
-import { Plus, RefreshCw, Search, Trash2, Download, Cog, ChevronDown, LayoutGrid, List, Terminal, Play, Square, RotateCcw, Copy, Pencil, X, Settings, Wifi, Radio, Eye, ArrowUpCircle, Globe, CheckCircle, XCircle, Loader2 } from 'lucide-react'
+import { Plus, RefreshCw, Search, Trash2, Download, Cog, ChevronDown, LayoutGrid, List, Terminal, Play, Square, RotateCcw, Copy, Pencil, X, Settings, Wifi, Radio, Eye, ArrowUpCircle, Globe, CheckCircle, XCircle, Loader2, AlertTriangle } from 'lucide-react'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 
 import { InboundPanel } from '@/components/xray/inbound-panel'
 import { OutboundPanel } from '@/components/xray/outbound-panel'
@@ -74,6 +75,7 @@ interface RemoteServer {
   traffic_used?: number
   traffic_reset_day?: number
   steal_mode?: string
+  time_offset_seconds?: number
   inbounds?: RemoteServerInboundInfo[]
   current_upload_speed?: number
   current_download_speed?: number
@@ -744,6 +746,16 @@ function XrayServersPage() {
                       <div className={cn("w-3 h-3 rounded-full flex-shrink-0", server.status === 'connected' ? "bg-green-500" : server.status === 'pending' ? "bg-yellow-500" : "bg-red-500")} title={server.status === 'connected' ? '在线' : server.status === 'pending' ? '等待连接' : '离线'} />
                       <CardTitle className="text-lg truncate">{server.name}</CardTitle>
                       <RemoteServerStatusBadge status={server.status} />
+                      {Math.abs(server.time_offset_seconds ?? 0) > 10 && (
+                        <TooltipProvider>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <AlertTriangle className="h-4 w-4 text-yellow-500 cursor-help flex-shrink-0" />
+                            </TooltipTrigger>
+                            <TooltipContent>服务器时间有误差，可能导致vmess、ss等时间敏感协议无法使用</TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      )}
                       {server.fallback_to_pull && (<Badge variant="secondary" className="text-xs bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 shrink-0">已降级</Badge>)}
                       {server.steal_mode && server.steal_mode !== 'tunnel' && (<Badge variant="outline" className="text-xs shrink-0">{server.steal_mode === 'fallback' ? '回落' : '默认'}</Badge>)}
                     </div>
@@ -864,6 +876,16 @@ function XrayServersPage() {
                         <div className={cn("w-2.5 h-2.5 rounded-full flex-shrink-0", server.status === 'connected' ? "bg-green-500" : server.status === 'pending' ? "bg-yellow-500" : "bg-red-500")} />
                         <span className={server.status !== 'connected' ? 'cursor-pointer hover:text-primary' : ''} onClick={() => { if (server.status !== 'connected') { setSelectedRemoteServer(server); setIsRemoteServerDetailDialogOpen(true) } }}>{server.name}</span>
                         <RemoteServerStatusBadge status={server.status} />
+                        {Math.abs(server.time_offset_seconds ?? 0) > 10 && (
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <AlertTriangle className="h-4 w-4 text-yellow-500 cursor-help flex-shrink-0" />
+                              </TooltipTrigger>
+                              <TooltipContent>服务器时间有误差，可能导致vmess、ss等时间敏感协议无法使用</TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                        )}
                         {server.fallback_to_pull && (<Badge variant="secondary" className="text-xs bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200">已降级</Badge>)}
                       </div>
                     </TableCell>

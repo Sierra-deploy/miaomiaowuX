@@ -430,6 +430,7 @@ type RemoteServer struct {
 	StealMode             string     `json:"steal_mode,omitempty"` // "tunnel" | "fallback"，默认 tunnel
 	SiteType              string     `json:"site_type,omitempty"`  // "static" | "proxy"
 	SiteValue             string     `json:"site_value,omitempty"` // 静态路径或反向代理地址
+	TimeOffsetSeconds     *int64     `json:"time_offset_seconds,omitempty"` // agent 与主控的时钟偏差（秒）
 	CreatedAt             time.Time  `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 }
@@ -1272,6 +1273,9 @@ CREATE INDEX IF NOT EXISTS idx_remote_servers_status ON remote_servers(status);
 		return err
 	}
 	if err := r.ensureRemoteServerColumn("site_value", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := r.ensureRemoteServerColumn("time_offset_seconds", "INTEGER"); err != nil {
 		return err
 	}
 
@@ -6023,6 +6027,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		COALESCE(agent_token, ''), agent_token_expires_at, last_agent_token_refresh,
 		COALESCE(use_443, 0), COALESCE(steal_mode, 'tunnel'),
 		COALESCE(site_type, ''), COALESCE(site_value, ''),
+		COALESCE(time_offset_seconds, 0),
 		created_at, updated_at
 		FROM remote_servers ORDER BY created_at DESC`
 	rows, err := r.db.QueryContext(ctx, query)
@@ -6038,6 +6043,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		var bootTime, xrayBootTime sql.NullString
 		var agentTokenExpiresAt, lastAgentTokenRefresh sql.NullTime
 		var fallbackToPull, xrayRunning int
+		var timeOffsetSeconds int64
 		if err := rows.Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.Domain,
 			&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 			&tokenExpiresAt, &lastTokenRefresh,
@@ -6049,6 +6055,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 			&server.AgentToken, &agentTokenExpiresAt, &lastAgentTokenRefresh,
 			&server.Use443, &server.StealMode,
 			&server.SiteType, &server.SiteValue,
+			&timeOffsetSeconds,
 			&server.CreatedAt, &server.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan remote server: %w", err)
 		}
@@ -6086,6 +6093,9 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		}
 		server.FallbackToPull = fallbackToPull != 0
 		server.XrayRunning = xrayRunning != 0
+		if timeOffsetSeconds != 0 {
+			server.TimeOffsetSeconds = &timeOffsetSeconds
+		}
 		servers = append(servers, server)
 	}
 
@@ -6346,11 +6356,12 @@ func (r *TrafficRepository) CreateRemoteServer(ctx context.Context, server *Remo
 
 // HeartbeatUpdate 包含用于更新远程服务器心跳的数据。
 type HeartbeatUpdate struct {
-	Token        string
-	IPAddress    string
-	BootTime     *time.Time
-	XrayBootTime *time.Time
-	ListenPort   int
+	Token             string
+	IPAddress         string
+	BootTime          *time.Time
+	XrayBootTime      *time.Time
+	ListenPort        int
+	TimeOffsetSeconds *int64
 }
 
 // HeartbeatResult 包含心跳更新的结果，包括重新启动检测。
@@ -6486,6 +6497,7 @@ func (r *TrafficRepository) UpdateRemoteServerHeartbeatWithRestart(ctx context.C
 		xray_boot_count = ?,
 		listen_port = ?,
 		pull_address = ?,
+		time_offset_seconds = ?,
 		updated_at = CURRENT_TIMESTAMP
 		WHERE token = ?`
 
@@ -6498,6 +6510,7 @@ func (r *TrafficRepository) UpdateRemoteServerHeartbeatWithRestart(ctx context.C
 		result.XrayBootCount,
 		update.ListenPort,
 		pullAddress,
+		update.TimeOffsetSeconds,
 		token)
 	if err != nil {
 		return nil, fmt.Errorf("update remote server heartbeat: %w", err)

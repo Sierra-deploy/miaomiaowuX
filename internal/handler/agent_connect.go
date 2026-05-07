@@ -128,6 +128,7 @@ type RemoteHeartbeatRequest struct {
 	XrayBootTime int64 `json:"xray_boot_time"` // Xray 进程开始时间（Unix 时间戳）
 	XrayPID      int   `json:"xray_pid"`       // 当前 X 射线进程 ID
 	ListenPort   int   `json:"listen_port"`    // 代理HTTP监听端口
+	LocalTime    int64 `json:"local_time"`     // agent 本地 Unix 时间戳，用于时钟偏差检测
 }
 
 // RemoteHeartbeatResponse 表示心跳响应
@@ -214,6 +215,10 @@ func (h *XrayServerHandler) RemoteHeartbeat(w http.ResponseWriter, r *http.Reque
 	if req.XrayBootTime > 0 {
 		xrayBootTime := time.Unix(req.XrayBootTime, 0)
 		update.XrayBootTime = &xrayBootTime
+	}
+	if req.LocalTime > 0 {
+		offset := req.LocalTime - time.Now().Unix()
+		update.TimeOffsetSeconds = &offset
 	}
 
 	// 通过重启检测更新心跳

@@ -66,6 +66,8 @@ type Client struct {
 	httpAvailable bool
 	modeMu        sync.RWMutex
 
+	startTime time.Time // 进程启动时间（固定不变，用于重启检测）
+
 	// 速度计算（来自系统网络接口）
 	lastRxBytes    int64
 	lastTxBytes    int64
@@ -92,6 +94,7 @@ func NewClient(config Config, collector *traffic.Collector, repo *storage.Traffi
 		collector: collector,
 		repo:      repo,
 		stopCh:    make(chan struct{}),
+		startTime: time.Now(),
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -429,9 +432,9 @@ func (c *Client) sendTrafficData(conn *websocket.Conn) error {
 
 // 发送心跳消息
 func (c *Client) sendHeartbeat(conn *websocket.Conn) error {
-	now := time.Now()
 	payload, _ := json.Marshal(map[string]interface{}{
-		"boot_time": now, // 在实际的实现中，这将是实际的启动时间
+		"boot_time":  c.startTime,
+		"local_time": time.Now().Unix(),
 	})
 
 	msg := map[string]interface{}{
@@ -783,9 +786,9 @@ func (c *Client) sendSpeedHTTP(ctx context.Context) error {
 
 // 通过 HTTP POST 发送心跳
 func (c *Client) sendHeartbeatHTTP(ctx context.Context) error {
-	now := time.Now()
 	payload, _ := json.Marshal(map[string]interface{}{
-		"boot_time": now,
+		"boot_time":  c.startTime.Unix(),
+		"local_time": time.Now().Unix(),
 	})
 
 	u, err := url.Parse(c.config.MasterURL)
@@ -808,6 +811,15 @@ func (c *Client) sendHeartbeatHTTP(ctx context.Context) error {
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	}
+
+	var hbResp struct {
+		ServerTime int64 `json:"server_time"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&hbResp); err == nil && hbResp.ServerTime > 0 {
+		if drift := time.Now().Unix() - hbResp.ServerTime; drift > 10 || drift < -10 {
+			agentlog.Printf("[Child Client] Clock drift detected: local time is %+ds from master", drift)
+		}
 	}
 
 	return nil

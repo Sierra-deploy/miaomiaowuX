@@ -36,6 +36,7 @@ const (
 	WSMsgTypeScanResult          = "scan_result"           // Agent -> Master：启动扫描结果
 	WSMsgTypeDomainLatencyProbe  = "domain_latency_probe"  // Master -> Agent：探测域延迟
 	WSMsgTypeDomainLatencyResult = "domain_latency_result" // Agent -> Master：探测结果
+	WSMsgTypeHeartbeatAck        = "heartbeat_ack"         // Master -> Agent：心跳确认（含服务器时间）
 )
 
 // WSMessage 表示 WebSocket 消息
@@ -62,9 +63,10 @@ type WSTrafficPayload struct {
 
 // WSHeartbeatPayload 表示心跳消息负载
 type WSHeartbeatPayload struct {
-	BootTime     *time.Time `json:"boot_time,omitempty"`
-	XrayBootTime *time.Time `json:"xray_boot_time,omitempty"`
-	ListenPort   int        `json:"listen_port,omitempty"`
+	BootTime       *time.Time `json:"boot_time,omitempty"`
+	XrayBootTime   *time.Time `json:"xray_boot_time,omitempty"`
+	ListenPort     int        `json:"listen_port,omitempty"`
+	LocalTimestamp int64      `json:"local_time,omitempty"`
 }
 
 // WSSpeedPayload 表示实时速度数据负载
@@ -450,10 +452,17 @@ func (h *RemoteWSHandler) handleHeartbeat(wsConn *RemoteWSConnection, payload js
 	if hbPayload.XrayBootTime != nil {
 		update.XrayBootTime = hbPayload.XrayBootTime
 	}
+	if hbPayload.LocalTimestamp > 0 {
+		offset := hbPayload.LocalTimestamp - time.Now().Unix()
+		update.TimeOffsetSeconds = &offset
+	}
 
 	if _, err := h.repo.UpdateRemoteServerHeartbeatWithRestart(ctx, update); err != nil {
 		log.Printf("[Remote WS] Failed to update heartbeat for server %s: %v", wsConn.ServerName, err)
 	}
+
+	ackPayload, _ := json.Marshal(map[string]int64{"server_time": time.Now().Unix()})
+	h.sendMessage(wsConn.Conn, WSMessage{Type: WSMsgTypeHeartbeatAck, Payload: json.RawMessage(ackPayload)})
 }
 
 // 处理实时速度数据消息
