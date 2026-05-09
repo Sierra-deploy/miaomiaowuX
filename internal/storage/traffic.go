@@ -1573,6 +1573,22 @@ CREATE TABLE IF NOT EXISTS user_inbound_configs (
 		return fmt.Errorf("migrate user_inbound_configs: %w", err)
 	}
 
+	const userOutboundsSchema = `
+CREATE TABLE IF NOT EXISTS user_outbounds (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    server_id INTEGER NOT NULL,
+    inbound_tag TEXT NOT NULL,
+    outbound_tag TEXT NOT NULL,
+    outbound_json TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
+);
+`
+	if _, err := r.db.Exec(userOutboundsSchema); err != nil {
+		return fmt.Errorf("migrate user_outbounds: %w", err)
+	}
+
 	return nil
 }
 
@@ -5823,6 +5839,64 @@ func (r *TrafficRepository) GetUserInboundConfig(ctx context.Context, username s
 		return nil, err
 	}
 	return &c, nil
+}
+
+// UserOutbound 记录用户添加的出站配置
+type UserOutbound struct {
+	ID           int64
+	Username     string
+	ServerID     int64
+	InboundTag   string
+	OutboundTag  string
+	OutboundJSON string
+	CreatedAt    time.Time
+}
+
+func (r *TrafficRepository) SaveUserOutbound(ctx context.Context, uo UserOutbound) error {
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO user_outbounds (username, server_id, inbound_tag, outbound_tag, outbound_json) VALUES (?, ?, ?, ?, ?)`,
+		uo.Username, uo.ServerID, uo.InboundTag, uo.OutboundTag, uo.OutboundJSON)
+	return err
+}
+
+func (r *TrafficRepository) GetUserOutbounds(ctx context.Context, username string) ([]UserOutbound, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, username, server_id, inbound_tag, outbound_tag, outbound_json, created_at FROM user_outbounds WHERE username = ?`, username)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var outbounds []UserOutbound
+	for rows.Next() {
+		var o UserOutbound
+		if err := rows.Scan(&o.ID, &o.Username, &o.ServerID, &o.InboundTag, &o.OutboundTag, &o.OutboundJSON, &o.CreatedAt); err != nil {
+			return nil, err
+		}
+		outbounds = append(outbounds, o)
+	}
+	return outbounds, rows.Err()
+}
+
+func (r *TrafficRepository) GetUserOutbound(ctx context.Context, username string, serverID int64, outboundTag string) (*UserOutbound, error) {
+	var o UserOutbound
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, username, server_id, inbound_tag, outbound_tag, outbound_json, created_at FROM user_outbounds WHERE username = ? AND server_id = ? AND outbound_tag = ?`,
+		username, serverID, outboundTag).Scan(&o.ID, &o.Username, &o.ServerID, &o.InboundTag, &o.OutboundTag, &o.OutboundJSON, &o.CreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &o, nil
+}
+
+func (r *TrafficRepository) DeleteUserOutbound(ctx context.Context, username string, serverID int64, outboundTag string) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM user_outbounds WHERE username = ? AND server_id = ? AND outbound_tag = ?`,
+		username, serverID, outboundTag)
+	return err
+}
+
+func (r *TrafficRepository) DeleteUserOutboundsByUsername(ctx context.Context, username string) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM user_outbounds WHERE username = ?`, username)
+	return err
 }
 
 func (r *TrafficRepository) ListUsersWithPackage(ctx context.Context) ([]User, error) {

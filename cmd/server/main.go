@@ -308,6 +308,12 @@ func main() {
 	mux.Handle("/api/admin/packages/assign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageAssignHandler(repo, remoteManageHandler)))
 	mux.Handle("/api/admin/packages/unassign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageUnassignHandler(repo, remoteManageHandler)))
 
+	// 用户节点管理（普通用户查看套餐节点、管理自己的出站）
+	userNodesHandler := handler.NewUserNodesHandler(repo, remoteManageHandler)
+	mux.Handle("/api/user/nodes", auth.RequireToken(tokenStore, userRepo, http.HandlerFunc(userNodesHandler.HandleListNodes)))
+	mux.Handle("/api/user/nodes/outbound", auth.RequireToken(tokenStore, userRepo, http.HandlerFunc(userNodesHandler.HandleOutbound)))
+	mux.Handle("/api/user/nodes/outbounds", auth.RequireToken(tokenStore, userRepo, http.HandlerFunc(userNodesHandler.HandleListOutbounds)))
+
 	// 注册节点处理程序（需要remoteManageHandler进行远程入站清理）
 	mux.Handle("/api/admin/nodes", auth.RequireAdmin(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler)))
 	mux.Handle("/api/admin/nodes/", auth.RequireAdmin(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler)))
