@@ -251,7 +251,8 @@ func (h *nodesHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		ClashConfig:  req.ClashConfig,
 		Enabled:      req.Enabled,
 		Tag:          req.Tag,
-		InboundTag:   req.InboundTag,
+		InboundTag:       req.InboundTag,
+		ChainProxyNodeID: req.ChainProxyNodeID,
 	}
 
 	created, err := h.repo.CreateNode(r.Context(), node)
@@ -422,6 +423,7 @@ func (h *nodesHandler) handleUpdate(w http.ResponseWriter, r *http.Request, idSe
 		existing.Tag = req.Tag
 	}
 	existing.Enabled = req.Enabled
+	existing.ChainProxyNodeID = req.ChainProxyNodeID
 
 	updated, err := h.repo.UpdateNode(r.Context(), existing)
 	if err != nil {
@@ -1009,45 +1011,48 @@ func (h *nodesHandler) handleBatchRename(w http.ResponseWriter, r *http.Request)
 }
 
 type nodeRequest struct {
-	RawURL       string `json:"raw_url"`
-	NodeName     string `json:"node_name"`
-	Protocol     string `json:"protocol"`
-	ParsedConfig string `json:"parsed_config"`
-	ClashConfig  string `json:"clash_config"`
-	Enabled      bool   `json:"enabled"`
-	Tag          string `json:"tag"`
-	InboundTag   string `json:"inbound_tag"`
+	RawURL           string `json:"raw_url"`
+	NodeName         string `json:"node_name"`
+	Protocol         string `json:"protocol"`
+	ParsedConfig     string `json:"parsed_config"`
+	ClashConfig      string `json:"clash_config"`
+	Enabled          bool   `json:"enabled"`
+	Tag              string `json:"tag"`
+	InboundTag       string `json:"inbound_tag"`
+	ChainProxyNodeID *int64 `json:"chain_proxy_node_id"`
 }
 
 type nodeDTO struct {
-	ID             int64     `json:"id"`
-	RawURL         string    `json:"raw_url"`
-	NodeName       string    `json:"node_name"`
-	Protocol       string    `json:"protocol"`
-	ParsedConfig   string    `json:"parsed_config"`
-	ClashConfig    string    `json:"clash_config"`
-	Enabled        bool      `json:"enabled"`
-	Tag            string    `json:"tag"`
-	OriginalServer string    `json:"original_server"`
-	InboundTag     string    `json:"inbound_tag"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID               int64     `json:"id"`
+	RawURL           string    `json:"raw_url"`
+	NodeName         string    `json:"node_name"`
+	Protocol         string    `json:"protocol"`
+	ParsedConfig     string    `json:"parsed_config"`
+	ClashConfig      string    `json:"clash_config"`
+	Enabled          bool      `json:"enabled"`
+	Tag              string    `json:"tag"`
+	OriginalServer   string    `json:"original_server"`
+	InboundTag       string    `json:"inbound_tag"`
+	ChainProxyNodeID *int64    `json:"chain_proxy_node_id"`
+	CreatedAt        time.Time `json:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 func convertNode(node storage.Node) nodeDTO {
 	return nodeDTO{
-		ID:             node.ID,
-		RawURL:         node.RawURL,
-		NodeName:       node.NodeName,
-		Protocol:       node.Protocol,
-		ParsedConfig:   node.ParsedConfig,
-		ClashConfig:    node.ClashConfig,
-		Enabled:        node.Enabled,
-		Tag:            node.Tag,
-		OriginalServer: node.OriginalServer,
-		InboundTag:     node.InboundTag,
-		CreatedAt:      node.CreatedAt,
-		UpdatedAt:      node.UpdatedAt,
+		ID:               node.ID,
+		RawURL:           node.RawURL,
+		NodeName:         node.NodeName,
+		Protocol:         node.Protocol,
+		ParsedConfig:     node.ParsedConfig,
+		ClashConfig:      node.ClashConfig,
+		Enabled:          node.Enabled,
+		Tag:              node.Tag,
+		OriginalServer:   node.OriginalServer,
+		InboundTag:       node.InboundTag,
+		ChainProxyNodeID: node.ChainProxyNodeID,
+		CreatedAt:        node.CreatedAt,
+		UpdatedAt:        node.UpdatedAt,
 	}
 }
 

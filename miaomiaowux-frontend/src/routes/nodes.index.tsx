@@ -77,6 +77,7 @@ type ParsedNode = {
   tag: string
   original_server: string
   inbound_tag: string
+  chain_proxy_node_id: number | null
   created_at: string
   updated_at: string
 }
@@ -378,6 +379,10 @@ function NodesPage() {
   const [landingStep, setLandingStep] = useState<'select' | 'create-inbound'>('select')
   const [landingServerId, setLandingServerId] = useState<number | null>(null)
   const [landingLoading, setLandingLoading] = useState(false)
+
+  const [chainProxyDialogOpen, setChainProxyDialogOpen] = useState(false)
+  const [sourceNodeForChainProxy, setSourceNodeForChainProxy] = useState<ParsedNode | null>(null)
+  const [chainProxyFilterText, setChainProxyFilterText] = useState<string>('')
 
   const [routingDialogOpen, setRoutingDialogOpen] = useState(false)
   const [routingSourceNode, setRoutingSourceNode] = useState<any>(null)
@@ -1609,6 +1614,40 @@ function NodesPage() {
     }
   }
 
+  // 创建链式代理节点
+  const createRelayNodeMutation = useMutation({
+    mutationFn: async ({ sourceNode, targetNode }: { sourceNode: ParsedNode; targetNode: ParsedNode }) => {
+      let sourceClashConfig: Record<string, unknown>
+      try {
+        sourceClashConfig = JSON.parse(sourceNode.clash_config)
+      } catch {
+        throw new Error(t('toast.chainProxySourceParseError'))
+      }
+      const newNodeName = `${sourceNode.node_name} | ${targetNode.node_name}`
+      const newClashConfig = { ...sourceClashConfig, name: newNodeName }
+      const response = await api.post('/api/admin/nodes', {
+        raw_url: sourceNode.raw_url,
+        node_name: newNodeName,
+        protocol: `${sourceNode.protocol}⇋${targetNode.protocol}`,
+        parsed_config: JSON.stringify(newClashConfig),
+        clash_config: JSON.stringify(newClashConfig),
+        enabled: true,
+        tag: '链式代理',
+        chain_proxy_node_id: targetNode.id,
+      })
+      return response.data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['nodes'] })
+      toast.success(t('toast.chainProxyCreateSuccess'))
+      setChainProxyDialogOpen(false)
+      setSourceNodeForChainProxy(null)
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.error || t('toast.chainProxyCreateFailed'))
+    },
+  })
+
   // 从订阅获取节点
   const fetchSubscriptionMutation = useMutation({
     mutationFn: async ({ url, userAgent }: { url: string; userAgent: string }) => {
@@ -2745,6 +2784,29 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                     <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                   </Tooltip>
                                 )}
+                                {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        variant='ghost'
+                                        size='icon'
+                                        className='size-7 text-[#d97757] hover:text-[#c66647]'
+                                        onClick={() => {
+                                          setSourceNodeForChainProxy(node.dbNode)
+                                          setChainProxyDialogOpen(true)
+                                          setChainProxyFilterText('')
+                                        }}
+                                      >
+                                        <img
+                                          src={ExchangeIcon}
+                                          alt={t('tooltip.chainProxy')}
+                                          className='size-4 [filter:invert(63%)_sepia(45%)_saturate(1068%)_hue-rotate(327deg)_brightness(95%)_contrast(88%)]'
+                                        />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>{t('tooltip.chainProxy')}</TooltipContent>
+                                  </Tooltip>
+                                )}
                                 {node.isSaved && node.dbId && (
                                   <Tooltip>
                                     <TooltipTrigger asChild>
@@ -3083,6 +3145,29 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                     </Tooltip>
                                   )}
+                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Button
+                                          variant='ghost'
+                                          size='icon'
+                                          className='size-7 text-[#d97757] hover:text-[#c66647] shrink-0'
+                                          onClick={() => {
+                                            setSourceNodeForChainProxy(node.dbNode)
+                                            setChainProxyDialogOpen(true)
+                                            setChainProxyFilterText('')
+                                          }}
+                                        >
+                                          <img
+                                            src={ExchangeIcon}
+                                            alt={t('tooltip.chainProxy')}
+                                            className='size-4 [filter:invert(63%)_sepia(45%)_saturate(1068%)_hue-rotate(327deg)_brightness(95%)_contrast(88%)]'
+                                          />
+                                        </Button>
+                                      </TooltipTrigger>
+                                      <TooltipContent>{t('tooltip.chainProxy')}</TooltipContent>
+                                    </Tooltip>
+                                  )}
                                 </div>
                               )}
                             </TableCell>
@@ -3320,6 +3405,29 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                         </Button>
                                       </TooltipTrigger>
                                       <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
+                                    </Tooltip>
+                                  )}
+                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Button
+                                          variant='ghost'
+                                          size='icon'
+                                          className='size-7 text-[#d97757] hover:text-[#c66647] shrink-0'
+                                          onClick={() => {
+                                            setSourceNodeForChainProxy(node.dbNode)
+                                            setChainProxyDialogOpen(true)
+                                            setChainProxyFilterText('')
+                                          }}
+                                        >
+                                          <img
+                                            src={ExchangeIcon}
+                                            alt={t('tooltip.chainProxy')}
+                                            className='size-4 [filter:invert(63%)_sepia(45%)_saturate(1068%)_hue-rotate(327deg)_brightness(95%)_contrast(88%)]'
+                                          />
+                                        </Button>
+                                      </TooltipTrigger>
+                                      <TooltipContent>{t('tooltip.chainProxy')}</TooltipContent>
                                     </Tooltip>
                                   )}
                                   <FlagEmojiPicker
@@ -3956,6 +4064,87 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
               )}
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* 链式代理对话框 */}
+      <Dialog open={chainProxyDialogOpen} onOpenChange={(open) => {
+        setChainProxyDialogOpen(open)
+        if (!open) setChainProxyFilterText('')
+      }}>
+        <DialogContent className='max-w-2xl flex flex-col max-h-[80vh]'>
+          <DialogHeader>
+            <DialogTitle>{t('dialog.chainProxy.title')}</DialogTitle>
+            <DialogDescription>
+              {t('dialog.chainProxy.description', { name: sourceNodeForChainProxy?.node_name })}
+            </DialogDescription>
+          </DialogHeader>
+          <div className='space-y-2 shrink-0'>
+            <Input
+              placeholder={t('dialog.chainProxy.searchPlaceholder')}
+              value={chainProxyFilterText}
+              onChange={(e) => setChainProxyFilterText(e.target.value)}
+              className='text-sm'
+            />
+            <p className='text-xs text-muted-foreground'>
+              {t('dialog.chainProxy.excludeHint')}
+            </p>
+          </div>
+          <div className='overflow-y-auto min-h-0 py-2'>
+            {(() => {
+              const filteredNodes = savedNodes
+                .filter(node => node.id !== sourceNodeForChainProxy?.id)
+                .filter(node => !node.protocol.includes('⇋'))
+                .filter(node => {
+                  if (!chainProxyFilterText.trim()) return true
+                  const searchText = chainProxyFilterText.toLowerCase()
+                  return (
+                    node.node_name.toLowerCase().includes(searchText) ||
+                    node.protocol.toLowerCase().includes(searchText) ||
+                    (node.tag && node.tag.toLowerCase().includes(searchText))
+                  )
+                })
+
+              return filteredNodes.length > 0 ? (
+                <div className='space-y-2'>
+                  {filteredNodes.map((node) => (
+                    <Button
+                      key={node.id}
+                      variant='outline'
+                      className='w-full justify-start text-left h-auto py-3'
+                      onClick={() => {
+                        if (sourceNodeForChainProxy) {
+                          createRelayNodeMutation.mutate({
+                            sourceNode: sourceNodeForChainProxy,
+                            targetNode: node
+                          })
+                        }
+                      }}
+                      disabled={createRelayNodeMutation.isPending}
+                    >
+                      <div className='flex flex-col gap-2 w-full items-start'>
+                        <div className='flex items-center gap-2 w-full flex-wrap'>
+                          <span className='font-medium'>{node.node_name}</span>
+                          <span className='text-xs text-muted-foreground'>
+                            {node.protocol} - {node.original_server}
+                          </span>
+                        </div>
+                        {node.tag && (
+                          <Badge variant='secondary' className='text-xs'>
+                            {node.tag}
+                          </Badge>
+                        )}
+                      </div>
+                    </Button>
+                  ))}
+                </div>
+              ) : (
+                <div className='text-center text-sm text-muted-foreground py-8'>
+                  {chainProxyFilterText.trim() ? t('dialog.chainProxy.noMatch') : t('dialog.chainProxy.noNodes')}
+                </div>
+              )
+            })()}
+          </div>
         </DialogContent>
       </Dialog>
 

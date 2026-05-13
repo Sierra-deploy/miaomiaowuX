@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute, redirect } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { Bell, CircleHelp, Code, Copy, Eye, EyeOff, Link, RefreshCw, Timer } from 'lucide-react'
+import { Bell, CircleHelp, Code, Copy, Eye, EyeOff, Link, RefreshCw, ShieldOff, Timer } from 'lucide-react'
 import { Topbar } from '@/components/layout/topbar'
 import {
   Card,
@@ -163,6 +163,38 @@ function SystemSettingsPage() {
       setEnableOverrideScripts(overrideScriptsData.enable_override_scripts)
     }
   }, [overrideScriptsData])
+
+  // 静默模式
+  const [silentMode, setSilentMode] = useState(false)
+  const [silentModeTimeout, setSilentModeTimeout] = useState(15)
+
+  const { data: silentModeData } = useQuery({
+    queryKey: ['silent-mode'],
+    queryFn: async () => {
+      const response = await api.get('/api/admin/system-settings/silent-mode')
+      return response.data as { success: boolean; silent_mode: boolean; silent_mode_timeout: number }
+    },
+    enabled: Boolean(auth.accessToken),
+    staleTime: 5 * 60 * 1000,
+  })
+
+  const updateSilentModeMutation = useMutation({
+    mutationFn: async (params: { silent_mode: boolean; silent_mode_timeout: number }) => {
+      await api.put('/api/admin/system-settings/silent-mode', params)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['silent-mode'] })
+      toast.success(t('silentMode.updated'))
+    },
+    onError: handleServerError,
+  })
+
+  useEffect(() => {
+    if (silentModeData) {
+      setSilentMode(silentModeData.silent_mode)
+      setSilentModeTimeout(silentModeData.silent_mode_timeout)
+    }
+  }, [silentModeData])
 
   // 定时配置
   const [speedCollectInterval, setSpeedCollectInterval] = useState(3)
@@ -648,6 +680,56 @@ function SystemSettingsPage() {
                   disabled={toggleOverrideScriptsMutation.isPending}
                 />
               </div>
+            </CardContent>
+          </Card>
+
+          {/* 静默模式 */}
+          <Card className={silentMode ? 'border-orange-500/50' : ''}>
+            <CardHeader className='pb-4'>
+              <CardTitle className='flex items-center gap-2'>
+                <ShieldOff className='h-5 w-5' />
+                {t('silentMode.title')}
+              </CardTitle>
+              <CardDescription>{t('silentMode.description')}</CardDescription>
+            </CardHeader>
+            <CardContent className='space-y-4'>
+              <div className='flex items-center justify-between'>
+                <Label htmlFor='silent-mode-toggle'>{t('silentMode.enableLabel')}</Label>
+                <Switch
+                  id='silent-mode-toggle'
+                  checked={silentMode}
+                  onCheckedChange={(checked) => {
+                    setSilentMode(checked)
+                    updateSilentModeMutation.mutate({ silent_mode: checked, silent_mode_timeout: silentModeTimeout })
+                  }}
+                  disabled={updateSilentModeMutation.isPending}
+                />
+              </div>
+              {silentMode && (
+                <div className='space-y-2'>
+                  <Label htmlFor='silent-mode-timeout'>{t('silentMode.timeout')}</Label>
+                  <div className='flex items-center gap-2'>
+                    <Input
+                      id='silent-mode-timeout'
+                      type='number'
+                      min={1}
+                      value={silentModeTimeout}
+                      onChange={(e) => setSilentModeTimeout(Number(e.target.value))}
+                      className='w-24'
+                    />
+                    <span className='text-sm text-muted-foreground'>{t('silentMode.minutes')}</span>
+                    <Button
+                      size='sm'
+                      variant='outline'
+                      onClick={() => updateSilentModeMutation.mutate({ silent_mode: silentMode, silent_mode_timeout: silentModeTimeout })}
+                      disabled={updateSilentModeMutation.isPending}
+                    >
+                      {t('actions.save', { ns: 'common' })}
+                    </Button>
+                  </div>
+                  <p className='text-xs text-muted-foreground'>{t('silentMode.hint', { timeout: silentModeTimeout })}</p>
+                </div>
+              )}
             </CardContent>
           </Card>
 

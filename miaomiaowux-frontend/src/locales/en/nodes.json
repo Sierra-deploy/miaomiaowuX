@@ -161,6 +161,9 @@
     "addRoutingRuleFailed": "Failed to add routing rule",
     "inboundCreatedNoNode": "Inbound created but synced node not found, please configure landing manually",
     "createLandingFailed": "Failed to create landing node",
+    "chainProxySourceParseError": "Failed to parse source node config",
+    "chainProxyCreateSuccess": "Chain proxy node created successfully",
+    "chainProxyCreateFailed": "Failed to create chain proxy node",
     "remoteServerNotFound": "Associated remote server not found",
     "configMissingFields": "Config missing required fields: name, type, server, port",
     "jsonFormatError": "JSON format error: {{error}}",
@@ -224,6 +227,14 @@
       "description": "Auto copy failed, please manually copy the URI below",
       "retryBtn": "Try Again",
       "copyFailedRetry": "Copy failed, please select and copy text manually"
+    },
+    "chainProxy": {
+      "title": "Select Relay Node",
+      "description": "Select a target node to create chain proxy with \"{{name}}\"",
+      "searchPlaceholder": "Search node name, protocol, or tag...",
+      "excludeHint": "Chain proxy nodes are automatically excluded",
+      "noMatch": "No matching nodes found",
+      "noNodes": "No nodes available"
     },
     "batchTag": {
       "title": "Batch Update Tags",
@@ -314,7 +325,8 @@
     "resolveIp": "Resolve IP Address",
     "selectIp": "Select IP Address",
     "restoreDomain": "Restore Original Domain",
-    "landingNode": "Landing Node"
+    "landingNode": "Landing Node",
+    "chainProxy": "Create Chain Proxy"
   },
   "label": {
     "address": "Address:",

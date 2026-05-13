@@ -553,6 +553,17 @@ func main() {
 		}
 	})))
 
+	mux.Handle("/api/admin/system-settings/silent-mode", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			systemSettingsHandler.GetSilentMode(w, r)
+		case http.MethodPut:
+			systemSettingsHandler.SetSilentMode(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
+
 	// 通知配置 API（仅限管理员）
 	notifyConfigHandler := handler.NewNotifyConfigHandler(repo)
 	mux.Handle("/api/admin/notify-config", auth.RequireAdmin(tokenStore, userRepo, notifyConfigHandler))
@@ -642,8 +653,11 @@ func main() {
 		web.Handler().ServeHTTP(w, r)
 	})
 
+	silentModeManager := handler.NewSilentModeManager(repo, tokenStore)
+	handlerWithSilentMode := silentModeManager.Middleware(mux)
+
 	allowedOrigins := getAllowedOrigins()
-	handlerWithCORS := withCORS(mux, allowedOrigins)
+	handlerWithCORS := withCORS(handlerWithSilentMode, allowedOrigins)
 
 	srv := &http.Server{
 		Addr:              addr,

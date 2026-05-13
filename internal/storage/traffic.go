@@ -210,9 +210,10 @@ type Node struct {
 	Tag            string
 	Tags           []string // 多标签支持（兼容旧版单Tag）
 	OriginalServer string
-	InboundTag     string // 关联入站标签（用于将节点链接到入站）
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	InboundTag       string // 关联入站标签（用于将节点链接到入站）
+	ChainProxyNodeID *int64 // 链式代理目标节点 ID
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 // SubscribeFile 表示订阅文件配置。
@@ -276,6 +277,8 @@ type SystemConfig struct {
 	NotifyDailyTrafficTime      string // "HH:MM"，默认 "08:00"
 	NotifyTrafficThresholdPercent int  // 0-100，默认 80
 	EnableOverrideScripts       bool   // 启用覆写脚本功能
+	SilentMode                  bool   // 静默模式：所有请求返回404，仅订阅接口可用
+	SilentModeTimeout           int    // 获取订阅后恢复访问的分钟数，默认15
 }
 
 // ExternalSubscription表示用户导入的外部订阅URL。
@@ -794,6 +797,9 @@ CREATE INDEX IF NOT EXISTS idx_nodes_enabled ON nodes(enabled);
 	if err := r.ensureNodeColumn("inbound_tag", "TEXT"); err != nil {
 		return err
 	}
+	if err := r.ensureNodeColumn("chain_proxy_node_id", "INTEGER"); err != nil {
+		return err
+	}
 
 	// 确保列存在后创建标签索引
 	if _, err := r.db.Exec(`CREATE INDEX IF NOT EXISTS idx_nodes_tag ON nodes(tag);`); err != nil {
@@ -1149,6 +1155,12 @@ CREATE INDEX IF NOT EXISTS idx_override_scripts_hook ON override_scripts(hook);
 	}
 
 	if err := r.ensureSystemConfigColumn("enable_override_scripts", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("ensure enable_override_scripts column: %w", err)
+	}
+	if err := r.ensureSystemConfigColumn("silent_mode", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("ensure silent_mode column: %w", err)
+	}
+	if err := r.ensureSystemConfigColumn("silent_mode_timeout", "INTEGER NOT NULL DEFAULT 15"); err != nil {
 		return err
 	}
 
@@ -5122,7 +5134,8 @@ SELECT proxy_groups_source_url, client_compatibility_mode, COALESCE(enable_short
        COALESCE(notify_login, 0), COALESCE(notify_subscribe_fetch, 0), COALESCE(notify_daily_traffic, 0),
        COALESCE(notify_server_offline, 0), COALESCE(notify_server_online, 0), COALESCE(notify_traffic_threshold, 0),
        COALESCE(notify_daily_traffic_time, '08:00'), COALESCE(notify_traffic_threshold_percent, 80),
-       COALESCE(enable_override_scripts, 0)
+       COALESCE(enable_override_scripts, 0),
+       COALESCE(silent_mode, 0), COALESCE(silent_mode_timeout, 15)
 FROM system_config
 WHERE id = 1
 `
@@ -5131,7 +5144,7 @@ WHERE id = 1
 	var compatibilityMode, enableShortLink, agentLogEnabled int
 	var notifyEnabled, notifyLogin, notifySubFetch, notifyDailyTraffic int
 	var notifyServerOffline, notifyServerOnline, notifyTrafficThreshold int
-	var enableOverrideScripts int
+	var enableOverrideScripts, silentMode, silentModeTimeout int
 	err := r.db.QueryRowContext(ctx, query).Scan(
 		&cfg.ProxyGroupsSourceURL, &compatibilityMode, &enableShortLink,
 		&cfg.SpeedCollectInterval, &cfg.TrafficCollectInterval,
@@ -5142,10 +5155,11 @@ WHERE id = 1
 		&notifyServerOffline, &notifyServerOnline, &notifyTrafficThreshold,
 		&cfg.NotifyDailyTrafficTime, &cfg.NotifyTrafficThresholdPercent,
 		&enableOverrideScripts,
+		&silentMode, &silentModeTimeout,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return SystemConfig{EnableShortLink: true, SpeedCollectInterval: 3, TrafficCollectInterval: 60, TrafficCheckInterval: 120, HeartbeatInterval: 30, NotifyDailyTrafficTime: "08:00", NotifyTrafficThresholdPercent: 80}, nil
+			return SystemConfig{EnableShortLink: true, SpeedCollectInterval: 3, TrafficCollectInterval: 60, TrafficCheckInterval: 120, HeartbeatInterval: 30, NotifyDailyTrafficTime: "08:00", NotifyTrafficThresholdPercent: 80, SilentModeTimeout: 15}, nil
 		}
 		return SystemConfig{}, fmt.Errorf("query system config: %w", err)
 	}
@@ -5161,6 +5175,11 @@ WHERE id = 1
 	cfg.NotifyServerOnline = notifyServerOnline != 0
 	cfg.NotifyTrafficThreshold = notifyTrafficThreshold != 0
 	cfg.EnableOverrideScripts = enableOverrideScripts != 0
+	cfg.SilentMode = silentMode != 0
+	cfg.SilentModeTimeout = silentModeTimeout
+	if cfg.SilentModeTimeout <= 0 {
+		cfg.SilentModeTimeout = 15
+	}
 	return cfg, nil
 }
 
@@ -5189,6 +5208,8 @@ SET proxy_groups_source_url = ?,
     notify_daily_traffic_time = ?,
     notify_traffic_threshold_percent = ?,
     enable_override_scripts = ?,
+    silent_mode = ?,
+    silent_mode_timeout = ?,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = 1
 `
@@ -5213,6 +5234,11 @@ WHERE id = 1
 		return 0
 	}
 
+	silentModeTimeout := cfg.SilentModeTimeout
+	if silentModeTimeout <= 0 {
+		silentModeTimeout = 15
+	}
+
 	result, err := r.db.ExecContext(ctx, updateStmt, cfg.ProxyGroupsSourceURL, compatibilityMode, enableShortLink,
 		cfg.SpeedCollectInterval, cfg.TrafficCollectInterval, cfg.TrafficCheckInterval, cfg.HeartbeatInterval,
 		agentLogEnabled,
@@ -5220,7 +5246,8 @@ WHERE id = 1
 		boolToInt(cfg.NotifyLogin), boolToInt(cfg.NotifySubscribeFetch), boolToInt(cfg.NotifyDailyTraffic),
 		boolToInt(cfg.NotifyServerOffline), boolToInt(cfg.NotifyServerOnline), boolToInt(cfg.NotifyTrafficThreshold),
 		cfg.NotifyDailyTrafficTime, cfg.NotifyTrafficThresholdPercent,
-		boolToInt(cfg.EnableOverrideScripts))
+		boolToInt(cfg.EnableOverrideScripts),
+		boolToInt(cfg.SilentMode), silentModeTimeout)
 	if err != nil {
 		return fmt.Errorf("update system config: %w", err)
 	}
@@ -5236,8 +5263,9 @@ INSERT INTO system_config (id, proxy_groups_source_url, client_compatibility_mod
     speed_collect_interval, traffic_collect_interval, traffic_check_interval, heartbeat_interval, agent_log_enabled,
     notify_enabled, telegram_bot_token, telegram_chat_id, notify_login, notify_subscribe_fetch,
     notify_daily_traffic, notify_server_offline, notify_server_online, notify_traffic_threshold,
-    notify_daily_traffic_time, notify_traffic_threshold_percent, enable_override_scripts)
-VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    notify_daily_traffic_time, notify_traffic_threshold_percent, enable_override_scripts,
+    silent_mode, silent_mode_timeout)
+VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 		if _, err := r.db.ExecContext(ctx, insertStmt, cfg.ProxyGroupsSourceURL, compatibilityMode, enableShortLink,
 			cfg.SpeedCollectInterval, cfg.TrafficCollectInterval, cfg.TrafficCheckInterval, cfg.HeartbeatInterval, agentLogEnabled,
@@ -5245,7 +5273,8 @@ VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			boolToInt(cfg.NotifyLogin), boolToInt(cfg.NotifySubscribeFetch), boolToInt(cfg.NotifyDailyTraffic),
 			boolToInt(cfg.NotifyServerOffline), boolToInt(cfg.NotifyServerOnline), boolToInt(cfg.NotifyTrafficThreshold),
 			cfg.NotifyDailyTrafficTime, cfg.NotifyTrafficThresholdPercent,
-			boolToInt(cfg.EnableOverrideScripts)); err != nil {
+			boolToInt(cfg.EnableOverrideScripts),
+			boolToInt(cfg.SilentMode), silentModeTimeout); err != nil {
 			return fmt.Errorf("insert system config: %w", err)
 		}
 	}

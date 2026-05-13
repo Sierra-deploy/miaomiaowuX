@@ -63,6 +63,15 @@
     "enableLabel": "启用覆写脚本",
     "updated": "覆写脚本设置已更新"
   },
+  "silentMode": {
+    "title": "静默模式",
+    "description": "开启后，所有请求返回 404，仅订阅相关接口可用。用户获取一次订阅后临时恢复访问。",
+    "enableLabel": "启用静默模式",
+    "timeout": "恢复时长",
+    "minutes": "分钟",
+    "hint": "获取订阅后恢复访问 {{timeout}} 分钟，之后再次进入静默状态",
+    "updated": "静默模式设置已更新"
+  },
   "sync": {
     "title": "外部订阅同步设置",
     "description": "配置外部订阅的同步行为",

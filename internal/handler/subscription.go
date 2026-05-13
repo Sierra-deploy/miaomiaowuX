@@ -266,6 +266,9 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			clientType = "unknown"
 		}
 		SendSubscribeFetchNotification(r.Context(), username, clientType, GetClientIP(r))
+		if silentMgr := GetSilentModeManager(); silentMgr != nil && username != "" {
+			silentMgr.RecordSubscriptionAccessWithIP(username, GetClientIP(r))
+		}
 	}
 
 	cleanedName := filepath.Clean(filename)
@@ -516,6 +519,13 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	logger.Info("[⏱️ 耗时监测] 节点排序完成", "step", "node_order", "duration_ms", time.Since(stepStart).Milliseconds())
+
+	// 链式代理注入：根据 chain_proxy_node_id 注入 dialer-proxy
+	stepStart = time.Now()
+	if username != "" && h.repo != nil {
+		data = injectChainProxy(r.Context(), h.repo, username, data)
+	}
+	logger.Info("[⏱️ 耗时监测] 链式代理注入完成", "step", "chain_proxy", "duration_ms", time.Since(stepStart).Milliseconds())
 
 	// 执行覆写脚本（post_fetch 钩子）
 	stepStart = time.Now()
@@ -1615,4 +1625,81 @@ func sortProxiesByNodeOrder(ctx context.Context, repo *storage.TrafficRepository
 
 	logger.Info("[Subscription] 按节点顺序排序完成", "count", len(proxiesWithOrder), "user", username)
 	return nil
+}
+
+func injectChainProxy(ctx context.Context, repo *storage.TrafficRepository, username string, data []byte) []byte {
+	nodes, err := repo.ListNodes(ctx, username)
+	if err != nil {
+		return data
+	}
+
+	nodeIDToName := make(map[int64]string, len(nodes))
+	nameToChainTarget := make(map[string]string)
+	hasChainProxy := false
+	for _, node := range nodes {
+		nodeIDToName[node.ID] = node.NodeName
+	}
+	for _, node := range nodes {
+		if node.ChainProxyNodeID != nil {
+			if targetName, ok := nodeIDToName[*node.ChainProxyNodeID]; ok {
+				nameToChainTarget[node.NodeName] = targetName
+				hasChainProxy = true
+			}
+		}
+	}
+	if !hasChainProxy {
+		return data
+	}
+
+	var yamlNode yaml.Node
+	if err := yaml.Unmarshal(data, &yamlNode); err != nil {
+		return data
+	}
+	if len(yamlNode.Content) == 0 || yamlNode.Content[0].Kind != yaml.MappingNode {
+		return data
+	}
+
+	rootMap := yamlNode.Content[0]
+	modified := false
+	for i := 0; i < len(rootMap.Content); i += 2 {
+		if rootMap.Content[i].Value != "proxies" {
+			continue
+		}
+		proxiesNode := rootMap.Content[i+1]
+		if proxiesNode.Kind != yaml.SequenceNode {
+			break
+		}
+		for _, proxyNode := range proxiesNode.Content {
+			if proxyNode.Kind != yaml.MappingNode {
+				continue
+			}
+			var proxyName string
+			for j := 0; j < len(proxyNode.Content); j += 2 {
+				if proxyNode.Content[j].Value == "name" {
+					proxyName = proxyNode.Content[j+1].Value
+					break
+				}
+			}
+			if targetName, ok := nameToChainTarget[proxyName]; ok {
+				proxyNode.Content = append(proxyNode.Content,
+					&yaml.Node{Kind: yaml.ScalarNode, Value: "dialer-proxy"},
+					&yaml.Node{Kind: yaml.ScalarNode, Value: targetName},
+				)
+				modified = true
+			}
+		}
+		break
+	}
+
+	if !modified {
+		return data
+	}
+
+	out, err := MarshalYAMLWithIndent(&yamlNode)
+	if err != nil {
+		return data
+	}
+	fixed := RemoveUnicodeEscapeQuotes(string(out))
+	logger.Info("[Subscription] 链式代理注入完成", "user", username, "injected", len(nameToChainTarget))
+	return []byte(fixed)
 }

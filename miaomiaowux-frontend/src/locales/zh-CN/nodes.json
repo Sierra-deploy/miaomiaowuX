@@ -161,6 +161,9 @@
     "addRoutingRuleFailed": "添加路由规则失败",
     "inboundCreatedNoNode": "入站已创建，但未找到同步的节点，请手动配置落地",
     "createLandingFailed": "创建落地节点失败",
+    "chainProxySourceParseError": "源节点配置解析失败",
+    "chainProxyCreateSuccess": "链式代理节点创建成功",
+    "chainProxyCreateFailed": "创建链式代理节点失败",
     "remoteServerNotFound": "未找到关联的远程服务器",
     "configMissingFields": "配置缺少必需字段: name, type, server, port",
     "jsonFormatError": "JSON 格式错误: {{error}}",
@@ -224,6 +227,14 @@
       "description": "自动复制失败，请手动复制下方的 URI",
       "retryBtn": "再试一次",
       "copyFailedRetry": "复制失败，请手动选择文本复制"
+    },
+    "chainProxy": {
+      "title": "选择中转节点",
+      "description": "选择目标节点与 \"{{name}}\" 创建链式代理",
+      "searchPlaceholder": "搜索节点名称、协议或标签...",
+      "excludeHint": "自动排除链式代理节点",
+      "noMatch": "未找到匹配的节点",
+      "noNodes": "暂无可用的节点"
     },
     "batchTag": {
       "title": "批量修改标签",
@@ -314,7 +325,8 @@
     "resolveIp": "解析IP地址",
     "selectIp": "选择IP地址",
     "restoreDomain": "恢复原始域名",
-    "landingNode": "落地节点"
+    "landingNode": "落地节点",
+    "chainProxy": "创建链式代理"
   },
   "label": {
     "address": "地址:",

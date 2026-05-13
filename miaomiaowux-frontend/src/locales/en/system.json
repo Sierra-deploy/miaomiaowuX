@@ -63,6 +63,15 @@
     "enableLabel": "Enable Override Scripts",
     "updated": "Override scripts settings updated"
   },
+  "silentMode": {
+    "title": "Silent Mode",
+    "description": "When enabled, all requests return 404 except subscription endpoints. Access is temporarily restored after fetching a subscription.",
+    "enableLabel": "Enable Silent Mode",
+    "timeout": "Recovery Duration",
+    "minutes": "minutes",
+    "hint": "Access is restored for {{timeout}} minutes after fetching a subscription, then returns to silent mode",
+    "updated": "Silent mode settings updated"
+  },
   "sync": {
     "title": "External Subscription Sync",
     "description": "Configure external subscription sync behavior",
