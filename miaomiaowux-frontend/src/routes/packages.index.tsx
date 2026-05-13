@@ -45,6 +45,8 @@ interface PackageTemplate {
   is_reset: boolean
   reset_day: number
   nodes: number[]
+  speed_limit_mbps: number
+  device_limit: number
   created_at: string
   updated_at: string
 }
@@ -56,6 +58,8 @@ interface PackageFormData {
   traffic_limit_gb: number
   cycle_days: number
   nodes: number[]
+  speed_limit_mbps: number
+  device_limit: number
 }
 
 function PackagesPage() {
@@ -69,6 +73,8 @@ function PackagesPage() {
     traffic_limit_gb: 100,
     cycle_days: 30,
     nodes: [],
+    speed_limit_mbps: 0,
+    device_limit: 0,
   })
 
   const { data: packagesData, isLoading } = useQuery({
@@ -138,6 +144,8 @@ function PackagesPage() {
       is_reset: false,
       reset_day: 1,
       nodes: [],
+      speed_limit_mbps: 0,
+      device_limit: 0,
     })
   }
 
@@ -155,6 +163,8 @@ function PackagesPage() {
       traffic_limit_gb: pkg.traffic_limit_gb,
       cycle_days: pkg.cycle_days,
       nodes: pkg.nodes || [],
+      speed_limit_mbps: pkg.speed_limit_mbps || 0,
+      device_limit: pkg.device_limit || 0,
     })
   }
 
@@ -258,6 +268,22 @@ function PackagesPage() {
                   <span className="text-sm text-muted-foreground">{t('card.cycleDays')}</span>
                   <span className="text-sm font-medium">{t('card.cycleDaysValue', { days: pkg.cycle_days })}</span>
                 </div>
+                {(pkg.speed_limit_mbps > 0 || pkg.device_limit > 0) && (
+                  <div className="flex items-center gap-3 flex-wrap">
+                    {pkg.speed_limit_mbps > 0 && (
+                      <div className="flex items-center gap-1">
+                        <span className="text-sm text-muted-foreground">{t('card.speedLimit')}</span>
+                        <span className="text-sm font-medium">{pkg.speed_limit_mbps} Mbps</span>
+                      </div>
+                    )}
+                    {pkg.device_limit > 0 && (
+                      <div className="flex items-center gap-1">
+                        <span className="text-sm text-muted-foreground">{t('card.deviceLimit')}</span>
+                        <span className="text-sm font-medium">{pkg.device_limit}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
               </CardContent>
               <CardFooter className="flex gap-2 flex-wrap">
                 <Button
@@ -348,6 +374,35 @@ function PackagesPage() {
                   onChange={(e) => setFormData({ ...formData, cycle_days: parseInt(e.target.value) })}
                   required
                 />
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="speed_limit_mbps">{t('dialog.speedLimit')}</Label>
+                  <Input
+                    id="speed_limit_mbps"
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={formData.speed_limit_mbps}
+                    onChange={(e) => setFormData({ ...formData, speed_limit_mbps: parseFloat(e.target.value) || 0 })}
+                    placeholder={t('dialog.speedLimitPlaceholder')}
+                  />
+                  <p className="text-xs text-muted-foreground">{t('dialog.speedLimitDesc')}</p>
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="device_limit">{t('dialog.deviceLimit')}</Label>
+                  <Input
+                    id="device_limit"
+                    type="number"
+                    min="0"
+                    step="1"
+                    value={formData.device_limit}
+                    onChange={(e) => setFormData({ ...formData, device_limit: parseInt(e.target.value) || 0 })}
+                    placeholder={t('dialog.deviceLimitPlaceholder')}
+                  />
+                  <p className="text-xs text-muted-foreground">{t('dialog.deviceLimitDesc')}</p>
+                </div>
               </div>
 
               <div className="space-y-2">

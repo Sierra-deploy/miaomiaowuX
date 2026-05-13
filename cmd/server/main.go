@@ -234,10 +234,9 @@ func main() {
 	mux.Handle("/api/admin/template-v3", auth.RequireAdmin(tokenStore, userRepo, templateV3Handler))
 	mux.Handle("/api/admin/template-v3/", auth.RequireAdmin(tokenStore, userRepo, templateV3Handler))
 
-	// 包管理端点（仅限管理员）
+	// 包管理端点（仅限管理员）— list/create/delete 不依赖 limiterPusher
 	mux.Handle("/api/admin/packages", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageListHandler(repo)))
 	mux.Handle("/api/admin/packages/create", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageCreateHandler(repo)))
-	mux.Handle("/api/admin/packages/update", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageUpdateHandler(repo)))
 	mux.Handle("/api/admin/packages/", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageDeleteHandler(repo)))
 
 	// 用户端点（所有经过身份验证的用户）
@@ -312,12 +311,19 @@ func main() {
 	remoteWSHandler := handler.NewRemoteWSHandler(repo, trafficCollector)
 	mux.Handle("/api/remote/ws", remoteWSHandler)
 
+	// 限速配置推送器
+	limiterPusher := handler.NewLimiterConfigPusher(repo, remoteWSHandler)
+	remoteWSHandler.SetLimiterPusher(limiterPusher)
+	xrayServerHandler.SetLimiterPusher(limiterPusher)
+
 	// 远程服务器管理代理（将命令转发到子服务器）
 	remoteManageHandler := handler.NewRemoteManageHandler(repo, remoteWSHandler)
 
-	// 套餐绑定/解绑（需要remoteManageHandler操作远程入站）
-	mux.Handle("/api/admin/packages/assign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageAssignHandler(repo, remoteManageHandler)))
-	mux.Handle("/api/admin/packages/unassign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageUnassignHandler(repo, remoteManageHandler)))
+	// 依赖 limiterPusher 的端点
+	mux.Handle("/api/admin/packages/update", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageUpdateHandler(repo, limiterPusher)))
+	mux.Handle("/api/admin/packages/assign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageAssignHandler(repo, remoteManageHandler, limiterPusher)))
+	mux.Handle("/api/admin/packages/unassign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageUnassignHandler(repo, remoteManageHandler, limiterPusher)))
+	mux.Handle("/api/admin/users/limits", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserLimitsHandler(repo, limiterPusher)))
 
 	// 用户节点管理（普通用户查看套餐节点、管理自己的出站）
 	userNodesHandler := handler.NewUserNodesHandler(repo, remoteManageHandler)

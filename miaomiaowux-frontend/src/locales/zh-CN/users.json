@@ -42,7 +42,20 @@
     "tooltipPackage": "套餐：{{name}}",
     "tooltipUsed": "已用：{{used}}",
     "tooltipLimit": "限额：{{limit}} GB",
-    "tooltipPercent": "使用率：{{percent}}%"
+    "tooltipPercent": "使用率：{{percent}}%",
+    "tooltipSpeed": "限速：{{speed}} Mbps",
+    "tooltipDevice": "设备数：{{count}}"
+  },
+  "limits": {
+    "title": "编辑限速覆写",
+    "edit": "限速",
+    "override": "覆写",
+    "speedLimit": "限速覆写 (Mbps)",
+    "speedPlaceholder": "留空使用套餐默认值",
+    "speedDesc": "覆写套餐的限速设置，留空则使用套餐默认值",
+    "deviceLimit": "设备数覆写",
+    "devicePlaceholder": "留空使用套餐默认值",
+    "deviceDesc": "覆写套餐的设备数限制，留空则使用套餐默认值"
   },
   "actions": {
     "resetPassword": "重置密码",
@@ -111,6 +124,7 @@
     "userCreated": "用户已创建，初始密码已复制",
     "packageUpdated": "套餐已更新",
     "packageWarning": "套餐已绑定，但部分节点配置失败：{{warnings}}",
-    "remarkUpdated": "备注已更新"
+    "remarkUpdated": "备注已更新",
+    "limitsUpdated": "限速设置已更新"
   }
 }

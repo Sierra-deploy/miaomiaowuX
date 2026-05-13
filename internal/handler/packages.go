@@ -60,6 +60,8 @@ type createPackageRequest struct {
 	IsReset        bool    `json:"is_reset"`
 	ResetDay       int     `json:"reset_day"`
 	Nodes          []int64 `json:"nodes"`
+	SpeedLimitMbps float64 `json:"speed_limit_mbps"`
+	DeviceLimit    int     `json:"device_limit"`
 }
 
 func (h *PackageCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -110,6 +112,8 @@ func (h *PackageCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		IsReset:           req.IsReset,
 		ResetDay:          req.ResetDay,
 		Nodes:             nodes,
+		SpeedLimitMbps:    req.SpeedLimitMbps,
+		DeviceLimit:       req.DeviceLimit,
 	}
 
 	id, err := h.repo.CreatePackage(r.Context(), pkg)
@@ -132,11 +136,12 @@ func (h *PackageCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 // PackageUpdateHandler 处理更新现有包模板
 type PackageUpdateHandler struct {
-	repo *storage.TrafficRepository
+	repo    *storage.TrafficRepository
+	pusher  *LimiterConfigPusher
 }
 
-func NewPackageUpdateHandler(repo *storage.TrafficRepository) *PackageUpdateHandler {
-	return &PackageUpdateHandler{repo: repo}
+func NewPackageUpdateHandler(repo *storage.TrafficRepository, pusher *LimiterConfigPusher) *PackageUpdateHandler {
+	return &PackageUpdateHandler{repo: repo, pusher: pusher}
 }
 
 type updatePackageRequest struct {
@@ -148,6 +153,8 @@ type updatePackageRequest struct {
 	IsReset        bool    `json:"is_reset"`
 	ResetDay       int     `json:"reset_day"`
 	Nodes          []int64 `json:"nodes"`
+	SpeedLimitMbps float64 `json:"speed_limit_mbps"`
+	DeviceLimit    int     `json:"device_limit"`
 }
 
 func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -204,6 +211,8 @@ func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		IsReset:           req.IsReset,
 		ResetDay:          req.ResetDay,
 		Nodes:             nodes,
+		SpeedLimitMbps:    req.SpeedLimitMbps,
+		DeviceLimit:       req.DeviceLimit,
 	}
 
 	if err := h.repo.UpdatePackage(r.Context(), pkg); err != nil {
@@ -213,6 +222,10 @@ func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		}
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	if h.pusher != nil {
+		go h.pusher.PushToAllServersForPackage(context.Background(), req.ID)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -286,10 +299,11 @@ func (h *PackageDeleteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 type PackageUnassignHandler struct {
 	repo         *storage.TrafficRepository
 	remoteManage *RemoteManageHandler
+	pusher       *LimiterConfigPusher
 }
 
-func NewPackageUnassignHandler(repo *storage.TrafficRepository, remoteManage *RemoteManageHandler) *PackageUnassignHandler {
-	return &PackageUnassignHandler{repo: repo, remoteManage: remoteManage}
+func NewPackageUnassignHandler(repo *storage.TrafficRepository, remoteManage *RemoteManageHandler, pusher *LimiterConfigPusher) *PackageUnassignHandler {
+	return &PackageUnassignHandler{repo: repo, remoteManage: remoteManage, pusher: pusher}
 }
 
 func (h *PackageUnassignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -328,6 +342,10 @@ func (h *PackageUnassignHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		log.Printf("[PackageUnassign] Failed to delete user inbound config records: %v", err)
 	}
 
+	if h.pusher != nil {
+		go h.pusher.PushToAllServersForUser(context.Background(), req.Username)
+	}
+
 	if err := h.repo.RemovePackageFromUser(ctx, req.Username); err != nil {
 		if err == storage.ErrUserNotFound {
 			http.Error(w, "User not found", http.StatusNotFound)
@@ -347,10 +365,11 @@ func (h *PackageUnassignHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 type PackageAssignHandler struct {
 	repo         *storage.TrafficRepository
 	remoteManage *RemoteManageHandler
+	pusher       *LimiterConfigPusher
 }
 
-func NewPackageAssignHandler(repo *storage.TrafficRepository, remoteManage *RemoteManageHandler) *PackageAssignHandler {
-	return &PackageAssignHandler{repo: repo, remoteManage: remoteManage}
+func NewPackageAssignHandler(repo *storage.TrafficRepository, remoteManage *RemoteManageHandler, pusher *LimiterConfigPusher) *PackageAssignHandler {
+	return &PackageAssignHandler{repo: repo, remoteManage: remoteManage, pusher: pusher}
 }
 
 type assignPackageRequest struct {
@@ -458,6 +477,9 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				}
 			}
 			if len(warnings) > 0 {
+				if h.pusher != nil {
+					go h.pusher.PushToAllServersForUser(context.Background(), req.Username)
+				}
 				w.Header().Set("Content-Type", "application/json")
 				json.NewEncoder(w).Encode(map[string]interface{}{
 					"message":  "Package assigned with warnings",
@@ -466,6 +488,10 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				return
 			}
 		}
+	}
+
+	if h.pusher != nil {
+		go h.pusher.PushToAllServersForUser(context.Background(), req.Username)
 	}
 
 	w.Header().Set("Content-Type", "application/json")

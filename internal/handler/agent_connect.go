@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -255,6 +256,13 @@ func (h *XrayServerHandler) RemoteHeartbeat(w http.ResponseWriter, r *http.Reque
 		SendServerOnlineNotification(ctx, result.ServerName, clientIP)
 	}
 
+	// 首次连接或 Xray 重启时推送限速配置（非 WebSocket 模式的补偿）
+	if result.ServerID > 0 && h.limiterPusher != nil {
+		if result.PreviousStatus != "connected" || result.XrayRestarted {
+			go h.limiterPusher.PushToServer(context.Background(), result.ServerID)
+		}
+	}
+
 	// 重置成功心跳时的推送失败计数（连接正常）
 	if result.ServerID > 0 {
 		if err := h.repo.ResetRemoteServerPushFailCount(ctx, result.ServerID); err != nil {
@@ -371,6 +379,10 @@ func (h *XrayServerHandler) GetRemoteInstallScript(w http.ResponseWriter, r *htt
 	// 从查询参数中获取令牌
 	token := r.URL.Query().Get("token")
 	stealSelf := r.URL.Query().Get("steal_self") == "1"
+	xrayMode := r.URL.Query().Get("xray_mode")
+	if xrayMode != "embedded" {
+		xrayMode = "external"
+	}
 	frontService := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("front_service")))
 	if frontService != "xray" && frontService != "nginx" {
 		frontService = "xray"
@@ -391,6 +403,7 @@ TOKEN="` + token + `"
 SERVER="` + r.Host + `"
 AUTO_STEAL_SELF="` + map[bool]string{true: "1", false: "0"}[stealSelf] + `"
 FRONT_SERVICE="` + frontService + `"
+XRAY_MODE="` + xrayMode + `"
 
 # Detect protocol (default to http if accessed locally)
 if [[ "$SERVER" == *":"* ]]; then
@@ -433,6 +446,7 @@ mode: remote
 master_url: ${MASTER_URL}
 token: ${TOKEN}
 connection_mode: websocket
+xray_mode: ${XRAY_MODE}
 EOF
 
 echo "Configuration saved to /etc/mmw-agent/config.yaml"
@@ -525,21 +539,26 @@ if [ "$AUTO_STEAL_SELF" = "1" ]; then
     echo "  Auto Install: Xray + Nginx"
     echo "=========================================="
     echo ""
-    XRAY_INSTALLED=0
-    if command -v xray >/dev/null 2>&1 || [ -x /usr/local/bin/xray ] || [ -x /usr/bin/xray ] || [ -x /opt/xray/xray ]; then
-        XRAY_INSTALLED=1
+
+    if [ "$XRAY_MODE" = "embedded" ]; then
+        echo "[Auto] Embedded Xray mode, skip external Xray installation."
+    else
+        XRAY_INSTALLED=0
+        if command -v xray >/dev/null 2>&1 || [ -x /usr/local/bin/xray ] || [ -x /usr/bin/xray ] || [ -x /opt/xray/xray ]; then
+            XRAY_INSTALLED=1
+        fi
+
+        if [ "$XRAY_INSTALLED" = "1" ]; then
+            echo "[Auto] Xray already installed, skip."
+        else
+            echo "[Auto 1/2] Installing Xray..."
+            bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+        fi
     fi
 
     NGINX_INSTALLED=0
     if command -v nginx >/dev/null 2>&1 || [ -x /usr/local/nginx/sbin/nginx ]; then
         NGINX_INSTALLED=1
-    fi
-
-    if [ "$XRAY_INSTALLED" = "1" ]; then
-        echo "[Auto] Xray already installed, skip."
-    else
-        echo "[Auto 1/2] Installing Xray..."
-        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     fi
 
     if [ "$NGINX_INSTALLED" = "1" ]; then
@@ -549,7 +568,7 @@ if [ "$AUTO_STEAL_SELF" = "1" ]; then
         curl -fsSL https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/install-nginx.sh | bash
     fi
     echo ""
-    echo "Auto install complete (front service: ${FRONT_SERVICE})"
+    echo "Auto install complete (front service: ${FRONT_SERVICE}, xray mode: ${XRAY_MODE})"
 fi
 echo ""
 `

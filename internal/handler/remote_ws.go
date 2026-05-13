@@ -37,6 +37,7 @@ const (
 	WSMsgTypeDomainLatencyProbe  = "domain_latency_probe"  // Master -> Agent：探测域延迟
 	WSMsgTypeDomainLatencyResult = "domain_latency_result" // Agent -> Master：探测结果
 	WSMsgTypeHeartbeatAck        = "heartbeat_ack"         // Master -> Agent：心跳确认（含服务器时间）
+	WSMsgTypeLimiterConfig       = "limiter_config"        // Master -> Agent：限速配置下发
 )
 
 // WSMessage 表示 WebSocket 消息
@@ -58,7 +59,22 @@ type WSAuthResultPayload struct {
 
 // WSTrafficPayload 表示流量数据消息负载
 type WSTrafficPayload struct {
-	Stats *traffic.XrayStats `json:"stats,omitempty"`
+	Stats       *traffic.XrayStats  `json:"stats,omitempty"`
+	OnlineUsers map[string][]string `json:"online_users,omitempty"`
+}
+
+// WSLimiterConfigPayload 表示限速配置下发消息 (Master -> Agent)
+type WSLimiterConfigPayload struct {
+	InboundTag string             `json:"inbound_tag"`
+	NodeLimit  uint64             `json:"node_limit"`
+	Users      []WSUserLimitInfo  `json:"users"`
+}
+
+// WSUserLimitInfo 表示单个用户的限速配置
+type WSUserLimitInfo struct {
+	Email       string `json:"email"`
+	SpeedLimit  uint64 `json:"speed_limit"`
+	DeviceLimit int    `json:"device_limit"`
 }
 
 // WSHeartbeatPayload 表示心跳消息负载
@@ -155,6 +171,7 @@ type RemoteWSHandler struct {
 	mu                sync.RWMutex
 	stealSelfDeployer func(ctx context.Context, serverID int64) error
 	pendingProbes     sync.Map // 详见上下文
+	limiterPusher     *LimiterConfigPusher
 }
 
 // 创建一个新的 WebSocket 处理程序
@@ -170,6 +187,10 @@ func NewRemoteWSHandler(repo *storage.TrafficRepository, collector *traffic.Coll
 			},
 		},
 	}
+}
+
+func (h *RemoteWSHandler) SetLimiterPusher(p *LimiterConfigPusher) {
+	h.limiterPusher = p
 }
 
 // 处理 WebSocket 升级和连接
@@ -369,6 +390,11 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, remoteAddr string, pa
 	log.Printf("[Remote WS] Server %s (%d) authenticated via WebSocket from %s", server.Name, server.ID, remoteAddr)
 	h.sendAuthResult(conn, true, "Authenticated")
 
+	// embedded 模式：认证成功后推送限速配置
+	if server.XrayMode == "embedded" && h.limiterPusher != nil {
+		go h.limiterPusher.PushToServer(context.Background(), server.ID)
+	}
+
 	// 在第一次连接时自动部署窃取配置（服务器处于挂起状态）
 	if server.Use443 && server.Domain != "" && server.Status == "pending" && h.stealSelfDeployer != nil {
 		go func() {
@@ -556,6 +582,31 @@ func (h *RemoteWSHandler) BroadcastConfig(token string, config interface{}) erro
 		Type:    WSMsgTypeConfig,
 		Payload: payload,
 	})
+}
+
+// SendLimiterConfig 向指定服务器推送限速配置
+func (h *RemoteWSHandler) SendLimiterConfig(serverID int64, configs []WSLimiterConfigPayload) error {
+	wsConn, ok := h.GetConnectionByServerID(serverID)
+	if !ok {
+		return nil
+	}
+
+	wsConn.mu.Lock()
+	defer wsConn.mu.Unlock()
+
+	for _, cfg := range configs {
+		payload, err := json.Marshal(cfg)
+		if err != nil {
+			return err
+		}
+		if err := h.sendMessage(wsConn.Conn, WSMessage{
+			Type:    WSMsgTypeLimiterConfig,
+			Payload: payload,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // 删除最近未执行 ping 操作的陈旧连接

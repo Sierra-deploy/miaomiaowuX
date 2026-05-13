@@ -42,7 +42,20 @@
     "tooltipPackage": "Package: {{name}}",
     "tooltipUsed": "Used: {{used}}",
     "tooltipLimit": "Limit: {{limit}} GB",
-    "tooltipPercent": "Usage: {{percent}}%"
+    "tooltipPercent": "Usage: {{percent}}%",
+    "tooltipSpeed": "Speed Limit: {{speed}} Mbps",
+    "tooltipDevice": "Device Limit: {{count}}"
+  },
+  "limits": {
+    "title": "Edit Limit Overrides",
+    "edit": "Limits",
+    "override": "Override",
+    "speedLimit": "Speed Limit Override (Mbps)",
+    "speedPlaceholder": "Leave empty to use package default",
+    "speedDesc": "Override package speed limit, leave empty for package default",
+    "deviceLimit": "Device Limit Override",
+    "devicePlaceholder": "Leave empty to use package default",
+    "deviceDesc": "Override package device limit, leave empty for package default"
   },
   "actions": {
     "resetPassword": "Reset Password",
@@ -111,6 +124,7 @@
     "userCreated": "User created, initial password copied",
     "packageUpdated": "Package updated",
     "packageWarning": "Package bound, but some node configurations failed: {{warnings}}",
-    "remarkUpdated": "Remark updated"
+    "remarkUpdated": "Remark updated",
+    "limitsUpdated": "Limits updated"
   }
 }

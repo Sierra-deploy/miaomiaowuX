@@ -13,7 +13,9 @@
   "card": {
     "trafficQuota": "流量额度",
     "cycleDays": "计量周期",
-    "cycleDaysValue": "{{days}} 天"
+    "cycleDaysValue": "{{days}} 天",
+    "speedLimit": "限速",
+    "deviceLimit": "设备数"
   },
   "dialog": {
     "createTitle": "创建套餐模板",
@@ -30,6 +32,12 @@
     "noNodes": "暂无可用节点",
     "nodeInternal": "内部",
     "nodeExternal": "外部",
+    "speedLimit": "限速 (Mbps)",
+    "speedLimitPlaceholder": "0 表示不限速",
+    "speedLimitDesc": "每用户最大下载速度，0 表示不限速",
+    "deviceLimit": "设备数限制",
+    "deviceLimitPlaceholder": "0 表示不限制",
+    "deviceLimitDesc": "每用户最大在线设备数，0 表示不限制",
     "nodesHint": "选择该套餐可以使用的节点（不选择表示可以使用所有节点）",
     "saving": "保存中...",
     "confirmDelete": "确定要删除套餐模板 \"{{name}}\" 吗？"

@@ -13,22 +13,26 @@ import (
 )
 
 type userEntry struct {
-	Username       string  `json:"username"`
-	Email          string  `json:"email"`
-	Nickname       string  `json:"nickname"`
-	Avatar         string  `json:"avatar_url"`
-	Role           string  `json:"role"`
-	IsActive       bool    `json:"is_active"`
-	Remark         string  `json:"remark"`
-	PackageID      *int64  `json:"package_id"`
-	PackageName    string  `json:"package_name,omitempty"`
-	TrafficLimitGB float64 `json:"traffic_limit_gb,omitempty"`
-	TrafficUsed    int64   `json:"traffic_used,omitempty"`
-	TrafficLimit   int64   `json:"traffic_limit,omitempty"`
-	IsOverLimit    bool    `json:"is_over_limit"`
-	IsReset        bool    `json:"is_reset"`
-	ResetDay       int     `json:"reset_day"`
-	PackageEndDate *string `json:"package_end_date,omitempty"`
+	Username            string   `json:"username"`
+	Email               string   `json:"email"`
+	Nickname            string   `json:"nickname"`
+	Avatar              string   `json:"avatar_url"`
+	Role                string   `json:"role"`
+	IsActive            bool     `json:"is_active"`
+	Remark              string   `json:"remark"`
+	PackageID           *int64   `json:"package_id"`
+	PackageName         string   `json:"package_name,omitempty"`
+	TrafficLimitGB      float64  `json:"traffic_limit_gb,omitempty"`
+	TrafficUsed         int64    `json:"traffic_used,omitempty"`
+	TrafficLimit        int64    `json:"traffic_limit,omitempty"`
+	IsOverLimit         bool     `json:"is_over_limit"`
+	IsReset             bool     `json:"is_reset"`
+	ResetDay            int      `json:"reset_day"`
+	PackageEndDate      *string  `json:"package_end_date,omitempty"`
+	SpeedLimitMbps      float64  `json:"speed_limit_mbps"`
+	DeviceLimit         int      `json:"device_limit"`
+	SpeedLimitOverride  *float64 `json:"speed_limit_override"`
+	DeviceLimitOverride *int     `json:"device_limit_override"`
 }
 
 type userStatusRequest struct {
@@ -97,6 +101,8 @@ func NewUserListHandler(repo *storage.TrafficRepository) http.Handler {
 				IsActive: user.IsActive,
 				Remark:   user.Remark,
 			}
+			entry.SpeedLimitOverride = user.SpeedLimitOverride
+			entry.DeviceLimitOverride = user.DeviceLimitOverride
 			if user.PackageID > 0 {
 				pid := user.PackageID
 				entry.PackageID = &pid
@@ -104,6 +110,8 @@ func NewUserListHandler(repo *storage.TrafficRepository) http.Handler {
 					entry.PackageName = pkg.Name
 					entry.TrafficLimitGB = pkg.TrafficLimitGB
 					entry.TrafficLimit = pkg.TrafficLimitBytes
+					entry.SpeedLimitMbps = pkg.SpeedLimitMbps
+					entry.DeviceLimit = pkg.DeviceLimit
 				}
 				entry.TrafficUsed = trafficMap[user.Username]
 				if entry.TrafficLimit > 0 && entry.TrafficUsed >= entry.TrafficLimit {
@@ -463,6 +471,47 @@ func NewUserUpdateEmailHandler(repo *storage.TrafficRepository) http.Handler {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"message": "Email updated successfully",
+		})
+	})
+}
+
+func NewUserLimitsHandler(repo *storage.TrafficRepository, pusher *LimiterConfigPusher) http.Handler {
+	type req struct {
+		Username            string   `json:"username"`
+		SpeedLimitOverride  *float64 `json:"speed_limit_override"`
+		DeviceLimitOverride *int     `json:"device_limit_override"`
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut && r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var body req
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, errors.New("invalid request body"))
+			return
+		}
+
+		if strings.TrimSpace(body.Username) == "" {
+			writeError(w, http.StatusBadRequest, errors.New("username is required"))
+			return
+		}
+
+		if err := repo.UpdateUserLimitOverrides(r.Context(), body.Username, body.SpeedLimitOverride, body.DeviceLimitOverride); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		if pusher != nil {
+			go pusher.PushToAllServersForUser(r.Context(), body.Username)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"message": "User limits updated",
 		})
 	})
 }

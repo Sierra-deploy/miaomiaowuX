@@ -645,7 +645,12 @@
     "adding": "添加中...",
     "pendingShort": "待连接",
     "deleteServerTokenWarning": "确定要删除这个远程服务器吗？删除后将撤销其 Token，远程服务器将无法再与本服务器通信。",
-    "loadingStatus": "加载中..."
+    "loadingStatus": "加载中...",
+    "xrayMode": "Xray 模式",
+    "xrayModeExternal": "外部 Xray",
+    "xrayModeEmbedded": "内嵌 Xray",
+    "xrayModeExternalDesc": "使用独立安装的 Xray 进程，Agent 通过 gRPC 与其通信",
+    "xrayModeEmbeddedDesc": "Agent 内嵌 Xray-core，支持自动限速和设备数限制"
   },
   "presets": {
     "defaultLabel": "默认"

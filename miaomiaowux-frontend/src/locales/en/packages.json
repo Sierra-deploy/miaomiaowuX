@@ -13,7 +13,9 @@
   "card": {
     "trafficQuota": "Traffic Quota",
     "cycleDays": "Billing Cycle",
-    "cycleDaysValue": "{{days}} days"
+    "cycleDaysValue": "{{days}} days",
+    "speedLimit": "Speed Limit",
+    "deviceLimit": "Devices"
   },
   "dialog": {
     "createTitle": "Create Package Template",
@@ -30,6 +32,12 @@
     "noNodes": "No available nodes",
     "nodeInternal": "Internal",
     "nodeExternal": "External",
+    "speedLimit": "Speed Limit (Mbps)",
+    "speedLimitPlaceholder": "0 for unlimited",
+    "speedLimitDesc": "Max download speed per user, 0 for unlimited",
+    "deviceLimit": "Device Limit",
+    "deviceLimitPlaceholder": "0 for unlimited",
+    "deviceLimitDesc": "Max concurrent devices per user, 0 for unlimited",
     "nodesHint": "Select nodes this package can use (none selected means all nodes)",
     "saving": "Saving...",
     "confirmDelete": "Are you sure you want to delete package template \"{{name}}\"?"

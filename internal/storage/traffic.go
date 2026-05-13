@@ -191,7 +191,9 @@ type Package struct {
 	CycleDays         int       `json:"cycle_days"`       // 包裹持续时间（天）
 	IsReset           bool      `json:"is_reset"`         // 流量是否按月重置
 	ResetDay          int       `json:"reset_day"`        // 重置的月份日期 (1-31)
-	Nodes             []int64   `json:"nodes"`            // 关联节点 ID
+	Nodes             []int64   `json:"nodes"`              // 关联节点 ID
+	SpeedLimitMbps    float64   `json:"speed_limit_mbps"`   // 限速 (Mbps)，0=不限
+	DeviceLimit       int       `json:"device_limit"`       // 设备数限制，0=不限
 	ShortCode         string    `json:"short_code"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
@@ -460,6 +462,7 @@ type RemoteServer struct {
 	StealMode             string     `json:"steal_mode,omitempty"` // "tunnel" | "fallback"，默认 tunnel
 	SiteType              string     `json:"site_type,omitempty"`  // "static" | "proxy"
 	SiteValue             string     `json:"site_value,omitempty"` // 静态路径或反向代理地址
+	XrayMode              string     `json:"xray_mode"`            // "external" (默认) 或 "embedded"
 	TimeOffsetSeconds     *int64     `json:"time_offset_seconds,omitempty"` // agent 与主控的时钟偏差（秒）
 	CreatedAt             time.Time  `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
@@ -1388,6 +1391,17 @@ CREATE INDEX IF NOT EXISTS idx_remote_servers_status ON remote_servers(status);
 	if err := r.ensureRemoteServerColumn("time_offset_seconds", "INTEGER"); err != nil {
 		return err
 	}
+	if err := r.ensureRemoteServerColumn("xray_mode", "TEXT NOT NULL DEFAULT 'external'"); err != nil {
+		return err
+	}
+
+	// 套餐限速字段
+	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN speed_limit_mbps REAL NOT NULL DEFAULT 0")
+	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 0")
+
+	// 用户限速覆写字段
+	_, _ = r.db.Exec("ALTER TABLE users ADD COLUMN speed_limit_override REAL")
+	_, _ = r.db.Exec("ALTER TABLE users ADD COLUMN device_limit_override INTEGER")
 
 	// 批量入站表 - 跟踪跨多个服务器批量添加的入站
 	const batchInboundsSchema = `
@@ -3185,11 +3199,13 @@ type User struct {
 	Role         string
 	IsActive     bool
 	Remark       string
-	PackageID      int64
-	IsReset        bool
-	ResetDay       int
-	PackageEndDate *time.Time
-	TOTPSecret    string
+	PackageID           int64
+	IsReset             bool
+	ResetDay            int
+	PackageEndDate      *time.Time
+	SpeedLimitOverride  *float64
+	DeviceLimitOverride *int
+	TOTPSecret          string
 	TOTPEnabled   bool
 	RecoveryCodes string
 	CreatedAt      time.Time
@@ -3312,7 +3328,7 @@ func (r *TrafficRepository) ListUsers(ctx context.Context, limit int) ([]User, e
 		limit = 10
 	}
 
-	rows, err := r.db.QueryContext(ctx, `SELECT username, password_hash, COALESCE(email, ''), COALESCE(nickname, ''), COALESCE(avatar_url, ''), COALESCE(role, ''), is_active, COALESCE(remark, ''), COALESCE(package_id, 0), COALESCE(is_reset, 0), COALESCE(reset_day, 1), package_end_date, created_at, updated_at FROM users ORDER BY created_at ASC LIMIT ?`, limit)
+	rows, err := r.db.QueryContext(ctx, `SELECT username, password_hash, COALESCE(email, ''), COALESCE(nickname, ''), COALESCE(avatar_url, ''), COALESCE(role, ''), is_active, COALESCE(remark, ''), COALESCE(package_id, 0), COALESCE(is_reset, 0), COALESCE(reset_day, 1), package_end_date, speed_limit_override, device_limit_override, created_at, updated_at FROM users ORDER BY created_at ASC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
@@ -3323,7 +3339,9 @@ func (r *TrafficRepository) ListUsers(ctx context.Context, limit int) ([]User, e
 		var user User
 		var active, isReset int
 		var endDate sql.NullTime
-		if err := rows.Scan(&user.Username, &user.PasswordHash, &user.Email, &user.Nickname, &user.AvatarURL, &user.Role, &active, &user.Remark, &user.PackageID, &isReset, &user.ResetDay, &endDate, &user.CreatedAt, &user.UpdatedAt); err != nil {
+		var speedOverride sql.NullFloat64
+		var deviceOverride sql.NullInt64
+		if err := rows.Scan(&user.Username, &user.PasswordHash, &user.Email, &user.Nickname, &user.AvatarURL, &user.Role, &active, &user.Remark, &user.PackageID, &isReset, &user.ResetDay, &endDate, &speedOverride, &deviceOverride, &user.CreatedAt, &user.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
 		if user.Nickname == "" {
@@ -3336,6 +3354,14 @@ func (r *TrafficRepository) ListUsers(ctx context.Context, limit int) ([]User, e
 		user.IsReset = isReset != 0
 		if endDate.Valid {
 			user.PackageEndDate = &endDate.Time
+		}
+		if speedOverride.Valid {
+			v := speedOverride.Float64
+			user.SpeedLimitOverride = &v
+		}
+		if deviceOverride.Valid {
+			v := int(deviceOverride.Int64)
+			user.DeviceLimitOverride = &v
 		}
 		users = append(users, user)
 	}
@@ -5649,7 +5675,8 @@ func (r *TrafficRepository) ListPackages(ctx context.Context) ([]Package, error)
 
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
-		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(short_code, ''), created_at, updated_at
+		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
+		       COALESCE(short_code, ''), created_at, updated_at
 		FROM packages
 		ORDER BY created_at DESC
 	`
@@ -5666,7 +5693,8 @@ func (r *TrafficRepository) ListPackages(ctx context.Context) ([]Package, error)
 		var isReset int
 		var nodesJSON string
 		err := rows.Scan(&pkg.ID, &pkg.Name, &pkg.Description, &pkg.TrafficLimitBytes,
-			&pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON, &pkg.ShortCode, &pkg.CreatedAt, &pkg.UpdatedAt)
+			&pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON, &pkg.SpeedLimitMbps, &pkg.DeviceLimit,
+			&pkg.ShortCode, &pkg.CreatedAt, &pkg.UpdatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("scan package: %w", err)
 		}
@@ -5699,7 +5727,8 @@ func (r *TrafficRepository) GetPackage(ctx context.Context, id int64) (*Package,
 
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
-		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(short_code, ''), created_at, updated_at
+		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
+		       COALESCE(short_code, ''), created_at, updated_at
 		FROM packages
 		WHERE id = ?
 	`
@@ -5708,7 +5737,8 @@ func (r *TrafficRepository) GetPackage(ctx context.Context, id int64) (*Package,
 	var isReset int
 	var nodesJSON string
 	err := r.db.QueryRowContext(ctx, query, id).Scan(&pkg.ID, &pkg.Name, &pkg.Description,
-		&pkg.TrafficLimitBytes, &pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON, &pkg.ShortCode,
+		&pkg.TrafficLimitBytes, &pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON,
+		&pkg.SpeedLimitMbps, &pkg.DeviceLimit, &pkg.ShortCode,
 		&pkg.CreatedAt, &pkg.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -5744,7 +5774,8 @@ func (r *TrafficRepository) GetPackageByName(ctx context.Context, name string) (
 
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
-		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(short_code, ''), created_at, updated_at
+		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
+		       COALESCE(short_code, ''), created_at, updated_at
 		FROM packages
 		WHERE name = ?
 	`
@@ -5753,7 +5784,8 @@ func (r *TrafficRepository) GetPackageByName(ctx context.Context, name string) (
 	var isReset int
 	var nodesJSON string
 	err := r.db.QueryRowContext(ctx, query, name).Scan(&pkg.ID, &pkg.Name, &pkg.Description,
-		&pkg.TrafficLimitBytes, &pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON, &pkg.ShortCode,
+		&pkg.TrafficLimitBytes, &pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON,
+		&pkg.SpeedLimitMbps, &pkg.DeviceLimit, &pkg.ShortCode,
 		&pkg.CreatedAt, &pkg.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -5804,8 +5836,8 @@ func (r *TrafficRepository) CreatePackage(ctx context.Context, pkg Package) (int
 	}
 
 	const query = `
-		INSERT INTO packages (name, description, traffic_limit_bytes, cycle_days, is_reset, reset_day, nodes, short_code)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO packages (name, description, traffic_limit_bytes, cycle_days, is_reset, reset_day, nodes, speed_limit_mbps, device_limit, short_code)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	isReset := 0
@@ -5814,7 +5846,7 @@ func (r *TrafficRepository) CreatePackage(ctx context.Context, pkg Package) (int
 	}
 
 	result, err := r.db.ExecContext(ctx, query, name, pkg.Description, pkg.TrafficLimitBytes,
-		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), shortCode)
+		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, shortCode)
 	if err != nil {
 		return 0, fmt.Errorf("create package: %w", err)
 	}
@@ -5851,7 +5883,8 @@ func (r *TrafficRepository) UpdatePackage(ctx context.Context, pkg Package) erro
 	const query = `
 		UPDATE packages
 		SET name = ?, description = ?, traffic_limit_bytes = ?, cycle_days = ?,
-		    is_reset = ?, reset_day = ?, nodes = ?, updated_at = CURRENT_TIMESTAMP
+		    is_reset = ?, reset_day = ?, nodes = ?, speed_limit_mbps = ?, device_limit = ?,
+		    updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`
 
@@ -5861,7 +5894,7 @@ func (r *TrafficRepository) UpdatePackage(ctx context.Context, pkg Package) erro
 	}
 
 	result, err := r.db.ExecContext(ctx, query, name, pkg.Description, pkg.TrafficLimitBytes,
-		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.ID)
+		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, pkg.ID)
 	if err != nil {
 		return fmt.Errorf("update package: %w", err)
 	}
@@ -6022,6 +6055,24 @@ func (r *TrafficRepository) GetUserInboundConfigs(ctx context.Context, username 
 	return configs, rows.Err()
 }
 
+func (r *TrafficRepository) GetUserInboundConfigsByServer(ctx context.Context, serverID int64) ([]UserInboundConfig, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, username, server_id, inbound_tag, protocol, credential_json, created_at FROM user_inbound_configs WHERE server_id = ?`, serverID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var configs []UserInboundConfig
+	for rows.Next() {
+		var c UserInboundConfig
+		if err := rows.Scan(&c.ID, &c.Username, &c.ServerID, &c.InboundTag, &c.Protocol, &c.CredentialJSON, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		configs = append(configs, c)
+	}
+	return configs, rows.Err()
+}
+
 func (r *TrafficRepository) DeleteUserInboundConfigs(ctx context.Context, username string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM user_inbound_configs WHERE username = ?`, username)
 	return err
@@ -6098,7 +6149,7 @@ func (r *TrafficRepository) DeleteUserOutboundsByUsername(ctx context.Context, u
 
 func (r *TrafficRepository) ListUsersWithPackage(ctx context.Context) ([]User, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT username, password_hash, COALESCE(email, ''), COALESCE(nickname, ''), COALESCE(avatar_url, ''), COALESCE(role, ''), is_active, COALESCE(remark, ''), COALESCE(package_id, 0), COALESCE(is_reset, 0), COALESCE(reset_day, 1), package_end_date, created_at, updated_at FROM users WHERE package_id IS NOT NULL AND package_id > 0`)
+		`SELECT username, password_hash, COALESCE(email, ''), COALESCE(nickname, ''), COALESCE(avatar_url, ''), COALESCE(role, ''), is_active, COALESCE(remark, ''), COALESCE(package_id, 0), COALESCE(is_reset, 0), COALESCE(reset_day, 1), package_end_date, speed_limit_override, device_limit_override, created_at, updated_at FROM users WHERE package_id IS NOT NULL AND package_id > 0`)
 	if err != nil {
 		return nil, err
 	}
@@ -6108,13 +6159,23 @@ func (r *TrafficRepository) ListUsersWithPackage(ctx context.Context) ([]User, e
 		var u User
 		var active, isReset int
 		var endDate sql.NullTime
-		if err := rows.Scan(&u.Username, &u.PasswordHash, &u.Email, &u.Nickname, &u.AvatarURL, &u.Role, &active, &u.Remark, &u.PackageID, &isReset, &u.ResetDay, &endDate, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		var speedOverride sql.NullFloat64
+		var deviceOverride sql.NullInt64
+		if err := rows.Scan(&u.Username, &u.PasswordHash, &u.Email, &u.Nickname, &u.AvatarURL, &u.Role, &active, &u.Remark, &u.PackageID, &isReset, &u.ResetDay, &endDate, &speedOverride, &deviceOverride, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, err
 		}
 		u.IsActive = active != 0
 		u.IsReset = isReset != 0
 		if endDate.Valid {
 			u.PackageEndDate = &endDate.Time
+		}
+		if speedOverride.Valid {
+			v := speedOverride.Float64
+			u.SpeedLimitOverride = &v
+		}
+		if deviceOverride.Valid {
+			v := int(deviceOverride.Int64)
+			u.DeviceLimitOverride = &v
 		}
 		users = append(users, u)
 	}
@@ -6126,6 +6187,13 @@ func (r *TrafficRepository) GetUserTotalTraffic(ctx context.Context, username st
 	err := r.db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(uplink + downlink), 0) FROM user_traffic WHERE username = ?`, username).Scan(&total)
 	return total, err
+}
+
+func (r *TrafficRepository) UpdateUserLimitOverrides(ctx context.Context, username string, speedOverride *float64, deviceOverride *int) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE users SET speed_limit_override = ?, device_limit_override = ?, updated_at = CURRENT_TIMESTAMP WHERE username = ?`,
+		speedOverride, deviceOverride, username)
+	return err
 }
 
 func (r *TrafficRepository) UpdateUserOverLimit(ctx context.Context, username string, isOverLimit bool) error {
@@ -6298,6 +6366,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		COALESCE(agent_token, ''), agent_token_expires_at, last_agent_token_refresh,
 		COALESCE(use_443, 0), COALESCE(steal_mode, 'tunnel'),
 		COALESCE(site_type, ''), COALESCE(site_value, ''),
+		COALESCE(xray_mode, 'external'),
 		COALESCE(time_offset_seconds, 0),
 		created_at, updated_at
 		FROM remote_servers ORDER BY created_at DESC`
@@ -6326,6 +6395,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 			&server.AgentToken, &agentTokenExpiresAt, &lastAgentTokenRefresh,
 			&server.Use443, &server.StealMode,
 			&server.SiteType, &server.SiteValue,
+			&server.XrayMode,
 			&timeOffsetSeconds,
 			&server.CreatedAt, &server.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan remote server: %w", err)
@@ -6395,6 +6465,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		COALESCE(agent_token, ''), agent_token_expires_at, last_agent_token_refresh,
 		COALESCE(use_443, 0), COALESCE(steal_mode, 'tunnel'),
 		COALESCE(site_type, ''), COALESCE(site_value, ''),
+		COALESCE(xray_mode, 'external'),
 		created_at, updated_at
 		FROM remote_servers WHERE id = ?`
 
@@ -6410,6 +6481,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		&server.AgentToken, &agentTokenExpiresAt, &lastAgentTokenRefresh,
 		&server.Use443, &server.StealMode,
 		&server.SiteType, &server.SiteValue,
+		&server.XrayMode,
 		&server.CreatedAt, &server.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -6459,6 +6531,7 @@ func (r *TrafficRepository) GetRemoteServerByToken(ctx context.Context, token st
 		COALESCE(agent_token, ''), agent_token_expires_at, last_agent_token_refresh,
 		COALESCE(use_443, 0), COALESCE(steal_mode, 'tunnel'),
 		COALESCE(site_type, ''), COALESCE(site_value, ''),
+		COALESCE(xray_mode, 'external'),
 		created_at, updated_at
 		FROM remote_servers WHERE token = ?`
 
@@ -6473,6 +6546,7 @@ func (r *TrafficRepository) GetRemoteServerByToken(ctx context.Context, token st
 		&server.AgentToken, &agentTokenExpiresAt, &lastAgentTokenRefresh,
 		&server.Use443, &server.StealMode,
 		&server.SiteType, &server.SiteValue,
+		&server.XrayMode,
 		&server.CreatedAt, &server.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -6523,6 +6597,7 @@ func (r *TrafficRepository) GetRemoteServerByName(ctx context.Context, name stri
 		COALESCE(agent_token, ''), agent_token_expires_at, last_agent_token_refresh,
 		COALESCE(use_443, 0), COALESCE(steal_mode, 'tunnel'),
 		COALESCE(site_type, ''), COALESCE(site_value, ''),
+		COALESCE(xray_mode, 'external'),
 		created_at, updated_at
 		FROM remote_servers WHERE name = ?`
 
@@ -6538,6 +6613,7 @@ func (r *TrafficRepository) GetRemoteServerByName(ctx context.Context, name stri
 		&server.AgentToken, &agentTokenExpiresAt, &lastAgentTokenRefresh,
 		&server.Use443, &server.StealMode,
 		&server.SiteType, &server.SiteValue,
+		&server.XrayMode,
 		&server.CreatedAt, &server.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -6601,13 +6677,17 @@ func (r *TrafficRepository) CreateRemoteServer(ctx context.Context, server *Remo
 	// 将令牌有效期设置为从现在起 7 天
 	tokenExpiresAt := time.Now().Add(7 * 24 * time.Hour)
 
-	const stmt = `INSERT INTO remote_servers (name, token, status, ip_address, domain, token_expires_at, last_token_refresh, connection_mode, pull_address, pull_port, pull_token, use_443, steal_mode, site_type, site_value, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+	const stmt = `INSERT INTO remote_servers (name, token, status, ip_address, domain, token_expires_at, last_token_refresh, connection_mode, pull_address, pull_port, pull_token, use_443, steal_mode, site_type, site_value, xray_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
 
 	stealMode := server.StealMode
 	if stealMode == "" {
 		stealMode = "tunnel"
 	}
-	result, err := r.db.ExecContext(ctx, stmt, server.Name, server.Token, server.Status, server.IPAddress, server.Domain, tokenExpiresAt, server.ConnectionMode, server.PullAddress, server.PullPort, server.PullToken, server.Use443, stealMode, server.SiteType, server.SiteValue)
+	xrayMode := server.XrayMode
+	if xrayMode == "" {
+		xrayMode = "external"
+	}
+	result, err := r.db.ExecContext(ctx, stmt, server.Name, server.Token, server.Status, server.IPAddress, server.Domain, tokenExpiresAt, server.ConnectionMode, server.PullAddress, server.PullPort, server.PullToken, server.Use443, stealMode, server.SiteType, server.SiteValue, xrayMode)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return ErrRemoteServerExists
@@ -7224,8 +7304,8 @@ func (r *TrafficRepository) ShouldUsePullMode(server RemoteServer) bool {
 	return false
 }
 
-// 更新远程服务器的基本信息（名称、域、流量设置、连接模式）。
-func (r *TrafficRepository) UpdateRemoteServer(ctx context.Context, id int64, name, domain string, trafficLimit int64, trafficResetDay int, connectionMode string) error {
+// 更新远程服务器的基本信息（名称、域、流量设置、连接模式、Xray模式）。
+func (r *TrafficRepository) UpdateRemoteServer(ctx context.Context, id int64, name, domain string, trafficLimit int64, trafficResetDay int, connectionMode, xrayMode string) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
 	}
@@ -7234,17 +7314,22 @@ func (r *TrafficRepository) UpdateRemoteServer(ctx context.Context, id int64, na
 		return errors.New("remote server id is required")
 	}
 
-	// 根据是否提供connection_mode构建SQL
-	var stmt string
-	var args []any
+	// 动态构建 SET 子句
+	setClauses := []string{"name = ?", "domain = ?", "traffic_limit = ?", "traffic_reset_day = ?"}
+	args := []any{name, domain, trafficLimit, trafficResetDay}
 
 	if connectionMode != "" {
-		stmt = `UPDATE remote_servers SET name = ?, domain = ?, traffic_limit = ?, traffic_reset_day = ?, connection_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-		args = []any{name, domain, trafficLimit, trafficResetDay, connectionMode, id}
-	} else {
-		stmt = `UPDATE remote_servers SET name = ?, domain = ?, traffic_limit = ?, traffic_reset_day = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-		args = []any{name, domain, trafficLimit, trafficResetDay, id}
+		setClauses = append(setClauses, "connection_mode = ?")
+		args = append(args, connectionMode)
 	}
+	if xrayMode != "" {
+		setClauses = append(setClauses, "xray_mode = ?")
+		args = append(args, xrayMode)
+	}
+	setClauses = append(setClauses, "updated_at = CURRENT_TIMESTAMP")
+	args = append(args, id)
+
+	stmt := `UPDATE remote_servers SET ` + strings.Join(setClauses, ", ") + ` WHERE id = ?`
 
 	result, err := r.db.ExecContext(ctx, stmt, args...)
 	if err != nil {

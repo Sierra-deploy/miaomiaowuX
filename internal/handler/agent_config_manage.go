@@ -23,8 +23,9 @@ var randReader io.Reader = rand.Reader
 var base64URLEncoding = base64.URLEncoding
 
 type XrayServerHandler struct {
-	repo      *storage.TrafficRepository
-	collector *traffic.Collector
+	repo           *storage.TrafficRepository
+	collector      *traffic.Collector
+	limiterPusher  *LimiterConfigPusher
 }
 
 func NewXrayServerHandler(repo *storage.TrafficRepository, collector *traffic.Collector) *XrayServerHandler {
@@ -32,6 +33,10 @@ func NewXrayServerHandler(repo *storage.TrafficRepository, collector *traffic.Co
 		repo:      repo,
 		collector: collector,
 	}
+}
+
+func (h *XrayServerHandler) SetLimiterPusher(p *LimiterConfigPusher) {
+	h.limiterPusher = p
 }
 
 // 远程服务器管理API
@@ -54,6 +59,7 @@ type RemoteServerCreateRequest struct {
 	StealMode         string `json:"steal_mode"`          // "tunnel" | "fallback"，默认 tunnel
 	SiteType          string `json:"site_type"`           // "static" | "proxy"
 	SiteValue         string `json:"site_value"`          // 静态路径或反向代理地址
+	XrayMode          string `json:"xray_mode"`           // "external" 或 "embedded"，默认 "external"
 }
 
 // RemoteServerResponse 表示带有远程服务器数据的响应
@@ -95,15 +101,16 @@ type RemoteServerDeleteRequest struct {
 
 // RemoteServerUpdateRequest 表示更新远程服务器的请求
 type RemoteServerUpdateRequest struct {
-	ID              int64  `json:"id"`
-	Name            string `json:"name"`
-	Domain          string `json:"domain"`            // 服务器域（可选）
-	TrafficLimit    int64  `json:"traffic_limit"`     // 流量限制（以字节为单位）
-	TrafficResetDay int    `json:"traffic_reset_day"` // 要重置的月份日期 (1-31)
-	ConnectionMode  string `json:"connection_mode"`   // “websocket”、“http”、“pull”、“auto”
-	PullAddress     string `json:"pull_address"`      // pull模式地址
-	PullPort        int    `json:"pull_port"`         // pull模式端口
-	PullToken       string `json:"pull_token"`        // pull模式令牌
+	ID              int64  `json:”id”`
+	Name            string `json:”name”`
+	Domain          string `json:”domain”`            // 服务器域（可选）
+	TrafficLimit    int64  `json:”traffic_limit”`     // 流量限制（以字节为单位）
+	TrafficResetDay int    `json:”traffic_reset_day”` // 要重置的月份日期 (1-31)
+	ConnectionMode  string `json:”connection_mode”`   // “websocket”、”http”、”pull”、”auto”
+	PullAddress     string `json:”pull_address”`      // pull模式地址
+	PullPort        int    `json:”pull_port”`         // pull模式端口
+	PullToken       string `json:”pull_token”`        // pull模式令牌
+	XrayMode        string `json:”xray_mode”`         // “external” 或 “embedded”
 }
 
 // 生成加密安全令牌
@@ -277,6 +284,11 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		stealMode = "tunnel"
 	}
 
+	xrayMode := req.XrayMode
+	if xrayMode != "embedded" {
+		xrayMode = "external"
+	}
+
 	server := &storage.RemoteServer{
 		Name:           req.Name,
 		Token:          token,
@@ -291,6 +303,7 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		StealMode:      stealMode,
 		SiteType:       req.SiteType,
 		SiteValue:      req.SiteValue,
+		XrayMode:       xrayMode,
 	}
 
 	if err := h.repo.CreateRemoteServer(ctx, server); err != nil {
@@ -336,6 +349,9 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 	if req.StealSelf {
 		installQuery.Set("steal_self", "1")
 		installQuery.Set("front_service", frontService)
+	}
+	if xrayMode == "embedded" {
+		installQuery.Set("xray_mode", "embedded")
 	}
 	installScriptURL := fmt.Sprintf("%s/api/remote/install.sh?%s", serverURL, installQuery.Encode())
 
@@ -486,7 +502,7 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		return
 	}
 
-	if err := h.repo.UpdateRemoteServer(ctx, req.ID, req.Name, req.Domain, req.TrafficLimit, req.TrafficResetDay, req.ConnectionMode); err != nil {
+	if err := h.repo.UpdateRemoteServer(ctx, req.ID, req.Name, req.Domain, req.TrafficLimit, req.TrafficResetDay, req.ConnectionMode, req.XrayMode); err != nil {
 		msg := "更新服务器失败"
 		if err == storage.ErrRemoteServerNotFound {
 			msg = "服务器不存在"

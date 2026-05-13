@@ -645,7 +645,12 @@
     "adding": "Adding...",
     "pendingShort": "Pending",
     "deleteServerTokenWarning": "Are you sure you want to delete this remote server? Its Token will be revoked and the remote server will no longer be able to communicate with this server.",
-    "loadingStatus": "Loading..."
+    "loadingStatus": "Loading...",
+    "xrayMode": "Xray Mode",
+    "xrayModeExternal": "External Xray",
+    "xrayModeEmbedded": "Embedded Xray",
+    "xrayModeExternalDesc": "Uses a standalone Xray process, Agent communicates via gRPC",
+    "xrayModeEmbeddedDesc": "Agent embeds Xray-core, supports auto speed limiting and device limiting"
   },
   "presets": {
     "defaultLabel": "Default"

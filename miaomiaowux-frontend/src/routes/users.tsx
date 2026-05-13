@@ -68,6 +68,10 @@ type UserRow = {
   is_reset?: boolean
   reset_day?: number
   package_end_date?: string
+  speed_limit_mbps?: number
+  device_limit?: number
+  speed_limit_override?: number | null
+  device_limit_override?: number | null
 }
 
 type ResetState = {
@@ -126,6 +130,7 @@ function UsersPage() {
   })
   const [packageManageState, setPackageManageState] = useState<PackageManageState | null>(null)
   const [remarkEditState, setRemarkEditState] = useState<{ username: string; remark: string } | null>(null)
+  const [limitsEditState, setLimitsEditState] = useState<{ username: string; speed_limit_override: string; device_limit_override: string } | null>(null)
 
   const { data: profile, isLoading: profileLoading, isError: profileError } = useQuery({
     queryKey: ['profile'],
@@ -267,6 +272,18 @@ function UsersPage() {
       queryClient.invalidateQueries({ queryKey: ['admin-users'] })
       toast.success(t('toast.remarkUpdated'))
       setRemarkEditState(null)
+    },
+    onError: handleServerError,
+  })
+
+  const limitsMutation = useMutation({
+    mutationFn: async (payload: { username: string; speed_limit_override: number | null; device_limit_override: number | null }) => {
+      await api.put('/api/admin/users/limits', payload)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+      toast.success(t('toast.limitsUpdated'))
+      setLimitsEditState(null)
     },
     onError: handleServerError,
   })
@@ -436,6 +453,12 @@ function UsersPage() {
                             <p>{t('package.tooltipUsed', { used: formatBytes(used) })}</p>
                             <p>{t('package.tooltipLimit', { limit: user.traffic_limit_gb })}</p>
                             <p>{t('package.tooltipPercent', { percent: percent.toFixed(1) })}</p>
+                            {((user.speed_limit_mbps ?? 0) > 0 || user.speed_limit_override != null) && (
+                              <p>{t('package.tooltipSpeed', { speed: user.speed_limit_override ?? user.speed_limit_mbps ?? 0 })}{user.speed_limit_override != null ? ` (${t('limits.override')})` : ''}</p>
+                            )}
+                            {((user.device_limit ?? 0) > 0 || user.device_limit_override != null) && (
+                              <p>{t('package.tooltipDevice', { count: user.device_limit_override ?? user.device_limit ?? 0 })}{user.device_limit_override != null ? ` (${t('limits.override')})` : ''}</p>
+                            )}
                           </TooltipContent>
                         </Tooltip>
                       </TooltipProvider>
@@ -513,6 +536,19 @@ function UsersPage() {
                           <Package className='h-3 w-3 mr-1' />
                           {t('package.manage')}
                         </Button>
+                        {user.package_id && (
+                          <Button
+                            size='sm'
+                            variant='outline'
+                            onClick={() => setLimitsEditState({
+                              username: user.username,
+                              speed_limit_override: user.speed_limit_override != null ? String(user.speed_limit_override) : '',
+                              device_limit_override: user.device_limit_override != null ? String(user.device_limit_override) : '',
+                            })}
+                          >
+                            {t('limits.edit')}
+                          </Button>
+                        )}
                         <Button
                           size='sm'
                           variant='destructive'
@@ -959,6 +995,75 @@ function UsersPage() {
               onClick={() => remarkEditState && remarkMutation.mutate(remarkEditState)}
             >
               {remarkMutation.isPending ? t('remarkDialog.saving') : t('remarkDialog.confirmSave')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(limitsEditState)} onOpenChange={(open) => !open && setLimitsEditState(null)}>
+        <DialogContent className='sm:max-w-md'>
+          <DialogHeader>
+            <DialogTitle>{t('limits.title')}</DialogTitle>
+          </DialogHeader>
+          <div className='space-y-4'>
+            <div className='space-y-2'>
+              <Label>{t('remarkDialog.username')}</Label>
+              <Input value={limitsEditState?.username ?? ''} readOnly disabled />
+            </div>
+            <div className='space-y-2'>
+              <Label htmlFor='edit-speed-limit'>{t('limits.speedLimit')}</Label>
+              <Input
+                id='edit-speed-limit'
+                type='number'
+                min='0'
+                step='1'
+                value={limitsEditState?.speed_limit_override ?? ''}
+                placeholder={t('limits.speedPlaceholder')}
+                onChange={(event) =>
+                  setLimitsEditState((prev) =>
+                    prev ? { ...prev, speed_limit_override: event.target.value } : prev
+                  )
+                }
+              />
+              <p className='text-xs text-muted-foreground'>{t('limits.speedDesc')}</p>
+            </div>
+            <div className='space-y-2'>
+              <Label htmlFor='edit-device-limit'>{t('limits.deviceLimit')}</Label>
+              <Input
+                id='edit-device-limit'
+                type='number'
+                min='0'
+                step='1'
+                value={limitsEditState?.device_limit_override ?? ''}
+                placeholder={t('limits.devicePlaceholder')}
+                onChange={(event) =>
+                  setLimitsEditState((prev) =>
+                    prev ? { ...prev, device_limit_override: event.target.value } : prev
+                  )
+                }
+              />
+              <p className='text-xs text-muted-foreground'>{t('limits.deviceDesc')}</p>
+            </div>
+          </div>
+          <DialogFooter className='gap-2'>
+            <DialogClose asChild>
+              <Button type='button' variant='outline' disabled={limitsMutation.isPending}>
+                {t('actions.cancel', { ns: 'common' })}
+              </Button>
+            </DialogClose>
+            <Button
+              type='button'
+              disabled={limitsMutation.isPending}
+              onClick={() => {
+                if (!limitsEditState) return
+                limitsMutation.mutate({
+                  username: limitsEditState.username,
+                  speed_limit_override: limitsEditState.speed_limit_override ? parseFloat(limitsEditState.speed_limit_override) : null,
+                  device_limit_override: limitsEditState.device_limit_override ? parseInt(limitsEditState.device_limit_override) : null,
+                })
+              }}
+            >
+              {limitsMutation.isPending ? t('remarkDialog.saving') : t('remarkDialog.confirmSave')}
             </Button>
           </DialogFooter>
         </DialogContent>

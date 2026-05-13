@@ -77,6 +77,7 @@ interface RemoteServer {
   traffic_used?: number
   traffic_reset_day?: number
   steal_mode?: string
+  xray_mode?: 'external' | 'embedded'
   time_offset_seconds?: number
   inbounds?: RemoteServerInboundInfo[]
   current_upload_speed?: number
@@ -147,6 +148,7 @@ function XrayServersPage() {
   const [createUse443, setCreateUse443] = useState(false)
   const [createDomain, setCreateDomain] = useState('')
   const [domainAutoFilled, setDomainAutoFilled] = useState(false)
+  const [createXrayMode, setCreateXrayMode] = useState<'external' | 'embedded'>('external')
   const [createSiteType, setCreateSiteType] = useState<'static' | 'proxy'>('static')
   const [createSiteValue, setCreateSiteValue] = useState('')
   const [isAddWebsiteDialogOpen, setIsAddWebsiteDialogOpen] = useState(false)
@@ -182,6 +184,7 @@ function XrayServersPage() {
     traffic_limit_gb: '',
     traffic_reset_day: '',
     steal_mode: 'tunnel',
+    xray_mode: 'external',
   })
   const [configServer, setConfigServer] = useState<{ type: 'remote'; server: RemoteServer } | null>(null)
   const [remoteXraySystemConfig, setRemoteXraySystemConfig] = useState<XraySystemConfig>({
@@ -498,7 +501,7 @@ function XrayServersPage() {
 
   const handleEditRemoteServer = (server: RemoteServer) => {
     setEditingRemoteServer(server)
-    setRemoteFormData({ name: server.name, domain: server.domain || '', traffic_limit_gb: server.traffic_limit ? (server.traffic_limit / 1024 / 1024 / 1024).toFixed(2) : '', traffic_reset_day: server.traffic_reset_day?.toString() || '', steal_mode: server.steal_mode || 'tunnel' })
+    setRemoteFormData({ name: server.name, domain: server.domain || '', traffic_limit_gb: server.traffic_limit ? (server.traffic_limit / 1024 / 1024 / 1024).toFixed(2) : '', traffic_reset_day: server.traffic_reset_day?.toString() || '', steal_mode: server.steal_mode || 'tunnel', xray_mode: server.xray_mode || 'external' })
     setIsEditRemoteServerDialogOpen(true)
   }
 
@@ -510,7 +513,7 @@ function XrayServersPage() {
       switchStealModeMutation.mutate({ serverId: editingRemoteServer.id, stealMode: newMode })
     }
     const trafficLimitGb = parseFloat(remoteFormData.traffic_limit_gb) || 0
-    updateRemoteServerMutation.mutate({ id: editingRemoteServer.id, name: remoteFormData.name, domain: remoteFormData.domain, traffic_limit: trafficLimitGb > 0 ? Math.floor(trafficLimitGb * 1024 * 1024 * 1024) : 0, traffic_reset_day: parseInt(remoteFormData.traffic_reset_day) || 0 })
+    updateRemoteServerMutation.mutate({ id: editingRemoteServer.id, name: remoteFormData.name, domain: remoteFormData.domain, traffic_limit: trafficLimitGb > 0 ? Math.floor(trafficLimitGb * 1024 * 1024 * 1024) : 0, traffic_reset_day: parseInt(remoteFormData.traffic_reset_day) || 0, xray_mode: remoteFormData.xray_mode })
   }
 
   const loadRemoteServerStatusToCache = async (serverId: number, forceReload = false) => {
@@ -536,14 +539,14 @@ function XrayServersPage() {
     const trafficUsedOffsetBytes = formData.traffic_used_gb ? Math.round(parseFloat(formData.traffic_used_gb) * 1024 * 1024 * 1024) : 0
     const trafficResetDay = formData.traffic_reset_day ? parseInt(formData.traffic_reset_day) : 0
     setIsGeneratingToken(true)
-    createRemoteServerMutation.mutate({ name: remoteServerName, traffic_limit: trafficLimitBytes, traffic_used_offset: trafficUsedOffsetBytes, traffic_reset_day: trafficResetDay, connection_mode: 'auto', pull_address: pullAddress || undefined, pull_port: pullPort ? parseInt(pullPort) : undefined, pull_token: pullToken || undefined, steal_self: createStealSelf, front_service: createFrontService, domain: createDomain.trim() || undefined, use_443: createUse443 || undefined, steal_mode: createStealSelf ? createStealMode : undefined, site_type: createStealSelf ? createSiteType : undefined, site_value: createStealSelf ? createSiteValue : undefined })
+    createRemoteServerMutation.mutate({ name: remoteServerName, traffic_limit: trafficLimitBytes, traffic_used_offset: trafficUsedOffsetBytes, traffic_reset_day: trafficResetDay, connection_mode: 'auto', pull_address: pullAddress || undefined, pull_port: pullPort ? parseInt(pullPort) : undefined, pull_token: pullToken || undefined, steal_self: createStealSelf, front_service: createFrontService, domain: createDomain.trim() || undefined, use_443: createUse443 || undefined, steal_mode: createStealSelf ? createStealMode : undefined, site_type: createStealSelf ? createSiteType : undefined, site_value: createStealSelf ? createSiteValue : undefined, xray_mode: createXrayMode })
   }
 
   const copyToClipboard = (text: string, label: string) => { navigator.clipboard.writeText(text).then(() => toast.success(t('servers.copied', { label }))).catch(() => toast.error(t('servers.copyFailed'))) }
 
   const resetAddDialog = () => {
     setRemoteServerName(''); setGeneratedToken(''); setInstallCommand(''); setIsGeneratingToken(false)
-    setPullAddress(''); setPullPort('23889'); setPullToken(''); setCreateStealSelf(false); setCreateFrontService('xray'); setCreateStealMode('tunnel'); setCreateUse443(false); setCreateDomain(''); setDomainAutoFilled(false); setCreateSiteType('static'); setCreateSiteValue('')
+    setPullAddress(''); setPullPort('23889'); setPullToken(''); setCreateStealSelf(false); setCreateFrontService('xray'); setCreateStealMode('tunnel'); setCreateUse443(false); setCreateDomain(''); setDomainAutoFilled(false); setCreateSiteType('static'); setCreateSiteValue(''); setCreateXrayMode('external')
     setFormData({ ...formData, traffic_limit_gb: '', traffic_used_gb: '', traffic_reset_day: '' })
   }
 
@@ -670,6 +673,14 @@ function XrayServersPage() {
                 <div className="grid gap-2"><Label htmlFor="add-traffic-used">{t('servers.usedTraffic')}</Label><Input id="add-traffic-used" type="number" step="0.01" placeholder={t('servers.usedTrafficPlaceholder')} value={formData.traffic_used_gb} onChange={(e) => setFormData({ ...formData, traffic_used_gb: e.target.value })} disabled={!!generatedToken} /></div>
                 <div className="grid gap-2"><Label htmlFor="add-reset-day">{t('servers.resetDay')}</Label><Input id="add-reset-day" type="number" min="1" max="31" placeholder={t('servers.resetDayPlaceholder')} value={formData.traffic_reset_day} onChange={(e) => setFormData({ ...formData, traffic_reset_day: e.target.value })} disabled={!!generatedToken} /></div>
               </div>
+              <div className="grid gap-2 p-4 border rounded-lg">
+                <Label>{t('servers.xrayMode')}</Label>
+                <RadioGroup value={createXrayMode} onValueChange={(value) => setCreateXrayMode(value as 'external' | 'embedded')} className="flex gap-4">
+                  <div className="flex items-center gap-2"><RadioGroupItem value="external" id="create-xray-mode-external" disabled={!!generatedToken} /><Label htmlFor="create-xray-mode-external" className="text-sm cursor-pointer">{t('servers.xrayModeExternal')}</Label></div>
+                  <div className="flex items-center gap-2"><RadioGroupItem value="embedded" id="create-xray-mode-embedded" disabled={!!generatedToken} /><Label htmlFor="create-xray-mode-embedded" className="text-sm cursor-pointer">{t('servers.xrayModeEmbedded')}</Label></div>
+                </RadioGroup>
+                <p className="text-xs text-muted-foreground">{createXrayMode === 'external' ? t('servers.xrayModeExternalDesc') : t('servers.xrayModeEmbeddedDesc')}</p>
+              </div>
               <div className="grid gap-3 p-4 border rounded-lg">
                 <div className="flex items-center justify-between"><Label htmlFor="create-steal-self" className="cursor-pointer">{t('servers.stealSelf')}</Label><Switch id="create-steal-self" checked={createStealSelf} onCheckedChange={(checked) => { setCreateStealSelf(checked); if (checked) { setCreateUse443(true); if (pullAddress.trim()) checkSameIP(pullAddress) } }} disabled={!!generatedToken} /></div>
                 <div className="grid gap-2">
@@ -759,6 +770,7 @@ function XrayServersPage() {
                       )}
                       {server.fallback_to_pull && (<Badge variant="secondary" className="text-xs bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 shrink-0">{t('servers.degraded')}</Badge>)}
                       {server.steal_mode && server.steal_mode !== 'tunnel' && (<Badge variant="outline" className="text-xs shrink-0">{server.steal_mode === 'fallback' ? t('servers.fallbackLabel') : t('servers.stealModeDefault')}</Badge>)}
+                      {server.xray_mode === 'embedded' && (<Badge variant="outline" className="text-xs shrink-0 border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-400">{t('servers.xrayModeEmbedded')}</Badge>)}
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
                       {server.status === 'connected' && (<Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); handleOpenXrayRawConfig(server) }} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title={t('servers.viewXrayConfig')}><Eye className="h-4 w-4" /></Button>)}
@@ -1112,7 +1124,7 @@ function XrayServersPage() {
       </Dialog>
 
       {/* Edit Remote Server Dialog */}
-      <Dialog open={isEditRemoteServerDialogOpen} onOpenChange={(open) => { setIsEditRemoteServerDialogOpen(open); if (!open) { setEditingRemoteServer(null); setRemoteFormData({ name: '', domain: '', traffic_limit_gb: '', traffic_reset_day: '' }) } }}>
+      <Dialog open={isEditRemoteServerDialogOpen} onOpenChange={(open) => { setIsEditRemoteServerDialogOpen(open); if (!open) { setEditingRemoteServer(null); setRemoteFormData({ name: '', domain: '', traffic_limit_gb: '', traffic_reset_day: '', steal_mode: 'tunnel', xray_mode: 'external' }) } }}>
         <DialogContent className="max-w-md">
           <DialogHeader><DialogTitle>{t('servers.editRemoteServer')}</DialogTitle><DialogDescription>{t('servers.editRemoteServerDesc')}</DialogDescription></DialogHeader>
           <div className="grid gap-4 py-4">
@@ -1121,6 +1133,14 @@ function XrayServersPage() {
             <div className="grid grid-cols-2 gap-4">
               <div className="grid gap-2"><Label htmlFor="edit-remote-traffic-limit">{t('servers.trafficLimit')}</Label><Input id="edit-remote-traffic-limit" type="number" step="0.01" placeholder={t('servers.trafficLimitPlaceholder')} value={remoteFormData.traffic_limit_gb} onChange={(e) => setRemoteFormData({ ...remoteFormData, traffic_limit_gb: e.target.value })} /></div>
               <div className="grid gap-2"><Label htmlFor="edit-remote-reset-day">{t('servers.resetDay')}</Label><Input id="edit-remote-reset-day" type="number" min="1" max="31" placeholder={t('servers.resetDayPlaceholder')} value={remoteFormData.traffic_reset_day} onChange={(e) => setRemoteFormData({ ...remoteFormData, traffic_reset_day: e.target.value })} /></div>
+            </div>
+            <div className="grid gap-2">
+              <Label>{t('servers.xrayMode')}</Label>
+              <RadioGroup value={remoteFormData.xray_mode} onValueChange={(value) => setRemoteFormData({ ...remoteFormData, xray_mode: value })} className="flex gap-4">
+                <div className="flex items-center gap-2"><RadioGroupItem value="external" id="edit-xray-mode-external" /><Label htmlFor="edit-xray-mode-external" className="text-sm cursor-pointer">{t('servers.xrayModeExternal')}</Label></div>
+                <div className="flex items-center gap-2"><RadioGroupItem value="embedded" id="edit-xray-mode-embedded" /><Label htmlFor="edit-xray-mode-embedded" className="text-sm cursor-pointer">{t('servers.xrayModeEmbedded')}</Label></div>
+              </RadioGroup>
+              <p className="text-xs text-muted-foreground">{remoteFormData.xray_mode === 'external' ? t('servers.xrayModeExternalDesc') : t('servers.xrayModeEmbeddedDesc')}</p>
             </div>
             {editingRemoteServer?.status === 'connected' && (
               <div className="grid gap-2">
