@@ -30,7 +30,11 @@ echo ""
 # 1. bump version
 echo "[1/5] 升级版本号..."
 cd "$PROJECT_ROOT/miaomiaowux-frontend"
-npm version patch --no-git-tag-version
+if [ -n "$1" ]; then
+  npm version "$1" --no-git-tag-version
+else
+  npm version patch --no-git-tag-version
+fi
 NEW_VERSION=$(node -p "require('./package.json').version")
 cd "$PROJECT_ROOT"
 
