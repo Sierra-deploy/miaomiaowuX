@@ -20,6 +20,7 @@ import (
 	"miaomiaowux/internal/child"
 	"miaomiaowux/internal/event"
 	"miaomiaowux/internal/handler"
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/logger"
 	"miaomiaowux/internal/proxygroups"
 	"miaomiaowux/internal/storage"
@@ -86,6 +87,10 @@ func main() {
 		os.Exit(1)
 	}
 	defer repo.Close()
+
+	licenseManager := license.NewManager(repo, license.GetMachineID())
+	licenseManager.Start(context.Background())
+	defer licenseManager.Stop()
 
 	authManager, err := auth.NewManager(repo)
 	if err != nil {
@@ -314,6 +319,7 @@ func main() {
 	// 限速配置推送器
 	limiterPusher := handler.NewLimiterConfigPusher(repo, remoteWSHandler)
 	remoteWSHandler.SetLimiterPusher(limiterPusher)
+	remoteWSHandler.SetLicenseManager(licenseManager)
 	xrayServerHandler.SetLimiterPusher(limiterPusher)
 
 	// 远程服务器管理代理（将命令转发到子服务器）
@@ -570,6 +576,21 @@ func main() {
 			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
 		}
 	})))
+
+	// 许可证 API
+	licenseHandler := handler.NewLicenseHandler(repo, licenseManager)
+	mux.Handle("/api/admin/license/status", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(licenseHandler.GetStatus)))
+	mux.Handle("/api/admin/license/settings", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			licenseHandler.GetSettings(w, r)
+		case http.MethodPut:
+			licenseHandler.UpdateSettings(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/user/license/status", auth.RequireToken(tokenStore, userRepo, http.HandlerFunc(licenseHandler.UserGetStatus)))
 
 	// 通知配置 API（仅限管理员）
 	notifyConfigHandler := handler.NewNotifyConfigHandler(repo)

@@ -95,6 +95,24 @@
     "cacheExpireMinutesHint": "Set to 0 to re-fetch on every subscription request. When greater than 0, re-fetch only after the specified minutes",
     "cacheExpireWarning": "Note: Fetching every time will affect subscription API response speed"
   },
+  "license": {
+    "title": "License",
+    "description": "Manage license status",
+    "licenseKey": "License Key",
+    "licenseKeyPlaceholder": "Enter license key",
+    "status": "Current Status",
+    "valid": "Valid",
+    "invalid": "Invalid",
+    "plan": "Plan",
+    "expiresAt": "Expires",
+    "maxServers": "Max Servers",
+    "maxNodes": "Max Nodes",
+    "maxUsers": "Max Users",
+    "permanent": "Permanent",
+    "trial": "Trial",
+    "updated": "License settings updated",
+    "trialHint": "You are on a trial license. PRO features (rate limiter, node speed test, etc.) are not available. Register and claim your MiaomiaowuX launch commemorative license (includes PRO features, with more coming...) at:"
+  },
   "configUpdated": "Settings updated",
   "configUpdateFailed": "Failed to update settings"
 }

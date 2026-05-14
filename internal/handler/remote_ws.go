@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"miaomiaowux/internal/agentlog"
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
 	"miaomiaowux/internal/traffic"
 	"miaomiaowux/internal/version"
@@ -38,6 +39,7 @@ const (
 	WSMsgTypeDomainLatencyResult = "domain_latency_result" // Agent -> Master：探测结果
 	WSMsgTypeHeartbeatAck        = "heartbeat_ack"         // Master -> Agent：心跳确认（含服务器时间）
 	WSMsgTypeLimiterConfig       = "limiter_config"        // Master -> Agent：限速配置下发
+	WSMsgTypeLicenseStatus       = "license_status"        // Master -> Agent：许可证状态下发
 )
 
 // WSMessage 表示 WebSocket 消息
@@ -172,6 +174,7 @@ type RemoteWSHandler struct {
 	stealSelfDeployer func(ctx context.Context, serverID int64) error
 	pendingProbes     sync.Map // 详见上下文
 	limiterPusher     *LimiterConfigPusher
+	licenseManager    *license.Manager
 }
 
 // 创建一个新的 WebSocket 处理程序
@@ -187,6 +190,10 @@ func NewRemoteWSHandler(repo *storage.TrafficRepository, collector *traffic.Coll
 			},
 		},
 	}
+}
+
+func (h *RemoteWSHandler) SetLicenseManager(mgr *license.Manager) {
+	h.licenseManager = mgr
 }
 
 func (h *RemoteWSHandler) SetLimiterPusher(p *LimiterConfigPusher) {
@@ -389,6 +396,11 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, remoteAddr string, pa
 
 	log.Printf("[Remote WS] Server %s (%d) authenticated via WebSocket from %s", server.Name, server.ID, remoteAddr)
 	h.sendAuthResult(conn, true, "Authenticated")
+
+	// 推送许可证状态给 Agent
+	if h.licenseManager != nil {
+		go h.SendLicenseStatus(wsConn)
+	}
 
 	// embedded 模式：认证成功后推送限速配置
 	if server.XrayMode == "embedded" && h.limiterPusher != nil {
@@ -607,6 +619,33 @@ func (h *RemoteWSHandler) SendLimiterConfig(serverID int64, configs []WSLimiterC
 		}
 	}
 	return nil
+}
+
+// SendLicenseStatus 向指定连接推送许可证状态
+func (h *RemoteWSHandler) SendLicenseStatus(wsConn *RemoteWSConnection) {
+	if h.licenseManager == nil {
+		return
+	}
+	status := h.licenseManager.StatusForAgent()
+	payload, err := json.Marshal(status)
+	if err != nil {
+		return
+	}
+	wsConn.mu.Lock()
+	defer wsConn.mu.Unlock()
+	_ = h.sendMessage(wsConn.Conn, WSMessage{
+		Type:    WSMsgTypeLicenseStatus,
+		Payload: payload,
+	})
+}
+
+// BroadcastLicenseStatus 向所有已连接的 Agent 广播许可证状态
+func (h *RemoteWSHandler) BroadcastLicenseStatus() {
+	h.conns.Range(func(_, value any) bool {
+		wsConn := value.(*RemoteWSConnection)
+		h.SendLicenseStatus(wsConn)
+		return true
+	})
 }
 
 // 删除最近未执行 ping 操作的陈旧连接

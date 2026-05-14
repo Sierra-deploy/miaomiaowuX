@@ -23,7 +23,7 @@ i18n
   .use(initReactI18next)
   .init({
     resources,
-    fallbackLng: 'zh-CN',
+    fallbackLng: 'en',
     supportedLngs: ['zh-CN', 'en'],
     defaultNS: 'common',
     interpolation: { escapeValue: false },
@@ -32,6 +32,8 @@ i18n
       lookupCookie: 'mmw-language',
       caches: ['cookie'],
       cookieOptions: { path: '/', sameSite: 'lax' },
+      convertDetectedLanguage: (lng: string) =>
+        lng.startsWith('zh') ? 'zh-CN' : 'en',
     },
   })
 

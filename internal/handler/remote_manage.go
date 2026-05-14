@@ -2243,7 +2243,11 @@ func (h *RemoteManageHandler) HandleAddWebsite(w http.ResponseWriter, r *http.Re
 	domainConf := strings.ReplaceAll(string(domainTpl), "{domain}", domain)
 	domainConf = strings.ReplaceAll(domainConf, "{root_domain}", rootDomain)
 	domainConf = strings.ReplaceAll(domainConf, "{cert_name}", certName)
-	domainConf = strings.ReplaceAll(domainConf, "{static_root_path}", req.SiteValue)
+	staticRoot := req.SiteValue
+	if staticRoot == "" {
+		staticRoot = "/usr/local/nginx/html"
+	}
+	domainConf = strings.ReplaceAll(domainConf, "{static_root_path}", staticRoot)
 	domainConf = strings.ReplaceAll(domainConf, "{proxy_pass_server}", req.SiteValue)
 
 	// 2. 部署 nginx domain config（不覆盖 nginx.conf）

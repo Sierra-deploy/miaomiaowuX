@@ -225,7 +225,7 @@ function SettingsPage() {
         </section>
 
         <div className='mt-8 grid gap-6 lg:grid-cols-2'>
-          {/* 左侧：个人资料 */}
+          {/* 左侧：个人资料 + 界面风格 + 2FA */}
           <div className='space-y-6'>
             <Card>
               <CardHeader>
@@ -294,10 +294,7 @@ function SettingsPage() {
                 </form>
               </CardContent>
             </Card>
-          </div>
 
-          {/* 右侧：修改密码和订阅Token */}
-          <div className='space-y-6'>
             <Card>
               <CardHeader>
                 <CardTitle>{t('themeStyle.title')}</CardTitle>
@@ -332,6 +329,11 @@ function SettingsPage() {
               </CardContent>
             </Card>
 
+            <TwoFactorCard />
+          </div>
+
+          {/* 右侧：修改密码和订阅Token */}
+          <div className='space-y-6'>
             <Card>
               <CardHeader>
                 <CardTitle>{t('password.title')}</CardTitle>
@@ -437,8 +439,6 @@ function SettingsPage() {
                 </div>
               </CardContent>
             </Card>
-
-            <TwoFactorCard />
           </div>
         </div>
       </main>

@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute, redirect } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { Bell, CircleHelp, Code, Copy, Eye, EyeOff, Link, RefreshCw, ShieldOff, Timer } from 'lucide-react'
+import { CircleHelp, Copy, Eye, EyeOff, KeyRound, RefreshCw, Settings, Timer } from 'lucide-react'
 import { Topbar } from '@/components/layout/topbar'
 import {
   Card,
@@ -17,7 +17,9 @@ import { Label } from '@/components/ui/label'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { api } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
 import { useAuthStore } from '@/stores/auth-store'
@@ -273,7 +275,6 @@ function SystemSettingsPage() {
     notify_daily_traffic_time: '08:00',
     notify_traffic_threshold_percent: 80,
   })
-  const [showBotToken, setShowBotToken] = useState(false)
   const [editingBotToken, setEditingBotToken] = useState('')
 
   const { data: notifyData } = useQuery({
@@ -633,107 +634,265 @@ function SystemSettingsPage() {
             </CardContent>
           </Card>
 
-          {/* 短链接全局开关 */}
+          {/* 功能开关 */}
           <Card>
             <CardHeader className='pb-4'>
-              <CardTitle className='flex items-center gap-2'>
-                <Link className='h-5 w-5' />
-                {t('shortLink.title')}
-              </CardTitle>
-              <CardDescription>{t('shortLink.description')}</CardDescription>
+              <CardTitle>{t('title')}</CardTitle>
+              <CardDescription>{t('description')}</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className='flex items-center justify-between'>
-                <Label htmlFor='short-link-toggle'>{t('shortLink.enableLabel')}</Label>
-                <Switch
-                  id='short-link-toggle'
-                  checked={enableShortLink}
-                  onCheckedChange={(checked) => {
-                    setEnableShortLink(checked)
-                    toggleShortLinkMutation.mutate(checked)
-                  }}
-                  disabled={toggleShortLinkMutation.isPending}
-                />
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* 覆写脚本开关 */}
-          <Card>
-            <CardHeader className='pb-4'>
-              <CardTitle className='flex items-center gap-2'>
-                <Code className='h-5 w-5' />
-                {t('overrideScripts.title')}
-              </CardTitle>
-              <CardDescription>{t('overrideScripts.description')}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <div className='flex items-center justify-between'>
-                <Label htmlFor='override-scripts-toggle'>{t('overrideScripts.enableLabel')}</Label>
-                <Switch
-                  id='override-scripts-toggle'
-                  checked={enableOverrideScripts}
-                  onCheckedChange={(checked) => {
-                    setEnableOverrideScripts(checked)
-                    toggleOverrideScriptsMutation.mutate(checked)
-                  }}
-                  disabled={toggleOverrideScriptsMutation.isPending}
-                />
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* 静默模式 */}
-          <Card className={silentMode ? 'border-orange-500/50' : ''}>
-            <CardHeader className='pb-4'>
-              <CardTitle className='flex items-center gap-2'>
-                <ShieldOff className='h-5 w-5' />
-                {t('silentMode.title')}
-              </CardTitle>
-              <CardDescription>{t('silentMode.description')}</CardDescription>
-            </CardHeader>
-            <CardContent className='space-y-4'>
-              <div className='flex items-center justify-between'>
-                <Label htmlFor='silent-mode-toggle'>{t('silentMode.enableLabel')}</Label>
-                <Switch
-                  id='silent-mode-toggle'
-                  checked={silentMode}
-                  onCheckedChange={(checked) => {
-                    setSilentMode(checked)
-                    updateSilentModeMutation.mutate({ silent_mode: checked, silent_mode_timeout: silentModeTimeout })
-                  }}
-                  disabled={updateSilentModeMutation.isPending}
-                />
-              </div>
-              {silentMode && (
-                <div className='space-y-2'>
-                  <Label htmlFor='silent-mode-timeout'>{t('silentMode.timeout')}</Label>
+              <div className='grid grid-cols-1 sm:grid-cols-2 gap-4'>
+                {/* 短链接 */}
+                <div className='flex items-center justify-between rounded-lg border p-3'>
                   <div className='flex items-center gap-2'>
-                    <Input
-                      id='silent-mode-timeout'
-                      type='number'
-                      min={1}
-                      value={silentModeTimeout}
-                      onChange={(e) => setSilentModeTimeout(Number(e.target.value))}
-                      className='w-24'
-                    />
-                    <span className='text-sm text-muted-foreground'>{t('silentMode.minutes')}</span>
-                    <Button
-                      size='sm'
-                      variant='outline'
-                      onClick={() => updateSilentModeMutation.mutate({ silent_mode: silentMode, silent_mode_timeout: silentModeTimeout })}
-                      disabled={updateSilentModeMutation.isPending}
-                    >
-                      {t('actions.save', { ns: 'common' })}
-                    </Button>
+                    <Label htmlFor='short-link-toggle' className='cursor-pointer'>
+                      {t('shortLink.enableLabel')}
+                    </Label>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <CircleHelp className='h-4 w-4 text-muted-foreground cursor-help' />
+                      </TooltipTrigger>
+                      <TooltipContent side='top' className='max-w-xs'>
+                        <p>{t('shortLink.description')}</p>
+                      </TooltipContent>
+                    </Tooltip>
                   </div>
-                  <p className='text-xs text-muted-foreground'>{t('silentMode.hint', { timeout: silentModeTimeout })}</p>
+                  <Switch
+                    id='short-link-toggle'
+                    checked={enableShortLink}
+                    onCheckedChange={(checked) => {
+                      setEnableShortLink(checked)
+                      toggleShortLinkMutation.mutate(checked)
+                    }}
+                    disabled={toggleShortLinkMutation.isPending}
+                  />
+                </div>
+
+                {/* 覆写脚本 */}
+                <div className='flex items-center justify-between rounded-lg border p-3'>
+                  <div className='flex items-center gap-2'>
+                    <Label htmlFor='override-scripts-toggle' className='cursor-pointer'>
+                      {t('overrideScripts.enableLabel')}
+                    </Label>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <CircleHelp className='h-4 w-4 text-muted-foreground cursor-help' />
+                      </TooltipTrigger>
+                      <TooltipContent side='top' className='max-w-xs'>
+                        <p>{t('overrideScripts.description')}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <Switch
+                    id='override-scripts-toggle'
+                    checked={enableOverrideScripts}
+                    onCheckedChange={(checked) => {
+                      setEnableOverrideScripts(checked)
+                      toggleOverrideScriptsMutation.mutate(checked)
+                    }}
+                    disabled={toggleOverrideScriptsMutation.isPending}
+                  />
+                </div>
+
+                {/* 通知推送 */}
+                <div className='flex items-center justify-between rounded-lg border p-3'>
+                  <div className='flex items-center gap-2'>
+                    <Popover>
+                      <PopoverTrigger asChild>
+                        <Button variant='outline' size='icon' className='h-7 w-7'>
+                          <Settings className='h-3.5 w-3.5' />
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className='w-80' side='bottom' align='start'>
+                        <div className='space-y-4'>
+                          <div className='space-y-2'>
+                            <Label htmlFor='bot-token'>{t('telegram.botToken')}</Label>
+                            <Input
+                              id='bot-token'
+                              value={editingBotToken}
+                              onChange={(e) => setEditingBotToken(e.target.value)}
+                              onBlur={() => {
+                                if (editingBotToken !== notifyConfig.telegram_bot_token) {
+                                  saveNotifyConfig({ telegram_bot_token: editingBotToken })
+                                }
+                              }}
+                              placeholder={t('telegram.botTokenPlaceholder')}
+                            />
+                          </div>
+                          <div className='space-y-2'>
+                            <Label htmlFor='chat-id'>{t('telegram.chatId')}</Label>
+                            <Input
+                              id='chat-id'
+                              value={notifyConfig.telegram_chat_id}
+                              onChange={(e) => setNotifyConfig({ ...notifyConfig, telegram_chat_id: e.target.value })}
+                              onBlur={() => {
+                                if (notifyConfig.telegram_chat_id !== notifyData?.telegram_chat_id) {
+                                  saveNotifyConfig({ telegram_chat_id: notifyConfig.telegram_chat_id })
+                                }
+                              }}
+                              placeholder={t('telegram.chatIdPlaceholder')}
+                            />
+                          </div>
+                          <Button
+                            variant='outline'
+                            size='sm'
+                            className='w-full'
+                            onClick={() => testNotifyMutation.mutate()}
+                            disabled={testNotifyMutation.isPending || !notifyConfig.telegram_bot_token || !notifyConfig.telegram_chat_id}
+                          >
+                            {testNotifyMutation.isPending ? '...' : t('telegram.sendTest')}
+                          </Button>
+                          <div className='border-t pt-3 space-y-2'>
+                            <div className='flex items-center gap-2'>
+                              <Checkbox
+                                id='notify-login'
+                                checked={notifyConfig.notify_login}
+                                onCheckedChange={(checked) => saveNotifyConfig({ notify_login: checked === true })}
+                              />
+                              <Label htmlFor='notify-login' className='cursor-pointer text-sm'>{t('telegram.events.login')}</Label>
+                            </div>
+                            <div className='flex items-center gap-2'>
+                              <Checkbox
+                                id='notify-subscribe'
+                                checked={notifyConfig.notify_subscribe_fetch}
+                                onCheckedChange={(checked) => saveNotifyConfig({ notify_subscribe_fetch: checked === true })}
+                              />
+                              <Label htmlFor='notify-subscribe' className='cursor-pointer text-sm'>{t('telegram.events.subscribe')}</Label>
+                            </div>
+                            <div className='flex items-center gap-2'>
+                              <Checkbox
+                                id='notify-online'
+                                checked={notifyConfig.notify_server_online}
+                                onCheckedChange={(checked) => saveNotifyConfig({ notify_server_online: checked === true })}
+                              />
+                              <Label htmlFor='notify-online' className='cursor-pointer text-sm'>{t('telegram.events.serverOnline')}</Label>
+                            </div>
+                            <div className='flex items-center gap-2'>
+                              <Checkbox
+                                id='notify-offline'
+                                checked={notifyConfig.notify_server_offline}
+                                onCheckedChange={(checked) => saveNotifyConfig({ notify_server_offline: checked === true })}
+                              />
+                              <Label htmlFor='notify-offline' className='cursor-pointer text-sm'>{t('telegram.events.serverOffline')}</Label>
+                            </div>
+                            <div className='flex items-center gap-2'>
+                              <Checkbox
+                                id='notify-daily'
+                                checked={notifyConfig.notify_daily_traffic}
+                                onCheckedChange={(checked) => saveNotifyConfig({ notify_daily_traffic: checked === true })}
+                              />
+                              <Label htmlFor='notify-daily' className='cursor-pointer text-sm'>{t('telegram.events.dailyTraffic')}</Label>
+                              {notifyConfig.notify_daily_traffic && (
+                                <Input
+                                  type='time'
+                                  value={notifyConfig.notify_daily_traffic_time}
+                                  onChange={(e) => setNotifyConfig({ ...notifyConfig, notify_daily_traffic_time: e.target.value })}
+                                  onBlur={() => saveNotifyConfig({ notify_daily_traffic_time: notifyConfig.notify_daily_traffic_time })}
+                                  className='h-7 w-24 text-xs'
+                                />
+                              )}
+                            </div>
+                            <div className='flex items-center gap-2'>
+                              <Checkbox
+                                id='notify-threshold'
+                                checked={notifyConfig.notify_traffic_threshold}
+                                onCheckedChange={(checked) => saveNotifyConfig({ notify_traffic_threshold: checked === true })}
+                              />
+                              <Label htmlFor='notify-threshold' className='cursor-pointer text-sm'>{t('telegram.events.trafficThreshold')}</Label>
+                              {notifyConfig.notify_traffic_threshold && (
+                                <Input
+                                  type='number'
+                                  min={1}
+                                  max={100}
+                                  value={notifyConfig.notify_traffic_threshold_percent}
+                                  onChange={(e) => setNotifyConfig({ ...notifyConfig, notify_traffic_threshold_percent: Number(e.target.value) })}
+                                  onBlur={() => saveNotifyConfig({ notify_traffic_threshold_percent: notifyConfig.notify_traffic_threshold_percent })}
+                                  className='h-7 w-16 text-xs'
+                                />
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </PopoverContent>
+                    </Popover>
+                    <Label htmlFor='notify-enabled' className='cursor-pointer'>
+                      {t('telegram.enableLabel')}
+                    </Label>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <CircleHelp className='h-4 w-4 text-muted-foreground cursor-help' />
+                      </TooltipTrigger>
+                      <TooltipContent side='top' className='max-w-xs'>
+                        <p>{t('telegram.description')}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <Switch
+                    id='notify-enabled'
+                    checked={notifyConfig.notify_enabled}
+                    onCheckedChange={(checked) => saveNotifyConfig({ notify_enabled: checked })}
+                    disabled={updateNotifyMutation.isPending}
+                  />
+                </div>
+
+                {/* 静默模式 */}
+                <div className='flex items-center justify-between rounded-lg border border-orange-200 bg-orange-50 p-3 dark:border-orange-900 dark:bg-orange-950'>
+                  <div className='flex items-center gap-2'>
+                    <Label htmlFor='silent-mode-toggle' className='cursor-pointer'>
+                      {t('silentMode.enableLabel')}
+                    </Label>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <CircleHelp className='h-4 w-4 text-muted-foreground cursor-help' />
+                      </TooltipTrigger>
+                      <TooltipContent side='top' className='max-w-xs'>
+                        <p>{t('silentMode.description')}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <Switch
+                    id='silent-mode-toggle'
+                    checked={silentMode}
+                    onCheckedChange={(checked) => {
+                      setSilentMode(checked)
+                      updateSilentModeMutation.mutate({ silent_mode: checked, silent_mode_timeout: silentModeTimeout })
+                    }}
+                    disabled={updateSilentModeMutation.isPending}
+                  />
+                </div>
+              </div>
+
+              {/* 静默模式超时设置 */}
+              {silentMode && (
+                <div className='mt-4 space-y-2 rounded-lg border border-orange-200 bg-orange-50 p-3 dark:border-orange-900 dark:bg-orange-950'>
+                  <div className='flex items-center gap-2'>
+                    <Label htmlFor='silent-mode-timeout'>{t('silentMode.timeout')}</Label>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <CircleHelp className='h-4 w-4 text-muted-foreground cursor-help' />
+                      </TooltipTrigger>
+                      <TooltipContent side='top' className='max-w-xs'>
+                        <p>{t('silentMode.hint', { timeout: silentModeTimeout })}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <Input
+                    id='silent-mode-timeout'
+                    type='number'
+                    min={1}
+                    max={1440}
+                    value={silentModeTimeout}
+                    onChange={(e) => setSilentModeTimeout(parseInt(e.target.value) || 15)}
+                    onBlur={() => updateSilentModeMutation.mutate({ silent_mode: silentMode, silent_mode_timeout: silentModeTimeout })}
+                    disabled={updateSilentModeMutation.isPending}
+                    className='max-w-32'
+                  />
                 </div>
               )}
             </CardContent>
           </Card>
 
-          {/* 定时配置 */}
+          {/* 定时配置 + 主服务器地址 */}
           <Card>
             <CardHeader className='pb-4'>
               <CardTitle className='flex items-center gap-2'>
@@ -744,8 +903,8 @@ function SystemSettingsPage() {
             </CardHeader>
             <CardContent className='space-y-4'>
               <div className='grid grid-cols-2 gap-4'>
-                <div className='space-y-2'>
-                  <Label htmlFor='speed-interval'>{t('intervals.speedCollect')}</Label>
+                <div className='space-y-1'>
+                  <Label htmlFor='speed-interval' className='text-sm'>{t('intervals.speedCollect')}</Label>
                   <Input
                     id='speed-interval'
                     type='number'
@@ -754,8 +913,8 @@ function SystemSettingsPage() {
                     onChange={(e) => setSpeedCollectInterval(Number(e.target.value))}
                   />
                 </div>
-                <div className='space-y-2'>
-                  <Label htmlFor='traffic-interval'>{t('intervals.trafficCollect')}</Label>
+                <div className='space-y-1'>
+                  <Label htmlFor='traffic-interval' className='text-sm'>{t('intervals.trafficCollect')}</Label>
                   <Input
                     id='traffic-interval'
                     type='number'
@@ -764,8 +923,8 @@ function SystemSettingsPage() {
                     onChange={(e) => setTrafficCollectInterval(Number(e.target.value))}
                   />
                 </div>
-                <div className='space-y-2'>
-                  <Label htmlFor='check-interval'>{t('intervals.trafficCheck')}</Label>
+                <div className='space-y-1'>
+                  <Label htmlFor='check-interval' className='text-sm'>{t('intervals.trafficCheck')}</Label>
                   <Input
                     id='check-interval'
                     type='number'
@@ -774,8 +933,8 @@ function SystemSettingsPage() {
                     onChange={(e) => setTrafficCheckInterval(Number(e.target.value))}
                   />
                 </div>
-                <div className='space-y-2'>
-                  <Label htmlFor='heartbeat-interval'>{t('intervals.heartbeat')}</Label>
+                <div className='space-y-1'>
+                  <Label htmlFor='heartbeat-interval' className='text-sm'>{t('intervals.heartbeat')}</Label>
                   <Input
                     id='heartbeat-interval'
                     type='number'
@@ -786,6 +945,7 @@ function SystemSettingsPage() {
                 </div>
               </div>
               <Button
+                size='sm'
                 onClick={() => updateIntervalsMutation.mutate({
                   speed_collect_interval: speedCollectInterval,
                   traffic_collect_interval: trafficCollectInterval,
@@ -796,18 +956,9 @@ function SystemSettingsPage() {
               >
                 {t('actions.save', { ns: 'common' })}
               </Button>
-            </CardContent>
-          </Card>
 
-          {/* 主服务器地址 */}
-          <Card>
-            <CardHeader className='pb-4'>
-              <CardTitle>{t('masterUrl.title')}</CardTitle>
-              <CardDescription>{t('masterUrl.description')}</CardDescription>
-            </CardHeader>
-            <CardContent className='space-y-4'>
-              <div className='space-y-2'>
-                <Label htmlFor='master-url'>{t('masterUrl.label')}</Label>
+              <div className='border-t pt-4 space-y-2'>
+                <Label htmlFor='master-url'>{t('masterUrl.title')}</Label>
                 <Input
                   id='master-url'
                   placeholder={t('masterUrl.placeholder')}
@@ -822,247 +973,224 @@ function SystemSettingsPage() {
                   }}
                   disabled={updateMasterUrlMutation.isPending}
                 />
-                <p className='text-xs text-muted-foreground'>
-                  {t('masterUrl.hint')}
-                </p>
+                <p className='text-xs text-muted-foreground'>{t('masterUrl.hint')}</p>
               </div>
             </CardContent>
           </Card>
 
-          {/* Telegram 通知 */}
+          {/* API Token */}
           <Card>
             <CardHeader className='pb-4'>
-              <CardTitle className='flex items-center gap-2'>
-                <Bell className='h-5 w-5' />
-                {t('telegram.title')}
-              </CardTitle>
-              <CardDescription>{t('telegram.description')}</CardDescription>
-            </CardHeader>
-            <CardContent className='space-y-4'>
-              <div className='flex items-center justify-between'>
-                <Label htmlFor='notify-enabled'>{t('telegram.enableLabel')}</Label>
-                <Switch
-                  id='notify-enabled'
-                  checked={notifyConfig.notify_enabled}
-                  onCheckedChange={(checked) => saveNotifyConfig({ notify_enabled: checked })}
-                  disabled={updateNotifyMutation.isPending}
-                />
-              </div>
-
-              <div className='space-y-2'>
-                <Label htmlFor='bot-token'>{t('telegram.botToken')}</Label>
-                <div className='flex items-center gap-2'>
-                  <div className='flex-1 relative'>
-                    <Input
-                      id='bot-token'
-                      type={showBotToken ? 'text' : 'password'}
-                      placeholder={t('telegram.botTokenPlaceholder')}
-                      value={editingBotToken}
-                      onChange={(e) => setEditingBotToken(e.target.value)}
-                      onBlur={() => {
-                        if (editingBotToken !== notifyConfig.telegram_bot_token) {
-                          saveNotifyConfig({ telegram_bot_token: editingBotToken })
-                        }
-                      }}
-                      className='pr-10 font-mono text-sm'
-                    />
-                    <Button
-                      type='button'
-                      variant='ghost'
-                      size='sm'
-                      className='absolute right-0 top-0 h-full px-3 hover:bg-transparent'
-                      onClick={() => setShowBotToken(!showBotToken)}
-                    >
-                      {showBotToken ? (
-                        <EyeOff className='h-4 w-4 text-muted-foreground' />
-                      ) : (
-                        <Eye className='h-4 w-4 text-muted-foreground' />
-                      )}
-                    </Button>
-                  </div>
-                </div>
-              </div>
-
-              <div className='space-y-2'>
-                <Label htmlFor='chat-id'>{t('telegram.chatId')}</Label>
-                <Input
-                  id='chat-id'
-                  placeholder={t('telegram.chatIdPlaceholder')}
-                  value={notifyConfig.telegram_chat_id}
-                  onChange={(e) => setNotifyConfig({ ...notifyConfig, telegram_chat_id: e.target.value })}
-                  onBlur={() => {
-                    if (notifyConfig.telegram_chat_id !== notifyData?.telegram_chat_id) {
-                      saveNotifyConfig({ telegram_chat_id: notifyConfig.telegram_chat_id })
-                    }
-                  }}
-                  className='font-mono text-sm'
-                />
-              </div>
-
-              <Button
-                variant='outline'
-                size='sm'
-                onClick={() => testNotifyMutation.mutate()}
-                disabled={testNotifyMutation.isPending || !notifyConfig.notify_enabled}
-              >
-                {testNotifyMutation.isPending ? t('actions.sending', { ns: 'common' }) : t('telegram.sendTest')}
-              </Button>
-
-              <div className='border-t pt-4 space-y-3'>
-                <p className='text-sm font-medium text-muted-foreground'>{t('telegram.events.title')}</p>
-                <div className='flex items-center justify-between'>
-                  <Label htmlFor='notify-login'>{t('telegram.events.login')}</Label>
-                  <Switch
-                    id='notify-login'
-                    checked={notifyConfig.notify_login}
-                    onCheckedChange={(checked) => saveNotifyConfig({ notify_login: checked })}
-                    disabled={updateNotifyMutation.isPending}
-                  />
-                </div>
-                <div className='flex items-center justify-between'>
-                  <Label htmlFor='notify-subscribe'>{t('telegram.events.subscribe')}</Label>
-                  <Switch
-                    id='notify-subscribe'
-                    checked={notifyConfig.notify_subscribe_fetch}
-                    onCheckedChange={(checked) => saveNotifyConfig({ notify_subscribe_fetch: checked })}
-                    disabled={updateNotifyMutation.isPending}
-                  />
-                </div>
-                <div className='flex items-center justify-between'>
-                  <Label htmlFor='notify-online'>{t('telegram.events.serverOnline')}</Label>
-                  <Switch
-                    id='notify-online'
-                    checked={notifyConfig.notify_server_online}
-                    onCheckedChange={(checked) => saveNotifyConfig({ notify_server_online: checked })}
-                    disabled={updateNotifyMutation.isPending}
-                  />
-                </div>
-                <div className='flex items-center justify-between'>
-                  <Label htmlFor='notify-offline'>{t('telegram.events.serverOffline')}</Label>
-                  <Switch
-                    id='notify-offline'
-                    checked={notifyConfig.notify_server_offline}
-                    onCheckedChange={(checked) => saveNotifyConfig({ notify_server_offline: checked })}
-                    disabled={updateNotifyMutation.isPending}
-                  />
-                </div>
-                <div className='flex items-center justify-between'>
-                  <Label htmlFor='notify-daily'>{t('telegram.events.dailyTraffic')}</Label>
-                  <Switch
-                    id='notify-daily'
-                    checked={notifyConfig.notify_daily_traffic}
-                    onCheckedChange={(checked) => saveNotifyConfig({ notify_daily_traffic: checked })}
-                    disabled={updateNotifyMutation.isPending}
-                  />
-                </div>
-                {notifyConfig.notify_daily_traffic && (
-                  <div className='ml-4 space-y-2'>
-                    <Label htmlFor='daily-time'>{t('telegram.events.dailyTrafficTime')}</Label>
-                    <Input
-                      id='daily-time'
-                      type='time'
-                      value={notifyConfig.notify_daily_traffic_time}
-                      onChange={(e) => setNotifyConfig({ ...notifyConfig, notify_daily_traffic_time: e.target.value })}
-                      onBlur={() => saveNotifyConfig({ notify_daily_traffic_time: notifyConfig.notify_daily_traffic_time })}
-                      className='w-32'
-                    />
-                  </div>
-                )}
-                <div className='flex items-center justify-between'>
-                  <Label htmlFor='notify-threshold'>{t('telegram.events.trafficThreshold')}</Label>
-                  <Switch
-                    id='notify-threshold'
-                    checked={notifyConfig.notify_traffic_threshold}
-                    onCheckedChange={(checked) => saveNotifyConfig({ notify_traffic_threshold: checked })}
-                    disabled={updateNotifyMutation.isPending}
-                  />
-                </div>
-                {notifyConfig.notify_traffic_threshold && (
-                  <div className='ml-4 space-y-2'>
-                    <Label htmlFor='threshold-pct'>{t('telegram.events.thresholdPercent')}</Label>
-                    <Input
-                      id='threshold-pct'
-                      type='number'
-                      min={1}
-                      max={100}
-                      value={notifyConfig.notify_traffic_threshold_percent}
-                      onChange={(e) => setNotifyConfig({ ...notifyConfig, notify_traffic_threshold_percent: Number(e.target.value) })}
-                      onBlur={() => saveNotifyConfig({ notify_traffic_threshold_percent: notifyConfig.notify_traffic_threshold_percent })}
-                      className='w-32'
-                    />
-                  </div>
-                )}
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* API Token 设置 */}
-          <Card>
-            <CardHeader>
               <CardTitle>{t('apiToken.title')}</CardTitle>
               <CardDescription>{t('apiToken.description')}</CardDescription>
             </CardHeader>
-            <CardContent className='space-y-4'>
-              <div className='space-y-2'>
-                <Label>{t('apiToken.currentLabel')}</Label>
-                <div className='flex items-center gap-2'>
-                  <div className='flex-1 relative'>
-                    <Input
-                      type={showApiToken ? 'text' : 'password'}
-                      value={loadingApiToken ? t('actions.loading', { ns: 'common' }) : (apiTokenData?.token || '')}
-                      readOnly
-                      className='pr-10 font-mono text-sm'
-                    />
-                    <Button
-                      type='button'
-                      variant='ghost'
-                      size='sm'
-                      className='absolute right-0 top-0 h-full px-3 hover:bg-transparent'
-                      onClick={() => setShowApiToken(!showApiToken)}
-                    >
-                      {showApiToken ? (
-                        <EyeOff className='h-4 w-4 text-muted-foreground' />
-                      ) : (
-                        <Eye className='h-4 w-4 text-muted-foreground' />
-                      )}
-                    </Button>
-                  </div>
+            <CardContent className='space-y-3'>
+              <div className='flex items-center gap-2'>
+                <div className='flex-1 relative'>
+                  <Input
+                    type={showApiToken ? 'text' : 'password'}
+                    value={loadingApiToken ? '...' : (apiTokenData?.token || '')}
+                    readOnly
+                    className='pr-10 font-mono text-sm'
+                  />
                   <Button
                     type='button'
-                    variant='outline'
-                    size='icon'
-                    onClick={copyApiToken}
-                    disabled={loadingApiToken || !apiTokenData?.token}
+                    variant='ghost'
+                    size='sm'
+                    className='absolute right-0 top-0 h-full px-3 hover:bg-transparent'
+                    onClick={() => setShowApiToken(!showApiToken)}
                   >
-                    <Copy className='h-4 w-4' />
-                  </Button>
-                  <Button
-                    type='button'
-                    variant='outline'
-                    size='icon'
-                    onClick={() => {
-                      if (confirm(t('apiToken.regenerateConfirm'))) {
-                        regenerateApiTokenMutation.mutate()
-                      }
-                    }}
-                    disabled={loadingApiToken || regenerateApiTokenMutation.isPending}
-                  >
-                    <RefreshCw className={`h-4 w-4 ${regenerateApiTokenMutation.isPending ? 'animate-spin' : ''}`} />
+                    {showApiToken ? (
+                      <EyeOff className='h-4 w-4 text-muted-foreground' />
+                    ) : (
+                      <Eye className='h-4 w-4 text-muted-foreground' />
+                    )}
                   </Button>
                 </div>
-                <p className='text-sm text-muted-foreground'>
-                  {t('apiToken.usageHint')}
-                </p>
+                <Button
+                  type='button'
+                  variant='outline'
+                  size='icon'
+                  onClick={copyApiToken}
+                  disabled={loadingApiToken || !apiTokenData?.token}
+                >
+                  <Copy className='h-4 w-4' />
+                </Button>
+                <Button
+                  type='button'
+                  variant='outline'
+                  size='icon'
+                  onClick={() => {
+                    if (confirm(t('apiToken.regenerateConfirm'))) {
+                      regenerateApiTokenMutation.mutate()
+                    }
+                  }}
+                  disabled={loadingApiToken || regenerateApiTokenMutation.isPending}
+                >
+                  <RefreshCw className={`h-4 w-4 ${regenerateApiTokenMutation.isPending ? 'animate-spin' : ''}`} />
+                </Button>
               </div>
-              <div className='rounded-lg border bg-muted/40 p-4'>
-                <p className='text-sm text-muted-foreground whitespace-pre-line'>
-                  {t('apiToken.warning')}
-                </p>
-              </div>
+              <p className='text-xs text-muted-foreground whitespace-pre-line'>
+                {t('apiToken.warning')}
+              </p>
             </CardContent>
           </Card>
+
+          {/* 许可证设置 */}
+          <LicenseSettingsCard />
         </div>
       </main>
     </div>
+  )
+}
+
+function LicenseSettingsCard() {
+  const { t } = useTranslation('system')
+  const queryClient = useQueryClient()
+  const [licenseKey, setLicenseKey] = useState('')
+
+  const { data: licenseSettings } = useQuery({
+    queryKey: ['license-settings'],
+    queryFn: async () => {
+      const response = await api.get('/api/admin/license/settings')
+      return response.data as {
+        success: boolean
+        license_key: string
+      }
+    },
+    staleTime: 5 * 60 * 1000,
+  })
+
+  const { data: licenseStatus } = useQuery({
+    queryKey: ['license-status'],
+    queryFn: async () => {
+      const response = await api.get('/api/admin/license/status')
+      return response.data as {
+        success: boolean
+        license: {
+          valid: boolean
+          max_servers: number
+          expires_at?: string
+          plan?: {
+            name: string
+            display_name: string
+            max_servers: number
+            max_nodes: number
+            max_users: number
+            features: string[]
+          }
+        }
+      }
+    },
+    staleTime: 60 * 1000,
+  })
+
+  useEffect(() => {
+    if (licenseSettings) {
+      setLicenseKey(licenseSettings.license_key || '')
+    }
+  }, [licenseSettings])
+
+  const updateMutation = useMutation({
+    mutationFn: async () => {
+      await api.put('/api/admin/license/settings', {
+        license_key: licenseKey,
+      })
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['license-settings'] })
+      queryClient.invalidateQueries({ queryKey: ['license-status'] })
+      toast.success(t('license.updated'))
+    },
+    onError: handleServerError,
+  })
+
+  const lic = licenseStatus?.license
+  const isTrial = !licenseKey || lic?.plan?.name === 'TRIAL'
+
+  return (
+    <Card>
+      <CardHeader className='pb-4'>
+        <CardTitle className='flex items-center gap-2'>
+          <KeyRound className='h-5 w-5' />
+          {t('license.title')}
+        </CardTitle>
+        <CardDescription>{t('license.description')}</CardDescription>
+      </CardHeader>
+      <CardContent className='space-y-4'>
+        {lic && (
+          <div className='rounded-lg border bg-muted/40 p-4'>
+            <div className='flex items-center gap-2 mb-3'>
+              <span className='text-sm font-medium'>{t('license.status')}:</span>
+              <span className={`text-sm font-medium ${lic.valid ? 'text-green-600' : 'text-red-500'}`}>
+                {lic.valid ? t('license.valid') : t('license.invalid')}
+              </span>
+              <span className='text-muted-foreground'>·</span>
+              <span className='text-sm text-muted-foreground'>{t('license.plan')}:</span>
+              <span className='text-sm'>{lic.plan?.display_name || t('license.trial')}</span>
+              {lic.expires_at && (
+                <>
+                  <span className='text-muted-foreground'>·</span>
+                  <span className='text-sm text-muted-foreground'>{t('license.expiresAt')}:</span>
+                  <span className='text-sm'>{lic.expires_at}</span>
+                </>
+              )}
+            </div>
+            <div className='grid grid-cols-3 gap-3'>
+              <div className='rounded border bg-background px-3 py-2 text-center'>
+                <div className='text-lg font-semibold'>{lic.max_servers}</div>
+                <div className='text-xs text-muted-foreground'>{t('license.maxServers')}</div>
+              </div>
+              {lic.plan && (
+                <>
+                  <div className='rounded border bg-background px-3 py-2 text-center'>
+                    <div className='text-lg font-semibold'>{lic.plan.max_nodes}</div>
+                    <div className='text-xs text-muted-foreground'>{t('license.maxNodes')}</div>
+                  </div>
+                  <div className='rounded border bg-background px-3 py-2 text-center'>
+                    <div className='text-lg font-semibold'>{lic.plan.max_users}</div>
+                    <div className='text-xs text-muted-foreground'>{t('license.maxUsers')}</div>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
+        {isTrial && (
+          <div className='rounded-lg border border-blue-200 bg-blue-50 p-4 dark:border-blue-900 dark:bg-blue-950'>
+            <p className='text-sm text-blue-800 dark:text-blue-200'>
+              {t('license.trialHint')}{' '}
+              <a
+                href='https://license.miaomiaowu.net/'
+                target='_blank'
+                rel='noopener noreferrer'
+                className='font-medium underline'
+              >
+                license.miaomiaowu.net
+              </a>
+            </p>
+          </div>
+        )}
+
+        <div className='space-y-2'>
+          <Label>{t('license.licenseKey')}</Label>
+          <div className='flex items-center gap-2'>
+            <Input
+              value={licenseKey}
+              onChange={(e) => setLicenseKey(e.target.value)}
+              placeholder={t('license.licenseKeyPlaceholder')}
+            />
+            <Button
+              onClick={() => updateMutation.mutate()}
+              disabled={updateMutation.isPending}
+              className='shrink-0'
+            >
+              {updateMutation.isPending ? '...' : t('actions.save', { ns: 'common' })}
+            </Button>
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   )
 }

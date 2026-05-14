@@ -95,6 +95,24 @@
     "cacheExpireMinutesHint": "设置为0表示每次获取订阅时都重新拉取。大于0时，只有超过设置的分钟数才会重新拉取",
     "cacheExpireWarning": "注意：每次都更新订阅会影响获取订阅接口的响应速度"
   },
+  "license": {
+    "title": "许可证",
+    "description": "管理许可证状态",
+    "licenseKey": "许可证密钥",
+    "licenseKeyPlaceholder": "输入许可证密钥",
+    "status": "当前状态",
+    "valid": "有效",
+    "invalid": "无效",
+    "plan": "套餐",
+    "expiresAt": "到期时间",
+    "maxServers": "最大服务器数",
+    "maxNodes": "最大节点数",
+    "maxUsers": "最大用户数",
+    "permanent": "永久",
+    "trial": "试用版",
+    "updated": "许可证设置已更新",
+    "trialHint": "当前为试用许可证，PRO 功能（限速器、节点测速等）不可用。访问以下地址注册并免费获取妙妙屋X上线纪念许可证（包含 PRO 功能，还会持续新增功能...）："
+  },
   "configUpdated": "设置已更新",
   "configUpdateFailed": "更新设置失败"
 }
