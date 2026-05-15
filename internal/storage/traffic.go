@@ -194,9 +194,20 @@ type Package struct {
 	Nodes             []int64   `json:"nodes"`              // 关联节点 ID
 	SpeedLimitMbps    float64   `json:"speed_limit_mbps"`   // 限速 (Mbps)，0=不限
 	DeviceLimit       int       `json:"device_limit"`       // 设备数限制，0=不限
+	AutoSpeedRules    []AutoSpeedLimitRule `json:"auto_speed_rules,omitempty"`
 	ShortCode         string    `json:"short_code"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+type AutoSpeedLimitRule struct {
+	Type             string  `json:"type"`               // "sustained" | "burst"
+	ThresholdMbps    float64 `json:"threshold_mbps"`     // 触发阈值 (Mbps)
+	SustainedSeconds int     `json:"sustained_seconds"`  // sustained: 持续时长; burst: 单次最短时长
+	WindowSeconds    int     `json:"window_seconds"`     // burst: 时间窗口
+	BurstCount       int     `json:"burst_count"`        // burst: 窗口内触发次数
+	LimitMbps        float64 `json:"limit_mbps"`         // 限速后速率 (Mbps)
+	LimitDuration    int     `json:"limit_duration"`     // 限速持续时间 (秒)
 }
 
 // Node代表存储在数据库中的代理节点。
@@ -1398,6 +1409,7 @@ CREATE INDEX IF NOT EXISTS idx_remote_servers_status ON remote_servers(status);
 	// 套餐限速字段
 	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN speed_limit_mbps REAL NOT NULL DEFAULT 0")
 	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 0")
+	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN auto_speed_limit_json TEXT DEFAULT ''")
 
 	// 用户限速覆写字段
 	_, _ = r.db.Exec("ALTER TABLE users ADD COLUMN speed_limit_override REAL")
@@ -5676,7 +5688,7 @@ func (r *TrafficRepository) ListPackages(ctx context.Context) ([]Package, error)
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
 		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
-		       COALESCE(short_code, ''), created_at, updated_at
+		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), created_at, updated_at
 		FROM packages
 		ORDER BY created_at DESC
 	`
@@ -5691,22 +5703,24 @@ func (r *TrafficRepository) ListPackages(ctx context.Context) ([]Package, error)
 	for rows.Next() {
 		var pkg Package
 		var isReset int
-		var nodesJSON string
+		var nodesJSON, autoSpeedJSON string
 		err := rows.Scan(&pkg.ID, &pkg.Name, &pkg.Description, &pkg.TrafficLimitBytes,
 			&pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON, &pkg.SpeedLimitMbps, &pkg.DeviceLimit,
-			&pkg.ShortCode, &pkg.CreatedAt, &pkg.UpdatedAt)
+			&autoSpeedJSON, &pkg.ShortCode, &pkg.CreatedAt, &pkg.UpdatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("scan package: %w", err)
 		}
 		pkg.IsReset = isReset != 0
 		pkg.TrafficLimitGB = float64(pkg.TrafficLimitBytes) / (1024 * 1024 * 1024)
 
-		// 反序列化节点 JSON
 		pkg.Nodes = []int64{}
 		if nodesJSON != "" && nodesJSON != "[]" {
 			if err := json.Unmarshal([]byte(nodesJSON), &pkg.Nodes); err != nil {
 				pkg.Nodes = []int64{}
 			}
+		}
+		if autoSpeedJSON != "" {
+			json.Unmarshal([]byte(autoSpeedJSON), &pkg.AutoSpeedRules)
 		}
 
 		packages = append(packages, pkg)
@@ -5728,17 +5742,17 @@ func (r *TrafficRepository) GetPackage(ctx context.Context, id int64) (*Package,
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
 		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
-		       COALESCE(short_code, ''), created_at, updated_at
+		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), created_at, updated_at
 		FROM packages
 		WHERE id = ?
 	`
 
 	var pkg Package
 	var isReset int
-	var nodesJSON string
+	var nodesJSON, autoSpeedJSON string
 	err := r.db.QueryRowContext(ctx, query, id).Scan(&pkg.ID, &pkg.Name, &pkg.Description,
 		&pkg.TrafficLimitBytes, &pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON,
-		&pkg.SpeedLimitMbps, &pkg.DeviceLimit, &pkg.ShortCode,
+		&pkg.SpeedLimitMbps, &pkg.DeviceLimit, &autoSpeedJSON, &pkg.ShortCode,
 		&pkg.CreatedAt, &pkg.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -5750,12 +5764,14 @@ func (r *TrafficRepository) GetPackage(ctx context.Context, id int64) (*Package,
 	pkg.IsReset = isReset != 0
 	pkg.TrafficLimitGB = float64(pkg.TrafficLimitBytes) / (1024 * 1024 * 1024)
 
-	// 反序列化节点 JSON
 	pkg.Nodes = []int64{}
 	if nodesJSON != "" && nodesJSON != "[]" {
 		if err := json.Unmarshal([]byte(nodesJSON), &pkg.Nodes); err != nil {
 			pkg.Nodes = []int64{}
 		}
+	}
+	if autoSpeedJSON != "" {
+		json.Unmarshal([]byte(autoSpeedJSON), &pkg.AutoSpeedRules)
 	}
 
 	return &pkg, nil
@@ -5775,17 +5791,17 @@ func (r *TrafficRepository) GetPackageByName(ctx context.Context, name string) (
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
 		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
-		       COALESCE(short_code, ''), created_at, updated_at
+		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), created_at, updated_at
 		FROM packages
 		WHERE name = ?
 	`
 
 	var pkg Package
 	var isReset int
-	var nodesJSON string
+	var nodesJSON, autoSpeedJSON string
 	err := r.db.QueryRowContext(ctx, query, name).Scan(&pkg.ID, &pkg.Name, &pkg.Description,
 		&pkg.TrafficLimitBytes, &pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON,
-		&pkg.SpeedLimitMbps, &pkg.DeviceLimit, &pkg.ShortCode,
+		&pkg.SpeedLimitMbps, &pkg.DeviceLimit, &autoSpeedJSON, &pkg.ShortCode,
 		&pkg.CreatedAt, &pkg.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -5797,12 +5813,14 @@ func (r *TrafficRepository) GetPackageByName(ctx context.Context, name string) (
 	pkg.IsReset = isReset != 0
 	pkg.TrafficLimitGB = float64(pkg.TrafficLimitBytes) / (1024 * 1024 * 1024)
 
-	// 反序列化节点 JSON
 	pkg.Nodes = []int64{}
 	if nodesJSON != "" && nodesJSON != "[]" {
 		if err := json.Unmarshal([]byte(nodesJSON), &pkg.Nodes); err != nil {
 			pkg.Nodes = []int64{}
 		}
+	}
+	if autoSpeedJSON != "" {
+		json.Unmarshal([]byte(autoSpeedJSON), &pkg.AutoSpeedRules)
 	}
 	return &pkg, nil
 }
@@ -5829,6 +5847,12 @@ func (r *TrafficRepository) CreatePackage(ctx context.Context, pkg Package) (int
 		return 0, fmt.Errorf("serialize nodes: %w", err)
 	}
 
+	var autoSpeedJSON string
+	if len(pkg.AutoSpeedRules) > 0 {
+		b, _ := json.Marshal(pkg.AutoSpeedRules)
+		autoSpeedJSON = string(b)
+	}
+
 	// 生成短码
 	shortCode, err := generatePackageShortCode()
 	if err != nil {
@@ -5836,8 +5860,8 @@ func (r *TrafficRepository) CreatePackage(ctx context.Context, pkg Package) (int
 	}
 
 	const query = `
-		INSERT INTO packages (name, description, traffic_limit_bytes, cycle_days, is_reset, reset_day, nodes, speed_limit_mbps, device_limit, short_code)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO packages (name, description, traffic_limit_bytes, cycle_days, is_reset, reset_day, nodes, speed_limit_mbps, device_limit, auto_speed_limit_json, short_code)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	isReset := 0
@@ -5846,7 +5870,7 @@ func (r *TrafficRepository) CreatePackage(ctx context.Context, pkg Package) (int
 	}
 
 	result, err := r.db.ExecContext(ctx, query, name, pkg.Description, pkg.TrafficLimitBytes,
-		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, shortCode)
+		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, autoSpeedJSON, shortCode)
 	if err != nil {
 		return 0, fmt.Errorf("create package: %w", err)
 	}
@@ -5880,11 +5904,17 @@ func (r *TrafficRepository) UpdatePackage(ctx context.Context, pkg Package) erro
 		return fmt.Errorf("serialize nodes: %w", err)
 	}
 
+	var autoSpeedJSON string
+	if len(pkg.AutoSpeedRules) > 0 {
+		b, _ := json.Marshal(pkg.AutoSpeedRules)
+		autoSpeedJSON = string(b)
+	}
+
 	const query = `
 		UPDATE packages
 		SET name = ?, description = ?, traffic_limit_bytes = ?, cycle_days = ?,
 		    is_reset = ?, reset_day = ?, nodes = ?, speed_limit_mbps = ?, device_limit = ?,
-		    updated_at = CURRENT_TIMESTAMP
+		    auto_speed_limit_json = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`
 
@@ -5894,7 +5924,7 @@ func (r *TrafficRepository) UpdatePackage(ctx context.Context, pkg Package) erro
 	}
 
 	result, err := r.db.ExecContext(ctx, query, name, pkg.Description, pkg.TrafficLimitBytes,
-		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, pkg.ID)
+		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, autoSpeedJSON, pkg.ID)
 	if err != nil {
 		return fmt.Errorf("update package: %w", err)
 	}

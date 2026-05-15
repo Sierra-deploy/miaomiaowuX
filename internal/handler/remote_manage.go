@@ -2749,3 +2749,19 @@ func (h *RemoteManageHandler) addWebsiteFallbackConfig(config map[string]any, do
 		return
 	}
 }
+
+func (h *RemoteManageHandler) HandleUserSpeeds(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	serverID, err := strconv.ParseInt(r.URL.Query().Get("server_id"), 10, 64)
+	if err != nil || serverID <= 0 {
+		respondJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "invalid server_id"})
+		return
+	}
+
+	speeds := h.wsHandler.GetUserSpeeds(serverID)
+	respondJSON(w, http.StatusOK, map[string]any{"success": true, "user_speeds": speeds})
+}

@@ -67,13 +67,15 @@ type WSAuthResultPayload struct {
 type WSTrafficPayload struct {
 	Stats       *traffic.XrayStats  `json:"stats,omitempty"`
 	OnlineUsers map[string][]string `json:"online_users,omitempty"`
+	UserSpeeds  map[string]int64    `json:"user_speeds,omitempty"`
 }
 
 // WSLimiterConfigPayload 表示限速配置下发消息 (Master -> Agent)
 type WSLimiterConfigPayload struct {
-	InboundTag string             `json:"inbound_tag"`
-	NodeLimit  uint64             `json:"node_limit"`
-	Users      []WSUserLimitInfo  `json:"users"`
+	InboundTag     string                       `json:"inbound_tag"`
+	NodeLimit      uint64                       `json:"node_limit"`
+	Users          []WSUserLimitInfo            `json:"users"`
+	AutoSpeedRules []storage.AutoSpeedLimitRule `json:"auto_speed_rules,omitempty"`
 }
 
 // WSUserLimitInfo 表示单个用户的限速配置
@@ -192,6 +194,7 @@ type RemoteWSHandler struct {
 	limiterPusher     *LimiterConfigPusher
 	licenseManager    *license.Manager
 	crypto            *CryptoConfig
+	userSpeedCache    sync.Map // key: "serverID:email" -> int64 (Bytes/s)
 }
 
 // 创建一个新的 WebSocket 处理程序
@@ -363,6 +366,7 @@ func (h *RemoteWSHandler) handleConnection(conn *websocket.Conn, remoteAddr stri
 	// 断开连接时清理
 	if wsConn != nil {
 		h.conns.Delete(wsConn.Token)
+		h.clearUserSpeedCache(wsConn.ServerID)
 		log.Printf("[Remote WS] Connection closed for server %s (%d)", wsConn.ServerName, wsConn.ServerID)
 	}
 }
@@ -569,7 +573,6 @@ func (h *RemoteWSHandler) handleTraffic(wsConn *RemoteWSConnection, payload json
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// 更新流量报告上的last_heartbeat - 这取代了单独心跳的需要
 	if err := h.repo.UpdateRemoteServerLastActivity(ctx, wsConn.ServerID); err != nil {
 		log.Printf("[Remote WS] Failed to update last activity for server %s: %v", wsConn.ServerName, err)
 	}
@@ -577,6 +580,13 @@ func (h *RemoteWSHandler) handleTraffic(wsConn *RemoteWSConnection, payload json
 	if err := h.collector.ProcessRemoteMetrics(ctx, wsConn.ServerID, trafficPayload.Stats); err != nil {
 		log.Printf("[Remote WS] Failed to process traffic from server %s: %v", wsConn.ServerName, err)
 		return
+	}
+
+	if len(trafficPayload.UserSpeeds) > 0 {
+		serverID := wsConn.ServerID
+		for email, speed := range trafficPayload.UserSpeeds {
+			h.userSpeedCache.Store(fmt.Sprintf("%d:%s", serverID, email), speed)
+		}
 	}
 
 	agentlog.Printf("[Remote WS] Processed traffic from server %s: %d inbounds, %d outbounds, %d users",
@@ -1053,4 +1063,29 @@ func (h *RemoteWSHandler) GetConnectionByServerID(serverID int64) (*RemoteWSConn
 		return true
 	})
 	return found, found != nil
+}
+
+func (h *RemoteWSHandler) clearUserSpeedCache(serverID int64) {
+	prefix := fmt.Sprintf("%d:", serverID)
+	h.userSpeedCache.Range(func(key, _ any) bool {
+		if k, ok := key.(string); ok && strings.HasPrefix(k, prefix) {
+			h.userSpeedCache.Delete(key)
+		}
+		return true
+	})
+}
+
+func (h *RemoteWSHandler) GetUserSpeeds(serverID int64) map[string]int64 {
+	prefix := fmt.Sprintf("%d:", serverID)
+	result := make(map[string]int64)
+	h.userSpeedCache.Range(func(key, value any) bool {
+		if k, ok := key.(string); ok && strings.HasPrefix(k, prefix) {
+			email := k[len(prefix):]
+			if speed, ok := value.(int64); ok {
+				result[email] = speed
+			}
+		}
+		return true
+	})
+	return result
 }

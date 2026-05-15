@@ -49,6 +49,7 @@ func (p *LimiterConfigPusher) BuildLimiterConfigForServer(ctx context.Context, s
 		email       string
 		speedMbps   float64
 		deviceLimit int
+		packageID   int64
 	}
 	userLimitMap := make(map[string]userLimits)
 
@@ -91,10 +92,12 @@ func (p *LimiterConfigPusher) BuildLimiterConfigForServer(ctx context.Context, s
 			email:       username,
 			speedMbps:   speedMbps,
 			deviceLimit: deviceLimit,
+			packageID:   user.PackageID,
 		}
 	}
 
 	tagUsers := make(map[string][]WSUserLimitInfo)
+	tagPkgIDs := make(map[string]map[int64]bool)
 	for _, c := range configs {
 		ul, ok := userLimitMap[c.Username]
 		if !ok {
@@ -109,13 +112,26 @@ func (p *LimiterConfigPusher) BuildLimiterConfigForServer(ctx context.Context, s
 			SpeedLimit:  speedBytes,
 			DeviceLimit: ul.deviceLimit,
 		})
+		if ul.packageID > 0 {
+			if tagPkgIDs[c.InboundTag] == nil {
+				tagPkgIDs[c.InboundTag] = make(map[int64]bool)
+			}
+			tagPkgIDs[c.InboundTag][ul.packageID] = true
+		}
 	}
 
 	var payloads []WSLimiterConfigPayload
 	for tag, users := range tagUsers {
+		var rules []storage.AutoSpeedLimitRule
+		for pkgID := range tagPkgIDs[tag] {
+			if pkg, ok := pkgCache[pkgID]; ok && len(pkg.AutoSpeedRules) > 0 {
+				rules = append(rules, pkg.AutoSpeedRules...)
+			}
+		}
 		payloads = append(payloads, WSLimiterConfigPayload{
-			InboundTag: tag,
-			Users:      users,
+			InboundTag:     tag,
+			Users:          users,
+			AutoSpeedRules: rules,
 		})
 	}
 
