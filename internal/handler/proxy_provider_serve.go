@@ -601,6 +601,9 @@ func parseShadowsocksURI(uri string) (map[string]interface{}, error) {
 		// 格式: base64(method:password)@server:port 或 method:password@server:port
 		atIdx := strings.LastIndex(content, "@")
 		authPart := content[:atIdx]
+		if decoded, err := url.QueryUnescape(authPart); err == nil {
+			authPart = decoded
+		}
 		serverPart := content[atIdx+1:]
 
 		server, port = parseServerPort(serverPart)
