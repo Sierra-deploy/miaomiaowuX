@@ -7,6 +7,8 @@
     "packageManagement": "Packages",
     "certificateManagement": "Certificates",
     "templateManagement": "Templates",
+    "subscriptionGenerator": "Subscriptions",
+    "subscriptionManagement": "Sub Files",
     "systemSettings": "System Settings"
   },
   "actions": {

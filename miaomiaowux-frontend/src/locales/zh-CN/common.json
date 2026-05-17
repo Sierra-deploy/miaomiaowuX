@@ -7,6 +7,8 @@
     "packageManagement": "套餐管理",
     "certificateManagement": "证书管理",
     "templateManagement": "模板管理",
+    "subscriptionGenerator": "生成订阅",
+    "subscriptionManagement": "订阅管理",
     "systemSettings": "系统设置"
   },
   "actions": {

@@ -1,6 +1,6 @@
 import { Link } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, Users, Package, Settings, Shield, Server, LayoutTemplate, Network } from 'lucide-react'
+import { Activity, Users, Package, Settings, Shield, Server, LayoutTemplate, Network, Link2, FileText } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useAuthStore } from '@/stores/auth-store'
 import { useLayoutStore } from '@/stores/layout-store'
@@ -18,6 +18,8 @@ const adminNavLinks = [
   { titleKey: 'nav.userManagement' as const, to: '/users', icon: Users },
   { titleKey: 'nav.packageManagement' as const, to: '/packages', icon: Package },
   { titleKey: 'nav.templateManagement' as const, to: '/templates', icon: LayoutTemplate },
+  { titleKey: 'nav.subscriptionGenerator' as const, to: '/generator', icon: Link2 },
+  { titleKey: 'nav.subscriptionManagement' as const, to: '/subscribe-files', icon: FileText },
   { titleKey: 'nav.systemSettings' as const, to: '/system-settings', icon: Settings },
 ]
 
