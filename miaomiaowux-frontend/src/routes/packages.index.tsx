@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { Edit2, RefreshCw, Trash2, Plus, Package } from 'lucide-react'
 
+import { ProFeatureGate } from '@/components/pro-feature-gate'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -376,6 +377,7 @@ function PackagesPage() {
                 />
               </div>
 
+              <ProFeatureGate feature="limiter">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="speed_limit_mbps">{t('dialog.speedLimit')}</Label>
@@ -404,6 +406,7 @@ function PackagesPage() {
                   <p className="text-xs text-muted-foreground">{t('dialog.deviceLimitDesc')}</p>
                 </div>
               </div>
+              </ProFeatureGate>
 
               <div className="space-y-2">
                 <Label>{t('dialog.relatedNodes')}</Label>

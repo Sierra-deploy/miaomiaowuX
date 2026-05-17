@@ -210,7 +210,9 @@ func main() {
 	// 仅限管理端点
 	mux.Handle("/api/admin/credentials", auth.RequireAdmin(tokenStore, userRepo, handler.NewCredentialsHandler(authManager, tokenStore)))
 	mux.Handle("/api/admin/users", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserListHandler(repo)))
-	mux.Handle("/api/admin/users/create", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserCreateHandler(repo)))
+	userCreateHandler := handler.NewUserCreateHandler(repo)
+	userCreateHandler.SetLicenseManager(licenseManager)
+	mux.Handle("/api/admin/users/create", auth.RequireAdmin(tokenStore, userRepo, userCreateHandler))
 	mux.Handle("/api/admin/users/delete", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserDeleteHandler(repo)))
 	mux.Handle("/api/admin/users/status", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserStatusHandler(repo)))
 	mux.Handle("/api/admin/users/reset-password", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserResetPasswordHandler(repo)))
@@ -332,6 +334,7 @@ func main() {
 	remoteWSHandler.SetLimiterPusher(limiterPusher)
 	remoteWSHandler.SetLicenseManager(licenseManager)
 	xrayServerHandler.SetLimiterPusher(limiterPusher)
+	xrayServerHandler.SetLicenseManager(licenseManager)
 
 	// 远程服务器管理代理（将命令转发到子服务器）
 	remoteManageHandler := handler.NewRemoteManageHandler(repo, remoteWSHandler)
@@ -352,8 +355,8 @@ func main() {
 	mux.Handle("/api/user/nodes/outbounds", auth.RequireToken(tokenStore, userRepo, http.HandlerFunc(userNodesHandler.HandleListOutbounds)))
 
 	// 注册节点处理程序（需要remoteManageHandler进行远程入站清理）
-	mux.Handle("/api/admin/nodes", auth.RequireAdmin(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler)))
-	mux.Handle("/api/admin/nodes/", auth.RequireAdmin(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler)))
+	mux.Handle("/api/admin/nodes", auth.RequireAdmin(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler, licenseManager)))
+	mux.Handle("/api/admin/nodes/", auth.RequireAdmin(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler, licenseManager)))
 
 	// 初始化事件系统以进行入站同步
 	eventBus := event.GetBus()
@@ -628,6 +631,7 @@ func main() {
 	// 许可证 API
 	licenseHandler := handler.NewLicenseHandler(repo, licenseManager)
 	mux.Handle("/api/admin/license/status", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(licenseHandler.GetStatus)))
+	mux.Handle("/api/admin/license/usage", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(licenseHandler.GetUsage)))
 	mux.Handle("/api/admin/license/settings", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:

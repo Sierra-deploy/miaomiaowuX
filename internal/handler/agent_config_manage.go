@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
 	"miaomiaowux/internal/traffic"
 )
@@ -25,12 +26,13 @@ var randReader io.Reader = rand.Reader
 var base64URLEncoding = base64.URLEncoding
 
 type XrayServerHandler struct {
-	repo          *storage.TrafficRepository
-	collector     *traffic.Collector
-	limiterPusher *LimiterConfigPusher
-	remoteManager *RemoteManageHandler
-	wsHandler     *RemoteWSHandler
-	crypto        *CryptoConfig
+	repo           *storage.TrafficRepository
+	collector      *traffic.Collector
+	limiterPusher  *LimiterConfigPusher
+	remoteManager  *RemoteManageHandler
+	wsHandler      *RemoteWSHandler
+	crypto         *CryptoConfig
+	licenseManager *license.Manager
 }
 
 func (h *XrayServerHandler) SetWSHandler(ws *RemoteWSHandler) {
@@ -51,6 +53,10 @@ func (h *XrayServerHandler) SetLimiterPusher(p *LimiterConfigPusher) {
 
 func (h *XrayServerHandler) SetRemoteManager(rm *RemoteManageHandler) {
 	h.remoteManager = rm
+}
+
+func (h *XrayServerHandler) SetLicenseManager(mgr *license.Manager) {
+	h.licenseManager = mgr
 }
 
 
@@ -210,6 +216,24 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 	if r.Method != "POST" {
 		stdhttp.Error(w, "Method not allowed", stdhttp.StatusMethodNotAllowed)
 		return
+	}
+
+	if h.licenseManager != nil {
+		status := h.licenseManager.GetStatus()
+		maxServers := 5
+		if status.Plan != nil {
+			maxServers = status.Plan.MaxServers
+		}
+		count, err := h.repo.CountRemoteServers(r.Context())
+		if err == nil && count >= int64(maxServers) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(stdhttp.StatusForbidden)
+			json.NewEncoder(w).Encode(RemoteServerResponse{
+				Success: false,
+				Message: fmt.Sprintf("已达到服务器数量上限 (%d/%d)，请升级许可证", count, maxServers),
+			})
+			return
+		}
 	}
 
 	var req RemoteServerCreateRequest

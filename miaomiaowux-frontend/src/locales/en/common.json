@@ -176,5 +176,11 @@
   },
   "flagPicker": {
     "autoDetect": "Auto Detect Region"
+  },
+  "license": {
+    "proFeatureTooltip": "This feature requires a Pro license. Please upgrade in license settings.",
+    "serverLimitReached": "Server limit reached ({{current}}/{{max}})",
+    "nodeLimitReached": "Node limit reached ({{current}}/{{max}})",
+    "userLimitReached": "User limit reached ({{current}}/{{max}})"
   }
 }

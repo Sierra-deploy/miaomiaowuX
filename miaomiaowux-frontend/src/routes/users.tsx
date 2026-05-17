@@ -7,6 +7,7 @@ import { toast } from 'sonner'
 import { Topbar } from '@/components/layout/topbar'
 import { DataTable } from '@/components/data-table'
 import type { DataTableColumn } from '@/components/data-table'
+import { useLicenseUsage } from '@/hooks/use-license'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -118,6 +119,9 @@ function UsersPage() {
   const { auth } = useAuthStore()
   const queryClient = useQueryClient()
   const { t } = useTranslation('users')
+  const { t: tc } = useTranslation('common')
+  const { data: licenseUsage } = useLicenseUsage()
+  const usersAtLimit = Boolean(licenseUsage?.usage?.users && licenseUsage.usage.users.current >= licenseUsage.usage.users.max)
   const [resetState, setResetState] = useState<ResetState | null>(null)
   const [deleteUsername, setDeleteUsername] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
@@ -347,6 +351,8 @@ function UsersPage() {
               </div>
               <Button
                 size='sm'
+                disabled={usersAtLimit}
+                title={usersAtLimit ? tc('license.userLimitReached', { current: licenseUsage?.usage?.users?.current, max: licenseUsage?.usage?.users?.max }) : undefined}
                 onClick={() => {
                   setCreateState({ username: '', email: '', nickname: '', password: generatePassword(), remark: '' })
                   setCreateOpen(true)

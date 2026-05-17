@@ -6393,6 +6393,28 @@ func (r *TrafficRepository) SetSystemSetting(ctx context.Context, key, value str
 	return nil
 }
 
+func (r *TrafficRepository) CountRemoteServers(ctx context.Context) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	var count int64
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM remote_servers`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count remote servers: %w", err)
+	}
+	return count, nil
+}
+
+func (r *TrafficRepository) CountUsers(ctx context.Context) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	var count int64
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM users`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count users: %w", err)
+	}
+	return count, nil
+}
+
 // 远程服务器CRUD操作
 
 // 返回所有远程服务器。

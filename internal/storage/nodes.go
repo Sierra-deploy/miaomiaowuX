@@ -115,6 +115,17 @@ func (r *TrafficRepository) ListNodes(ctx context.Context, username string) ([]N
 	return nodes, nil
 }
 
+func (r *TrafficRepository) CountNodes(ctx context.Context) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	var count int64
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM nodes`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count nodes: %w", err)
+	}
+	return count, nil
+}
+
 // 返回管理员用户的所有节点。
 func (r *TrafficRepository) ListAllNodes(ctx context.Context) ([]Node, error) {
 	if r == nil || r.db == nil {

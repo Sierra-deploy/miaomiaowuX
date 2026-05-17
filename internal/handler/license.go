@@ -79,3 +79,29 @@ func (h *LicenseHandler) UserGetStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }
+
+func (h *LicenseHandler) GetUsage(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	status := h.manager.GetStatus()
+
+	serverCount, _ := h.repo.CountRemoteServers(ctx)
+	nodeCount, _ := h.repo.CountNodes(ctx)
+	userCount, _ := h.repo.CountUsers(ctx)
+
+	maxServers, maxNodes, maxUsers := 5, 20, 10
+	if status.Plan != nil {
+		maxServers = status.Plan.MaxServers
+		maxNodes = status.Plan.MaxNodes
+		maxUsers = status.Plan.MaxUsers
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"usage": map[string]any{
+			"servers": map[string]any{"current": serverCount, "max": maxServers},
+			"nodes":   map[string]any{"current": nodeCount, "max": maxNodes},
+			"users":   map[string]any{"current": userCount, "max": maxUsers},
+		},
+	})
+}

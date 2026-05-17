@@ -7,6 +7,7 @@ import { toast } from 'sonner'
 import { Plus, RefreshCw, Search, Trash2, Download, Cog, ChevronDown, Terminal, Play, Square, RotateCcw, Copy, Pencil, X, Settings, Wifi, Radio, Eye, ArrowUpCircle, Globe, CheckCircle, XCircle, Loader2, AlertTriangle, Lock, LockOpen } from 'lucide-react'
 import { ViewToggle, type ViewMode } from '@/components/ui/view-toggle'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { useLicenseUsage } from '@/hooks/use-license'
 
 import { InboundPanel } from '@/components/xray/inbound-panel'
 import { OutboundPanel } from '@/components/xray/outbound-panel'
@@ -118,6 +119,8 @@ function XrayServersPage() {
   const { t: tc } = useTranslation('common')
   const queryClient = useQueryClient()
   const navigate = useNavigate()
+  const { data: licenseUsage } = useLicenseUsage()
+  const serversAtLimit = Boolean(licenseUsage?.usage?.servers && licenseUsage.usage.servers.current >= licenseUsage.usage.servers.max)
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false)
   const [viewMode, setViewMode] = useState<ViewMode>('card')
   const [formData, setFormData] = useState({
@@ -652,7 +655,7 @@ function XrayServersPage() {
       <div className="flex flex-wrap gap-4 mb-6">
         <ViewToggle view={viewMode} onViewChange={setViewMode} />
         <Dialog open={isAddDialogOpen} onOpenChange={(open) => { setIsAddDialogOpen(open); if (!open) resetAddDialog() }}>
-          <DialogTrigger asChild><Button><Plus className="mr-2 h-4 w-4" />{t('servers.addServer')}</Button></DialogTrigger>
+          <DialogTrigger asChild><Button disabled={serversAtLimit} title={serversAtLimit ? t('license.serverLimitReached', { current: licenseUsage?.usage?.servers?.current, max: licenseUsage?.usage?.servers?.max, ns: 'common' }) : undefined}><Plus className="mr-2 h-4 w-4" />{t('servers.addServer')}</Button></DialogTrigger>
           <DialogContent className="w-[90vw] md:w-[60vw] max-w-none max-h-[85vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>{t('servers.addRemoteServer')}</DialogTitle>

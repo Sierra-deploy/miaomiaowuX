@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
 
 	"gopkg.in/yaml.v3"
@@ -113,10 +114,11 @@ type nodesHandler struct {
 	subscribeDir    string
 	yamlSyncManager *YAMLSyncManager
 	remoteManage    *RemoteManageHandler
+	licenseManager  *license.Manager
 }
 
 // 返回一个管理代理节点的仅管理处理程序。
-func NewNodesHandler(repo *storage.TrafficRepository, subscribeDir string, remoteManage *RemoteManageHandler) http.Handler {
+func NewNodesHandler(repo *storage.TrafficRepository, subscribeDir string, remoteManage *RemoteManageHandler, licenseMgr *license.Manager) http.Handler {
 	if repo == nil {
 		panic("nodes handler requires repository")
 	}
@@ -126,6 +128,7 @@ func NewNodesHandler(repo *storage.TrafficRepository, subscribeDir string, remot
 		subscribeDir:    subscribeDir,
 		yamlSyncManager: NewYAMLSyncManager(subscribeDir),
 		remoteManage:    remoteManage,
+		licenseManager:  licenseMgr,
 	}
 }
 
@@ -195,6 +198,19 @@ func (h *nodesHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if username == "" {
 		writeError(w, http.StatusUnauthorized, errors.New("用户未认证"))
 		return
+	}
+
+	if h.licenseManager != nil {
+		status := h.licenseManager.GetStatus()
+		maxNodes := 20
+		if status.Plan != nil {
+			maxNodes = status.Plan.MaxNodes
+		}
+		count, err := h.repo.CountNodes(r.Context())
+		if err == nil && count >= int64(maxNodes) {
+			writeJSONError(w, http.StatusForbidden, fmt.Sprintf("已达到节点数量上限 (%d/%d)，请升级许可证", count, maxNodes))
+			return
+		}
 	}
 
 	var req nodeRequest
@@ -289,6 +305,19 @@ func (h *nodesHandler) handleBatchCreate(w http.ResponseWriter, r *http.Request)
 	if len(req.Nodes) == 0 {
 		writeBadRequest(w, "节点列表不能为空")
 		return
+	}
+
+	if h.licenseManager != nil {
+		status := h.licenseManager.GetStatus()
+		maxNodes := 20
+		if status.Plan != nil {
+			maxNodes = status.Plan.MaxNodes
+		}
+		count, err := h.repo.CountNodes(r.Context())
+		if err == nil && count+int64(len(req.Nodes)) > int64(maxNodes) {
+			writeJSONError(w, http.StatusForbidden, fmt.Sprintf("批量创建将超出节点上限 (%d+%d > %d)，请升级许可证", count, len(req.Nodes), maxNodes))
+			return
+		}
 	}
 
 	nodes := make([]storage.Node, 0, len(req.Nodes))

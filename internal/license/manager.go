@@ -55,8 +55,15 @@ var defaultStatus = Status{
 	},
 }
 
+// SettingsGetter is kept for backward compatibility.
 type SettingsGetter interface {
 	GetSystemSetting(ctx context.Context, key string) (string, error)
+}
+
+// SettingsStore extends SettingsGetter with write capability.
+type SettingsStore interface {
+	GetSystemSetting(ctx context.Context, key string) (string, error)
+	SetSystemSetting(ctx context.Context, key, value string) error
 }
 
 type Manager struct {
@@ -65,14 +72,14 @@ type Manager struct {
 	serverURL string
 	key       string
 	machineID string
-	settings  SettingsGetter
+	settings  SettingsStore
 	client    *http.Client
 	cancel    context.CancelFunc
 }
 
 const DefaultServerURL = "https://license.miaomiaowu.net"
 
-func NewManager(settings SettingsGetter, machineID string) *Manager {
+func NewManager(settings SettingsStore, machineID string) *Manager {
 	return &Manager{
 		status:    defaultStatus,
 		serverURL: DefaultServerURL,
@@ -86,6 +93,8 @@ func (m *Manager) Start(ctx context.Context) {
 	ctx, m.cancel = context.WithCancel(ctx)
 
 	m.loadSettings(ctx)
+	m.loadPersistedStatus(ctx)
+
 	if m.key != "" && m.serverURL != "" {
 		m.activate(ctx)
 	}
@@ -143,6 +152,40 @@ func (m *Manager) loadSettings(ctx context.Context) {
 	}
 }
 
+func (m *Manager) loadPersistedStatus(ctx context.Context) {
+	if m.settings == nil {
+		return
+	}
+	raw, err := m.settings.GetSystemSetting(ctx, "license_status")
+	if err != nil || raw == "" {
+		return
+	}
+	var status Status
+	if err := json.Unmarshal([]byte(raw), &status); err != nil {
+		log.Printf("[license] failed to load persisted status: %v", err)
+		return
+	}
+	m.mu.Lock()
+	m.status = status
+	m.mu.Unlock()
+	log.Printf("[license] restored status from database: valid=%v plan=%s", status.Valid, status.Plan.Name)
+}
+
+func (m *Manager) persistStatus(ctx context.Context) {
+	if m.settings == nil {
+		return
+	}
+	m.mu.RLock()
+	data, err := json.Marshal(m.status)
+	m.mu.RUnlock()
+	if err != nil {
+		return
+	}
+	if err := m.settings.SetSystemSetting(ctx, "license_status", string(data)); err != nil {
+		log.Printf("[license] failed to persist status: %v", err)
+	}
+}
+
 func (m *Manager) activate(ctx context.Context) {
 	body, _ := json.Marshal(map[string]string{
 		"key":        m.key,
@@ -162,7 +205,7 @@ func (m *Manager) activate(ctx context.Context) {
 	}
 	defer resp.Body.Close()
 
-	m.parseResponse(resp)
+	m.parseResponse(ctx, resp)
 }
 
 func (m *Manager) heartbeat(ctx context.Context) {
@@ -188,10 +231,10 @@ func (m *Manager) heartbeat(ctx context.Context) {
 	}
 	defer resp.Body.Close()
 
-	m.parseResponse(resp)
+	m.parseResponse(ctx, resp)
 }
 
-func (m *Manager) parseResponse(resp *http.Response) {
+func (m *Manager) parseResponse(ctx context.Context, resp *http.Response) {
 	var result struct {
 		Valid      bool            `json:"valid"`
 		Error      string          `json:"error,omitempty"`
@@ -205,7 +248,6 @@ func (m *Manager) parseResponse(resp *http.Response) {
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
 
 	m.status.Valid = result.Valid
 	m.status.Error = result.Error
@@ -230,6 +272,10 @@ func (m *Manager) parseResponse(resp *http.Response) {
 			}
 		}
 	}
+
+	m.mu.Unlock()
+
+	m.persistStatus(ctx)
 }
 
 func (m *Manager) heartbeatLoop(ctx context.Context) {

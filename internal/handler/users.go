@@ -4,11 +4,13 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
 
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
 )
 
@@ -254,72 +256,94 @@ func NewUserResetPasswordHandler(repo *storage.TrafficRepository) http.Handler {
 	})
 }
 
-func NewUserCreateHandler(repo *storage.TrafficRepository) http.Handler {
+type userCreateHandler struct {
+	repo           *storage.TrafficRepository
+	licenseManager *license.Manager
+}
+
+func NewUserCreateHandler(repo *storage.TrafficRepository) *userCreateHandler {
 	if repo == nil {
 		panic("user create handler requires repository")
 	}
+	return &userCreateHandler{repo: repo}
+}
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, errors.New("only POST is supported"))
+func (h *userCreateHandler) SetLicenseManager(mgr *license.Manager) {
+	h.licenseManager = mgr
+}
+
+func (h *userCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("only POST is supported"))
+		return
+	}
+
+	if h.licenseManager != nil {
+		status := h.licenseManager.GetStatus()
+		maxUsers := 10
+		if status.Plan != nil {
+			maxUsers = status.Plan.MaxUsers
+		}
+		count, err := h.repo.CountUsers(r.Context())
+		if err == nil && count >= int64(maxUsers) {
+			writeJSONError(w, http.StatusForbidden, fmt.Sprintf("已达到用户数量上限 (%d/%d)，请升级许可证", count, maxUsers))
 			return
 		}
+	}
 
-		var payload userCreateRequest
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
+	var payload userCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 
-		username := strings.TrimSpace(payload.Username)
-		email := strings.TrimSpace(payload.Email)
-		nickname := strings.TrimSpace(payload.Nickname)
-		password := strings.TrimSpace(payload.Password)
-		remark := strings.TrimSpace(payload.Remark)
+	username := strings.TrimSpace(payload.Username)
+	email := strings.TrimSpace(payload.Email)
+	nickname := strings.TrimSpace(payload.Nickname)
+	password := strings.TrimSpace(payload.Password)
+	remark := strings.TrimSpace(payload.Remark)
 
-		if username == "" {
-			writeError(w, http.StatusBadRequest, errors.New("username is required"))
-			return
-		}
+	if username == "" {
+		writeError(w, http.StatusBadRequest, errors.New("username is required"))
+		return
+	}
 
-		if password == "" {
-			random, err := generateRandomPassword(12)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, err)
-				return
-			}
-			password = random
-		}
-		if nickname == "" {
-			nickname = username
-		}
-
-		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if password == "" {
+		random, err := generateRandomPassword(12)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		password = random
+	}
+	if nickname == "" {
+		nickname = username
+	}
 
-		// 新用户被创建为普通用户，而不是管理员
-		role := storage.RoleUser
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 
-		if err := repo.CreateUser(r.Context(), username, email, nickname, string(hash), role, remark); err != nil {
-			if errors.Is(err, storage.ErrUserExists) {
-				writeError(w, http.StatusConflict, errors.New("用户已存在"))
-				return
-			}
-			writeError(w, http.StatusInternalServerError, err)
+	role := storage.RoleUser
+
+	if err := h.repo.CreateUser(r.Context(), username, email, nickname, string(hash), role, remark); err != nil {
+		if errors.Is(err, storage.ErrUserExists) {
+			writeError(w, http.StatusConflict, errors.New("用户已存在"))
 			return
 		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(userCreateResponse{
-			Username: username,
-			Email:    email,
-			Nickname: nickname,
-			Role:     role,
-			Password: password,
-		})
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(userCreateResponse{
+		Username: username,
+		Email:    email,
+		Nickname: nickname,
+		Role:     role,
+		Password: password,
 	})
 }
 
