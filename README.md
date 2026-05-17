@@ -158,6 +158,9 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.0.6 (2026-05-18)
+- 🛠️ fix:docker镜像打包系统版本不对
+- 🛠️ fix:reality节点创建多了出站
 ### v0.0.5-beta (2026-05-18)
 - 🛠️ fix:agent自动上报IPv4优先
 ### v0.0.5 (2026-05-18)
