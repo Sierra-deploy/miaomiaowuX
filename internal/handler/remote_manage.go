@@ -1132,7 +1132,7 @@ func (h *RemoteManageHandler) autoSyncInboundToNodes(ctx context.Context, server
 		return
 	}
 
-	// tunnel 模式：仅当入站端口 == tunnel-in 的 settings.port 时，才使用域名+443
+	// tunnel 模式：仅当入站端口 == tunnel-in 的 settings.port 时，使用 443 端口（但 server 保持用 IP，域名可能走 CDN）
 	tunnelPort := 0
 	if server.Domain != "" && (server.StealMode == "tunnel" || server.StealMode == "") {
 		inboundPort := 0
@@ -1144,7 +1144,6 @@ func (h *RemoteManageHandler) autoSyncInboundToNodes(ctx context.Context, server
 		if inboundPort > 0 {
 			tunnelInSettingsPort := h.getTunnelInSettingsPort(ctx, serverID)
 			if tunnelInSettingsPort > 0 && inboundPort == tunnelInSettingsPort {
-				serverHost = server.Domain
 				tunnelPort = 443
 			}
 		}
@@ -1473,14 +1472,12 @@ func (h *RemoteManageHandler) syncInboundsToNodesInternal(ctx context.Context, s
 			continue
 		}
 
-		// 将入站转换为 Clash 代理配置
+		// 将入站转换为 Clash 代理配置（server 保持用 IP，域名可能走 CDN）
 		tunnelPort := 0
-		host := serverHost
 		if tunnelInSettingsPort > 0 && int(port) == tunnelInSettingsPort {
-			host = server.Domain
 			tunnelPort = 443
 		}
-		clashProxy, err := h.inboundToClashProxy(inbound, host, server.Name, tunnelPort)
+		clashProxy, err := h.inboundToClashProxy(inbound, serverHost, server.Name, tunnelPort)
 		if err != nil {
 			response.Errors = append(response.Errors, fmt.Sprintf("tag=%s: %v", tag, err))
 			response.SkippedCount++
@@ -1736,14 +1733,12 @@ func (h *RemoteManageHandler) HandleSyncInboundsToNodes(w http.ResponseWriter, r
 			}
 		}
 
-		// 将入站转换为 Clash 代理配置
+		// 将入站转换为 Clash 代理配置（server 保持用 IP，域名可能走 CDN）
 		tunnelPort := 0
-		host := req.ServerHost
 		if tunnelInSettingsPort > 0 && int(port) == tunnelInSettingsPort {
-			host = server.Domain
 			tunnelPort = 443
 		}
-		clashProxy, err := h.inboundToClashProxy(inbound, host, server.Name, tunnelPort)
+		clashProxy, err := h.inboundToClashProxy(inbound, req.ServerHost, server.Name, tunnelPort)
 		if err != nil {
 			log.Printf("[Sync Nodes] Error converting inbound %s: %v", tag, err)
 			response.Errors = append(response.Errors, fmt.Sprintf("tag=%s: %v", tag, err))
@@ -2124,7 +2119,7 @@ func (h *RemoteManageHandler) InboundToClashProxyByServerID(serverID int64, inbo
 	serverHost := server.IPAddress
 	tunnelPort := 0
 
-	// tunnel 模式：仅当新入站端口 == tunnel-in 的 settings.port 时，才使用域名+443
+	// tunnel 模式：仅当新入站端口 == tunnel-in 的 settings.port 时，使用 443 端口（server 保持用 IP，域名可能走 CDN）
 	if server.Domain != "" && (server.StealMode == "tunnel" || server.StealMode == "") {
 		inboundPort := 0
 		if p, ok := inbound["port"].(float64); ok {
@@ -2136,7 +2131,6 @@ func (h *RemoteManageHandler) InboundToClashProxyByServerID(serverID int64, inbo
 		if inboundPort > 0 {
 			tunnelInSettingsPort := h.getTunnelInSettingsPort(ctx, serverID)
 			if tunnelInSettingsPort > 0 && inboundPort == tunnelInSettingsPort {
-				serverHost = server.Domain
 				tunnelPort = 443
 			}
 		}
