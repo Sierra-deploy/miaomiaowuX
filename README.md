@@ -158,6 +158,13 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.0.4 (2026-05-17)
+- 🌈 PRO功能展示优化
+- 🌈 优化发布脚本
+- 🌈 增加妙妙屋菜单
+- 🌈 妙妙屋功能增加开关控制
+- 🛠️ fix:同步妙妙屋修改
+- 🛠️ fix:证书保存目录错误写死了/etc
 ### v0.0.4-beta (2026-05-17)
 - 🛠️ fix:cloudflare证书不再本地验证dns
 - 🛠️ fix:自动限速无法恢复
