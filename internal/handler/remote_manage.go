@@ -1975,7 +1975,7 @@ func (h *RemoteManageHandler) addStreamSettings(proxy map[string]interface{}, st
 		if realitySettings, ok := streamSettings["realitySettings"].(map[string]interface{}); ok {
 			realityOpts := map[string]interface{}{}
 			if publicKey, ok := realitySettings["publicKey"].(string); ok {
-				realityOpts["public-key"] = publicKey
+				realityOpts["public-key"] = toURLSafeBase64(publicKey)
 			}
 			// ShortIds 是 Xray 配置中的一个数组
 			if shortIds, ok := realitySettings["shortIds"].([]interface{}); ok && len(shortIds) > 0 {
@@ -2873,4 +2873,9 @@ func (h *RemoteManageHandler) HandleUserSpeeds(w http.ResponseWriter, r *http.Re
 
 	speeds := h.wsHandler.GetUserSpeeds(serverID)
 	respondJSON(w, http.StatusOK, map[string]any{"success": true, "user_speeds": speeds})
+}
+
+func toURLSafeBase64(s string) string {
+	replacer := strings.NewReplacer("+", "-", "/", "_")
+	return strings.TrimRight(replacer.Replace(s), "=")
 }
