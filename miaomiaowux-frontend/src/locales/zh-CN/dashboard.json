@@ -12,16 +12,23 @@
       "usedPercent": "已使用 {{percent}}%"
     },
     "subscribe": {
+      "title": "订阅链接",
       "noSubscriptions": "暂无可用订阅",
+      "noSubscriptionsTitle": "暂无可用订阅",
       "noSubscriptionsDesc": "管理员尚未为您分配套餐或订阅链接，请联系管理员。",
       "showQrCode": "点击显示二维码",
+      "showQR": "点击显示二维码",
       "copy": "复制",
       "import": "导入",
+      "importClash": "导入 Clash",
       "expired": "已过期",
       "expireAt": "到期: {{date}}",
+      "expiresAt": "到期",
       "permanent": "永久",
       "linkCopied": "{{client}} 订阅链接已复制",
-      "copyFailed": "复制失败(需要https)，请手动复制"
+      "copyFailed": "复制失败(需要https)，请手动复制",
+      "qrTitle": "订阅二维码",
+      "description": "使用手机扫描二维码快速导入订阅链接。"
     },
     "qrDialog": {
       "title": "订阅二维码",

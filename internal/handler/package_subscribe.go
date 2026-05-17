@@ -81,7 +81,7 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Load template: default.yaml > redirhost__v3.yaml
-	templateContent, err := h.loadTemplate()
+	templateContent, err := h.loadTemplate(r)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -122,9 +122,16 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	w.Write(converted)
 }
 
-func (h *PackageSubscribeHandler) loadTemplate() (string, error) {
+func (h *PackageSubscribeHandler) loadTemplate(r *http.Request) (string, error) {
 	templatesDir := "rule_templates"
-	candidates := []string{"default.yaml", "redirhost__v3.yaml"}
+	var candidates []string
+
+	cfg, err := h.repo.GetSystemConfig(r.Context())
+	if err == nil && cfg.DefaultTemplateFilename != "" {
+		candidates = append(candidates, cfg.DefaultTemplateFilename)
+	}
+	candidates = append(candidates, "default.yaml", "redirhost__v3.yaml")
+
 	for _, name := range candidates {
 		content, err := os.ReadFile(filepath.Join(templatesDir, name))
 		if err == nil {
@@ -155,7 +162,7 @@ func (h *PackageSubscribeHandler) serveAllNodes(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusNotFound, errors.New("无可用节点"))
 		return
 	}
-	templateContent, err := h.loadTemplate()
+	templateContent, err := h.loadTemplate(r)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

@@ -9,6 +9,8 @@
     "templateManagement": "Templates",
     "subscriptionGenerator": "Subscriptions",
     "subscriptionManagement": "Sub Files",
+    "subscriptionLinks": "Sub Links",
+    "customRulesManagement": "Custom Rules",
     "systemSettings": "System Settings"
   },
   "actions": {

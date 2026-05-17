@@ -138,6 +138,7 @@ function SystemSettingsPage() {
   const [enableShortLink, setEnableShortLink] = useState(true)
   const [enableOverrideScripts, setEnableOverrideScripts] = useState(false)
   const [useNewTemplateSystem, setUseNewTemplateSystem] = useState(true)
+  const [enableMmwFeatures, setEnableMmwFeatures] = useState(true)
 
   const { data: overrideScriptsData } = useQuery({
     queryKey: ['override-scripts-enabled'],
@@ -165,6 +166,33 @@ function SystemSettingsPage() {
       setEnableOverrideScripts(overrideScriptsData.enable_override_scripts)
     }
   }, [overrideScriptsData])
+
+  const { data: mmwFeaturesData } = useQuery({
+    queryKey: ['miaomiaowu-features-enabled'],
+    queryFn: async () => {
+      const response = await api.get('/api/admin/system-settings/miaomiaowu-features')
+      return response.data as { success: boolean; enable_miaomiaowu_features: boolean }
+    },
+    enabled: Boolean(auth.accessToken),
+    staleTime: 5 * 60 * 1000,
+  })
+
+  const toggleMmwFeaturesMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      await api.put('/api/admin/system-settings/miaomiaowu-features', { enable_miaomiaowu_features: enabled })
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['miaomiaowu-features-enabled'] })
+      toast.success(t('miaomiaowuFeatures.updated'))
+    },
+    onError: handleServerError,
+  })
+
+  useEffect(() => {
+    if (mmwFeaturesData?.enable_miaomiaowu_features !== undefined) {
+      setEnableMmwFeatures(mmwFeaturesData.enable_miaomiaowu_features)
+    }
+  }, [mmwFeaturesData])
 
   // 静默模式
   const [silentMode, setSilentMode] = useState(false)
@@ -716,6 +744,32 @@ function SystemSettingsPage() {
                   />
                 </div>
 
+                {/* 妙妙屋功能 */}
+                <div className='flex items-center justify-between rounded-lg border p-3'>
+                  <div className='flex items-center gap-2'>
+                    <Label htmlFor='mmw-features-toggle' className='cursor-pointer'>
+                      {t('miaomiaowuFeatures.enableLabel')}
+                    </Label>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <CircleHelp className='h-4 w-4 text-muted-foreground cursor-help' />
+                      </TooltipTrigger>
+                      <TooltipContent side='top' className='max-w-xs'>
+                        <p>{t('miaomiaowuFeatures.description')}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <Switch
+                    id='mmw-features-toggle'
+                    checked={enableMmwFeatures}
+                    onCheckedChange={(checked) => {
+                      setEnableMmwFeatures(checked)
+                      toggleMmwFeaturesMutation.mutate(checked)
+                    }}
+                    disabled={toggleMmwFeaturesMutation.isPending}
+                  />
+                </div>
+
                 {/* 通知推送 */}
                 <div className='flex items-center justify-between rounded-lg border p-3'>
                   <div className='flex items-center gap-2'>
@@ -882,6 +936,31 @@ function SystemSettingsPage() {
                     disabled={updateSilentModeMutation.isPending}
                   />
                 </div>
+
+                {/* 强制加密通信 */}
+                <div className='flex items-center justify-between rounded-lg border p-3'>
+                  <div className='flex items-center gap-2'>
+                    <Label htmlFor='require-encryption-toggle' className='cursor-pointer'>
+                      {t('encryption.enableLabel')}
+                    </Label>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <CircleHelp className='h-4 w-4 text-muted-foreground cursor-help' />
+                      </TooltipTrigger>
+                      <TooltipContent side='top' className='max-w-xs'>
+                        <p>{t('encryption.description')}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <Switch
+                    id='require-encryption-toggle'
+                    checked={encryptionData?.require_encryption ?? false}
+                    onCheckedChange={(checked) => {
+                      updateEncryptionMutation.mutate({ require_encryption: checked })
+                    }}
+                    disabled={updateEncryptionMutation.isPending}
+                  />
+                </div>
               </div>
 
               {/* 静默模式超时设置 */}
@@ -911,31 +990,6 @@ function SystemSettingsPage() {
                   />
                 </div>
               )}
-
-              {/* 强制加密通信 */}
-              <div className='mt-4 flex items-center justify-between rounded-lg border p-3'>
-                <div className='flex items-center gap-2'>
-                  <Label htmlFor='require-encryption-toggle' className='cursor-pointer'>
-                    {t('encryption.enableLabel')}
-                  </Label>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <CircleHelp className='h-4 w-4 text-muted-foreground cursor-help' />
-                    </TooltipTrigger>
-                    <TooltipContent side='top' className='max-w-xs'>
-                      <p>{t('encryption.description')}</p>
-                    </TooltipContent>
-                  </Tooltip>
-                </div>
-                <Switch
-                  id='require-encryption-toggle'
-                  checked={encryptionData?.require_encryption ?? false}
-                  onCheckedChange={(checked) => {
-                    updateEncryptionMutation.mutate({ require_encryption: checked })
-                  }}
-                  disabled={updateEncryptionMutation.isPending}
-                />
-              </div>
               {encryptionData?.require_encryption && (
                 <p className='mt-1 text-xs text-amber-600 dark:text-amber-400'>
                   {t('encryption.warning')}

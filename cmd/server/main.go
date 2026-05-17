@@ -604,6 +604,26 @@ func main() {
 			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
 		}
 	})))
+	mux.Handle("/api/admin/system-settings/miaomiaowu-features", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			systemSettingsHandler.GetMiaomiaowuFeaturesEnabled(w, r)
+		case http.MethodPut:
+			systemSettingsHandler.SetMiaomiaowuFeaturesEnabled(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/admin/system-settings/default-template", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			systemSettingsHandler.GetDefaultTemplate(w, r)
+		case http.MethodPut:
+			systemSettingsHandler.SetDefaultTemplate(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
 
 	// 许可证 API
 	licenseHandler := handler.NewLicenseHandler(repo, licenseManager)

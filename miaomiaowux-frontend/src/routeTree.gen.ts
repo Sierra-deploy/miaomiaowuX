@@ -15,6 +15,7 @@ import { Route as XrayInboundsRouteImport } from './routes/xray-inbounds'
 import { Route as UsersRouteImport } from './routes/users'
 import { Route as TemplatesRouteImport } from './routes/templates'
 import { Route as SystemSettingsRouteImport } from './routes/system-settings'
+import { Route as SubscriptionRouteImport } from './routes/subscription'
 import { Route as SubscribeFilesRouteImport } from './routes/subscribe-files'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as RulesRouteImport } from './routes/rules'
@@ -30,6 +31,7 @@ import { Route as XrayServersIndexRouteImport } from './routes/xray-servers.inde
 import { Route as XrayOutboundsIndexRouteImport } from './routes/xray-outbounds.index'
 import { Route as XrayInboundsIndexRouteImport } from './routes/xray-inbounds.index'
 import { Route as TemplatesIndexRouteImport } from './routes/templates.index'
+import { Route as SubscriptionIndexRouteImport } from './routes/subscription.index'
 import { Route as SubscribeFilesIndexRouteImport } from './routes/subscribe-files.index'
 import { Route as PackagesIndexRouteImport } from './routes/packages.index'
 import { Route as NodesIndexRouteImport } from './routes/nodes.index'
@@ -65,6 +67,11 @@ const TemplatesRoute = TemplatesRouteImport.update({
 const SystemSettingsRoute = SystemSettingsRouteImport.update({
   id: '/system-settings',
   path: '/system-settings',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SubscriptionRoute = SubscriptionRouteImport.update({
+  id: '/subscription',
+  path: '/subscription',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SubscribeFilesRoute = SubscribeFilesRouteImport.update({
@@ -142,6 +149,11 @@ const TemplatesIndexRoute = TemplatesIndexRouteImport.update({
   path: '/',
   getParentRoute: () => TemplatesRoute,
 } as any)
+const SubscriptionIndexRoute = SubscriptionIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => SubscriptionRoute,
+} as any)
 const SubscribeFilesIndexRoute = SubscribeFilesIndexRouteImport.update({
   id: '/',
   path: '/',
@@ -185,6 +197,7 @@ export interface FileRoutesByFullPath {
   '/rules': typeof RulesRoute
   '/settings': typeof SettingsRoute
   '/subscribe-files': typeof SubscribeFilesRouteWithChildren
+  '/subscription': typeof SubscriptionRouteWithChildren
   '/system-settings': typeof SystemSettingsRoute
   '/templates': typeof TemplatesRouteWithChildren
   '/users': typeof UsersRoute
@@ -197,6 +210,7 @@ export interface FileRoutesByFullPath {
   '/nodes/': typeof NodesIndexRoute
   '/packages/': typeof PackagesIndexRoute
   '/subscribe-files/': typeof SubscribeFilesIndexRoute
+  '/subscription/': typeof SubscriptionIndexRoute
   '/templates/': typeof TemplatesIndexRoute
   '/xray-inbounds/': typeof XrayInboundsIndexRoute
   '/xray-outbounds/': typeof XrayOutboundsIndexRoute
@@ -217,6 +231,7 @@ export interface FileRoutesByTo {
   '/nodes': typeof NodesIndexRoute
   '/packages': typeof PackagesIndexRoute
   '/subscribe-files': typeof SubscribeFilesIndexRoute
+  '/subscription': typeof SubscriptionIndexRoute
   '/templates': typeof TemplatesIndexRoute
   '/xray-inbounds': typeof XrayInboundsIndexRoute
   '/xray-outbounds': typeof XrayOutboundsIndexRoute
@@ -235,6 +250,7 @@ export interface FileRoutesById {
   '/rules': typeof RulesRoute
   '/settings': typeof SettingsRoute
   '/subscribe-files': typeof SubscribeFilesRouteWithChildren
+  '/subscription': typeof SubscriptionRouteWithChildren
   '/system-settings': typeof SystemSettingsRoute
   '/templates': typeof TemplatesRouteWithChildren
   '/users': typeof UsersRoute
@@ -247,6 +263,7 @@ export interface FileRoutesById {
   '/nodes/': typeof NodesIndexRoute
   '/packages/': typeof PackagesIndexRoute
   '/subscribe-files/': typeof SubscribeFilesIndexRoute
+  '/subscription/': typeof SubscriptionIndexRoute
   '/templates/': typeof TemplatesIndexRoute
   '/xray-inbounds/': typeof XrayInboundsIndexRoute
   '/xray-outbounds/': typeof XrayOutboundsIndexRoute
@@ -266,6 +283,7 @@ export interface FileRouteTypes {
     | '/rules'
     | '/settings'
     | '/subscribe-files'
+    | '/subscription'
     | '/system-settings'
     | '/templates'
     | '/users'
@@ -278,6 +296,7 @@ export interface FileRouteTypes {
     | '/nodes/'
     | '/packages/'
     | '/subscribe-files/'
+    | '/subscription/'
     | '/templates/'
     | '/xray-inbounds/'
     | '/xray-outbounds/'
@@ -298,6 +317,7 @@ export interface FileRouteTypes {
     | '/nodes'
     | '/packages'
     | '/subscribe-files'
+    | '/subscription'
     | '/templates'
     | '/xray-inbounds'
     | '/xray-outbounds'
@@ -315,6 +335,7 @@ export interface FileRouteTypes {
     | '/rules'
     | '/settings'
     | '/subscribe-files'
+    | '/subscription'
     | '/system-settings'
     | '/templates'
     | '/users'
@@ -327,6 +348,7 @@ export interface FileRouteTypes {
     | '/nodes/'
     | '/packages/'
     | '/subscribe-files/'
+    | '/subscription/'
     | '/templates/'
     | '/xray-inbounds/'
     | '/xray-outbounds/'
@@ -345,6 +367,7 @@ export interface RootRouteChildren {
   RulesRoute: typeof RulesRoute
   SettingsRoute: typeof SettingsRoute
   SubscribeFilesRoute: typeof SubscribeFilesRouteWithChildren
+  SubscriptionRoute: typeof SubscriptionRouteWithChildren
   SystemSettingsRoute: typeof SystemSettingsRoute
   TemplatesRoute: typeof TemplatesRouteWithChildren
   UsersRoute: typeof UsersRoute
@@ -395,6 +418,13 @@ declare module '@tanstack/react-router' {
       path: '/system-settings'
       fullPath: '/system-settings'
       preLoaderRoute: typeof SystemSettingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/subscription': {
+      id: '/subscription'
+      path: '/subscription'
+      fullPath: '/subscription'
+      preLoaderRoute: typeof SubscriptionRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/subscribe-files': {
@@ -502,6 +532,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof TemplatesIndexRouteImport
       parentRoute: typeof TemplatesRoute
     }
+    '/subscription/': {
+      id: '/subscription/'
+      path: '/'
+      fullPath: '/subscription/'
+      preLoaderRoute: typeof SubscriptionIndexRouteImport
+      parentRoute: typeof SubscriptionRoute
+    }
     '/subscribe-files/': {
       id: '/subscribe-files/'
       path: '/'
@@ -607,6 +644,18 @@ const SubscribeFilesRouteWithChildren = SubscribeFilesRoute._addFileChildren(
   SubscribeFilesRouteChildren,
 )
 
+interface SubscriptionRouteChildren {
+  SubscriptionIndexRoute: typeof SubscriptionIndexRoute
+}
+
+const SubscriptionRouteChildren: SubscriptionRouteChildren = {
+  SubscriptionIndexRoute: SubscriptionIndexRoute,
+}
+
+const SubscriptionRouteWithChildren = SubscriptionRoute._addFileChildren(
+  SubscriptionRouteChildren,
+)
+
 interface TemplatesRouteChildren {
   TemplatesIndexRoute: typeof TemplatesIndexRoute
 }
@@ -667,6 +716,7 @@ const rootRouteChildren: RootRouteChildren = {
   RulesRoute: RulesRoute,
   SettingsRoute: SettingsRoute,
   SubscribeFilesRoute: SubscribeFilesRouteWithChildren,
+  SubscriptionRoute: SubscriptionRouteWithChildren,
   SystemSettingsRoute: SystemSettingsRoute,
   TemplatesRoute: TemplatesRouteWithChildren,
   UsersRoute: UsersRoute,

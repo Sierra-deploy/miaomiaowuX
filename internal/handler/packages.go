@@ -7,11 +7,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"miaomiaowux/internal/storage"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
+
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/substore"
 
 	"github.com/google/uuid"
 )
@@ -498,10 +502,116 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		go h.pusher.PushToAllServersForUser(context.Background(), req.Username)
 	}
 
+	go h.autoGenerateSubscription(context.Background(), req.Username, req.PackageID)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"message": "Package assigned successfully",
 	})
+}
+
+func (h *PackageAssignHandler) autoGenerateSubscription(ctx context.Context, username string, packageID int64) {
+	pkg, err := h.repo.GetPackage(ctx, packageID)
+	if err != nil {
+		log.Printf("[PackageAssign] 自动生成订阅失败: 获取套餐错误: %v", err)
+		return
+	}
+
+	var proxies []map[string]any
+	for _, nodeID := range pkg.Nodes {
+		node, err := h.repo.GetNodeByID(ctx, nodeID)
+		if err != nil || !node.Enabled || node.ClashConfig == "" {
+			continue
+		}
+		var proxyConfig map[string]any
+		if err := json.Unmarshal([]byte(node.ClashConfig), &proxyConfig); err != nil {
+			continue
+		}
+		proxies = append(proxies, proxyConfig)
+	}
+
+	if len(proxies) == 0 {
+		log.Printf("[PackageAssign] 自动生成订阅跳过: 套餐 %d 无可用节点", packageID)
+		return
+	}
+
+	templateContent, err := h.loadDefaultTemplate(ctx)
+	if err != nil {
+		log.Printf("[PackageAssign] 自动生成订阅失败: %v", err)
+		return
+	}
+
+	processor := substore.NewTemplateV3Processor(nil, nil)
+	result, err := processor.ProcessTemplate(templateContent, proxies)
+	if err != nil {
+		log.Printf("[PackageAssign] 自动生成订阅失败: 处理模板错误: %v", err)
+		return
+	}
+
+	result, err = injectProxiesIntoTemplate(result, proxies)
+	if err != nil {
+		log.Printf("[PackageAssign] 自动生成订阅失败: 注入代理错误: %v", err)
+		return
+	}
+
+	os.MkdirAll("subscribes", 0755)
+
+	existing, err := h.repo.GetUserPackageSubscription(ctx, username)
+	if err == nil {
+		filePath := filepath.Join("subscribes", existing.Filename)
+		if err := os.WriteFile(filePath, []byte(result), 0644); err != nil {
+			log.Printf("[PackageAssign] 自动生成订阅失败: 写入文件错误: %v", err)
+			return
+		}
+		existing.Name = fmt.Sprintf("%s - %s", username, pkg.Name)
+		existing.Description = "套餐自动生成"
+		h.repo.UpdateSubscribeFile(ctx, existing)
+		log.Printf("[PackageAssign] 已更新用户 %s 的套餐订阅文件", username)
+		return
+	}
+
+	filename := fmt.Sprintf("pkg_%s.yaml", username)
+	filePath := filepath.Join("subscribes", filename)
+	if err := os.WriteFile(filePath, []byte(result), 0644); err != nil {
+		log.Printf("[PackageAssign] 自动生成订阅失败: 写入文件错误: %v", err)
+		return
+	}
+
+	file := storage.SubscribeFile{
+		Name:        fmt.Sprintf("%s - %s", username, pkg.Name),
+		Description: "套餐自动生成",
+		Type:        storage.SubscribeTypePackage,
+		Filename:    filename,
+	}
+	created, err := h.repo.CreateSubscribeFile(ctx, file)
+	if err != nil {
+		log.Printf("[PackageAssign] 自动生成订阅失败: 创建记录错误: %v", err)
+		return
+	}
+	if err := h.repo.AssignSubscriptionToUser(ctx, username, created.ID); err != nil {
+		log.Printf("[PackageAssign] 自动生成订阅失败: 关联用户错误: %v", err)
+		return
+	}
+	log.Printf("[PackageAssign] 已为用户 %s 创建套餐订阅文件", username)
+}
+
+func (h *PackageAssignHandler) loadDefaultTemplate(ctx context.Context) (string, error) {
+	templatesDir := "rule_templates"
+	var candidates []string
+
+	cfg, err := h.repo.GetSystemConfig(ctx)
+	if err == nil && cfg.DefaultTemplateFilename != "" {
+		candidates = append(candidates, cfg.DefaultTemplateFilename)
+	}
+	candidates = append(candidates, "default.yaml", "redirhost__v3.yaml")
+
+	for _, name := range candidates {
+		content, err := os.ReadFile(filepath.Join(templatesDir, name))
+		if err == nil {
+			return string(content), nil
+		}
+	}
+	return "", fmt.Errorf("未找到可用模板")
 }
 
 // addUserToInbound 获取远程入站配置，添加用户凭据，然后重新提交

@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import { createFileRoute } from '@tanstack/react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { Plus, Pencil, Trash2, Eye, Save } from 'lucide-react'
+import { Plus, Pencil, Trash2, Eye, Save, Star } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 import { Topbar } from '@/components/layout/topbar'
@@ -99,6 +99,29 @@ function TemplatesPage() {
     queryFn: async () => {
       const response = await api.get('/api/admin/rule-templates')
       return response.data.templates || []
+    },
+  })
+
+  // Default template
+  const { data: defaultTemplateData } = useQuery({
+    queryKey: ['default-template'],
+    queryFn: async () => {
+      const response = await api.get('/api/admin/system-settings/default-template')
+      return response.data as { success: boolean; default_template_filename: string }
+    },
+  })
+  const defaultTemplateFilename = defaultTemplateData?.default_template_filename ?? ''
+
+  const setDefaultTemplateMutation = useMutation({
+    mutationFn: async (filename: string) => {
+      await api.put('/api/admin/system-settings/default-template', { default_template_filename: filename })
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['default-template'] })
+      toast.success(t('defaultTemplate.updated'))
+    },
+    onError: () => {
+      toast.error(t('defaultTemplate.failed'))
     },
   })
 
@@ -508,12 +531,27 @@ function TemplatesPage() {
   const columns: DataTableColumn<string>[] = [
     {
       header: t('list.templateName'),
-      cell: (name) => <span className="font-medium">{name}</span>,
+      cell: (name) => (
+        <div className="flex items-center gap-2">
+          <span className="font-medium">{name}</span>
+          {name === defaultTemplateFilename && (
+            <Badge variant="secondary" className="text-xs">{t('defaultTemplate.label')}</Badge>
+          )}
+        </div>
+      ),
     },
     {
       header: t('list.actions'),
       cell: (name) => (
         <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => setDefaultTemplateMutation.mutate(name === defaultTemplateFilename ? '' : name)}
+            title={name === defaultTemplateFilename ? t('defaultTemplate.unset') : t('defaultTemplate.set')}
+          >
+            <Star className={cn("h-4 w-4", name === defaultTemplateFilename ? "fill-primary text-primary" : "")} />
+          </Button>
           <Button variant="ghost" size="icon" onClick={() => handleEdit(name)} title={t('list.edit')}>
             <Pencil className="h-4 w-4" />
           </Button>

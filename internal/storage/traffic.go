@@ -292,6 +292,8 @@ type SystemConfig struct {
 	EnableOverrideScripts       bool   // 启用覆写脚本功能
 	SilentMode                  bool   // 静默模式：所有请求返回404，仅订阅接口可用
 	SilentModeTimeout           int    // 获取订阅后恢复访问的分钟数，默认15
+	EnableMiaomiaowuFeatures    bool   // 启用妙妙屋功能（模板、订阅管理等菜单）
+	DefaultTemplateFilename     string // 默认模板文件名（rule_templates/目录下）
 }
 
 // ExternalSubscription表示用户导入的外部订阅URL。
@@ -1175,6 +1177,12 @@ CREATE INDEX IF NOT EXISTS idx_override_scripts_hook ON override_scripts(hook);
 		return fmt.Errorf("ensure silent_mode column: %w", err)
 	}
 	if err := r.ensureSystemConfigColumn("silent_mode_timeout", "INTEGER NOT NULL DEFAULT 15"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("enable_miaomiaowu_features", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("default_template_filename", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 
@@ -5173,7 +5181,8 @@ SELECT proxy_groups_source_url, client_compatibility_mode, COALESCE(enable_short
        COALESCE(notify_server_offline, 0), COALESCE(notify_server_online, 0), COALESCE(notify_traffic_threshold, 0),
        COALESCE(notify_daily_traffic_time, '08:00'), COALESCE(notify_traffic_threshold_percent, 80),
        COALESCE(enable_override_scripts, 0),
-       COALESCE(silent_mode, 0), COALESCE(silent_mode_timeout, 15)
+       COALESCE(silent_mode, 0), COALESCE(silent_mode_timeout, 15),
+       COALESCE(enable_miaomiaowu_features, 1), COALESCE(default_template_filename, '')
 FROM system_config
 WHERE id = 1
 `
@@ -5183,6 +5192,7 @@ WHERE id = 1
 	var notifyEnabled, notifyLogin, notifySubFetch, notifyDailyTraffic int
 	var notifyServerOffline, notifyServerOnline, notifyTrafficThreshold int
 	var enableOverrideScripts, silentMode, silentModeTimeout int
+	var enableMiaomiaowuFeatures int
 	err := r.db.QueryRowContext(ctx, query).Scan(
 		&cfg.ProxyGroupsSourceURL, &compatibilityMode, &enableShortLink,
 		&cfg.SpeedCollectInterval, &cfg.TrafficCollectInterval,
@@ -5194,10 +5204,11 @@ WHERE id = 1
 		&cfg.NotifyDailyTrafficTime, &cfg.NotifyTrafficThresholdPercent,
 		&enableOverrideScripts,
 		&silentMode, &silentModeTimeout,
+		&enableMiaomiaowuFeatures, &cfg.DefaultTemplateFilename,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return SystemConfig{EnableShortLink: true, SpeedCollectInterval: 3, TrafficCollectInterval: 60, TrafficCheckInterval: 120, HeartbeatInterval: 30, NotifyDailyTrafficTime: "08:00", NotifyTrafficThresholdPercent: 80, SilentModeTimeout: 15}, nil
+			return SystemConfig{EnableShortLink: true, SpeedCollectInterval: 3, TrafficCollectInterval: 60, TrafficCheckInterval: 120, HeartbeatInterval: 30, NotifyDailyTrafficTime: "08:00", NotifyTrafficThresholdPercent: 80, SilentModeTimeout: 15, EnableMiaomiaowuFeatures: true}, nil
 		}
 		return SystemConfig{}, fmt.Errorf("query system config: %w", err)
 	}
@@ -5218,6 +5229,7 @@ WHERE id = 1
 	if cfg.SilentModeTimeout <= 0 {
 		cfg.SilentModeTimeout = 15
 	}
+	cfg.EnableMiaomiaowuFeatures = enableMiaomiaowuFeatures != 0
 	return cfg, nil
 }
 
@@ -5248,6 +5260,8 @@ SET proxy_groups_source_url = ?,
     enable_override_scripts = ?,
     silent_mode = ?,
     silent_mode_timeout = ?,
+    enable_miaomiaowu_features = ?,
+    default_template_filename = ?,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = 1
 `
@@ -5285,7 +5299,8 @@ WHERE id = 1
 		boolToInt(cfg.NotifyServerOffline), boolToInt(cfg.NotifyServerOnline), boolToInt(cfg.NotifyTrafficThreshold),
 		cfg.NotifyDailyTrafficTime, cfg.NotifyTrafficThresholdPercent,
 		boolToInt(cfg.EnableOverrideScripts),
-		boolToInt(cfg.SilentMode), silentModeTimeout)
+		boolToInt(cfg.SilentMode), silentModeTimeout,
+		boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename)
 	if err != nil {
 		return fmt.Errorf("update system config: %w", err)
 	}
@@ -5302,8 +5317,8 @@ INSERT INTO system_config (id, proxy_groups_source_url, client_compatibility_mod
     notify_enabled, telegram_bot_token, telegram_chat_id, notify_login, notify_subscribe_fetch,
     notify_daily_traffic, notify_server_offline, notify_server_online, notify_traffic_threshold,
     notify_daily_traffic_time, notify_traffic_threshold_percent, enable_override_scripts,
-    silent_mode, silent_mode_timeout)
-VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    silent_mode, silent_mode_timeout, enable_miaomiaowu_features, default_template_filename)
+VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 		if _, err := r.db.ExecContext(ctx, insertStmt, cfg.ProxyGroupsSourceURL, compatibilityMode, enableShortLink,
 			cfg.SpeedCollectInterval, cfg.TrafficCollectInterval, cfg.TrafficCheckInterval, cfg.HeartbeatInterval, agentLogEnabled,
@@ -5312,7 +5327,8 @@ VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			boolToInt(cfg.NotifyServerOffline), boolToInt(cfg.NotifyServerOnline), boolToInt(cfg.NotifyTrafficThreshold),
 			cfg.NotifyDailyTrafficTime, cfg.NotifyTrafficThresholdPercent,
 			boolToInt(cfg.EnableOverrideScripts),
-			boolToInt(cfg.SilentMode), silentModeTimeout); err != nil {
+			boolToInt(cfg.SilentMode), silentModeTimeout,
+			boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename); err != nil {
 			return fmt.Errorf("insert system config: %w", err)
 		}
 	}

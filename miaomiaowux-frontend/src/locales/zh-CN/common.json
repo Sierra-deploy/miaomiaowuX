@@ -9,6 +9,8 @@
     "templateManagement": "模板管理",
     "subscriptionGenerator": "生成订阅",
     "subscriptionManagement": "订阅管理",
+    "subscriptionLinks": "订阅链接",
+    "customRulesManagement": "覆写管理",
     "systemSettings": "系统设置"
   },
   "actions": {

@@ -24,6 +24,13 @@
     "newTemplate": "新建模板",
     "empty": "暂无模板，点击上方按钮创建"
   },
+  "defaultTemplate": {
+    "label": "默认",
+    "set": "设为默认",
+    "unset": "取消默认",
+    "updated": "默认模板已更新",
+    "failed": "设置默认模板失败"
+  },
   "editor": {
     "editTemplate": "编辑模板配置",
     "close": "关闭"

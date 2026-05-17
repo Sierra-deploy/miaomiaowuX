@@ -12,16 +12,23 @@
       "usedPercent": "Used {{percent}}%"
     },
     "subscribe": {
+      "title": "Subscription Links",
       "noSubscriptions": "No subscriptions available",
+      "noSubscriptionsTitle": "No subscriptions available",
       "noSubscriptionsDesc": "The administrator has not assigned any packages or subscription links to you. Please contact the admin.",
       "showQrCode": "Click to show QR code",
+      "showQR": "Click to show QR code",
       "copy": "Copy",
       "import": "Import",
+      "importClash": "Import Clash",
       "expired": "Expired",
       "expireAt": "Expires: {{date}}",
+      "expiresAt": "Expires",
       "permanent": "Permanent",
       "linkCopied": "{{client}} subscription link copied",
-      "copyFailed": "Copy failed (HTTPS required), please copy manually"
+      "copyFailed": "Copy failed (HTTPS required), please copy manually",
+      "qrTitle": "Subscription QR Code",
+      "description": "Scan the QR code with your phone to quickly import the subscription link."
     },
     "qrDialog": {
       "title": "Subscription QR Code",

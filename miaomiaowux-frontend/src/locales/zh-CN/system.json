@@ -63,6 +63,12 @@
     "enableLabel": "启用覆写脚本",
     "updated": "覆写脚本设置已更新"
   },
+  "miaomiaowuFeatures": {
+    "title": "妙妙屋功能",
+    "description": "开启后显示模板管理、订阅管理、生成订阅、订阅链接、覆写管理菜单",
+    "enableLabel": "启用妙妙屋功能",
+    "updated": "妙妙屋功能设置已更新"
+  },
   "silentMode": {
     "title": "静默模式",
     "description": "开启后，所有请求返回 404，仅订阅相关接口可用。用户获取一次订阅后临时恢复访问。",

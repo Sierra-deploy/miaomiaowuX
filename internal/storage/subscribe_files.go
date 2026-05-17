@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	SubscribeTypeCreate = "create"
-	SubscribeTypeImport = "import"
-	SubscribeTypeUpload = "upload"
+	SubscribeTypeCreate  = "create"
+	SubscribeTypeImport  = "import"
+	SubscribeTypeUpload  = "upload"
+	SubscribeTypePackage = "package"
 )
 
 // 返回按创建时间排序的所有订阅文件。
@@ -149,7 +150,7 @@ func (r *TrafficRepository) CreateSubscribeFile(ctx context.Context, file Subscr
 	if file.Name == "" {
 		return SubscribeFile{}, errors.New("subscribe file name is required")
 	}
-	if file.Type != SubscribeTypeCreate && file.Type != SubscribeTypeImport && file.Type != SubscribeTypeUpload {
+	if file.Type != SubscribeTypeCreate && file.Type != SubscribeTypeImport && file.Type != SubscribeTypeUpload && file.Type != SubscribeTypePackage {
 		return SubscribeFile{}, errors.New("invalid subscribe file type")
 	}
 	// URL只对import类型必填，upload类型可以为空
@@ -216,7 +217,7 @@ func (r *TrafficRepository) UpdateSubscribeFile(ctx context.Context, file Subscr
 	if file.Name == "" {
 		return SubscribeFile{}, errors.New("subscribe file name is required")
 	}
-	if file.Type != SubscribeTypeCreate && file.Type != SubscribeTypeImport && file.Type != SubscribeTypeUpload {
+	if file.Type != SubscribeTypeCreate && file.Type != SubscribeTypeImport && file.Type != SubscribeTypeUpload && file.Type != SubscribeTypePackage {
 		return SubscribeFile{}, errors.New("invalid subscribe file type")
 	}
 	// URL只对import类型必填，upload类型可以为空
@@ -297,4 +298,26 @@ func (r *TrafficRepository) DeleteSubscribeFile(ctx context.Context, id int64) e
 	}
 
 	return nil
+}
+
+// GetUserPackageSubscription 获取用户的自动生成（package类型）订阅文件。
+func (r *TrafficRepository) GetUserPackageSubscription(ctx context.Context, username string) (SubscribeFile, error) {
+	var file SubscribeFile
+	var autoSync int
+	var expireAt sql.NullTime
+	err := r.db.QueryRowContext(ctx, `
+		SELECT sf.id, sf.name, COALESCE(sf.description, ''), sf.url, sf.type, sf.filename, COALESCE(sf.file_short_code, ''), COALESCE(sf.auto_sync_custom_rules, 0), sf.expire_at, sf.created_at, sf.updated_at
+		FROM subscribe_files sf
+		INNER JOIN user_subscriptions us ON sf.id = us.subscription_id
+		WHERE us.username = ? AND sf.type = ?
+		LIMIT 1
+	`, username, SubscribeTypePackage).Scan(&file.ID, &file.Name, &file.Description, &file.URL, &file.Type, &file.Filename, &file.FileShortCode, &autoSync, &expireAt, &file.CreatedAt, &file.UpdatedAt)
+	if err != nil {
+		return file, err
+	}
+	file.AutoSyncCustomRules = autoSync != 0
+	if expireAt.Valid {
+		file.ExpireAt = &expireAt.Time
+	}
+	return file, nil
 }

@@ -24,6 +24,13 @@
     "newTemplate": "New Template",
     "empty": "No templates yet. Click the button above to create one."
   },
+  "defaultTemplate": {
+    "label": "Default",
+    "set": "Set as Default",
+    "unset": "Unset Default",
+    "updated": "Default template updated",
+    "failed": "Failed to set default template"
+  },
   "editor": {
     "editTemplate": "Edit template configuration",
     "close": "Close"

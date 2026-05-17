@@ -63,6 +63,12 @@
     "enableLabel": "Enable Override Scripts",
     "updated": "Override scripts settings updated"
   },
+  "miaomiaowuFeatures": {
+    "title": "Miaomiaowu Features",
+    "description": "When enabled, shows Templates, Sub Files, Subscriptions, Sub Links, and Custom Rules menus",
+    "enableLabel": "Enable Miaomiaowu Features",
+    "updated": "Miaomiaowu features settings updated"
+  },
   "silentMode": {
     "title": "Silent Mode",
     "description": "When enabled, all requests return 404 except subscription endpoints. Access is temporarily restored after fetching a subscription.",
