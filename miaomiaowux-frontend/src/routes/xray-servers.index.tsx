@@ -122,7 +122,7 @@ function XrayServersPage() {
   const { data: licenseUsage } = useLicenseUsage()
   const serversAtLimit = Boolean(licenseUsage?.usage?.servers && licenseUsage.usage.servers.current >= licenseUsage.usage.servers.max)
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false)
-  const [viewMode, setViewMode] = useState<ViewMode>('card')
+  const [viewMode, setViewMode] = useState<ViewMode>(() => (localStorage.getItem('servers-view-mode') as ViewMode) || 'card')
   const [formData, setFormData] = useState({
     name: '',
     traffic_limit_gb: '',
@@ -694,7 +694,7 @@ function XrayServersPage() {
         <p className="text-gray-600">{t('servers.desc')}</p>
       </div>
       <div className="flex flex-wrap gap-4 mb-6">
-        <ViewToggle view={viewMode} onViewChange={setViewMode} />
+        <ViewToggle view={viewMode} onViewChange={(v) => { setViewMode(v); localStorage.setItem('servers-view-mode', v) }} />
         <Dialog open={isAddDialogOpen} onOpenChange={(open) => { setIsAddDialogOpen(open); if (!open) resetAddDialog() }}>
           <DialogTrigger asChild><Button disabled={serversAtLimit} title={serversAtLimit ? t('license.serverLimitReached', { current: licenseUsage?.usage?.servers?.current, max: licenseUsage?.usage?.servers?.max, ns: 'common' }) : undefined}><Plus className="mr-2 h-4 w-4" />{t('servers.addServer')}</Button></DialogTrigger>
           <DialogContent className="w-[95vw] md:w-[75vw] lg:w-[60vw] max-w-4xl max-h-[85vh] overflow-y-auto overflow-x-hidden">
@@ -881,20 +881,19 @@ function XrayServersPage() {
                       ) : server.status === 'connected' ? (<p className="text-sm font-mono text-muted-foreground">{t('servers.waitingData')}</p>) : server.status === 'pending' ? (<p className="text-sm font-mono text-muted-foreground">{t('servers.pendingShort')}</p>) : (<p className="text-sm font-mono text-muted-foreground">{t('servers.offline')}</p>)}
                     </div>
                     <div className="flex-1 min-w-0 bg-muted/50 rounded-lg p-3">
-                      <div className="flex items-center justify-between gap-1 text-xs text-muted-foreground mb-2">
-                        <div className="flex items-center gap-1.5 shrink-0">
+                      <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
+                        <div className="flex items-center gap-1.5">
                           <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /><path d="M9 12l2 2 4-4" /></svg>
                           <span>{t('servers.trafficStats')}</span>
                         </div>
-                        <span className="text-sm font-mono font-medium text-foreground truncate">{server.traffic_limit && server.traffic_limit > 0 ? `${formatTraffic(server.traffic_used || 0)}/${formatTraffic(server.traffic_limit)}` : formatTraffic(server.traffic_used || 0)}</span>
+                        {server.traffic_limit && server.traffic_limit > 0 ? <span>{t('servers.usedTotal')}</span> : <span>{t('servers.unlimited')}</span>}
                       </div>
-                      {server.traffic_limit && server.traffic_limit > 0 ? (
+                      <div className="text-sm font-mono font-medium mb-2">{server.traffic_limit && server.traffic_limit > 0 ? `${formatTraffic(server.traffic_used || 0)} / ${formatTraffic(server.traffic_limit)}` : formatTraffic(server.traffic_used || 0)}</div>
+                      {server.traffic_limit > 0 && (
                         <div className="space-y-2">
                           <div className="h-1.5 bg-muted rounded-full overflow-hidden"><div className={cn("h-full rounded-full transition-all", getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 90 ? "bg-red-500" : getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 70 ? "bg-yellow-500" : "bg-primary")} style={{ width: `${Math.min(getTrafficPercent(server.traffic_used || 0, server.traffic_limit), 100)}%` }} /></div>
                           {server.traffic_reset_day && server.traffic_reset_day > 0 && (<div className="flex items-center justify-between text-xs text-muted-foreground"><span>{t('servers.resetLabel')}</span><span>{t('servers.monthlyReset', { day: server.traffic_reset_day })}</span></div>)}
                         </div>
-                      ) : (
-                        <div className="text-xs text-muted-foreground">{t('servers.unlimited')}</div>
                       )}
                     </div>
                   </div>
