@@ -39,14 +39,43 @@ func (h *shortLinkHandler) TryServe(w http.ResponseWriter, r *http.Request) bool
 		return false
 	}
 
-	compositeCode := strings.Trim(r.URL.Path, "/")
-	compositeCode = strings.TrimPrefix(compositeCode, "x/")
-	if len(compositeCode) < 2 {
+	code := strings.Trim(r.URL.Path, "/")
+	code = strings.TrimPrefix(code, "x/")
+	if len(code) < 2 {
 		return false
 	}
 
 	ctx := r.Context()
 
+	// 新逻辑：直接用 code 查 subscribe_files 表（custom_short_code 或 file_short_code）
+	if sf, err := h.repo.GetSubscribeFileByShortCode(ctx, code); err == nil {
+		username := sf.CreatedBy
+		if username == "" {
+			return false
+		}
+
+		if sf.Type == "package" && h.packageHandler != nil {
+			newCtx := auth.ContextWithUsername(ctx, username)
+			h.packageHandler.ServeHTTP(w, r.Clone(newCtx))
+			return true
+		}
+
+		newURL := *r.URL
+		q := newURL.Query()
+		q.Set("filename", sf.Filename)
+		if clientType := r.URL.Query().Get("t"); clientType != "" {
+			q.Set("t", clientType)
+		}
+		newURL.RawQuery = q.Encode()
+
+		newCtx := auth.ContextWithUsername(ctx, username)
+		newRequest := r.Clone(newCtx)
+		newRequest.URL = &newURL
+		h.subscriptionHandler.ServeHTTP(w, newRequest)
+		return true
+	}
+
+	// Fallback: 旧复合码逻辑（FileShortCode + UserShortCode）
 	fileCodes, err := h.repo.GetAllFileShortCodes(ctx)
 	if err != nil {
 		fileCodes = nil
@@ -64,9 +93,9 @@ func (h *shortLinkHandler) TryServe(w http.ResponseWriter, r *http.Request) bool
 	var filename, username string
 	var isPackage bool
 	matched := false
-	for i := len(compositeCode) - 1; i >= 1; i-- {
-		leftCode := compositeCode[:i]
-		rightCode := compositeCode[i:]
+	for i := len(code) - 1; i >= 1; i-- {
+		leftCode := code[:i]
+		rightCode := code[i:]
 		un, uOk := userCodes[rightCode]
 		if !uOk {
 			continue

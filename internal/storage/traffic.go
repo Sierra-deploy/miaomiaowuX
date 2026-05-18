@@ -237,10 +237,16 @@ type SubscribeFile struct {
 	URL                 string
 	Type                string
 	Filename            string
-	FileShortCode       string     // 用于复合短链接中文件识别的 3 字符代码
-	CustomShortCode     string     // 用户自定义的文件短码
-	AutoSyncCustomRules bool       // 是否自动同步自定义规则到该文件
-	ExpireAt            *time.Time // 可选的过期时间戳
+	FileShortCode       string   // 用于短链接的 3 字符代码（自动生成）
+	CustomShortCode     string   // 用户自定义短码（唯一，优先）
+	AutoSyncCustomRules bool
+	TemplateFilename    string   // 绑定的 V3 模板文件名
+	SelectedTags        []string // 选中的节点标签（DB 中 JSON 数组）
+	StatsServerIDs      string   // 流量统计服务器 ID（逗号分隔 remote_servers.id）
+	TrafficLimit        *float64 // 手动流量上限(GB)，nil=跟随服务器
+	SortOrder           int
+	RawOutput           bool
+	CreatedBy           string // 创建者用户名
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 }
@@ -1126,6 +1132,27 @@ CREATE INDEX IF NOT EXISTS idx_custom_rules_enabled ON custom_rules(enabled);
 
 	// 将 auto_sync_custom_rules 列添加到 subscribe_files 表
 	if err := r.ensureSubscribeFileColumn("auto_sync_custom_rules", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSubscribeFileColumn("template_filename", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := r.ensureSubscribeFileColumn("selected_tags", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+	if err := r.ensureSubscribeFileColumn("stats_server_ids", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := r.ensureSubscribeFileColumn("traffic_limit", "REAL"); err != nil {
+		return err
+	}
+	if err := r.ensureSubscribeFileColumn("sort_order", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSubscribeFileColumn("raw_output", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSubscribeFileColumn("created_by", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 
@@ -3987,14 +4014,17 @@ func (r *TrafficRepository) GetUserSubscriptions(ctx context.Context, username s
 		return nil, errors.New("username is required")
 	}
 
-	const stmt = `
-		SELECT s.id, s.name, COALESCE(s.description, ''), COALESCE(s.url, ''), s.type, s.filename, COALESCE(s.file_short_code, ''), COALESCE(s.auto_sync_custom_rules, 0), s.expire_at, s.created_at, s.updated_at
+	rows, err := r.db.QueryContext(ctx, `SELECT s.id, s.name, COALESCE(s.description, ''), s.url, s.type, s.filename,
+		COALESCE(s.file_short_code, ''), COALESCE(s.custom_short_code, ''),
+		COALESCE(s.auto_sync_custom_rules, 0),
+		COALESCE(s.template_filename, ''), COALESCE(s.selected_tags, '[]'),
+		COALESCE(s.stats_server_ids, ''), s.traffic_limit,
+		COALESCE(s.sort_order, 0), COALESCE(s.raw_output, 0), COALESCE(s.created_by, ''),
+		s.created_at, s.updated_at
 		FROM subscribe_files s
 		INNER JOIN user_subscriptions us ON s.id = us.subscription_id
 		WHERE us.username = ?
-		ORDER BY s.created_at DESC
-	`
-	rows, err := r.db.QueryContext(ctx, stmt, username)
+		ORDER BY s.sort_order ASC, s.created_at DESC`, username)
 	if err != nil {
 		return nil, fmt.Errorf("get user subscriptions: %w", err)
 	}
@@ -4002,15 +4032,9 @@ func (r *TrafficRepository) GetUserSubscriptions(ctx context.Context, username s
 
 	var subscriptions []SubscribeFile
 	for rows.Next() {
-		var sub SubscribeFile
-		var autoSync int
-		var expireAt sql.NullTime
-		if err := rows.Scan(&sub.ID, &sub.Name, &sub.Description, &sub.URL, &sub.Type, &sub.Filename, &sub.FileShortCode, &autoSync, &expireAt, &sub.CreatedAt, &sub.UpdatedAt); err != nil {
+		sub, err := scanSubscribeFile(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan subscription: %w", err)
-		}
-		sub.AutoSyncCustomRules = autoSync != 0
-		if expireAt.Valid {
-			sub.ExpireAt = &expireAt.Time
 		}
 		subscriptions = append(subscriptions, sub)
 	}
@@ -4819,12 +4843,10 @@ func (r *TrafficRepository) GetSubscribeFilesWithAutoSync(ctx context.Context) (
 		return nil, errors.New("traffic repository not initialized")
 	}
 
-	const query = `SELECT id, name, COALESCE(description, ''), url, type, filename, COALESCE(file_short_code, ''), auto_sync_custom_rules, expire_at, created_at, updated_at
+	rows, err := r.db.QueryContext(ctx, `SELECT `+subscribeFileSelectCols+`
 		FROM subscribe_files
 		WHERE auto_sync_custom_rules = 1
-		ORDER BY created_at DESC`
-
-	rows, err := r.db.QueryContext(ctx, query)
+		ORDER BY sort_order ASC, created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("get subscribe files with auto sync: %w", err)
 	}
@@ -4832,15 +4854,9 @@ func (r *TrafficRepository) GetSubscribeFilesWithAutoSync(ctx context.Context) (
 
 	var files []SubscribeFile
 	for rows.Next() {
-		var file SubscribeFile
-		var autoSync int
-		var expireAt sql.NullTime
-		if err := rows.Scan(&file.ID, &file.Name, &file.Description, &file.URL, &file.Type, &file.Filename, &file.FileShortCode, &autoSync, &expireAt, &file.CreatedAt, &file.UpdatedAt); err != nil {
+		file, err := scanSubscribeFile(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan subscribe file: %w", err)
-		}
-		file.AutoSyncCustomRules = autoSync != 0
-		if expireAt.Valid {
-			file.ExpireAt = &expireAt.Time
 		}
 		files = append(files, file)
 	}
@@ -5395,6 +5411,61 @@ func (r *TrafficRepository) GetServerTrafficUsed(ctx context.Context, serverID i
 		return 0, fmt.Errorf("get server traffic used: %w", err)
 	}
 	return total, nil
+}
+
+func (r *TrafficRepository) GetRemoteServerTrafficTotals(ctx context.Context, serverIDs []int64) (limit int64, used int64, err error) {
+	if r == nil || r.db == nil {
+		return 0, 0, errors.New("traffic repository not initialized")
+	}
+	for _, id := range serverIDs {
+		server, sErr := r.GetRemoteServer(ctx, id)
+		if sErr != nil {
+			continue
+		}
+		aggregated, _ := r.GetServerTrafficUsed(ctx, id)
+		used += aggregated + server.TrafficUsedOffset
+		limit += server.TrafficLimit
+	}
+	return limit, used, nil
+}
+
+func (r *TrafficRepository) GetAllRemoteServersTrafficTotals(ctx context.Context) (limit int64, used int64, err error) {
+	if r == nil || r.db == nil {
+		return 0, 0, errors.New("traffic repository not initialized")
+	}
+	servers, err := r.ListRemoteServers(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, s := range servers {
+		aggregated, _ := r.GetServerTrafficUsed(ctx, s.ID)
+		used += aggregated + s.TrafficUsedOffset
+		limit += s.TrafficLimit
+	}
+	return limit, used, nil
+}
+
+// GetInboundTagServerMap 批量获取所有 inbound tag → server_id 映射
+func (r *TrafficRepository) GetInboundTagServerMap(ctx context.Context) (map[string]int64, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	const query = `SELECT tag, server_id FROM batch_inbounds`
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("get inbound tag server map: %w", err)
+	}
+	defer rows.Close()
+	result := make(map[string]int64)
+	for rows.Next() {
+		var tag string
+		var serverID int64
+		if err := rows.Scan(&tag, &serverID); err != nil {
+			return nil, err
+		}
+		result[tag] = serverID
+	}
+	return result, nil
 }
 
 // 批量入站 CRUD 操作

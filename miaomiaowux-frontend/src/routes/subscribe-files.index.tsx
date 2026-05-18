@@ -1,13 +1,6 @@
 // @ts-nocheck
 import { useState, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import {
-  format,
-  addDays,
-  isPast,
-  differenceInCalendarDays,
-  isToday,
-} from 'date-fns'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute, redirect, useNavigate } from '@tanstack/react-router'
 import { load as parseYAML, dump as dumpYAML } from 'js-yaml'
@@ -25,7 +18,6 @@ import {
   ChevronUp,
   ExternalLink,
   Eye,
-  Calendar as CalendarIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAuthStore } from '@/stores/auth-store'
@@ -41,7 +33,6 @@ import {
   replaceMissingRuleTargets,
 } from '@/lib/rules-node-replacement'
 import { translateOutbound } from '@/lib/sublink/translations'
-import { cn } from '@/lib/utils'
 import { useMediaQuery } from '@/hooks/use-media-query'
 import { useProxyGroupCategories } from '@/hooks/use-proxy-groups'
 import {
@@ -57,7 +48,6 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Calendar } from '@/components/ui/calendar'
 import {
   Card,
   CardContent,
@@ -125,10 +115,18 @@ type SubscribeFile = {
   id: number
   name: string
   description: string
-  type: 'create' | 'import' | 'upload'
+  type: 'create' | 'import' | 'upload' | 'package'
   filename: string
+  file_short_code: string
+  custom_short_code: string
   auto_sync_custom_rules: boolean
-  expire_at?: string | null
+  template_filename: string
+  selected_tags: string[]
+  stats_server_ids: string
+  traffic_limit: number | null
+  sort_order: number
+  raw_output: boolean
+  created_by: string
   created_at: string
   updated_at: string
   latest_version?: number
@@ -484,12 +482,6 @@ function SubscribeFilesPage() {
   const [editingConfigFile, setEditingConfigFile] =
     useState<SubscribeFile | null>(null)
 
-  // 过期时间Popover状态
-  const [expirePopoverFileId, setExpirePopoverFileId] = useState<number | null>(
-    null
-  )
-  const [customDateFileId, setCustomDateFileId] = useState<number | null>(null)
-
   // 编辑节点Dialog状态
   const [editNodesDialogOpen, setEditNodesDialogOpen] = useState(false)
   const [editingNodesFile, setEditingNodesFile] =
@@ -545,7 +537,12 @@ function SubscribeFilesPage() {
     name: '',
     description: '',
     filename: '',
-    expire: undefined as Date | undefined,
+    template_filename: '',
+    selected_tags: [] as string[],
+    stats_server_ids: '',
+    traffic_limit: '' as string,
+    custom_short_code: '',
+    raw_output: false,
   })
 
   // 外部订阅卡片折叠状态 - 默认折叠
@@ -694,6 +691,44 @@ function SubscribeFilesPage() {
     enabled: Boolean(auth.accessToken && isExternalSubsExpanded),
   })
 
+  // 获取V3模板列表
+  const { data: templatesData } = useQuery({
+    queryKey: ['template-v3-list'],
+    queryFn: async () => {
+      const { data } = await api.get('/api/admin/template-v3')
+      return data.templates as { filename: string; name?: string }[]
+    },
+  })
+
+  // 获取节点标签
+  const { data: nodeTagsData } = useQuery({
+    queryKey: ['node-tags'],
+    queryFn: async () => {
+      const { data } = await api.get('/api/admin/nodes/tags')
+      return data.tags as string[]
+    },
+  })
+
+  // 获取远程服务器列表
+  const { data: remoteServersData } = useQuery({
+    queryKey: ['remote-servers'],
+    queryFn: async () => {
+      const { data } = await api.get('/api/admin/remote-servers')
+      return data.servers as { id: number; name: string }[]
+    },
+  })
+
+  // 获取订阅流量统计（独立接口，可能耗时）
+  const { data: trafficData, isLoading: isTrafficLoading } = useQuery({
+    queryKey: ['subscribe-files-traffic'],
+    queryFn: async () => {
+      const { data } = await api.get('/api/admin/subscribe-files/traffic')
+      return data.traffic as Record<string, { used: number; limit: number }>
+    },
+    staleTime: 30 * 1000,
+    refetchInterval: 60 * 1000,
+  })
+
   // 按 tag 分组的节点名称
   const nodesByTag = useMemo(() => {
     const nodes = allNodesData?.nodes ?? []
@@ -793,12 +828,56 @@ function SubscribeFilesPage() {
       toast.success(t('toast.updateSuccess'))
       setEditMetadataDialogOpen(false)
       setEditingMetadata(null)
-      setMetadataForm({ name: '', description: '', filename: '' })
+      setMetadataForm({ name: '', description: '', filename: '', template_filename: '', selected_tags: [], stats_server_ids: '', traffic_limit: '', custom_short_code: '', raw_output: false })
     },
     onError: (error: any) => {
       toast.error(error.response?.data?.error || t('toast.updateFailed'))
     },
   })
+
+  // 内联字段更新（短码、模板、标签等）
+  const inlineUpdateMutation = useMutation({
+    mutationFn: async (payload: { id: number; data: Record<string, any> }) => {
+      const response = await api.put(
+        `/api/admin/subscribe-files/${payload.id}`,
+        payload.data
+      )
+      return response.data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['subscribe-files'] })
+      queryClient.invalidateQueries({ queryKey: ['user-subscriptions'] })
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.error || t('toast.updateFailed'))
+    },
+  })
+
+  // 排序 mutation
+  const reorderMutation = useMutation({
+    mutationFn: async (ids: number[]) => {
+      await api.put('/api/admin/subscribe-files/reorder', { ids })
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['subscribe-files'] })
+    },
+  })
+
+  const handleMoveUp = (file: SubscribeFile) => {
+    const idx = files.findIndex((f) => f.id === file.id)
+    if (idx <= 0) return
+    const ids = files.map((f) => f.id)
+    ;[ids[idx - 1], ids[idx]] = [ids[idx], ids[idx - 1]]
+    reorderMutation.mutate(ids)
+  }
+
+  const handleMoveDown = (file: SubscribeFile) => {
+    const idx = files.findIndex((f) => f.id === file.id)
+    if (idx < 0 || idx >= files.length - 1) return
+    const ids = files.map((f) => f.id)
+    ;[ids[idx], ids[idx + 1]] = [ids[idx + 1], ids[idx]]
+    reorderMutation.mutate(ids)
+  }
 
   // 删除外部订阅
   const deleteExternalSubMutation = useMutation({
@@ -1707,7 +1786,12 @@ function SubscribeFilesPage() {
       name: file.name,
       description: file.description,
       filename: file.filename,
-      expire: file.expire_at ? new Date(file.expire_at) : undefined,
+      template_filename: file.template_filename || '',
+      selected_tags: file.selected_tags || [],
+      stats_server_ids: file.stats_server_ids || '',
+      traffic_limit: file.traffic_limit != null ? String(file.traffic_limit) : '',
+      custom_short_code: file.custom_short_code || '',
+      raw_output: file.raw_output || false,
     })
     setEditMetadataDialogOpen(true)
   }
@@ -1728,13 +1812,12 @@ function SubscribeFilesPage() {
         name: metadataForm.name,
         description: metadataForm.description,
         filename: metadataForm.filename,
-        expire_at: metadataForm.expire
-          ? (() => {
-              const endOfDay = new Date(metadataForm.expire)
-              endOfDay.setHours(23, 59, 59, 999)
-              return endOfDay.toISOString()
-            })()
-          : '',
+        template_filename: metadataForm.template_filename,
+        selected_tags: metadataForm.selected_tags,
+        stats_server_ids: metadataForm.stats_server_ids,
+        traffic_limit: metadataForm.traffic_limit ? parseFloat(metadataForm.traffic_limit) : null,
+        custom_short_code: metadataForm.custom_short_code,
+        raw_output: metadataForm.raw_output,
       },
     })
   }
@@ -2796,215 +2879,7 @@ function SubscribeFilesPage() {
                             : '-'}
                         </span>
                       ),
-                      width: '160px',
-                    },
-                    {
-                      header: t('management.fileList.expireDate'),
-                      cell: (file) => {
-                        const handleQuickExpire = (
-                          days: number | 'expired' | Date
-                        ) => {
-                          let newExpireAt: string | null = null
-
-                          if (days === 'expired') {
-                            newExpireAt = new Date().toISOString()
-                          } else if (days instanceof Date) {
-                            newExpireAt = days.toISOString()
-                          } else {
-                            const baseDate = file.expire_at
-                              ? new Date(file.expire_at)
-                              : new Date()
-                            newExpireAt = addDays(baseDate, days).toISOString()
-                          }
-
-                          updateMetadataMutation.mutate(
-                            {
-                              id: file.id,
-                              data: {
-                                name: file.name,
-                                description: file.description,
-                                auto_sync_custom_rules:
-                                  file.auto_sync_custom_rules,
-                                expire_at: newExpireAt,
-                              },
-                            },
-                            {
-                              onSuccess: () => {
-                                setExpirePopoverFileId(null)
-                                setCustomDateFileId(null)
-                                toast.success(t('management.fileList.expireUpdated'))
-                              },
-                            }
-                          )
-                        }
-
-                        const getExpirationStatus = () => {
-                          if (!file.expire_at) return null
-
-                          const expireDate = new Date(file.expire_at)
-
-                          // 先检查是否是今天过期
-                          if (isToday(expireDate)) {
-                            return {
-                              status: 'expiring',
-                              label: t('management.fileList.todayExpire'),
-                              className:
-                                'bg-yellow-500/10 text-yellow-700 dark:text-yellow-400',
-                            }
-                          }
-
-                          // 再检查是否已过期
-                          if (isPast(expireDate)) {
-                            return {
-                              status: 'expired',
-                              label: t('management.fileList.expired'),
-                              className:
-                                'bg-red-500/10 text-red-700 dark:text-red-400',
-                            }
-                          }
-
-                          // 计算剩余天数（使用日历天数）
-                          const daysRemaining = differenceInCalendarDays(
-                            expireDate,
-                            new Date()
-                          )
-
-                          if (daysRemaining <= 7) {
-                            return {
-                              status: 'expiring',
-                              label: t('management.fileList.daysRemaining', { days: daysRemaining }),
-                              className:
-                                'bg-yellow-500/10 text-yellow-700 dark:text-yellow-400',
-                            }
-                          }
-
-                          return {
-                            status: 'valid',
-                            label: format(expireDate, 'yyyy-MM-dd HH:mm'),
-                            className:
-                              'bg-green-500/10 text-green-700 dark:text-green-400',
-                          }
-                        }
-
-                        const expirationStatus = getExpirationStatus()
-
-                        return (
-                          <Popover
-                            open={expirePopoverFileId === file.id}
-                            onOpenChange={(open) =>
-                              setExpirePopoverFileId(open ? file.id : null)
-                            }
-                          >
-                            <PopoverTrigger asChild>
-                              <Button
-                                variant='ghost'
-                                size='sm'
-                                className='h-8 px-2 whitespace-nowrap'
-                              >
-                                {expirationStatus ? (
-                                  <Badge
-                                    variant='outline'
-                                    className={expirationStatus.className}
-                                  >
-                                    {expirationStatus.label}
-                                  </Badge>
-                                ) : (
-                                  <span className='text-muted-foreground text-sm'>
-                                    {t('management.fileList.notSet')}
-                                  </span>
-                                )}
-                              </Button>
-                            </PopoverTrigger>
-                            <PopoverContent
-                              className='w-auto p-2'
-                              align='start'
-                            >
-                              <div className='flex flex-col gap-2'>
-                                <Button
-                                  variant='outline'
-                                  size='sm'
-                                  onClick={() => handleQuickExpire(30)}
-                                  disabled={updateMetadataMutation.isPending}
-                                >
-                                  {t('management.fileList.extend30Days')}
-                                </Button>
-                                <Button
-                                  variant='outline'
-                                  size='sm'
-                                  onClick={() => handleQuickExpire('expired')}
-                                  disabled={updateMetadataMutation.isPending}
-                                >
-                                  {t('management.fileList.markExpired')}
-                                </Button>
-                                <Popover
-                                  open={customDateFileId === file.id}
-                                  onOpenChange={(open) =>
-                                    setCustomDateFileId(open ? file.id : null)
-                                  }
-                                >
-                                  <PopoverTrigger asChild>
-                                    <Button variant='outline' size='sm'>
-                                      <CalendarIcon className='mr-2 h-4 w-4' />
-                                      {t('management.fileList.selectTime')}
-                                    </Button>
-                                  </PopoverTrigger>
-                                  <PopoverContent
-                                    className='w-auto p-0'
-                                    align='start'
-                                  >
-                                    <Calendar
-                                      mode='single'
-                                      selected={
-                                        file.expire_at
-                                          ? new Date(file.expire_at)
-                                          : undefined
-                                      }
-                                      onSelect={(date) => {
-                                        if (date) {
-                                          handleQuickExpire(date)
-                                        }
-                                      }}
-                                      disabled={(date) => date < new Date()}
-                                      initialFocus
-                                    />
-                                  </PopoverContent>
-                                </Popover>
-                                {file.expire_at && (
-                                  <Button
-                                    variant='outline'
-                                    size='sm'
-                                    onClick={() => {
-                                      updateMetadataMutation.mutate(
-                                        {
-                                          id: file.id,
-                                          data: {
-                                            name: file.name,
-                                            description: file.description,
-                                            auto_sync_custom_rules:
-                                              file.auto_sync_custom_rules,
-                                            expire_at: null,
-                                          },
-                                        },
-                                        {
-                                          onSuccess: () => {
-                                            setExpirePopoverFileId(null)
-                                            toast.success(t('management.fileList.expireCleared'))
-                                          },
-                                        }
-                                      )
-                                    }}
-                                    disabled={updateMetadataMutation.isPending}
-                                    className='text-destructive hover:text-destructive'
-                                  >
-                                    {t('management.fileList.clearExpireTime')}
-                                  </Button>
-                                )}
-                              </div>
-                            </PopoverContent>
-                          </Popover>
-                        )
-                      },
-                      width: '180px',
+                      width: '140px',
                     },
                     {
                       header: t('management.fileList.ruleSync'),
@@ -3018,7 +2893,142 @@ function SubscribeFilesPage() {
                       ),
                       headerClassName: 'text-center',
                       cellClassName: 'text-center',
-                      width: '90px',
+                      width: '80px',
+                    },
+                    {
+                      header: '自定义连接',
+                      cell: (file) => {
+                        const code = file.custom_short_code || file.file_short_code
+                        return (
+                          <Popover>
+                            <PopoverTrigger asChild>
+                              <Button variant='outline' size='sm' className='h-7 text-xs font-mono px-2'>
+                                {code || '-'}
+                              </Button>
+                            </PopoverTrigger>
+                            <PopoverContent className='w-56 p-3' align='start'>
+                              <div className='space-y-2'>
+                                <Label className='text-xs'>自定义短码</Label>
+                                <Input
+                                  className='h-8 text-xs font-mono'
+                                  defaultValue={file.custom_short_code || ''}
+                                  placeholder={file.file_short_code || '留空使用自动短码'}
+                                  autoFocus
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      const val = (e.target as HTMLInputElement).value.trim()
+                                      if (val !== (file.custom_short_code || '')) {
+                                        inlineUpdateMutation.mutate({ id: file.id, data: { custom_short_code: val } })
+                                      }
+                                    }
+                                  }}
+                                />
+                                <p className='text-[10px] text-muted-foreground'>
+                                  回车保存，留空恢复自动短码{file.file_short_code ? ` (${file.file_short_code})` : ''}
+                                </p>
+                              </div>
+                            </PopoverContent>
+                          </Popover>
+                        )
+                      },
+                      width: '110px',
+                    },
+                    {
+                      header: 'V3 模板',
+                      cell: (file) => (
+                        <Select
+                          value={file.template_filename || '__none__'}
+                          onValueChange={(v) => {
+                            const val = v === '__none__' ? '' : v
+                            inlineUpdateMutation.mutate({ id: file.id, data: { template_filename: val } })
+                          }}
+                        >
+                          <SelectTrigger className='h-7 text-xs w-28'>
+                            <SelectValue placeholder='选择模板' />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value='__none__'>选择模板</SelectItem>
+                            {(templatesData ?? []).map((tpl) => (
+                              <SelectItem key={tpl.filename} value={tpl.filename}>
+                                {tpl.name || tpl.filename.replace(/_v3\.yaml$|__v3\.yaml$|\.yaml$/, '')}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      ),
+                      width: '140px',
+                    },
+                    /* 节点标签列 - 暂时隐藏
+                    {
+                      header: '节点标签',
+                      cell: (file) => (
+                        <span className='text-xs text-muted-foreground'>
+                          {file.selected_tags && file.selected_tags.length > 0
+                            ? file.selected_tags.join(', ')
+                            : '-'}
+                        </span>
+                      ),
+                      width: '100px',
+                    },
+                    */
+                    {
+                      header: '流量',
+                      cell: (file) => {
+                        if (isTrafficLoading || !trafficData) {
+                          return <div className='h-2 w-16 animate-pulse rounded bg-muted' />
+                        }
+                        const tr = trafficData[String(file.id)]
+                        if (!tr || (tr.used === 0 && tr.limit === 0)) {
+                          return <span className='text-xs text-muted-foreground'>-</span>
+                        }
+                        const pct = tr.limit > 0 ? Math.min(100, (tr.used / tr.limit) * 100) : 0
+                        const formatSize = (bytes: number) => {
+                          const gb = bytes / (1024 * 1024 * 1024)
+                          return gb >= 1 ? `${gb.toFixed(1)}G` : `${(bytes / (1024 * 1024)).toFixed(0)}M`
+                        }
+                        return (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <div className='w-20 space-y-0.5'>
+                                <Progress value={pct} className='h-2' />
+                                <span className='text-[10px] text-muted-foreground block'>
+                                  {tr.limit > 0 ? `${Math.round(pct)}%` : formatSize(tr.used)}
+                                </span>
+                              </div>
+                            </TooltipTrigger>
+                            <TooltipContent>
+                              {formatSize(tr.used)}{tr.limit > 0 ? ` / ${formatSize(tr.limit)}` : ''}
+                            </TooltipContent>
+                          </Tooltip>
+                        )
+                      },
+                      width: '100px',
+                    },
+                    {
+                      header: '',
+                      cell: (file) => (
+                        <div className='flex items-center gap-0.5'>
+                          <Button
+                            variant='ghost'
+                            size='icon'
+                            className='h-7 w-7'
+                            onClick={() => handleMoveUp(file)}
+                            disabled={files.indexOf(file) === 0}
+                          >
+                            <ChevronUp className='h-4 w-4' />
+                          </Button>
+                          <Button
+                            variant='ghost'
+                            size='icon'
+                            className='h-7 w-7'
+                            onClick={() => handleMoveDown(file)}
+                            disabled={files.indexOf(file) === files.length - 1}
+                          >
+                            <ChevronDown className='h-4 w-4' />
+                          </Button>
+                        </div>
+                      ),
+                      width: '70px',
                     },
                     {
                       header: t('management.fileList.actions'),
@@ -3031,13 +3041,6 @@ function SubscribeFilesPage() {
                             disabled={updateMetadataMutation.isPending}
                           >
                             <Settings className='h-4 w-4' />
-                          </Button>
-                          <Button
-                            variant='ghost'
-                            size='sm'
-                            onClick={() => handleEditConfig(file)}
-                          >
-                            <Edit className='h-4 w-4' />
                           </Button>
                           <AlertDialog>
                             <AlertDialogTrigger asChild>
@@ -3157,6 +3160,105 @@ function SubscribeFilesPage() {
                           )}
                         </div>
                       ),
+                    },
+                    {
+                      label: '自定义连接',
+                      value: (file) => {
+                        const code = file.custom_short_code || file.file_short_code
+                        return (
+                          <Popover>
+                            <PopoverTrigger asChild>
+                              <Button variant='outline' size='sm' className='h-7 text-xs font-mono px-2'>
+                                {code || '-'}
+                              </Button>
+                            </PopoverTrigger>
+                            <PopoverContent className='w-56 p-3' align='start'>
+                              <div className='space-y-2'>
+                                <Label className='text-xs'>自定义短码</Label>
+                                <Input
+                                  className='h-8 text-xs font-mono'
+                                  defaultValue={file.custom_short_code || ''}
+                                  placeholder={file.file_short_code || '留空使用自动短码'}
+                                  autoFocus
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') {
+                                      const val = (e.target as HTMLInputElement).value.trim()
+                                      if (val !== (file.custom_short_code || '')) {
+                                        inlineUpdateMutation.mutate({ id: file.id, data: { custom_short_code: val } })
+                                      }
+                                    }
+                                  }}
+                                />
+                                <p className='text-[10px] text-muted-foreground'>
+                                  回车保存{file.file_short_code ? `，自动短码: ${file.file_short_code}` : ''}
+                                </p>
+                              </div>
+                            </PopoverContent>
+                          </Popover>
+                        )
+                      },
+                    },
+                    {
+                      label: 'V3 模板',
+                      value: (file) => (
+                        <Select
+                          value={file.template_filename || '__none__'}
+                          onValueChange={(v) => {
+                            const val = v === '__none__' ? '' : v
+                            inlineUpdateMutation.mutate({ id: file.id, data: { template_filename: val } })
+                          }}
+                        >
+                          <SelectTrigger className='h-7 text-xs w-32'>
+                            <SelectValue placeholder='选择模板' />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value='__none__'>选择模板</SelectItem>
+                            {(templatesData ?? []).map((tpl) => (
+                              <SelectItem key={tpl.filename} value={tpl.filename}>
+                                {tpl.name || tpl.filename.replace(/_v3\.yaml$|__v3\.yaml$|\.yaml$/, '')}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      ),
+                    },
+                    /* 节点标签 - 暂时隐藏
+                    {
+                      label: '节点标签',
+                      value: (file) => (
+                        <span className='text-xs text-muted-foreground'>
+                          {file.selected_tags && file.selected_tags.length > 0
+                            ? file.selected_tags.join(', ')
+                            : '-'}
+                        </span>
+                      ),
+                      hidden: (file) => !file.selected_tags || file.selected_tags.length === 0,
+                    },
+                    */
+                    {
+                      label: '流量',
+                      value: (file) => {
+                        if (isTrafficLoading || !trafficData) {
+                          return <div className='h-2 w-20 animate-pulse rounded bg-muted' />
+                        }
+                        const tr = trafficData[String(file.id)]
+                        if (!tr || (tr.used === 0 && tr.limit === 0)) {
+                          return <span className='text-xs text-muted-foreground'>-</span>
+                        }
+                        const pct = tr.limit > 0 ? Math.min(100, (tr.used / tr.limit) * 100) : 0
+                        const formatSize = (bytes: number) => {
+                          const gb = bytes / (1024 * 1024 * 1024)
+                          return gb >= 1 ? `${gb.toFixed(1)}G` : `${(bytes / (1024 * 1024)).toFixed(0)}M`
+                        }
+                        return (
+                          <div className='w-24 space-y-0.5'>
+                            <Progress value={pct} className='h-2' />
+                            <span className='text-[10px] text-muted-foreground'>
+                              {formatSize(tr.used)}{tr.limit > 0 ? ` / ${formatSize(tr.limit)}` : ''}
+                            </span>
+                          </div>
+                        )
+                      },
                     },
                     {
                       label: t('management.fileList.mobileRuleSyncLabel'),
@@ -4733,7 +4835,12 @@ function SubscribeFilesPage() {
               name: '',
               description: '',
               filename: '',
-              expire: undefined,
+              template_filename: '',
+              selected_tags: [],
+              stats_server_ids: '',
+              traffic_limit: '',
+              custom_short_code: '',
+              raw_output: false,
             })
           }
         }}
@@ -4743,7 +4850,8 @@ function SubscribeFilesPage() {
             <DialogTitle>{t('editMetadata.title')}</DialogTitle>
             <DialogDescription>{t('editMetadata.description')}</DialogDescription>
           </DialogHeader>
-          <div className='space-y-4 py-4'>
+          <ScrollArea className='max-h-[70vh]'>
+          <div className='space-y-4 py-4 pr-4'>
             <div className='space-y-2'>
               <Label htmlFor='metadata-name'>{t('form.subscriptionName')} *</Label>
               <Input
@@ -4785,40 +4893,96 @@ function SubscribeFilesPage() {
               </p>
             </div>
             <div className='space-y-2'>
-              <Label>{t('editMetadata.expireDateLabel')}</Label>
-              <Popover>
-                <PopoverTrigger asChild>
-                  <Button
-                    variant='outline'
-                    className={cn(
-                      'w-full justify-start text-left font-normal',
-                      !metadataForm.expire && 'text-muted-foreground'
-                    )}
-                  >
-                    <CalendarIcon className='mr-2 h-4 w-4' />
-                    {metadataForm.expire ? (
-                      format(metadataForm.expire, 'PPP')
-                    ) : (
-                      <span>{t('editMetadata.noExpireDate')}</span>
-                    )}
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent className='w-auto p-0' align='start'>
-                  <Calendar
-                    mode='single'
-                    selected={metadataForm.expire}
-                    onSelect={(date) =>
-                      setMetadataForm({ ...metadataForm, expire: date })
-                    }
-                    initialFocus
-                  />
-                </PopoverContent>
-              </Popover>
-              <p className='text-muted-foreground text-xs'>
-                {t('editMetadata.expireDateHint')}
-              </p>
+              <Label>V3 模板</Label>
+              <Select
+                value={metadataForm.template_filename}
+                onValueChange={(v) => setMetadataForm(prev => ({ ...prev, template_filename: v === '__none__' ? '' : v }))}
+              >
+                <SelectTrigger><SelectValue placeholder="不使用模板" /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__none__">不使用模板</SelectItem>
+                  {templatesData?.map(t => (
+                    <SelectItem key={t.filename} value={t.filename}>{t.name || t.filename}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            {metadataForm.template_filename && nodeTagsData && nodeTagsData.length > 0 && (
+              <div className='space-y-2'>
+                <Label>节点标签筛选</Label>
+                <div className='flex flex-wrap gap-2'>
+                  {nodeTagsData.map(tag => (
+                    <label key={tag} className='flex items-center gap-1.5 text-sm'>
+                      <Checkbox
+                        checked={metadataForm.selected_tags.includes(tag)}
+                        onCheckedChange={(checked) => {
+                          setMetadataForm(prev => ({
+                            ...prev,
+                            selected_tags: checked
+                              ? [...prev.selected_tags, tag]
+                              : prev.selected_tags.filter(t => t !== tag)
+                          }))
+                        }}
+                      />
+                      {tag}
+                    </label>
+                  ))}
+                </div>
+                <p className='text-xs text-muted-foreground'>不选则包含所有节点</p>
+              </div>
+            )}
+            <div className='space-y-2'>
+              <Label>流量统计服务器</Label>
+              <div className='flex flex-wrap gap-2'>
+                {remoteServersData?.map(server => {
+                  const selected = metadataForm.stats_server_ids.split(',').filter(Boolean).includes(String(server.id))
+                  return (
+                    <label key={server.id} className='flex items-center gap-1.5 text-sm'>
+                      <Checkbox
+                        checked={selected}
+                        onCheckedChange={(checked) => {
+                          setMetadataForm(prev => {
+                            const ids = prev.stats_server_ids.split(',').filter(Boolean)
+                            const newIds = checked
+                              ? [...ids, String(server.id)]
+                              : ids.filter(id => id !== String(server.id))
+                            return { ...prev, stats_server_ids: newIds.join(',') }
+                          })
+                        }}
+                      />
+                      {server.name}
+                    </label>
+                  )
+                })}
+              </div>
+              <p className='text-xs text-muted-foreground'>不选则汇总所有服务器流量</p>
+            </div>
+            <div className='space-y-2'>
+              <Label>流量上限 (GB)</Label>
+              <Input
+                type='number'
+                placeholder='留空则跟随服务器'
+                value={metadataForm.traffic_limit}
+                onChange={(e) => setMetadataForm(prev => ({ ...prev, traffic_limit: e.target.value }))}
+              />
+            </div>
+            <div className='space-y-2'>
+              <Label>自定义短码</Label>
+              <Input
+                placeholder='留空使用自动生成'
+                value={metadataForm.custom_short_code}
+                onChange={(e) => setMetadataForm(prev => ({ ...prev, custom_short_code: e.target.value }))}
+              />
+            </div>
+            <div className='flex items-center justify-between'>
+              <Label>原始输出</Label>
+              <Switch
+                checked={metadataForm.raw_output}
+                onCheckedChange={(v) => setMetadataForm(prev => ({ ...prev, raw_output: v }))}
+              />
             </div>
           </div>
+          </ScrollArea>
           <DialogFooter>
             <Button
               variant='outline'

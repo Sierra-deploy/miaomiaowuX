@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -15,13 +16,50 @@ const (
 	SubscribeTypePackage = "package"
 )
 
-// 返回按创建时间排序的所有订阅文件。
+const subscribeFileSelectCols = `id, name, COALESCE(description, ''), url, type, filename,
+	COALESCE(file_short_code, ''), COALESCE(custom_short_code, ''),
+	COALESCE(auto_sync_custom_rules, 0),
+	COALESCE(template_filename, ''), COALESCE(selected_tags, '[]'),
+	COALESCE(stats_server_ids, ''), traffic_limit,
+	COALESCE(sort_order, 0), COALESCE(raw_output, 0), COALESCE(created_by, ''),
+	created_at, updated_at`
+
+func scanSubscribeFile(scanner interface{ Scan(dest ...any) error }) (SubscribeFile, error) {
+	var file SubscribeFile
+	var autoSync, rawOutput int
+	var tagsJSON string
+	var trafficLimit sql.NullFloat64
+	if err := scanner.Scan(
+		&file.ID, &file.Name, &file.Description, &file.URL, &file.Type, &file.Filename,
+		&file.FileShortCode, &file.CustomShortCode,
+		&autoSync,
+		&file.TemplateFilename, &tagsJSON,
+		&file.StatsServerIDs, &trafficLimit,
+		&file.SortOrder, &rawOutput, &file.CreatedBy,
+		&file.CreatedAt, &file.UpdatedAt,
+	); err != nil {
+		return file, err
+	}
+	file.AutoSyncCustomRules = autoSync != 0
+	file.RawOutput = rawOutput != 0
+	if trafficLimit.Valid {
+		file.TrafficLimit = &trafficLimit.Float64
+	}
+	if tagsJSON != "" && tagsJSON != "[]" {
+		_ = json.Unmarshal([]byte(tagsJSON), &file.SelectedTags)
+	}
+	if file.SelectedTags == nil {
+		file.SelectedTags = []string{}
+	}
+	return file, nil
+}
+
 func (r *TrafficRepository) ListSubscribeFiles(ctx context.Context) ([]SubscribeFile, error) {
 	if r == nil || r.db == nil {
 		return nil, errors.New("traffic repository not initialized")
 	}
 
-	rows, err := r.db.QueryContext(ctx, `SELECT id, name, COALESCE(description, ''), url, type, filename, COALESCE(file_short_code, ''), COALESCE(auto_sync_custom_rules, 0), expire_at, created_at, updated_at FROM subscribe_files ORDER BY created_at DESC`)
+	rows, err := r.db.QueryContext(ctx, `SELECT `+subscribeFileSelectCols+` FROM subscribe_files ORDER BY sort_order ASC, created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list subscribe files: %w", err)
 	}
@@ -29,113 +67,101 @@ func (r *TrafficRepository) ListSubscribeFiles(ctx context.Context) ([]Subscribe
 
 	var files []SubscribeFile
 	for rows.Next() {
-		var file SubscribeFile
-		var autoSync int
-		var expireAt sql.NullTime
-		if err := rows.Scan(&file.ID, &file.Name, &file.Description, &file.URL, &file.Type, &file.Filename, &file.FileShortCode, &autoSync, &expireAt, &file.CreatedAt, &file.UpdatedAt); err != nil {
+		file, err := scanSubscribeFile(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan subscribe file: %w", err)
-		}
-		file.AutoSyncCustomRules = autoSync != 0
-		if expireAt.Valid {
-			file.ExpireAt = &expireAt.Time
 		}
 		files = append(files, file)
 	}
-
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate subscribe files: %w", err)
 	}
-
 	return files, nil
 }
 
-// 通过 ID 检索订阅文件。
 func (r *TrafficRepository) GetSubscribeFileByID(ctx context.Context, id int64) (SubscribeFile, error) {
 	var file SubscribeFile
 	if r == nil || r.db == nil {
 		return file, errors.New("traffic repository not initialized")
 	}
-
 	if id <= 0 {
 		return file, errors.New("subscribe file id is required")
 	}
 
-	row := r.db.QueryRowContext(ctx, `SELECT id, name, COALESCE(description, ''), url, type, filename, COALESCE(file_short_code, ''), COALESCE(auto_sync_custom_rules, 0), expire_at, created_at, updated_at FROM subscribe_files WHERE id = ? LIMIT 1`, id)
-	var autoSync int
-	var expireAt sql.NullTime
-	if err := row.Scan(&file.ID, &file.Name, &file.Description, &file.URL, &file.Type, &file.Filename, &file.FileShortCode, &autoSync, &expireAt, &file.CreatedAt, &file.UpdatedAt); err != nil {
+	row := r.db.QueryRowContext(ctx, `SELECT `+subscribeFileSelectCols+` FROM subscribe_files WHERE id = ? LIMIT 1`, id)
+	file, err := scanSubscribeFile(row)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return file, ErrSubscribeFileNotFound
 		}
 		return file, fmt.Errorf("get subscribe file: %w", err)
 	}
-	file.AutoSyncCustomRules = autoSync != 0
-	if expireAt.Valid {
-		file.ExpireAt = &expireAt.Time
-	}
-
 	return file, nil
 }
 
-// 按名称检索订阅文件。
 func (r *TrafficRepository) GetSubscribeFileByName(ctx context.Context, name string) (SubscribeFile, error) {
 	var file SubscribeFile
 	if r == nil || r.db == nil {
 		return file, errors.New("traffic repository not initialized")
 	}
-
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return file, errors.New("subscribe file name is required")
 	}
 
-	row := r.db.QueryRowContext(ctx, `SELECT id, name, COALESCE(description, ''), url, type, filename, COALESCE(file_short_code, ''), COALESCE(auto_sync_custom_rules, 0), expire_at, created_at, updated_at FROM subscribe_files WHERE name = ? LIMIT 1`, name)
-	var autoSync int
-	var expireAt sql.NullTime
-	if err := row.Scan(&file.ID, &file.Name, &file.Description, &file.URL, &file.Type, &file.Filename, &file.FileShortCode, &autoSync, &expireAt, &file.CreatedAt, &file.UpdatedAt); err != nil {
+	row := r.db.QueryRowContext(ctx, `SELECT `+subscribeFileSelectCols+` FROM subscribe_files WHERE name = ? LIMIT 1`, name)
+	file, err := scanSubscribeFile(row)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return file, ErrSubscribeFileNotFound
 		}
 		return file, fmt.Errorf("get subscribe file by name: %w", err)
 	}
-	file.AutoSyncCustomRules = autoSync != 0
-	if expireAt.Valid {
-		file.ExpireAt = &expireAt.Time
-	}
-
 	return file, nil
 }
 
-// 按文件名检索订阅文件。
 func (r *TrafficRepository) GetSubscribeFileByFilename(ctx context.Context, filename string) (SubscribeFile, error) {
 	var file SubscribeFile
 	if r == nil || r.db == nil {
 		return file, errors.New("traffic repository not initialized")
 	}
-
 	filename = strings.TrimSpace(filename)
 	if filename == "" {
 		return file, errors.New("subscribe file filename is required")
 	}
 
-	row := r.db.QueryRowContext(ctx, `SELECT id, name, COALESCE(description, ''), url, type, filename, COALESCE(file_short_code, ''), COALESCE(auto_sync_custom_rules, 0), expire_at, created_at, updated_at FROM subscribe_files WHERE filename = ? LIMIT 1`, filename)
-	var autoSync int
-	var expireAt sql.NullTime
-	if err := row.Scan(&file.ID, &file.Name, &file.Description, &file.URL, &file.Type, &file.Filename, &file.FileShortCode, &autoSync, &expireAt, &file.CreatedAt, &file.UpdatedAt); err != nil {
+	row := r.db.QueryRowContext(ctx, `SELECT `+subscribeFileSelectCols+` FROM subscribe_files WHERE filename = ? LIMIT 1`, filename)
+	file, err := scanSubscribeFile(row)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return file, ErrSubscribeFileNotFound
 		}
 		return file, fmt.Errorf("get subscribe file by filename: %w", err)
 	}
-	file.AutoSyncCustomRules = autoSync != 0
-	if expireAt.Valid {
-		file.ExpireAt = &expireAt.Time
-	}
-
 	return file, nil
 }
 
-// 插入新的订阅文件记录。
+func (r *TrafficRepository) GetSubscribeFileByShortCode(ctx context.Context, code string) (SubscribeFile, error) {
+	var file SubscribeFile
+	if r == nil || r.db == nil {
+		return file, errors.New("traffic repository not initialized")
+	}
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return file, errors.New("short code is required")
+	}
+
+	row := r.db.QueryRowContext(ctx, `SELECT `+subscribeFileSelectCols+` FROM subscribe_files WHERE custom_short_code = ? OR file_short_code = ? LIMIT 1`, code, code)
+	file, err := scanSubscribeFile(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return file, ErrSubscribeFileNotFound
+		}
+		return file, fmt.Errorf("get subscribe file by short code: %w", err)
+	}
+	return file, nil
+}
+
 func (r *TrafficRepository) CreateSubscribeFile(ctx context.Context, file SubscribeFile) (SubscribeFile, error) {
 	if r == nil || r.db == nil {
 		return SubscribeFile{}, errors.New("traffic repository not initialized")
@@ -153,32 +179,35 @@ func (r *TrafficRepository) CreateSubscribeFile(ctx context.Context, file Subscr
 	if file.Type != SubscribeTypeCreate && file.Type != SubscribeTypeImport && file.Type != SubscribeTypeUpload && file.Type != SubscribeTypePackage {
 		return SubscribeFile{}, errors.New("invalid subscribe file type")
 	}
-	// URL只对import类型必填，upload类型可以为空
-	if (file.Type == SubscribeTypeImport) && file.URL == "" {
+	if file.Type == SubscribeTypeImport && file.URL == "" {
 		return SubscribeFile{}, errors.New("subscribe file url is required")
 	}
 	if file.Filename == "" {
 		return SubscribeFile{}, errors.New("subscribe file filename is required")
 	}
 
-	// 生成带有重试逻辑的文件短代码以进行冲突处理
-	const maxRetries = 10
-	var expireAt any
-	if file.ExpireAt != nil {
-		expireAt = *file.ExpireAt
+	tagsJSON, _ := json.Marshal(file.SelectedTags)
+	if file.SelectedTags == nil {
+		tagsJSON = []byte("[]")
 	}
+
+	const maxRetries = 10
 	for i := 0; i < maxRetries; i++ {
 		newFileShortCode, err := generateFileShortCode()
 		if err != nil {
 			return SubscribeFile{}, fmt.Errorf("generate file short code: %w", err)
 		}
 
-		// 对于新订阅文件，默认 auto_sync_custom_rules 为 1（启用）
-		res, err := r.db.ExecContext(ctx, `INSERT INTO subscribe_files (name, description, url, type, filename, file_short_code, auto_sync_custom_rules, expire_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
-			file.Name, file.Description, file.URL, file.Type, file.Filename, newFileShortCode, expireAt)
+		res, err := r.db.ExecContext(ctx, `INSERT INTO subscribe_files
+			(name, description, url, type, filename, file_short_code, custom_short_code,
+			auto_sync_custom_rules, template_filename, selected_tags, stats_server_ids,
+			traffic_limit, sort_order, raw_output, created_by)
+			VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)`,
+			file.Name, file.Description, file.URL, file.Type, file.Filename, newFileShortCode, file.CustomShortCode,
+			file.TemplateFilename, string(tagsJSON), file.StatsServerIDs,
+			file.TrafficLimit, file.SortOrder, boolToInt(file.RawOutput), file.CreatedBy)
 		if err != nil {
 			if strings.Contains(strings.ToLower(err.Error()), "unique") && strings.Contains(strings.ToLower(err.Error()), "file_short_code") {
-				// 文件短代码冲突，重试
 				continue
 			}
 			if strings.Contains(strings.ToLower(err.Error()), "unique") {
@@ -191,19 +220,15 @@ func (r *TrafficRepository) CreateSubscribeFile(ctx context.Context, file Subscr
 		if err != nil {
 			return SubscribeFile{}, fmt.Errorf("fetch subscribe file id: %w", err)
 		}
-
 		return r.GetSubscribeFileByID(ctx, id)
 	}
-
 	return SubscribeFile{}, errors.New("failed to generate unique file short code after retries")
 }
 
-// 更新现有的订阅文件记录。
 func (r *TrafficRepository) UpdateSubscribeFile(ctx context.Context, file SubscribeFile) (SubscribeFile, error) {
 	if r == nil || r.db == nil {
 		return SubscribeFile{}, errors.New("traffic repository not initialized")
 	}
-
 	if file.ID <= 0 {
 		return SubscribeFile{}, errors.New("subscribe file id is required")
 	}
@@ -220,24 +245,29 @@ func (r *TrafficRepository) UpdateSubscribeFile(ctx context.Context, file Subscr
 	if file.Type != SubscribeTypeCreate && file.Type != SubscribeTypeImport && file.Type != SubscribeTypeUpload && file.Type != SubscribeTypePackage {
 		return SubscribeFile{}, errors.New("invalid subscribe file type")
 	}
-	// URL只对import类型必填，upload类型可以为空
-	if (file.Type == SubscribeTypeImport) && file.URL == "" {
+	if file.Type == SubscribeTypeImport && file.URL == "" {
 		return SubscribeFile{}, errors.New("subscribe file url is required")
 	}
 	if file.Filename == "" {
 		return SubscribeFile{}, errors.New("subscribe file filename is required")
 	}
 
-	var autoSyncInt int
-	if file.AutoSyncCustomRules {
-		autoSyncInt = 1
+	tagsJSON, _ := json.Marshal(file.SelectedTags)
+	if file.SelectedTags == nil {
+		tagsJSON = []byte("[]")
 	}
-	var expireAt any
-	if file.ExpireAt != nil {
-		expireAt = *file.ExpireAt
-	}
-	res, err := r.db.ExecContext(ctx, `UPDATE subscribe_files SET name = ?, description = ?, url = ?, type = ?, filename = ?, auto_sync_custom_rules = ?, expire_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
-		file.Name, file.Description, file.URL, file.Type, file.Filename, autoSyncInt, expireAt, file.ID)
+
+	res, err := r.db.ExecContext(ctx, `UPDATE subscribe_files SET
+		name = ?, description = ?, url = ?, type = ?, filename = ?,
+		custom_short_code = ?, auto_sync_custom_rules = ?,
+		template_filename = ?, selected_tags = ?, stats_server_ids = ?,
+		traffic_limit = ?, sort_order = ?, raw_output = ?,
+		updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		file.Name, file.Description, file.URL, file.Type, file.Filename,
+		file.CustomShortCode, boolToInt(file.AutoSyncCustomRules),
+		file.TemplateFilename, string(tagsJSON), file.StatsServerIDs,
+		file.TrafficLimit, file.SortOrder, boolToInt(file.RawOutput),
+		file.ID)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return SubscribeFile{}, ErrSubscribeFileExists
@@ -252,34 +282,28 @@ func (r *TrafficRepository) UpdateSubscribeFile(ctx context.Context, file Subscr
 	if affected == 0 {
 		return SubscribeFile{}, ErrSubscribeFileNotFound
 	}
-
 	return r.GetSubscribeFileByID(ctx, file.ID)
 }
 
-// 删除订阅文件记录。
 func (r *TrafficRepository) DeleteSubscribeFile(ctx context.Context, id int64) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
 	}
-
 	if id <= 0 {
 		return errors.New("subscribe file id is required")
 	}
 
-	// 启动事务以确保两个删除同时成功或失败
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	// 首先删除相关的user_subscriptions记录
 	_, err = tx.ExecContext(ctx, `DELETE FROM user_subscriptions WHERE subscription_id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("delete user subscriptions: %w", err)
 	}
 
-	// 然后，删除订阅文件
 	res, err := tx.ExecContext(ctx, `DELETE FROM subscribe_files WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("delete subscribe file: %w", err)
@@ -292,32 +316,38 @@ func (r *TrafficRepository) DeleteSubscribeFile(ctx context.Context, id int64) e
 	if affected == 0 {
 		return ErrSubscribeFileNotFound
 	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit transaction: %w", err)
-	}
-
-	return nil
+	return tx.Commit()
 }
 
-// GetUserPackageSubscription 获取用户的自动生成（package类型）订阅文件。
+func (r *TrafficRepository) ReorderSubscribeFiles(ctx context.Context, ids []int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	for i, id := range ids {
+		if _, err := tx.ExecContext(ctx, `UPDATE subscribe_files SET sort_order = ? WHERE id = ?`, i, id); err != nil {
+			return fmt.Errorf("update sort order: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
 func (r *TrafficRepository) GetUserPackageSubscription(ctx context.Context, username string) (SubscribeFile, error) {
 	var file SubscribeFile
-	var autoSync int
-	var expireAt sql.NullTime
-	err := r.db.QueryRowContext(ctx, `
-		SELECT sf.id, sf.name, COALESCE(sf.description, ''), sf.url, sf.type, sf.filename, COALESCE(sf.file_short_code, ''), COALESCE(sf.auto_sync_custom_rules, 0), sf.expire_at, sf.created_at, sf.updated_at
+	row := r.db.QueryRowContext(ctx, `SELECT `+subscribeFileSelectCols+`
 		FROM subscribe_files sf
 		INNER JOIN user_subscriptions us ON sf.id = us.subscription_id
 		WHERE us.username = ? AND sf.type = ?
-		LIMIT 1
-	`, username, SubscribeTypePackage).Scan(&file.ID, &file.Name, &file.Description, &file.URL, &file.Type, &file.Filename, &file.FileShortCode, &autoSync, &expireAt, &file.CreatedAt, &file.UpdatedAt)
+		LIMIT 1`, username, SubscribeTypePackage)
+	file, err := scanSubscribeFile(row)
 	if err != nil {
 		return file, err
 	}
-	file.AutoSyncCustomRules = autoSync != 0
-	if expireAt.Valid {
-		file.ExpireAt = &expireAt.Time
-	}
 	return file, nil
 }
+

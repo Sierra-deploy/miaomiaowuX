@@ -33,20 +33,7 @@ func (h *subscribeFilesListHandler) ServeHTTP(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// 转换为DTO格式
-	result := make([]subscribeFileDTO, 0, len(files))
-	for _, file := range files {
-		result = append(result, subscribeFileDTO{
-			ID:          file.ID,
-			Name:        file.Name,
-			Description: file.Description,
-			Type:        file.Type,
-			Filename:    file.Filename,
-			ExpireAt:    file.ExpireAt,
-			CreatedAt:   file.CreatedAt,
-			UpdatedAt:   file.UpdatedAt,
-		})
-	}
+	result := convertSubscribeFiles(files)
 
 	respondJSON(w, http.StatusOK, map[string]any{
 		"files": result,

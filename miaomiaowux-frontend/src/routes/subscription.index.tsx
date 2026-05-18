@@ -66,7 +66,7 @@ type SubscribeFile = {
   type: string
   filename: string
   file_short_code?: string
-  expire_at?: string | null
+  custom_short_code?: string
   created_at: string
   updated_at: string
 }
@@ -104,7 +104,6 @@ function SubscriptionPage() {
   })
 
   const subscribeFiles = subscribeFilesData?.subscriptions ?? []
-  const userShortCode = subscribeFilesData?.user_short_code ?? ''
 
   const { data: tokenData } = useQuery({
     queryKey: ['user-token'],
@@ -112,7 +111,7 @@ function SubscriptionPage() {
       const response = await api.get('/api/user/token')
       return response.data as { token: string }
     },
-    enabled: Boolean(auth.accessToken) && subscribeFilesData !== undefined && !userShortCode,
+    enabled: Boolean(auth.accessToken),
     staleTime: 5 * 60 * 1000,
   })
 
@@ -124,9 +123,10 @@ function SubscriptionPage() {
       ? `${window.location.protocol}//${window.location.host}`
       : 'http://localhost:12889')
 
-  const buildSubscriptionURL = (filename: string, fileShortCode: string | undefined, clientType?: string, fileType?: string) => {
-    if (fileShortCode && userShortCode) {
-      const url = new URL(`/x/${fileShortCode + userShortCode}`, baseURL)
+  const buildSubscriptionURL = (filename: string, fileShortCode: string | undefined, clientType?: string, fileType?: string, customShortCode?: string) => {
+    const shortCode = customShortCode || fileShortCode
+    if (shortCode) {
+      const url = new URL(`/x/${shortCode}`, baseURL)
       if (clientType) url.searchParams.set('t', clientType)
       return url.toString()
     }
@@ -180,7 +180,7 @@ function SubscriptionPage() {
           ) : null}
 
           {subscribeFiles.map((file) => {
-            const subscribeURL = buildSubscriptionURL(file.filename, file.file_short_code, undefined, file.type)
+            const subscribeURL = buildSubscriptionURL(file.filename, file.file_short_code, undefined, file.type, file.custom_short_code)
             const displayURL = displayURLs[file.id] || subscribeURL
             const clashURL = `clash://install-config?url=${encodeURIComponent(subscribeURL)}`
             const updatedLabel = file.updated_at
@@ -211,19 +211,6 @@ function SubscriptionPage() {
                 </CardHeader>
                 <CardContent className='space-y-4'>
                   <div className='flex items-center justify-end gap-2 flex-wrap'>
-                    {file.expire_at ? (
-                      new Date(file.expire_at) < new Date() ? (
-                        <Badge variant='destructive'>{t('user.subscribe.expired')}</Badge>
-                      ) : (
-                        <Badge variant='outline'>
-                          {t('user.subscribe.expiresAt')}: {dateFormatter.format(new Date(file.expire_at))}
-                        </Badge>
-                      )
-                    ) : (
-                      <Badge variant='outline' className='text-muted-foreground'>
-                        {t('user.subscribe.permanent')}
-                      </Badge>
-                    )}
                     {updatedLabel ? (
                       <p className='text-xs text-muted-foreground'>{updatedLabel}</p>
                     ) : null}
@@ -245,7 +232,7 @@ function SubscriptionPage() {
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align='end' className='w-56'>
                         {CLIENT_TYPES.map((client) => {
-                          const clientURL = buildSubscriptionURL(file.filename, file.file_short_code, client.type, file.type)
+                          const clientURL = buildSubscriptionURL(file.filename, file.file_short_code, client.type, file.type, file.custom_short_code)
                           return (
                             <DropdownMenuItem
                               key={client.type}

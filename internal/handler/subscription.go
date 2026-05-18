@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"miaomiaowux/internal/logger"
@@ -220,6 +221,7 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	var displayName string
 	var err error
 	var hasSubscribeFile bool
+	_ = hasSubscribeFile
 
 	if filename != "" {
 		subscribeFile, err = h.repo.GetSubscribeFileByFilename(r.Context(), filename)
@@ -295,27 +297,37 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if hasSubscribeFile && subscribeFile.ExpireAt != nil {
-		now := time.Now()
-		if !subscribeFile.ExpireAt.After(now) {
-			logger.Info("[Subscription] 订阅已过期", "filename", filename, "expire_at", subscribeFile.ExpireAt.Format("2006-01-02 15:04:05"))
-			h.serveTokenInvalidResponse(w, r)
+	// 模板生成：如果订阅绑定了 V3 模板，使用模板动态生成配置
+	var data []byte
+	fromTemplate := false
+	if hasSubscribeFile && subscribeFile.TemplateFilename != "" {
+		stepStart = time.Now()
+		templateData, genErr := h.generateFromTemplate(r.Context(), subscribeFile)
+		if genErr != nil {
+			logger.Info("[Subscription] 模板生成失败，回退到原始文件", "error", genErr, "template", subscribeFile.TemplateFilename)
+		} else {
+			data = templateData
+			fromTemplate = true
+			logger.Info("[⏱️ 耗时监测] 模板生成完成", "step", "template_generate", "duration_ms", time.Since(stepStart).Milliseconds(), "bytes", len(data))
+		}
+	}
+	_ = fromTemplate
+
+	// 文件读取（如果模板生成失败或未绑定模板）
+	if len(data) == 0 {
+		stepStart = time.Now()
+		var readErr error
+		data, readErr = os.ReadFile(resolvedPath)
+		if readErr != nil {
+			if errors.Is(readErr, os.ErrNotExist) {
+				writeError(w, http.StatusNotFound, readErr)
+			} else {
+				writeError(w, http.StatusInternalServerError, readErr)
+			}
 			return
 		}
+		logger.Info("[⏱️ 耗时监测] 文件读取完成", "step", "file_read", "duration_ms", time.Since(stepStart).Milliseconds(), "bytes", len(data))
 	}
-
-	// 文件读取
-	stepStart = time.Now()
-	data, err := os.ReadFile(resolvedPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			writeError(w, http.StatusNotFound, err)
-		} else {
-			writeError(w, http.StatusInternalServerError, err)
-		}
-		return
-	}
-	logger.Info("[⏱️ 耗时监测] 文件读取完成", "step", "file_read", "duration_ms", time.Since(stepStart).Milliseconds(), "bytes", len(data))
 
 	// 外部订阅同步
 	stepStart = time.Now()
@@ -671,12 +683,33 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	logger.Info("[⏱️ 耗时监测] YAML 重排序完成", "step", "yaml_reorder", "duration_ms", time.Since(stepStart).Milliseconds())
 
 	w.Header().Set("Content-Type", contentType)
-	if externalTrafficLimit > 0 {
-		var expireAt *time.Time
-		if hasSubscribeFile {
-			expireAt = subscribeFile.ExpireAt
+
+	// 远程服务器流量统计（基于 subscribe_file 的 stats_server_ids 和 traffic_limit）
+	remoteTrafficLimit, remoteTrafficUsed := int64(0), int64(0)
+	if hasSubscribeFile && h.repo != nil {
+		var serverIDs []int64
+		if subscribeFile.StatsServerIDs != "" {
+			for _, idStr := range strings.Split(subscribeFile.StatsServerIDs, ",") {
+				idStr = strings.TrimSpace(idStr)
+				if id, err := strconv.ParseInt(idStr, 10, 64); err == nil && id > 0 {
+					serverIDs = append(serverIDs, id)
+				}
+			}
 		}
-		headerValue := buildSubscriptionHeader(externalTrafficLimit, externalTrafficUsed, expireAt)
+		if len(serverIDs) > 0 {
+			remoteTrafficLimit, remoteTrafficUsed, _ = h.repo.GetRemoteServerTrafficTotals(r.Context(), serverIDs)
+		} else {
+			remoteTrafficLimit, remoteTrafficUsed, _ = h.repo.GetAllRemoteServersTrafficTotals(r.Context())
+		}
+		if subscribeFile.TrafficLimit != nil {
+			remoteTrafficLimit = int64(*subscribeFile.TrafficLimit * 1024 * 1024 * 1024)
+		}
+	}
+
+	totalTrafficLimit := externalTrafficLimit + remoteTrafficLimit
+	totalTrafficUsed := externalTrafficUsed + remoteTrafficUsed
+	if totalTrafficLimit > 0 {
+		headerValue := buildSubscriptionHeader(totalTrafficLimit, totalTrafficUsed)
 		w.Header().Set("subscription-userinfo", headerValue)
 	}
 	w.Header().Set("profile-update-interval", "24")
@@ -718,14 +751,80 @@ func (h *SubscriptionHandler) resolveSubscription(ctx context.Context, name stri
 	return h.repo.GetFirstSubscriptionLink(ctx)
 }
 
-func buildSubscriptionHeader(totalLimit, totalUsed int64, expireAt *time.Time) string {
+// generateFromTemplate 基于绑定的 V3 模板生成订阅配置
+// 代理节点来源：所有远程服务器的节点（ListAllNodes），按 SelectedTags 过滤
+func (h *SubscriptionHandler) generateFromTemplate(ctx context.Context, subscribeFile storage.SubscribeFile) ([]byte, error) {
+	if subscribeFile.TemplateFilename == "" {
+		return nil, errors.New("订阅未绑定模板")
+	}
+
+	templatePath := filepath.Join("rule_templates", subscribeFile.TemplateFilename)
+	templateContent, err := os.ReadFile(templatePath)
+	if err != nil {
+		return nil, fmt.Errorf("读取模板文件失败: %w", err)
+	}
+
+	nodes, err := h.repo.ListAllNodes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("获取节点列表失败: %w", err)
+	}
+
+	selectedTagsMap := make(map[string]bool)
+	for _, tag := range subscribeFile.SelectedTags {
+		selectedTagsMap[tag] = true
+	}
+	hasTagFilter := len(selectedTagsMap) > 0
+
+	nodeIDToName := make(map[int64]string, len(nodes))
+	for _, node := range nodes {
+		nodeIDToName[node.ID] = node.NodeName
+	}
+
+	var proxies []map[string]any
+	for _, node := range nodes {
+		if !node.Enabled || node.ClashConfig == "" {
+			continue
+		}
+		if hasTagFilter && !node.HasAnyTag(selectedTagsMap) {
+			continue
+		}
+		var proxyConfig map[string]any
+		if err := json.Unmarshal([]byte(node.ClashConfig), &proxyConfig); err != nil {
+			continue
+		}
+		proxyConfig["name"] = node.NodeName
+		if node.ChainProxyNodeID != nil {
+			if targetName, ok := nodeIDToName[*node.ChainProxyNodeID]; ok {
+				proxyConfig["dialer-proxy"] = targetName
+			}
+		}
+		proxies = append(proxies, proxyConfig)
+	}
+	logger.Info("[模板生成] 节点筛选完成", "total", len(nodes), "filtered", len(proxies), "tag_filter", hasTagFilter)
+
+	if len(proxies) == 0 {
+		return nil, errors.New("无可用节点")
+	}
+
+	processor := substore.NewTemplateV3Processor(nil, nil)
+	result, err := processor.ProcessTemplate(string(templateContent), proxies)
+	if err != nil {
+		return nil, fmt.Errorf("处理模板失败: %w", err)
+	}
+
+	result, err = injectProxiesIntoTemplate(result, proxies)
+	if err != nil {
+		return nil, fmt.Errorf("注入代理节点失败: %w", err)
+	}
+
+	logger.Info("[模板生成] 完成", "subscribe", subscribeFile.Name, "template", subscribeFile.TemplateFilename, "bytes", len(result))
+	return []byte(result), nil
+}
+
+func buildSubscriptionHeader(totalLimit, totalUsed int64) string {
 	download := strconv.FormatInt(totalUsed, 10)
 	total := strconv.FormatInt(totalLimit, 10)
-	expire := ""
-	if expireAt != nil {
-		expire = strconv.FormatInt(expireAt.Unix(), 10)
-	}
-	return "upload=0; download=" + download + "; total=" + total + "; expire=" + expire
+	return "upload=0; download=" + download + "; total=" + total
 }
 
 // 将映射的键作为切片返回

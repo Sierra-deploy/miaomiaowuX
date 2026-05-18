@@ -167,6 +167,8 @@ func (h *nodesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleBatchDelete(w, r)
 	case path == "batch-rename" && r.Method == http.MethodPost:
 		h.handleBatchRename(w, r)
+	case path == "tags" && r.Method == http.MethodGet:
+		h.handleListTags(w, r)
 	default:
 		allowed := []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete}
 		methodNotAllowed(w, allowed...)
@@ -1250,4 +1252,28 @@ func (h *nodesHandler) handleFetchSubscription(w http.ResponseWriter, r *http.Re
 		"count":         len(clashConfig.Proxies),
 		"suggested_tag": suggestedTag,
 	})
+}
+
+func (h *nodesHandler) handleListTags(w http.ResponseWriter, r *http.Request) {
+	allNodes, err := h.repo.ListAllNodes(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	seen := make(map[string]bool)
+	var tags []string
+	for _, node := range allNodes {
+		for _, t := range node.Tags {
+			if t != "" && !seen[t] {
+				seen[t] = true
+				tags = append(tags, t)
+			}
+		}
+	}
+	if tags == nil {
+		tags = []string{}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{"tags": tags})
 }

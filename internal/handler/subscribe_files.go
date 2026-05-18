@@ -49,6 +49,10 @@ func (h *subscribeFilesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		h.handleList(w, r)
 	case path == "" && r.Method == http.MethodPost:
 		h.handleCreate(w, r)
+	case path == "reorder" && r.Method == http.MethodPut:
+		h.handleReorder(w, r)
+	case path == "traffic" && r.Method == http.MethodGet:
+		h.handleTraffic(w, r)
 	case path == "import" && r.Method == http.MethodPost:
 		h.handleImport(w, r)
 	case path == "upload" && r.Method == http.MethodPost:
@@ -109,20 +113,27 @@ func (h *subscribeFilesHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	file := storage.SubscribeFile{
-		Name:        req.Name,
-		Description: req.Description,
-		URL:         req.URL,
-		Type:        req.Type,
-		Filename:    req.Filename,
-	}
+	username := auth.UsernameFromContext(r.Context())
 
-	expireAt, err := parseExpireAt(req.ExpireAt)
-	if err != nil {
-		writeBadRequest(w, "过期时间格式不正确，需为 RFC3339")
-		return
+	file := storage.SubscribeFile{
+		Name:             req.Name,
+		Description:      req.Description,
+		URL:              req.URL,
+		Type:             req.Type,
+		Filename:         req.Filename,
+		TemplateFilename: req.TemplateFilename,
+		SelectedTags:     req.SelectedTags,
+		StatsServerIDs:   req.StatsServerIDs,
+		TrafficLimit:     req.TrafficLimit,
+		CustomShortCode:  req.CustomShortCode,
+		CreatedBy:        username,
 	}
-	file.ExpireAt = expireAt
+	if req.RawOutput != nil {
+		file.RawOutput = *req.RawOutput
+	}
+	if req.SortOrder != nil {
+		file.SortOrder = *req.SortOrder
+	}
 
 	created, err := h.repo.CreateSubscribeFile(r.Context(), file)
 	if err != nil {
@@ -391,13 +402,18 @@ func (h *subscribeFilesHandler) handleUpdate(w http.ResponseWriter, r *http.Requ
 	if req.AutoSyncCustomRules != nil {
 		existing.AutoSyncCustomRules = *req.AutoSyncCustomRules
 	}
-	if req.ExpireAt != nil {
-		expireAt, parseErr := parseExpireAt(req.ExpireAt)
-		if parseErr != nil {
-			writeBadRequest(w, "过期时间格式不正确，需为 RFC3339")
-			return
-		}
-		existing.ExpireAt = expireAt
+	existing.TemplateFilename = req.TemplateFilename
+	if req.SelectedTags != nil {
+		existing.SelectedTags = req.SelectedTags
+	}
+	existing.StatsServerIDs = req.StatsServerIDs
+	existing.TrafficLimit = req.TrafficLimit
+	existing.CustomShortCode = req.CustomShortCode
+	if req.RawOutput != nil {
+		existing.RawOutput = *req.RawOutput
+	}
+	if req.SortOrder != nil {
+		existing.SortOrder = *req.SortOrder
 	}
 
 	// 处理文件名更新
@@ -509,6 +525,129 @@ func (h *subscribeFilesHandler) handleDelete(w http.ResponseWriter, r *http.Requ
 	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }
 
+func (h *subscribeFilesHandler) handleReorder(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		IDs []int64 `json:"ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeBadRequest(w, "请求格式不正确")
+		return
+	}
+	if len(req.IDs) == 0 {
+		writeBadRequest(w, "排序列表不能为空")
+		return
+	}
+
+	if err := h.repo.ReorderSubscribeFiles(r.Context(), req.IDs); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]string{"status": "reordered"})
+}
+
+func (h *subscribeFilesHandler) handleTraffic(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	files, err := h.repo.ListSubscribeFiles(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	allNodes, err := h.repo.ListAllNodes(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	tagServerMap, err := h.repo.GetInboundTagServerMap(ctx)
+	if err != nil {
+		tagServerMap = make(map[string]int64)
+	}
+
+	allExternalSubs, _ := h.repo.ListAllExternalSubscriptions(ctx)
+	extSubByName := make(map[string]storage.ExternalSubscription, len(allExternalSubs))
+	for _, s := range allExternalSubs {
+		extSubByName[s.Name] = s
+	}
+
+	type trafficItem struct {
+		Used  int64 `json:"used"`
+		Limit int64 `json:"limit"`
+	}
+	result := make(map[int64]trafficItem, len(files))
+
+	now := time.Now()
+	for _, f := range files {
+		nodes := allNodes
+		if len(f.SelectedTags) > 0 {
+			tagsMap := make(map[string]bool, len(f.SelectedTags))
+			for _, t := range f.SelectedTags {
+				tagsMap[t] = true
+			}
+			filtered := make([]storage.Node, 0)
+			for _, n := range allNodes {
+				if n.HasAnyTag(tagsMap) {
+					filtered = append(filtered, n)
+				}
+			}
+			nodes = filtered
+		}
+
+		serverIDs := make(map[int64]bool)
+		extSubNames := make(map[string]bool)
+		for _, n := range nodes {
+			if n.InboundTag != "" {
+				if sid, ok := tagServerMap[n.InboundTag]; ok {
+					serverIDs[sid] = true
+				}
+			}
+			if n.Tag != "" && n.Tag != "手动输入" {
+				extSubNames[n.Tag] = true
+			}
+		}
+
+		var totalUsed, totalLimit int64
+
+		if len(serverIDs) > 0 {
+			ids := make([]int64, 0, len(serverIDs))
+			for id := range serverIDs {
+				ids = append(ids, id)
+			}
+			limit, used, _ := h.repo.GetRemoteServerTrafficTotals(ctx, ids)
+			totalUsed += used
+			totalLimit += limit
+		}
+
+		for name := range extSubNames {
+			sub, ok := extSubByName[name]
+			if !ok {
+				continue
+			}
+			if sub.Expire != nil && sub.Expire.Before(now) {
+				continue
+			}
+			totalLimit += sub.Total
+			switch sub.TrafficMode {
+			case "download":
+				totalUsed += sub.Download
+			case "upload":
+				totalUsed += sub.Upload
+			default:
+				totalUsed += sub.Upload + sub.Download
+			}
+		}
+
+		if f.TrafficLimit != nil {
+			totalLimit = int64(*f.TrafficLimit * 1024 * 1024 * 1024)
+		}
+		result[f.ID] = trafficItem{Used: totalUsed, Limit: totalLimit}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{"traffic": result})
+}
+
 // parseFilenameFromContentDisposition 从Content-Disposition头解析文件名
 // 支持格式: attachment;filename*=UTF-8”%E6%B3%A1%E6%B3%A1Dog
 func parseFilenameFromContentDisposition(header string) string {
@@ -540,13 +679,19 @@ func parseFilenameFromContentDisposition(header string) string {
 }
 
 type subscribeFileRequest struct {
-	Name                string  `json:"name"`
-	Description         string  `json:"description"`
-	URL                 string  `json:"url"`
-	Type                string  `json:"type"`
-	Filename            string  `json:"filename"`
-	AutoSyncCustomRules *bool   `json:"auto_sync_custom_rules,omitempty"` // 区分 false 和未提供的指针
-	ExpireAt            *string `json:"expire_at,omitempty"`
+	Name                string   `json:"name"`
+	Description         string   `json:"description"`
+	URL                 string   `json:"url"`
+	Type                string   `json:"type"`
+	Filename            string   `json:"filename"`
+	AutoSyncCustomRules *bool    `json:"auto_sync_custom_rules,omitempty"`
+	TemplateFilename    string   `json:"template_filename"`
+	SelectedTags        []string `json:"selected_tags"`
+	StatsServerIDs      string   `json:"stats_server_ids"`
+	TrafficLimit        *float64 `json:"traffic_limit"`
+	CustomShortCode     string   `json:"custom_short_code"`
+	RawOutput           *bool    `json:"raw_output,omitempty"`
+	SortOrder           *int     `json:"sort_order,omitempty"`
 }
 
 type subscribeFileDTO struct {
@@ -555,8 +700,16 @@ type subscribeFileDTO struct {
 	Description         string     `json:"description"`
 	Type                string     `json:"type"`
 	Filename            string     `json:"filename"`
-	ExpireAt            *time.Time `json:"expire_at,omitempty"`
+	FileShortCode       string     `json:"file_short_code"`
+	CustomShortCode     string     `json:"custom_short_code"`
 	AutoSyncCustomRules bool       `json:"auto_sync_custom_rules"`
+	TemplateFilename    string     `json:"template_filename"`
+	SelectedTags        []string   `json:"selected_tags"`
+	StatsServerIDs      string     `json:"stats_server_ids"`
+	TrafficLimit        *float64   `json:"traffic_limit"`
+	SortOrder           int        `json:"sort_order"`
+	RawOutput           bool       `json:"raw_output"`
+	CreatedBy           string     `json:"created_by"`
 	CreatedAt           time.Time  `json:"created_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
 	LatestVersion       int64      `json:"latest_version,omitempty"`
@@ -569,8 +722,16 @@ func convertSubscribeFile(file storage.SubscribeFile) subscribeFileDTO {
 		Description:         file.Description,
 		Type:                file.Type,
 		Filename:            file.Filename,
-		ExpireAt:            file.ExpireAt,
+		FileShortCode:       file.FileShortCode,
+		CustomShortCode:     file.CustomShortCode,
 		AutoSyncCustomRules: file.AutoSyncCustomRules,
+		TemplateFilename:    file.TemplateFilename,
+		SelectedTags:        file.SelectedTags,
+		StatsServerIDs:      file.StatsServerIDs,
+		TrafficLimit:        file.TrafficLimit,
+		SortOrder:           file.SortOrder,
+		RawOutput:           file.RawOutput,
+		CreatedBy:           file.CreatedBy,
 		CreatedAt:           file.CreatedAt,
 		UpdatedAt:           file.UpdatedAt,
 	}
@@ -597,26 +758,6 @@ func (h *subscribeFilesHandler) convertSubscribeFilesWithVersions(ctx context.Co
 		result = append(result, dto)
 	}
 	return result
-}
-
-func parseExpireAt(raw *string) (*time.Time, error) {
-	if raw == nil {
-		return nil, nil
-	}
-	value := strings.TrimSpace(*raw)
-	if value == "" {
-		return nil, nil
-	}
-	// 首先尝试 RFC3339（无毫秒）
-	parsed, err := time.Parse(time.RFC3339, value)
-	if err != nil {
-		// 回退到 RFC3339Nano（毫秒/纳秒）
-		parsed, err = time.Parse(time.RFC3339Nano, value)
-		if err != nil {
-			return nil, err
-		}
-	}
-	return &parsed, nil
 }
 
 // 保存生成的配置为订阅文件
