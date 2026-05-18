@@ -182,7 +182,7 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
             size="sm"
             onClick={() => setHideDefaultOutbounds(!hideDefaultOutbounds)}
           >
-            {hideDefaultOutbounds ? t('outbounds.hideDefault') : t('outbounds.showDefault')}
+            {hideDefaultOutbounds ? t('outbounds.showDefault') : t('outbounds.hideDefault')}
           </Button>
           <Button size="sm" onClick={() => setIsWizardDialogOpen(true)}>
             <Plus className="h-4 w-4 mr-1" />{t('outbounds.addOutbound')}

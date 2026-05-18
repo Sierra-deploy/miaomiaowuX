@@ -107,6 +107,7 @@ type RemoteServerExtended struct {
 	TrafficUsed int64                     `json:"traffic_used"`
 	Inbounds    []RemoteServerInboundInfo `json:"inbounds"`
 	Encrypted   bool                      `json:"encrypted"`
+	WsConnected bool                      `json:"ws_connected"`
 }
 
 // RemoteServersListResponse 表示所有远程服务器的响应
@@ -181,6 +182,7 @@ func (h *XrayServerHandler) ListRemoteServers(w stdhttp.ResponseWriter, r *stdht
 		}
 		if h.wsHandler != nil {
 			extended.Encrypted = h.wsHandler.IsConnectionEncrypted(server.Token)
+			extended.WsConnected = h.wsHandler.IsConnected(server.Token)
 		}
 
 		trafficUsed, _ := h.repo.GetServerTrafficUsed(ctx, server.ID)

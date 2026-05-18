@@ -821,7 +821,7 @@ function XrayServersPage() {
                       )}
                       {server.fallback_to_pull && (<Badge variant="secondary" className="text-xs bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 shrink-0">{t('servers.degraded')}</Badge>)}
                       {server.steal_mode && server.steal_mode !== 'tunnel' && (<Badge variant="outline" className="text-xs shrink-0">{server.steal_mode === 'fallback' ? t('servers.fallbackLabel') : t('servers.stealModeDefault')}</Badge>)}
-                      {server.xray_mode === 'embedded' && (<Badge variant="outline" className="text-xs shrink-0 border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-400">{t('servers.xrayModeEmbedded')}</Badge>)}
+                      <Badge variant="outline" className={cn("text-xs shrink-0", server.xray_mode === 'embedded' ? "border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-400" : "border-gray-300 text-gray-600 dark:border-gray-600 dark:text-gray-400")}>{server.xray_mode === 'embedded' ? t('servers.xrayModeEmbedded') : t('servers.xrayModeExternal')}</Badge>
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
                       {server.status === 'connected' && (<Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); handleOpenXrayRawConfig(server) }} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title={t('servers.viewXrayConfig')}><Eye className="h-4 w-4" /></Button>)}
@@ -853,6 +853,11 @@ function XrayServersPage() {
                         ))}
                       </DropdownMenuContent>
                     </DropdownMenu>
+                    {server.status === 'connected' && (
+                      <span className={cn("inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium", server.ws_connected ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" : server.fallback_to_pull ? "bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-400" : "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400")}>
+                        {server.ws_connected ? <><Wifi className="h-2.5 w-2.5" />WS</> : server.fallback_to_pull ? <><RefreshCw className="h-2.5 w-2.5" />{t('servers.pullMode')}</> : <><Radio className="h-2.5 w-2.5" />HTTP</>}
+                      </span>
+                    )}
                   </CardDescription>
                   <div className="flex items-center gap-4 mt-3">
                     <RemoteServiceStatusIndicator status={remoteStatus?.xray} name="Xray" serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} />
@@ -959,6 +964,7 @@ function XrayServersPage() {
                             )}
                             {server.fallback_to_pull && (<Badge variant="secondary" className="text-xs bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200">{t('servers.degraded')}</Badge>)}
                             {server.steal_mode && server.steal_mode !== 'tunnel' && (<Badge variant="outline" className="text-xs">{server.steal_mode === 'fallback' ? t('servers.fallbackLabel') : t('servers.stealModeDefault')}</Badge>)}
+                            <Badge variant="outline" className={cn("text-xs", server.xray_mode === 'embedded' ? "border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-400" : "border-gray-300 text-gray-600 dark:border-gray-600 dark:text-gray-400")}>{server.xray_mode === 'embedded' ? t('servers.xrayModeEmbedded') : t('servers.xrayModeExternal')}</Badge>
                           </div>
                           {server.last_heartbeat && (<div className="text-xs text-muted-foreground mt-0.5">{t('servers.heartbeatLabel')}: {new Date(server.last_heartbeat).toLocaleString()}</div>)}
                         </div>
