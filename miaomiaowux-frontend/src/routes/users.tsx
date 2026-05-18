@@ -159,10 +159,9 @@ function UsersPage() {
     queryKey: ['packages'],
     queryFn: async () => {
       const response = await api.get('/api/admin/packages')
-      return response.data?.packages ?? []
+      return response.data
     },
-    enabled: Boolean(isAdmin && auth.accessToken),
-    staleTime: 60 * 1000,
+    enabled: Boolean(packageManageState && auth.accessToken),
   })
 
   const statusMutation = useMutation({
@@ -871,9 +870,9 @@ function UsersPage() {
             </div>
             <div className='space-y-3'>
               <Label>{t('packageDialog.selectPackage')}</Label>
-              {packagesQuery.isLoading ? (
+              {(packagesQuery.isLoading || packagesQuery.isPending) ? (
                 <div className='text-sm text-muted-foreground'>{t('packageDialog.loadingPackages')}</div>
-              ) : (packagesQuery.data as any[])?.length > 0 ? (
+              ) : (packagesQuery.data?.packages as any[])?.length > 0 ? (
                 <div className='space-y-2 max-h-80 overflow-y-auto border rounded-md p-3'>
                   <div
                     className={`flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 transition hover:bg-muted ${packageManageState?.selectedPackageId === null ? 'bg-primary/10 border border-primary/30' : ''}`}
@@ -881,7 +880,7 @@ function UsersPage() {
                   >
                     <span className='text-sm font-medium'>{t('packageDialog.noPackage')}</span>
                   </div>
-                  {(packagesQuery.data as any[]).map((pkg: any) => (
+                  {(packagesQuery.data?.packages as any[]).map((pkg: any) => (
                     <div
                       key={pkg.id}
                       className={`flex cursor-pointer items-center justify-between gap-3 rounded-md px-3 py-2 transition hover:bg-muted ${packageManageState?.selectedPackageId === pkg.id ? 'bg-primary/10 border border-primary/30' : ''}`}
@@ -899,7 +898,7 @@ function UsersPage() {
                 <div className='text-sm text-muted-foreground'>{t('packageDialog.noAvailablePackages')}</div>
               )}
             </div>
-            {packageManageState?.selectedPackageId !== null && (
+            {packageManageState?.selectedPackageId != null && (
               <div className='space-y-3'>
                 <div className='space-y-2'>
                   <Label htmlFor='pkg-expire-date'>{t('packageDialog.expireDate')}</Label>
