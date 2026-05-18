@@ -570,6 +570,7 @@
     "restartBtn": "重启",
     "stopBtn": "停止",
     "startBtn": "启动",
+    "tryStartXray": "尝试启动 Xray",
     "installXray": "安装远程 Xray",
     "removeXray": "卸载远程 Xray",
     "installNginx": "安装远程 Nginx",

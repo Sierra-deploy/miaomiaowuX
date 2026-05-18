@@ -570,6 +570,7 @@
     "restartBtn": "Restart",
     "stopBtn": "Stop",
     "startBtn": "Start",
+    "tryStartXray": "Try to Start Xray",
     "installXray": "Install Remote Xray",
     "removeXray": "Remove Remote Xray",
     "installNginx": "Install Remote Nginx",

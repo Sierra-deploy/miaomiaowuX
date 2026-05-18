@@ -565,18 +565,32 @@ function XrayServersPage() {
     return <Badge variant={config.variant}>{config.label}</Badge>
   }
 
-  const RemoteServiceStatusIndicator = ({ status, name, serverId }: { status?: { installed: boolean; running: boolean; version?: string }, name: string, serverId: number }) => {
+  const RemoteServiceStatusIndicator = ({ status, name, serverId, isEmbedded }: { status?: { installed: boolean; running: boolean; version?: string }, name: string, serverId: number, isEmbedded?: boolean }) => {
     const [open, setOpen] = useState(false)
     const timeoutRef = useRef<ReturnType<typeof setTimeout>>()
     const serviceName = name.toLowerCase() as 'xray' | 'nginx'
-    const handleOpen = () => { clearTimeout(timeoutRef.current); if (status?.installed) setOpen(true) }
+    const handleOpen = () => { clearTimeout(timeoutRef.current); if (status?.installed || isEmbedded) setOpen(true) }
     const handleClose = () => { timeoutRef.current = setTimeout(() => setOpen(false), 150) }
     const handleControl = (action: 'start' | 'stop' | 'restart') => {
       setOpen(false)
       remoteServiceControlMutation.mutate({ serverId, service: serviceName, action }, { onSuccess: () => loadRemoteServerStatusToCache(serverId, true) })
     }
-    if (!status?.installed) {
+    if (!status?.installed && !isEmbedded) {
       return (<div className="flex items-center gap-1.5 text-xs px-2 py-1 rounded bg-red-50 text-red-500 dark:bg-red-900/20 dark:text-red-400"><X className="w-3 h-3" />{name}</div>)
+    }
+    if (isEmbedded && !status?.installed) {
+      return (
+        <Popover open={open} onOpenChange={setOpen}>
+          <PopoverTrigger asChild>
+            <div className="flex items-center gap-1.5 text-xs px-2 py-1 rounded cursor-pointer transition-colors bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700" onMouseEnter={handleOpen} onMouseLeave={handleClose}>
+              <div className="w-2 h-2 rounded-full bg-gray-400" />{name}
+            </div>
+          </PopoverTrigger>
+          <PopoverContent className="w-auto p-2" side="top" sideOffset={6} onMouseEnter={handleOpen} onMouseLeave={handleClose} onOpenAutoFocus={(e) => e.preventDefault()}>
+            <Button variant="outline" size="sm" className="h-7 px-2 text-xs text-green-600 hover:text-green-700" onClick={() => handleControl('start')} disabled={remoteServiceControlMutation.isPending}><Play className="w-3 h-3 mr-1" />{t('servers.tryStartXray')}</Button>
+          </PopoverContent>
+        </Popover>
+      )
     }
     return (
       <Popover open={open} onOpenChange={setOpen}>
@@ -599,13 +613,25 @@ function XrayServersPage() {
     )
   }
 
-  const InstallPopover = ({ serverId, compact }: { serverId: number; compact?: boolean }) => {
+  const InstallPopover = ({ serverId, compact, isEmbedded }: { serverId: number; compact?: boolean; isEmbedded?: boolean }) => {
     const [open, setOpen] = useState(false)
     const [withNginx, setWithNginx] = useState('yes')
     const status = remoteServicesStatusMap[serverId]
     const xrayInstalled = status?.xray?.installed
+    const xrayRunning = status?.xray?.running
     const nginxInstalled = status?.nginx?.installed
     const bothInstalled = xrayInstalled && nginxInstalled
+    if (isEmbedded && (xrayInstalled && xrayRunning)) return null
+    if (isEmbedded) {
+      const handleStartXray = () => {
+        remoteServiceControlMutation.mutate({ serverId, service: 'xray', action: 'start' }, { onSuccess: () => loadRemoteServerStatusToCache(serverId, true) })
+      }
+      return compact ? (
+        <Button variant="outline" size="sm" className="h-7 px-2 text-green-600 hover:text-green-700" onClick={handleStartXray} disabled={remoteServiceControlMutation.isPending}><Play className="h-3.5 w-3.5" /></Button>
+      ) : (
+        <Button variant="outline" size="sm" className="flex-1 min-w-0 text-green-600 hover:text-green-700" onClick={handleStartXray} disabled={remoteServiceControlMutation.isPending}><Play className="mr-1 h-3.5 w-3.5 shrink-0" /><span className="truncate">{t('servers.tryStartXray')}</span></Button>
+      )
+    }
     const getInstallDesc = () => {
       if (withNginx === 'yes') {
         if (!xrayInstalled && !nginxInstalled) return t('servers.willInstallBoth')
@@ -817,7 +843,7 @@ function XrayServersPage() {
                     </DropdownMenu>
                   </CardDescription>
                   <div className="flex items-center gap-4 mt-3">
-                    <RemoteServiceStatusIndicator status={remoteStatus?.xray} name="Xray" serverId={server.id} />
+                    <RemoteServiceStatusIndicator status={remoteStatus?.xray} name="Xray" serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} />
                     {remoteStatus?.nginx?.installed && (<RemoteServiceStatusIndicator status={remoteStatus?.nginx} name="Nginx" serverId={server.id} />)}
                     {remoteStatus?.loading && (<span className="text-xs text-muted-foreground">{t('servers.loadingStatus')}</span>)}
                   </div>
@@ -855,9 +881,9 @@ function XrayServersPage() {
                 <CardFooter className="flex gap-2 pt-4">
                   {server.status === 'connected' && (
                     <>
-                      <InstallPopover serverId={server.id} />
-                      {remoteStatus?.xray?.installed && (<Button variant="outline" size="sm" className="flex-1 min-w-0" onClick={(e) => { e.stopPropagation(); handleOpenRemoteXrayConfig(server) }}><Cog className="h-4 w-4 mr-1" />{t('servers.xrayConfig')}</Button>)}
-                      {remoteStatus?.xray?.installed && (
+                      <InstallPopover serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} />
+                      {(remoteStatus?.xray?.installed || server.xray_mode === 'embedded') && (<Button variant="outline" size="sm" className="flex-1 min-w-0" onClick={(e) => { e.stopPropagation(); handleOpenRemoteXrayConfig(server) }}><Cog className="h-4 w-4 mr-1" />{t('servers.xrayConfig')}</Button>)}
+                      {(remoteStatus?.xray?.installed || server.xray_mode === 'embedded') && (
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild><Button variant="outline" size="sm" className="flex-1 min-w-0"><Settings className="mr-1 h-3.5 w-3.5 shrink-0" />{t('servers.agentManagement')}<ChevronDown className="ml-1 h-3.5 w-3.5 shrink-0" /></Button></DropdownMenuTrigger>
                           <DropdownMenuContent align="start">
@@ -967,7 +993,7 @@ function XrayServersPage() {
                     <TableCell>
                       {server.status === 'connected' ? (remoteStatus?.loading ? (<span className="text-xs text-muted-foreground">{t('servers.loadingStatus')}</span>) : (
                         <div className="flex items-center gap-3">
-                          <RemoteServiceStatusIndicator status={remoteStatus?.xray} name="Xray" serverId={server.id} />
+                          <RemoteServiceStatusIndicator status={remoteStatus?.xray} name="Xray" serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} />
                           {remoteStatus?.nginx?.installed && (<RemoteServiceStatusIndicator status={remoteStatus?.nginx} name="Nginx" serverId={server.id} />)}
                         </div>
                       )) : (<span className="text-xs text-muted-foreground">{t('servers.notConnected')}</span>)}
@@ -976,9 +1002,9 @@ function XrayServersPage() {
                       <div className="flex justify-end gap-1">
                         {server.status === 'connected' && (
                           <>
-                            <InstallPopover serverId={server.id} compact />
-                            {remoteStatus?.xray?.installed && (<Button variant="outline" size="sm" className="h-7 px-2" onClick={() => handleOpenRemoteXrayConfig(server)} title={t('servers.xrayConfig')}><Cog className="h-3.5 w-3.5" /></Button>)}
-                            {remoteStatus?.xray?.installed && (
+                            <InstallPopover serverId={server.id} compact isEmbedded={server.xray_mode === 'embedded'} />
+                            {(remoteStatus?.xray?.installed || server.xray_mode === 'embedded') && (<Button variant="outline" size="sm" className="h-7 px-2" onClick={() => handleOpenRemoteXrayConfig(server)} title={t('servers.xrayConfig')}><Cog className="h-3.5 w-3.5" /></Button>)}
+                            {(remoteStatus?.xray?.installed || server.xray_mode === 'embedded') && (
                               <DropdownMenu>
                                 <DropdownMenuTrigger asChild><Button variant="outline" size="sm" className="h-7 px-2" title={t('servers.agentManagement')}><Settings className="h-3.5 w-3.5" /><ChevronDown className="h-3 w-3 ml-1" /></Button></DropdownMenuTrigger>
                                 <DropdownMenuContent>
