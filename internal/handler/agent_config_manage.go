@@ -129,6 +129,7 @@ type RemoteServerUpdateRequest struct {
 	Domain          string `json:"domain"`
 	TrafficLimit    int64  `json:"traffic_limit"`
 	TrafficResetDay int    `json:"traffic_reset_day"`
+	TrafficUsed     *int64 `json:"traffic_used"`
 	ConnectionMode  string `json:"connection_mode"`
 	PullAddress     string `json:"pull_address"`
 	PullPort        int    `json:"pull_port"`
@@ -186,7 +187,7 @@ func (h *XrayServerHandler) ListRemoteServers(w stdhttp.ResponseWriter, r *stdht
 		}
 
 		trafficUsed, _ := h.repo.GetServerTrafficUsed(ctx, server.ID)
-		extended.TrafficUsed = trafficUsed
+		extended.TrafficUsed = trafficUsed + server.TrafficUsedOffset
 
 		nodeTraffic, err := h.repo.GetNodeTrafficByServer(ctx, server.ID)
 		if err == nil {
@@ -577,6 +578,15 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 			log.Printf("[Remote Server] Failed to update nodes for server name change: %v", err)
 		} else if updated > 0 {
 			log.Printf("[Remote Server] Updated %d nodes for server name change: %s -> %s", updated, oldServer.Name, req.Name)
+		}
+	}
+
+	// 更新已用流量偏移量
+	if req.TrafficUsed != nil {
+		aggregated, _ := h.repo.GetServerTrafficUsed(ctx, req.ID)
+		offset := *req.TrafficUsed - aggregated
+		if err := h.repo.UpdateRemoteServerTrafficOffset(ctx, req.ID, offset); err != nil {
+			log.Printf("[Remote Server] Failed to update traffic offset for server %d: %v", req.ID, err)
 		}
 	}
 

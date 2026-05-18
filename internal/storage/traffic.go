@@ -477,6 +477,7 @@ type RemoteServer struct {
 	SiteValue             string     `json:"site_value,omitempty"` // 静态路径或反向代理地址
 	XrayMode              string     `json:"xray_mode"`            // "external" (默认) 或 "embedded"
 	TimeOffsetSeconds     *int64     `json:"time_offset_seconds,omitempty"` // agent 与主控的时钟偏差（秒）
+	TrafficUsedOffset     int64      `json:"traffic_used_offset"`
 	CreatedAt             time.Time  `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 }
@@ -1411,6 +1412,9 @@ CREATE INDEX IF NOT EXISTS idx_remote_servers_status ON remote_servers(status);
 		return err
 	}
 	if err := r.ensureRemoteServerColumn("xray_mode", "TEXT NOT NULL DEFAULT 'external'"); err != nil {
+		return err
+	}
+	if err := r.ensureRemoteServerColumn("traffic_used_offset", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 
@@ -6436,6 +6440,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		COALESCE(site_type, ''), COALESCE(site_value, ''),
 		COALESCE(xray_mode, 'external'),
 		COALESCE(time_offset_seconds, 0),
+		COALESCE(traffic_used_offset, 0),
 		created_at, updated_at
 		FROM remote_servers ORDER BY created_at DESC`
 	rows, err := r.db.QueryContext(ctx, query)
@@ -6465,6 +6470,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 			&server.SiteType, &server.SiteValue,
 			&server.XrayMode,
 			&timeOffsetSeconds,
+			&server.TrafficUsedOffset,
 			&server.CreatedAt, &server.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan remote server: %w", err)
 		}
@@ -7413,6 +7419,17 @@ func (r *TrafficRepository) UpdateRemoteServer(ctx context.Context, id int64, na
 		return ErrRemoteServerNotFound
 	}
 
+	return nil
+}
+
+func (r *TrafficRepository) UpdateRemoteServerTrafficOffset(ctx context.Context, id int64, offset int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	_, err := r.db.ExecContext(ctx, `UPDATE remote_servers SET traffic_used_offset = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, offset, id)
+	if err != nil {
+		return fmt.Errorf("update traffic_used_offset: %w", err)
+	}
 	return nil
 }
 

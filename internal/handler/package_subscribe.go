@@ -124,18 +124,25 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 
 func (h *PackageSubscribeHandler) loadTemplate(r *http.Request) (string, error) {
 	templatesDir := "rule_templates"
-	var candidates []string
 
 	cfg, err := h.repo.GetSystemConfig(r.Context())
 	if err == nil && cfg.DefaultTemplateFilename != "" {
-		candidates = append(candidates, cfg.DefaultTemplateFilename)
-	}
-	candidates = append(candidates, "default.yaml", "redirhost__v3.yaml")
-
-	for _, name := range candidates {
-		content, err := os.ReadFile(filepath.Join(templatesDir, name))
+		content, err := os.ReadFile(filepath.Join(templatesDir, cfg.DefaultTemplateFilename))
 		if err == nil {
 			return string(content), nil
+		}
+	}
+
+	entries, err := os.ReadDir(templatesDir)
+	if err == nil {
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+				continue
+			}
+			content, err := os.ReadFile(filepath.Join(templatesDir, e.Name()))
+			if err == nil {
+				return string(content), nil
+			}
 		}
 	}
 	return "", errors.New("未找到可用模板，请管理员配置模板")

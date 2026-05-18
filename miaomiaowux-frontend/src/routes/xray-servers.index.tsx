@@ -186,6 +186,7 @@ function XrayServersPage() {
     name: '',
     domain: '',
     traffic_limit_gb: '',
+    traffic_used_gb: '',
     traffic_reset_day: '',
     steal_mode: 'tunnel',
     xray_mode: 'external',
@@ -279,7 +280,7 @@ function XrayServersPage() {
   })
 
   const updateRemoteServerMutation = useMutation({
-    mutationFn: async (data: { id: number; name: string; domain?: string; traffic_limit: number; traffic_reset_day: number; connection_mode?: string }) => {
+    mutationFn: async (data: { id: number; name: string; domain?: string; traffic_limit: number; traffic_used?: number; traffic_reset_day: number; connection_mode?: string }) => {
       const response = await api.put('/api/admin/remote-servers/update', data)
       return response.data
     },
@@ -287,7 +288,7 @@ function XrayServersPage() {
       queryClient.invalidateQueries({ queryKey: ['remote-servers'] })
       setIsEditRemoteServerDialogOpen(false)
       setEditingRemoteServer(null)
-      setRemoteFormData({ name: '', domain: '', traffic_limit_gb: '', traffic_reset_day: '', steal_mode: 'tunnel' })
+      setRemoteFormData({ name: '', domain: '', traffic_limit_gb: '', traffic_used_gb: '', traffic_reset_day: '', steal_mode: 'tunnel' })
       toast.success(t('servers.serverUpdated'))
     },
     onError: handleServerError,
@@ -517,7 +518,7 @@ function XrayServersPage() {
 
   const handleEditRemoteServer = (server: RemoteServer) => {
     setEditingRemoteServer(server)
-    setRemoteFormData({ name: server.name, domain: server.domain || '', traffic_limit_gb: server.traffic_limit ? (server.traffic_limit / 1024 / 1024 / 1024).toFixed(2) : '', traffic_reset_day: server.traffic_reset_day?.toString() || '', steal_mode: server.steal_mode || 'tunnel', xray_mode: server.xray_mode || 'external' })
+    setRemoteFormData({ name: server.name, domain: server.domain || '', traffic_limit_gb: server.traffic_limit ? (server.traffic_limit / 1024 / 1024 / 1024).toFixed(2) : '', traffic_used_gb: server.traffic_used ? (server.traffic_used / 1024 / 1024 / 1024).toFixed(2) : '', traffic_reset_day: server.traffic_reset_day?.toString() || '', steal_mode: server.steal_mode || 'tunnel', xray_mode: server.xray_mode || 'external' })
     setIsEditRemoteServerDialogOpen(true)
   }
 
@@ -529,7 +530,9 @@ function XrayServersPage() {
       switchStealModeMutation.mutate({ serverId: editingRemoteServer.id, stealMode: newMode })
     }
     const trafficLimitGb = parseFloat(remoteFormData.traffic_limit_gb) || 0
-    updateRemoteServerMutation.mutate({ id: editingRemoteServer.id, name: remoteFormData.name, domain: remoteFormData.domain, traffic_limit: trafficLimitGb > 0 ? Math.floor(trafficLimitGb * 1024 * 1024 * 1024) : 0, traffic_reset_day: parseInt(remoteFormData.traffic_reset_day) || 0, xray_mode: remoteFormData.xray_mode })
+    const trafficUsedGb = parseFloat(remoteFormData.traffic_used_gb)
+    const trafficUsedBytes = !isNaN(trafficUsedGb) ? Math.round(trafficUsedGb * 1024 * 1024 * 1024) : undefined
+    updateRemoteServerMutation.mutate({ id: editingRemoteServer.id, name: remoteFormData.name, domain: remoteFormData.domain, traffic_limit: trafficLimitGb > 0 ? Math.floor(trafficLimitGb * 1024 * 1024 * 1024) : 0, traffic_used: trafficUsedBytes, traffic_reset_day: parseInt(remoteFormData.traffic_reset_day) || 0, xray_mode: remoteFormData.xray_mode })
   }
 
   const loadRemoteServerStatusToCache = async (serverId: number, forceReload = false) => {
@@ -865,31 +868,33 @@ function XrayServersPage() {
                     {remoteStatus?.loading && (<span className="text-xs text-muted-foreground">{t('servers.loadingStatus')}</span>)}
                   </div>
                   <div className="mt-4 flex gap-3">
-                    <div className="flex-1 bg-muted/50 rounded-lg p-3">
+                    <div className="flex-1 min-w-0 bg-muted/50 rounded-lg p-3">
                       <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-2">
-                        <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v20M2 12h20M7 7l5-5 5 5M7 17l5 5 5-5" /></svg>
+                        <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v20M2 12h20M7 7l5-5 5 5M7 17l5 5 5-5" /></svg>
                         <span>{t('servers.realtimeSpeed')}</span>
                       </div>
                       {(server.current_upload_speed !== undefined && server.current_upload_speed > 0) || (server.current_download_speed !== undefined && server.current_download_speed > 0) ? (
                         <div className="space-y-1">
-                          <div className="flex items-center justify-between"><span className="text-xs text-muted-foreground">{t('servers.upload')}</span><span className="text-sm font-mono font-medium text-green-600 dark:text-green-400">↑ {formatSpeed(server.current_upload_speed || 0)}</span></div>
-                          <div className="flex items-center justify-between"><span className="text-xs text-muted-foreground">{t('servers.download')}</span><span className="text-sm font-mono font-medium text-blue-600 dark:text-blue-400">↓ {formatSpeed(server.current_download_speed || 0)}</span></div>
+                          <div className="flex items-center justify-between"><span className="text-xs text-muted-foreground">{t('servers.upload')}</span><span className="text-sm font-mono font-medium text-green-600 dark:text-green-400 truncate ml-1">↑ {formatSpeed(server.current_upload_speed || 0)}</span></div>
+                          <div className="flex items-center justify-between"><span className="text-xs text-muted-foreground">{t('servers.download')}</span><span className="text-sm font-mono font-medium text-blue-600 dark:text-blue-400 truncate ml-1">↓ {formatSpeed(server.current_download_speed || 0)}</span></div>
                         </div>
                       ) : server.status === 'connected' ? (<p className="text-sm font-mono text-muted-foreground">{t('servers.waitingData')}</p>) : server.status === 'pending' ? (<p className="text-sm font-mono text-muted-foreground">{t('servers.pendingShort')}</p>) : (<p className="text-sm font-mono text-muted-foreground">{t('servers.offline')}</p>)}
                     </div>
-                    <div className="flex-1 bg-muted/50 rounded-lg p-3">
-                      <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-2">
-                        <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /><path d="M9 12l2 2 4-4" /></svg>
-                        <span>{t('servers.trafficStats')}</span>
+                    <div className="flex-1 min-w-0 bg-muted/50 rounded-lg p-3">
+                      <div className="flex items-center justify-between gap-1 text-xs text-muted-foreground mb-2">
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /><path d="M9 12l2 2 4-4" /></svg>
+                          <span>{t('servers.trafficStats')}</span>
+                        </div>
+                        <span className="text-sm font-mono font-medium text-foreground truncate">{server.traffic_limit && server.traffic_limit > 0 ? `${formatTraffic(server.traffic_used || 0)}/${formatTraffic(server.traffic_limit)}` : formatTraffic(server.traffic_used || 0)}</span>
                       </div>
                       {server.traffic_limit && server.traffic_limit > 0 ? (
                         <div className="space-y-2">
-                          <div className="flex items-center justify-between"><span className="text-xs text-muted-foreground">{t('servers.usedTotal')}</span><span className="text-sm font-mono font-medium">{formatTraffic(server.traffic_used || 0)}/{formatTraffic(server.traffic_limit)}</span></div>
                           <div className="h-1.5 bg-muted rounded-full overflow-hidden"><div className={cn("h-full rounded-full transition-all", getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 90 ? "bg-red-500" : getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 70 ? "bg-yellow-500" : "bg-primary")} style={{ width: `${Math.min(getTrafficPercent(server.traffic_used || 0, server.traffic_limit), 100)}%` }} /></div>
                           {server.traffic_reset_day && server.traffic_reset_day > 0 && (<div className="flex items-center justify-between text-xs text-muted-foreground"><span>{t('servers.resetLabel')}</span><span>{t('servers.monthlyReset', { day: server.traffic_reset_day })}</span></div>)}
                         </div>
                       ) : (
-                        <div className="space-y-1"><div className="flex items-center justify-between"><span className="text-xs text-muted-foreground">{t('servers.used')}</span><span className="text-sm font-mono font-medium">{formatTraffic(server.traffic_used || 0)}</span></div><div className="text-xs text-muted-foreground">{t('servers.unlimited')}</div></div>
+                        <div className="text-xs text-muted-foreground">{t('servers.unlimited')}</div>
                       )}
                     </div>
                   </div>
@@ -1186,14 +1191,15 @@ function XrayServersPage() {
       </Dialog>
 
       {/* Edit Remote Server Dialog */}
-      <Dialog open={isEditRemoteServerDialogOpen} onOpenChange={(open) => { setIsEditRemoteServerDialogOpen(open); if (!open) { setEditingRemoteServer(null); setRemoteFormData({ name: '', domain: '', traffic_limit_gb: '', traffic_reset_day: '', steal_mode: 'tunnel', xray_mode: 'external' }) } }}>
+      <Dialog open={isEditRemoteServerDialogOpen} onOpenChange={(open) => { setIsEditRemoteServerDialogOpen(open); if (!open) { setEditingRemoteServer(null); setRemoteFormData({ name: '', domain: '', traffic_limit_gb: '', traffic_used_gb: '', traffic_reset_day: '', steal_mode: 'tunnel', xray_mode: 'external' }) } }}>
         <DialogContent className="max-w-md">
           <DialogHeader><DialogTitle>{t('servers.editRemoteServer')}</DialogTitle><DialogDescription>{t('servers.editRemoteServerDesc')}</DialogDescription></DialogHeader>
           <div className="grid gap-4 py-4">
             <div className="grid gap-2"><Label htmlFor="edit-remote-name">{t('servers.serverName')}</Label><Input id="edit-remote-name" value={remoteFormData.name} onChange={(e) => setRemoteFormData({ ...remoteFormData, name: e.target.value })} placeholder={t('servers.serverNamePlaceholder')} /></div>
             <div className="grid gap-2"><Label htmlFor="edit-remote-domain">{t('servers.domainOptional')}</Label><Input id="edit-remote-domain" value={remoteFormData.domain} onChange={(e) => setRemoteFormData({ ...remoteFormData, domain: e.target.value })} placeholder="example.com" /><p className="text-xs text-muted-foreground">{t('servers.domainHint')}</p></div>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-3 gap-4">
               <div className="grid gap-2"><Label htmlFor="edit-remote-traffic-limit">{t('servers.trafficLimit')}</Label><Input id="edit-remote-traffic-limit" type="number" step="0.01" placeholder={t('servers.trafficLimitPlaceholder')} value={remoteFormData.traffic_limit_gb} onChange={(e) => setRemoteFormData({ ...remoteFormData, traffic_limit_gb: e.target.value })} /></div>
+              <div className="grid gap-2"><Label htmlFor="edit-remote-traffic-used">{t('servers.usedTraffic')}</Label><Input id="edit-remote-traffic-used" type="number" step="0.01" placeholder={t('servers.usedTrafficPlaceholder')} value={remoteFormData.traffic_used_gb} onChange={(e) => setRemoteFormData({ ...remoteFormData, traffic_used_gb: e.target.value })} /></div>
               <div className="grid gap-2"><Label htmlFor="edit-remote-reset-day">{t('servers.resetDay')}</Label><Input id="edit-remote-reset-day" type="number" min="1" max="31" placeholder={t('servers.resetDayPlaceholder')} value={remoteFormData.traffic_reset_day} onChange={(e) => setRemoteFormData({ ...remoteFormData, traffic_reset_day: e.target.value })} /></div>
             </div>
             <div className="grid gap-2">
