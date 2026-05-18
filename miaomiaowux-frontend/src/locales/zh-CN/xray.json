@@ -571,6 +571,7 @@
     "stopBtn": "停止",
     "startBtn": "启动",
     "tryStartXray": "尝试启动 Xray",
+    "serviceControlFailed": "操作失败",
     "installXray": "安装远程 Xray",
     "removeXray": "卸载远程 Xray",
     "installNginx": "安装远程 Nginx",

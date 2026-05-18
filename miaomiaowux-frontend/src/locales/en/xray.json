@@ -571,6 +571,7 @@
     "stopBtn": "Stop",
     "startBtn": "Start",
     "tryStartXray": "Try to Start Xray",
+    "serviceControlFailed": "Operation failed",
     "installXray": "Install Remote Xray",
     "removeXray": "Remove Remote Xray",
     "installNginx": "Install Remote Nginx",

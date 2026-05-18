@@ -891,7 +891,13 @@ func (h *RemoteManageHandler) doEncryptedPullRequest(ctx context.Context, method
 	}
 
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("remote server returned status %d", resp.StatusCode)
+		var errResp map[string]interface{}
+		if json.Unmarshal(respBody, &errResp) == nil {
+			if msg, ok := errResp["error"].(string); ok {
+				return nil, fmt.Errorf("%s", msg)
+			}
+		}
+		return nil, fmt.Errorf("remote server returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	if resp.Header.Get("X-Encrypted") == "1" {

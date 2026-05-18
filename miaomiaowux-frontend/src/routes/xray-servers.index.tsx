@@ -308,14 +308,26 @@ function XrayServersPage() {
   const remoteServiceControlMutation = useMutation({
     mutationFn: async ({ serverId, service, action }: { serverId: number, service: 'xray' | 'nginx', action: 'start' | 'stop' | 'restart' }) => {
       const response = await api.post(`/api/admin/remote/services/control?server_id=${serverId}`, { service, action })
-      return response.data
+      const data = response.data
+      if (data && data.success === false) {
+        throw new Error(data.error || data.message || data.msg || t('servers.serviceControlFailed'))
+      }
+      return data
     },
     onSuccess: (data, variables) => {
       if (managingRemoteServer) loadRemoteServicesStatus(managingRemoteServer.id)
       const actionText = variables.action === 'start' ? t('servers.actionStart') : variables.action === 'stop' ? t('servers.actionStop') : t('servers.actionRestart')
       toast.success(t('servers.serviceStarted', { service: variables.service === 'xray' ? 'Xray' : 'Nginx', action: actionText }))
     },
-    onError: handleServerError,
+    onError: (error, variables) => {
+      const serviceName = variables.service === 'xray' ? 'Xray' : 'Nginx'
+      const actionText = variables.action === 'start' ? t('servers.actionStart') : variables.action === 'stop' ? t('servers.actionStop') : t('servers.actionRestart')
+      if (error instanceof Error && !(error as any).response) {
+        toast.error(`${serviceName} ${actionText}${t('servers.failed')}: ${error.message}`)
+      } else {
+        handleServerError(error)
+      }
+    },
   })
 
   const updateRemoteXraySystemConfigMutation = useMutation({
