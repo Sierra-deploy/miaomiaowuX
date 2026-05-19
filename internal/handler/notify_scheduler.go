@@ -94,6 +94,22 @@ func sendDailyTrafficNotification(ctx context.Context, repo *storage.TrafficRepo
 		for _, ut := range allUserTraffic {
 			userTotals[ut.Username] += ut.Uplink + ut.Downlink
 		}
+
+		// 应用流量倍率
+		allUsers, _ := repo.ListUsersWithPackage(ctx)
+		packages, _ := repo.ListPackages(ctx)
+		pkgMap := make(map[int64]storage.Package)
+		for _, p := range packages {
+			pkgMap[p.ID] = p
+		}
+		for _, u := range allUsers {
+			if pkg, ok := pkgMap[u.PackageID]; ok {
+				if m := pkg.TrafficMultiplier(); m > 1 {
+					userTotals[u.Username] *= m
+				}
+			}
+		}
+
 		type userUsage struct {
 			name string
 			used int64

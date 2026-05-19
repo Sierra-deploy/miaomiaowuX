@@ -115,7 +115,11 @@ func NewUserListHandler(repo *storage.TrafficRepository) http.Handler {
 					entry.SpeedLimitMbps = pkg.SpeedLimitMbps
 					entry.DeviceLimit = pkg.DeviceLimit
 				}
-				entry.TrafficUsed = trafficMap[user.Username]
+				used := trafficMap[user.Username]
+				if pkg, ok := pkgMap[pid]; ok {
+					used *= pkg.TrafficMultiplier()
+				}
+				entry.TrafficUsed = used
 				if entry.TrafficLimit > 0 && entry.TrafficUsed >= entry.TrafficLimit {
 					entry.IsOverLimit = true
 				}

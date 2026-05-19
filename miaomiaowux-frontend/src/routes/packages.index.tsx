@@ -30,6 +30,13 @@ import { Label } from '@/components/ui/label'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Badge } from '@/components/ui/badge'
 import { Textarea } from '@/components/ui/textarea'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import { api } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
 
@@ -48,6 +55,7 @@ interface PackageTemplate {
   nodes: number[]
   speed_limit_mbps: number
   device_limit: number
+  traffic_mode: string
   created_at: string
   updated_at: string
 }
@@ -61,6 +69,7 @@ interface PackageFormData {
   nodes: number[]
   speed_limit_mbps: number
   device_limit: number
+  traffic_mode: string
 }
 
 function PackagesPage() {
@@ -76,6 +85,7 @@ function PackagesPage() {
     nodes: [],
     speed_limit_mbps: 0,
     device_limit: 0,
+    traffic_mode: 'oneway',
   })
 
   const { data: packagesData, isLoading } = useQuery({
@@ -147,6 +157,7 @@ function PackagesPage() {
       nodes: [],
       speed_limit_mbps: 0,
       device_limit: 0,
+      traffic_mode: 'oneway',
     })
   }
 
@@ -166,6 +177,7 @@ function PackagesPage() {
       nodes: pkg.nodes || [],
       speed_limit_mbps: pkg.speed_limit_mbps || 0,
       device_limit: pkg.device_limit || 0,
+      traffic_mode: pkg.traffic_mode || 'oneway',
     })
   }
 
@@ -257,7 +269,12 @@ function PackagesPage() {
                       </CardDescription>
                     )}
                   </div>
-                  <Badge variant="secondary">{pkg.traffic_limit_gb} GB</Badge>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {pkg.traffic_mode === 'twoway' && (
+                      <Badge variant="outline" className="border-orange-500 text-orange-600 dark:text-orange-400">{t('card.twoway')}</Badge>
+                    )}
+                    <Badge variant="secondary">{pkg.traffic_limit_gb} GB</Badge>
+                  </div>
                 </div>
               </CardHeader>
               <CardContent className="space-y-3">
@@ -363,6 +380,23 @@ function PackagesPage() {
                   onChange={(e) => setFormData({ ...formData, traffic_limit_gb: parseFloat(e.target.value) })}
                   required
                 />
+              </div>
+
+              <div className="space-y-2">
+                <Label>{t('dialog.trafficMode')}</Label>
+                <Select
+                  value={formData.traffic_mode}
+                  onValueChange={(value) => setFormData({ ...formData, traffic_mode: value })}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="oneway">{t('dialog.trafficModeOneway')}</SelectItem>
+                    <SelectItem value="twoway">{t('dialog.trafficModeTwoway')}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">{t('dialog.trafficModeDesc')}</p>
               </div>
 
               <div className="space-y-2">

@@ -67,6 +67,7 @@ type createPackageRequest struct {
 	SpeedLimitMbps float64                    `json:"speed_limit_mbps"`
 	DeviceLimit    int                        `json:"device_limit"`
 	AutoSpeedRules []storage.AutoSpeedLimitRule `json:"auto_speed_rules"`
+	TrafficMode    string                     `json:"traffic_mode"`
 }
 
 func (h *PackageCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -108,6 +109,11 @@ func (h *PackageCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		nodes = []int64{}
 	}
 
+	trafficMode := req.TrafficMode
+	if trafficMode == "" {
+		trafficMode = "oneway"
+	}
+
 	pkg := storage.Package{
 		Name:              req.Name,
 		Description:       req.Description,
@@ -120,6 +126,7 @@ func (h *PackageCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		SpeedLimitMbps:    req.SpeedLimitMbps,
 		DeviceLimit:       req.DeviceLimit,
 		AutoSpeedRules:    req.AutoSpeedRules,
+		TrafficMode:       trafficMode,
 	}
 
 	id, err := h.repo.CreatePackage(r.Context(), pkg)
@@ -163,6 +170,7 @@ type updatePackageRequest struct {
 	SpeedLimitMbps float64                     `json:"speed_limit_mbps"`
 	DeviceLimit    int                         `json:"device_limit"`
 	AutoSpeedRules []storage.AutoSpeedLimitRule `json:"auto_speed_rules"`
+	TrafficMode    string                      `json:"traffic_mode"`
 }
 
 func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -215,6 +223,11 @@ func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		oldNodes = oldPkg.Nodes
 	}
 
+	trafficMode := req.TrafficMode
+	if trafficMode == "" {
+		trafficMode = "oneway"
+	}
+
 	pkg := storage.Package{
 		ID:                req.ID,
 		Name:              req.Name,
@@ -228,6 +241,7 @@ func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		SpeedLimitMbps:    req.SpeedLimitMbps,
 		DeviceLimit:       req.DeviceLimit,
 		AutoSpeedRules:    req.AutoSpeedRules,
+		TrafficMode:       trafficMode,
 	}
 
 	if err := h.repo.UpdatePackage(r.Context(), pkg); err != nil {
@@ -687,6 +701,7 @@ func (h *PackageAssignHandler) autoGenerateSubscription(ctx context.Context, use
 		Description: "套餐自动生成",
 		Type:        storage.SubscribeTypePackage,
 		Filename:    filename,
+		CreatedBy:   username, // 套餐自动生成的订阅归属到该用户，否则后续 GetSubscribeFileByShortCode 拿不到归属用户
 	}
 	created, err := h.repo.CreateSubscribeFile(ctx, file)
 	if err != nil {

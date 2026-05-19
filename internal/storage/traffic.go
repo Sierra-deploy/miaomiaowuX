@@ -196,8 +196,16 @@ type Package struct {
 	DeviceLimit       int       `json:"device_limit"`       // 设备数限制，0=不限
 	AutoSpeedRules    []AutoSpeedLimitRule `json:"auto_speed_rules,omitempty"`
 	ShortCode         string    `json:"short_code"`
+	TrafficMode       string    `json:"traffic_mode"`
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+func (p *Package) TrafficMultiplier() int64 {
+	if p.TrafficMode == "twoway" {
+		return 2
+	}
+	return 1
 }
 
 type AutoSpeedLimitRule struct {
@@ -835,7 +843,7 @@ CREATE TABLE IF NOT EXISTS subscribe_files (
     name TEXT NOT NULL,
     description TEXT,
     url TEXT NOT NULL,
-    type TEXT NOT NULL CHECK (type IN ('create','import','upload')),
+    type TEXT NOT NULL CHECK (type IN ('create','import','upload','package')),
     filename TEXT NOT NULL,
     expire_at TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -1156,6 +1164,13 @@ CREATE INDEX IF NOT EXISTS idx_custom_rules_enabled ON custom_rules(enabled);
 		return err
 	}
 
+	// 老 schema 的 subscribe_files.type CHECK 只允许 ('create','import','upload')，
+	// 但代码层（subscribe_files.go SubscribeTypePackage）已经在写 'package'，导致 PackageAssign
+	// 的 autoGenerateSubscription 写入失败。这里 idempotent rebuild 加上 'package'。
+	if err := r.ensureSubscribeFileTypeAllowsPackage(); err != nil {
+		return fmt.Errorf("migrate subscribe_files type CHECK: %w", err)
+	}
+
 	// 创建 custom_rule_applications 表用于跟踪应用的内容
 	const customRuleApplicationsSchema = `
 CREATE TABLE IF NOT EXISTS custom_rule_applications (
@@ -1449,6 +1464,7 @@ CREATE INDEX IF NOT EXISTS idx_remote_servers_status ON remote_servers(status);
 	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN speed_limit_mbps REAL NOT NULL DEFAULT 0")
 	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 0")
 	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN auto_speed_limit_json TEXT DEFAULT ''")
+	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN traffic_mode TEXT NOT NULL DEFAULT 'oneway'")
 
 	// 用户限速覆写字段
 	_, _ = r.db.Exec("ALTER TABLE users ADD COLUMN speed_limit_override REAL")
@@ -2262,6 +2278,70 @@ func (r *TrafficRepository) ensureSubscribeFileColumn(name, definition string) e
 		return fmt.Errorf("add column %s: %w", name, err)
 	}
 
+	return nil
+}
+
+// ensureSubscribeFileTypeAllowsPackage 把 subscribe_files.type 的 CHECK 约束扩成支持 'package'。
+// 老 schema 是 CHECK (type IN ('create','import','upload'))，但代码层早就有 SubscribeTypePackage='package'，
+// PackageAssign 自动生成订阅会因为约束失败。SQLite 不支持改 CHECK，只能 rebuild 表。
+// idempotent：检测到 sql 里已有 'package' 直接 return。
+func (r *TrafficRepository) ensureSubscribeFileTypeAllowsPackage() error {
+	var schema string
+	err := r.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='subscribe_files'`).Scan(&schema)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil // 表还不存在，新装会用包含 'package' 的 schema（本次部署同时改了 schema 常量）
+		}
+		return fmt.Errorf("read subscribe_files schema: %w", err)
+	}
+	if strings.Contains(schema, "'package'") {
+		return nil
+	}
+
+	oldCheck := "CHECK (type IN ('create','import','upload'))"
+	newCheck := "CHECK (type IN ('create','import','upload','package'))"
+	if !strings.Contains(schema, oldCheck) {
+		// 不是预期的老 CHECK，可能 schema 已经手动改过别的形态，保守起见不动
+		return fmt.Errorf("subscribe_files schema 未找到预期 CHECK 子句，请手工检查:\n%s", schema)
+	}
+
+	newTableSQL := strings.Replace(schema, oldCheck, newCheck, 1)
+	// 只替换 CREATE TABLE 语句里的表名（首个出现）
+	newTableSQL = strings.Replace(newTableSQL, "subscribe_files", "subscribe_files_new", 1)
+
+	tx, err := r.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(newTableSQL); err != nil {
+		return fmt.Errorf("create subscribe_files_new: %w  sql=%s", err, newTableSQL)
+	}
+	// 字段顺序一致，可以直接 SELECT *
+	if _, err := tx.Exec("INSERT INTO subscribe_files_new SELECT * FROM subscribe_files"); err != nil {
+		return fmt.Errorf("copy rows: %w", err)
+	}
+	if _, err := tx.Exec("DROP TABLE subscribe_files"); err != nil {
+		return fmt.Errorf("drop old: %w", err)
+	}
+	if _, err := tx.Exec("ALTER TABLE subscribe_files_new RENAME TO subscribe_files"); err != nil {
+		return fmt.Errorf("rename: %w", err)
+	}
+	// 重建 indexes（DROP TABLE 把它们也带走了）
+	idxStmts := []string{
+		`CREATE INDEX IF NOT EXISTS idx_subscribe_files_type ON subscribe_files(type)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_subscribe_files_file_short_code ON subscribe_files(file_short_code) WHERE file_short_code != ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_subscribe_files_custom_short_code ON subscribe_files(custom_short_code) WHERE custom_short_code != ''`,
+	}
+	for _, s := range idxStmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("rebuild index: %w  sql=%s", err, s)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
 	return nil
 }
 
@@ -5779,7 +5859,7 @@ func (r *TrafficRepository) ListPackages(ctx context.Context) ([]Package, error)
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
 		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
-		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), created_at, updated_at
+		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), created_at, updated_at
 		FROM packages
 		ORDER BY created_at DESC
 	`
@@ -5797,7 +5877,7 @@ func (r *TrafficRepository) ListPackages(ctx context.Context) ([]Package, error)
 		var nodesJSON, autoSpeedJSON string
 		err := rows.Scan(&pkg.ID, &pkg.Name, &pkg.Description, &pkg.TrafficLimitBytes,
 			&pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON, &pkg.SpeedLimitMbps, &pkg.DeviceLimit,
-			&autoSpeedJSON, &pkg.ShortCode, &pkg.CreatedAt, &pkg.UpdatedAt)
+			&autoSpeedJSON, &pkg.ShortCode, &pkg.TrafficMode, &pkg.CreatedAt, &pkg.UpdatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("scan package: %w", err)
 		}
@@ -5833,7 +5913,7 @@ func (r *TrafficRepository) GetPackage(ctx context.Context, id int64) (*Package,
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
 		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
-		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), created_at, updated_at
+		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), created_at, updated_at
 		FROM packages
 		WHERE id = ?
 	`
@@ -5843,7 +5923,7 @@ func (r *TrafficRepository) GetPackage(ctx context.Context, id int64) (*Package,
 	var nodesJSON, autoSpeedJSON string
 	err := r.db.QueryRowContext(ctx, query, id).Scan(&pkg.ID, &pkg.Name, &pkg.Description,
 		&pkg.TrafficLimitBytes, &pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON,
-		&pkg.SpeedLimitMbps, &pkg.DeviceLimit, &autoSpeedJSON, &pkg.ShortCode,
+		&pkg.SpeedLimitMbps, &pkg.DeviceLimit, &autoSpeedJSON, &pkg.ShortCode, &pkg.TrafficMode,
 		&pkg.CreatedAt, &pkg.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -5882,7 +5962,7 @@ func (r *TrafficRepository) GetPackageByName(ctx context.Context, name string) (
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
 		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
-		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), created_at, updated_at
+		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), created_at, updated_at
 		FROM packages
 		WHERE name = ?
 	`
@@ -5892,7 +5972,7 @@ func (r *TrafficRepository) GetPackageByName(ctx context.Context, name string) (
 	var nodesJSON, autoSpeedJSON string
 	err := r.db.QueryRowContext(ctx, query, name).Scan(&pkg.ID, &pkg.Name, &pkg.Description,
 		&pkg.TrafficLimitBytes, &pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON,
-		&pkg.SpeedLimitMbps, &pkg.DeviceLimit, &autoSpeedJSON, &pkg.ShortCode,
+		&pkg.SpeedLimitMbps, &pkg.DeviceLimit, &autoSpeedJSON, &pkg.ShortCode, &pkg.TrafficMode,
 		&pkg.CreatedAt, &pkg.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -5951,8 +6031,8 @@ func (r *TrafficRepository) CreatePackage(ctx context.Context, pkg Package) (int
 	}
 
 	const query = `
-		INSERT INTO packages (name, description, traffic_limit_bytes, cycle_days, is_reset, reset_day, nodes, speed_limit_mbps, device_limit, auto_speed_limit_json, short_code)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO packages (name, description, traffic_limit_bytes, cycle_days, is_reset, reset_day, nodes, speed_limit_mbps, device_limit, auto_speed_limit_json, short_code, traffic_mode)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	isReset := 0
@@ -5960,8 +6040,13 @@ func (r *TrafficRepository) CreatePackage(ctx context.Context, pkg Package) (int
 		isReset = 1
 	}
 
+	trafficMode := pkg.TrafficMode
+	if trafficMode == "" {
+		trafficMode = "oneway"
+	}
+
 	result, err := r.db.ExecContext(ctx, query, name, pkg.Description, pkg.TrafficLimitBytes,
-		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, autoSpeedJSON, shortCode)
+		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, autoSpeedJSON, shortCode, trafficMode)
 	if err != nil {
 		return 0, fmt.Errorf("create package: %w", err)
 	}
@@ -6005,7 +6090,7 @@ func (r *TrafficRepository) UpdatePackage(ctx context.Context, pkg Package) erro
 		UPDATE packages
 		SET name = ?, description = ?, traffic_limit_bytes = ?, cycle_days = ?,
 		    is_reset = ?, reset_day = ?, nodes = ?, speed_limit_mbps = ?, device_limit = ?,
-		    auto_speed_limit_json = ?, updated_at = CURRENT_TIMESTAMP
+		    auto_speed_limit_json = ?, traffic_mode = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`
 
@@ -6014,8 +6099,13 @@ func (r *TrafficRepository) UpdatePackage(ctx context.Context, pkg Package) erro
 		isReset = 1
 	}
 
+	trafficMode := pkg.TrafficMode
+	if trafficMode == "" {
+		trafficMode = "oneway"
+	}
+
 	result, err := r.db.ExecContext(ctx, query, name, pkg.Description, pkg.TrafficLimitBytes,
-		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, autoSpeedJSON, pkg.ID)
+		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, autoSpeedJSON, trafficMode, pkg.ID)
 	if err != nil {
 		return fmt.Errorf("update package: %w", err)
 	}

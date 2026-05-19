@@ -15,7 +15,8 @@
     "cycleDays": "计量周期",
     "cycleDaysValue": "{{days}} 天",
     "speedLimit": "限速",
-    "deviceLimit": "设备数"
+    "deviceLimit": "设备数",
+    "twoway": "双向"
   },
   "dialog": {
     "createTitle": "创建套餐模板",
@@ -27,6 +28,10 @@
     "description": "描述",
     "descriptionPlaceholder": "套餐说明（可选）",
     "trafficLimit": "流量额度 (GB) *",
+    "trafficMode": "流量统计方式",
+    "trafficModeOneway": "单向（默认）",
+    "trafficModeTwoway": "双向（×2）",
+    "trafficModeDesc": "双向模式下用户流量按2倍计算",
     "cycleDays": "计量周期 (天) *",
     "relatedNodes": "关联节点",
     "noNodes": "暂无可用节点",

@@ -61,6 +61,9 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Build user credential lookup for per-user proxy configs
+	credMap := h.buildUserCredentialMap(r, username)
+
 	// Load nodes from package
 	var proxies []map[string]any
 	for _, nodeID := range pkg.Nodes {
@@ -72,6 +75,7 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		if err := json.Unmarshal([]byte(node.ClashConfig), &proxyConfig); err != nil {
 			continue
 		}
+		applyUserCredentials(proxyConfig, node, credMap)
 		proxies = append(proxies, proxyConfig)
 	}
 
@@ -266,5 +270,63 @@ func (h *PackageSubscribeHandler) convertFormat(r *http.Request, yamlData []byte
 		return []byte(v), nil
 	default:
 		return nil, fmt.Errorf("unexpected produce result type: %T", result)
+	}
+}
+
+type credKey struct {
+	serverName string
+	inboundTag string
+}
+
+func (h *PackageSubscribeHandler) buildUserCredentialMap(r *http.Request, username string) map[credKey]string {
+	ctx := r.Context()
+	userConfigs, err := h.repo.GetUserInboundConfigs(ctx, username)
+	if err != nil || len(userConfigs) == 0 {
+		return nil
+	}
+	servers, err := h.repo.ListRemoteServers(ctx)
+	if err != nil {
+		return nil
+	}
+	idToName := make(map[int64]string, len(servers))
+	for _, s := range servers {
+		idToName[s.ID] = s.Name
+	}
+	m := make(map[credKey]string, len(userConfigs))
+	for _, cfg := range userConfigs {
+		if name, ok := idToName[cfg.ServerID]; ok {
+			m[credKey{name, cfg.InboundTag}] = cfg.CredentialJSON
+		}
+	}
+	return m
+}
+
+func applyUserCredentials(proxy map[string]any, node storage.Node, credMap map[credKey]string) {
+	if credMap == nil || node.OriginalServer == "" || node.InboundTag == "" {
+		return
+	}
+	credJSON, ok := credMap[credKey{node.OriginalServer, node.InboundTag}]
+	if !ok {
+		return
+	}
+	var cred map[string]any
+	if err := json.Unmarshal([]byte(credJSON), &cred); err != nil {
+		return
+	}
+	switch node.Protocol {
+	case "vless", "vmess":
+		if id, ok := cred["id"].(string); ok && id != "" {
+			proxy["uuid"] = id
+		}
+	case "ss", "shadowsocks":
+		if userPass, ok := cred["password"].(string); ok && userPass != "" {
+			if nodePass, ok := proxy["password"].(string); ok && nodePass != "" {
+				proxy["password"] = nodePass + ":" + userPass
+			}
+		}
+	case "trojan":
+		if password, ok := cred["password"].(string); ok && password != "" {
+			proxy["password"] = password
+		}
 	}
 }

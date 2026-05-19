@@ -15,7 +15,8 @@
     "cycleDays": "Billing Cycle",
     "cycleDaysValue": "{{days}} days",
     "speedLimit": "Speed Limit",
-    "deviceLimit": "Devices"
+    "deviceLimit": "Devices",
+    "twoway": "Two-way"
   },
   "dialog": {
     "createTitle": "Create Package Template",
@@ -27,6 +28,10 @@
     "description": "Description",
     "descriptionPlaceholder": "Package description (optional)",
     "trafficLimit": "Traffic Quota (GB) *",
+    "trafficMode": "Traffic Counting Mode",
+    "trafficModeOneway": "One-way (Default)",
+    "trafficModeTwoway": "Two-way (x2)",
+    "trafficModeDesc": "In two-way mode, user traffic is counted at 2x",
     "cycleDays": "Billing Cycle (Days) *",
     "relatedNodes": "Related Nodes",
     "noNodes": "No available nodes",

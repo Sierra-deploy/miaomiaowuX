@@ -83,7 +83,7 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 		}
 
 		wasOverLimit, _ := e.repo.IsUserOverLimit(ctx, user.Username)
-		isOverLimit := totalTraffic >= pkg.TrafficLimitBytes
+		isOverLimit := totalTraffic*pkg.TrafficMultiplier() >= pkg.TrafficLimitBytes
 
 		if isOverLimit && !wasOverLimit {
 			log.Printf("[TrafficLimitEnforcer] User %s exceeded limit (%d/%d bytes), removing from inbounds",
