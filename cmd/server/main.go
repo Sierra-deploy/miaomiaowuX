@@ -214,7 +214,7 @@ func main() {
 	userCreateHandler.SetLicenseManager(licenseManager)
 	mux.Handle("/api/admin/users/create", auth.RequireAdmin(tokenStore, userRepo, userCreateHandler))
 	// /api/admin/users/delete 依赖 remoteManageHandler + limiterPusher 做 xray client 清理，注册下移到 ~line 348 之后
-	mux.Handle("/api/admin/users/status", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserStatusHandler(repo)))
+	// /api/admin/users/status (启用/禁用) 同样依赖 remoteManageHandler + limiterPusher,见同区
 	mux.Handle("/api/admin/users/reset-password", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserResetPasswordHandler(repo)))
 	mux.Handle("/api/admin/users/remark", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserRemarkHandler(repo)))
 	mux.Handle("/api/admin/users/update-email", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserUpdateEmailHandler(repo)))
@@ -348,6 +348,7 @@ func main() {
 	mux.Handle("/api/admin/packages/unassign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageUnassignHandler(repo, remoteManageHandler, limiterPusher)))
 	mux.Handle("/api/admin/users/limits", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserLimitsHandler(repo, limiterPusher)))
 	mux.Handle("/api/admin/users/delete", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserDeleteHandler(repo, remoteManageHandler, limiterPusher)))
+	mux.Handle("/api/admin/users/status", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserStatusHandler(repo, remoteManageHandler, limiterPusher)))
 
 	// 用户节点管理（普通用户查看套餐节点、管理自己的出站）
 	userNodesHandler := handler.NewUserNodesHandler(repo, remoteManageHandler)
@@ -530,6 +531,7 @@ func main() {
 
 	// 系统设置 API（仅限管理员）
 	systemSettingsHandler := handler.NewSystemSettingsHandler(repo, cryptoConfig)
+	systemSettingsHandler.SetCollector(trafficCollector)
 	// 启动时加载加密设置
 	if encVal, _ := repo.GetSystemSetting(context.Background(), "require_encryption"); encVal == "true" {
 		cryptoConfig.SetRequireEncryption(true)
@@ -566,6 +568,10 @@ func main() {
 			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
 		}
 	})))
+	// 公开:所有登录用户可拿前端 dashboard 刷新间隔(默认 5000ms,admin 可在系统设置改)
+	mux.Handle("/api/system-config/refetch-interval", auth.RequireToken(tokenStore, userRepo, http.HandlerFunc(systemSettingsHandler.GetPublicIntervals)))
+	// admin:写前端 dashboard 刷新间隔,clamp [1000, 60000] ms
+	mux.Handle("/api/admin/system-settings/dashboard-refresh", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(systemSettingsHandler.SetDashboardRefresh)))
 	mux.Handle("/api/admin/system-settings/agent-log", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -758,7 +764,7 @@ func main() {
 	// 启动每日快照和清理任务
 	go startDailySnapshotTask(collectorCtx, trafficHandler)
 	// 启动流量超限检查（每 2 分钟）
-	trafficEnforcer := handler.NewTrafficLimitEnforcer(repo, remoteManageHandler)
+	trafficEnforcer := handler.NewTrafficLimitEnforcer(repo, remoteManageHandler, limiterPusher)
 	go trafficEnforcer.Start(collectorCtx, time.Duration(systemConfig.TrafficCheckInterval)*time.Second)
 	// 启动 WebSocket 陈旧连接清理
 	remoteWSHandler.StartCleanupLoop(collectorCtx, 1*time.Minute)
@@ -887,12 +893,25 @@ func startDailySnapshotTask(ctx context.Context, trafficHandler *handler.Traffic
 		logger.Error("[流量收集器] 达到最大重试次数后仍失败", "max_retries", maxRetries)
 	}
 
-	runWithRetry()
+	// 启动后不立即跑,改为等到下一个 00:00:00 触发第一次,之后每 24h 一次。
+	// 用户需求:每日流量记录在 0 点产生,而不是服务器启动时刻。
+	now := time.Now()
+	nextMidnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).Add(24 * time.Hour)
+	firstDelay := time.Until(nextMidnight)
+	logger.Info("[流量收集器] 定时调度器已启动", "first_run_at", nextMidnight.Format("2006-01-02 15:04:05"), "interval", "24小时")
+
+	firstTimer := time.NewTimer(firstDelay)
+	select {
+	case <-ctx.Done():
+		firstTimer.Stop()
+		logger.Info("[流量收集器] 定时调度器已停止")
+		return
+	case <-firstTimer.C:
+		runWithRetry()
+	}
 
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
-
-	logger.Info("[流量收集器] 定时调度器已启动", "interval", "24小时")
 
 	for {
 		select {

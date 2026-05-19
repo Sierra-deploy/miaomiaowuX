@@ -140,7 +140,22 @@ func NewUserListHandler(repo *storage.TrafficRepository) http.Handler {
 	})
 }
 
-func NewUserStatusHandler(repo *storage.TrafficRepository) http.Handler {
+// NewUserStatusHandler 切换 user.is_active。
+//
+// 禁用 (is_active=false):
+//   - 把 users.is_active 设为 0
+//   - 遍历 user_inbound_configs,从每个节点的 xray inbound 移除该用户的 client (uuid/password 还在 DB 里)
+//   - 推 limiter 给 agent,让 agent limiter UserInfo 里也移除
+//
+// 启用 (is_active=true):
+//   - 把 users.is_active 设为 1
+//   - 遍历 user_inbound_configs,用 saved credential_json 调 addUserToInbound 把 client 加回 xray
+//     (addUserToInbound 已实现"复用已保存凭据",见 packages.go:775)
+//   - 推 limiter
+//
+// 跟 user delete 路径区别:本接口 **保留** user_inbound_configs 行 (credential 留着),
+// 启用时能精确还原原 uuid/password,客户端订阅无需重新生成。
+func NewUserStatusHandler(repo *storage.TrafficRepository, remoteManage *RemoteManageHandler, pusher *LimiterConfigPusher) http.Handler {
 	if repo == nil {
 		panic("user status handler requires repository")
 	}
@@ -163,8 +178,10 @@ func NewUserStatusHandler(repo *storage.TrafficRepository) http.Handler {
 			return
 		}
 
+		ctx := r.Context()
+
 		// 检查目标用户是否是admin
-		targetUser, err := repo.GetUser(r.Context(), username)
+		targetUser, err := repo.GetUser(ctx, username)
 		if err != nil {
 			if errors.Is(err, storage.ErrUserNotFound) {
 				writeError(w, http.StatusNotFound, errors.New("user not found"))
@@ -179,13 +196,47 @@ func NewUserStatusHandler(repo *storage.TrafficRepository) http.Handler {
 			return
 		}
 
-		if err := repo.UpdateUserStatus(r.Context(), username, payload.IsActive); err != nil {
+		if err := repo.UpdateUserStatus(ctx, username, payload.IsActive); err != nil {
 			if errors.Is(err, storage.ErrUserNotFound) {
 				writeError(w, http.StatusNotFound, errors.New("user not found"))
 				return
 			}
 			writeError(w, http.StatusInternalServerError, err)
 			return
+		}
+
+		// 状态切换后,同步 xray inbound clients。
+		// 仅在 remoteManage 非空且用户有套餐绑定时才有 inbound 需要操作。
+		if remoteManage != nil {
+			configs, cfgErr := repo.GetUserInboundConfigs(ctx, username)
+			if cfgErr != nil {
+				log.Printf("[UserStatus] get inbound configs for %s failed: %v", username, cfgErr)
+			}
+			if !payload.IsActive {
+				// 禁用 → 从每个 inbound 移除 client (但保留 user_inbound_configs 行)
+				for _, cfg := range configs {
+					if err := removeUserFromInbound(ctx, remoteManage, cfg); err != nil {
+						log.Printf("[UserStatus] disable: remove %s from inbound %s on server %d failed: %v",
+							username, cfg.InboundTag, cfg.ServerID, err)
+					}
+				}
+			} else {
+				// 启用 → 用 saved credential 调 addUserToInbound 把 client 加回。
+				// addUserToInbound 内部会发现 GetUserInboundConfig 已有记录,自动复用 credential_json。
+				targetUserCopy, _ := repo.GetUser(ctx, username)
+				for _, cfg := range configs {
+					if err := addUserToInbound(ctx, remoteManage, repo, targetUserCopy, cfg.ServerID, cfg.InboundTag); err != nil {
+						log.Printf("[UserStatus] enable: add %s back to inbound %s on server %d failed: %v",
+							username, cfg.InboundTag, cfg.ServerID, err)
+					}
+				}
+			}
+		}
+
+		// 推 limiter 配置,让 agent 内存 limiter UserInfo 跟 DB 状态对齐
+		// (push 路径会重新从 DB 读 is_active,disabled 用户不会被推送。)
+		if pusher != nil {
+			go pusher.PushToAllServersForUser(context.Background(), username)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
