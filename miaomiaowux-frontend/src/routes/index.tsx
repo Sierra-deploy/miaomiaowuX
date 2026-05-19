@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
 import { createFileRoute, redirect } from '@tanstack/react-router'
@@ -693,6 +693,14 @@ function AdminDashboard() {
     return [...map.values()].sort((a, b) => (b.cycle_uplink + b.cycle_downlink) - (a.cycle_uplink + a.cycle_downlink))
   }, [trafficData, validUsernames, timeRange, snapshotData])
 
+  // 基于"两次轮询的真实差值/真实时间间隔"算速度。详见 useDeltaSpeeds。
+  const userSpeedsMap = useDeltaSpeeds(
+    userTrafficList,
+    (u) => u.username,
+    (u) => u.cycle_uplink,
+    (u) => u.cycle_downlink,
+  )
+
   const drilldownData = useMemo<DrilldownItem[]>(() => {
     if (!drilldown || !trafficData?.servers) return []
     if (drilldown.type === 'node') {
@@ -826,8 +834,9 @@ function AdminDashboard() {
               ) : (
                 <div className="space-y-1">
                   {userTrafficList.slice(0, PREVIEW_COUNT).map((user) => {
-                    const upSpeed = estimateSpeed(user.cycle_uplink, user.last_uplink)
-                    const downSpeed = estimateSpeed(user.cycle_downlink, user.last_downlink)
+                    const speed = userSpeedsMap.get(user.username)
+                    const upSpeed = speed?.up ?? 0
+                    const downSpeed = speed?.down ?? 0
                     return (
                       <div key={user.username} className="flex items-center justify-between rounded-md px-3 py-2 text-sm cursor-pointer transition hover:bg-muted"
                         onClick={() => { setDrilldown({ type: 'user', key: user.username }); setDrilldownPage(0) }}>
@@ -897,7 +906,7 @@ function AdminDashboard() {
               <FullscreenNodeList items={nodeTrafficList} page={fullscreenPage} onPageChange={setFullscreenPage}
                 onDrilldown={(key, label) => { setDrilldown({ type: 'node', key, label }); setDrilldownPage(0) }} />
             ) : fullscreenView === 'users' ? (
-              <FullscreenUserList items={userTrafficList} page={fullscreenPage} onPageChange={setFullscreenPage}
+              <FullscreenUserList items={userTrafficList} speeds={userSpeedsMap} page={fullscreenPage} onPageChange={setFullscreenPage}
                 onDrilldown={(key) => { setDrilldown({ type: 'user', key }); setDrilldownPage(0) }} />
             ) : null}
           </DialogContent>
@@ -930,17 +939,16 @@ function PaginationControls({ page, totalPages, onPageChange }: { page: number; 
   )
 }
 
-function TrafficRow({ label, tooltip, uplink, downlink, lastUplink, lastDownlink, showSpeed = true, onClick }: {
-  label: string; tooltip?: string; uplink: number; downlink: number; lastUplink: number; lastDownlink: number; showSpeed?: boolean; onClick?: () => void
+function TrafficRow({ label, tooltip, uplink, downlink, upSpeed = 0, downSpeed = 0, showSpeed = true, onClick }: {
+  label: string; tooltip?: string; uplink: number; downlink: number; upSpeed?: number; downSpeed?: number; showSpeed?: boolean; onClick?: () => void
 }) {
-  const upSpeed = showSpeed ? estimateSpeed(uplink, lastUplink) : 0
-  const downSpeed = showSpeed ? estimateSpeed(downlink, lastDownlink) : 0
+  const showSpeedNow = showSpeed && (upSpeed > 0 || downSpeed > 0)
   return (
     <div className={`flex items-center justify-between rounded-md px-3 py-2 text-sm transition hover:bg-muted ${onClick ? 'cursor-pointer' : ''}`} onClick={onClick}>
       <div className="truncate flex-1 min-w-0 mr-3 font-medium" title={tooltip ?? label}>{label}</div>
       <div className="flex items-center gap-3 shrink-0 text-muted-foreground text-xs">
         <span>↑{formatBytes(uplink)} ↓{formatBytes(downlink)}</span>
-        {(upSpeed > 0 || downSpeed > 0) && <span className="text-primary">↑{formatSpeed(upSpeed)} ↓{formatSpeed(downSpeed)}</span>}
+        {showSpeedNow && <span className="text-primary">↑{formatSpeed(upSpeed)} ↓{formatSpeed(downSpeed)}</span>}
       </div>
     </div>
   )
@@ -958,7 +966,7 @@ function FullscreenNodeList({ items, page, onPageChange, onDrilldown }: {
       <div className="space-y-1">
         {paged.map((node) => (
           <TrafficRow key={node.tag} label={node.display_name} tooltip={`${node.display_name}\n${t('admin.nodeView.serverTooltip', { servers: node.server_names.join(', ') })}`}
-            uplink={node.uplink} downlink={node.downlink} lastUplink={node.last_uplink} lastDownlink={node.last_downlink} showSpeed={false}
+            uplink={node.uplink} downlink={node.downlink} showSpeed={false}
             onClick={() => onDrilldown(node.tag, node.display_name)} />
         ))}
       </div>
@@ -967,8 +975,8 @@ function FullscreenNodeList({ items, page, onPageChange, onDrilldown }: {
   )
 }
 
-function FullscreenUserList({ items, page, onPageChange, onDrilldown }: {
-  items: UserTrafficItem[]; page: number; onPageChange: (p: number) => void; onDrilldown: (key: string) => void
+function FullscreenUserList({ items, speeds, page, onPageChange, onDrilldown }: {
+  items: UserTrafficItem[]; speeds: Map<string, { up: number; down: number }>; page: number; onPageChange: (p: number) => void; onDrilldown: (key: string) => void
 }) {
   const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE))
   const paged = items.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
@@ -977,10 +985,13 @@ function FullscreenUserList({ items, page, onPageChange, onDrilldown }: {
   return (
     <div>
       <div className="space-y-1">
-        {paged.map((user) => (
-          <TrafficRow key={user.username} label={user.username} uplink={user.cycle_uplink} downlink={user.cycle_downlink}
-            lastUplink={user.last_uplink} lastDownlink={user.last_downlink} onClick={() => onDrilldown(user.username)} />
-        ))}
+        {paged.map((user) => {
+          const sp = speeds.get(user.username)
+          return (
+            <TrafficRow key={user.username} label={user.username} uplink={user.cycle_uplink} downlink={user.cycle_downlink}
+              upSpeed={sp?.up ?? 0} downSpeed={sp?.down ?? 0} onClick={() => onDrilldown(user.username)} />
+          )
+        })}
       </div>
       <PaginationControls page={page} totalPages={totalPages} onPageChange={onPageChange} />
     </div>
@@ -996,7 +1007,7 @@ function DrilldownList({ items, page, onPageChange }: { items: DrilldownItem[]; 
     <div>
       <div className="space-y-1">
         {paged.map((item) => (
-          <TrafficRow key={item.label} label={item.label} uplink={item.uplink} downlink={item.downlink} lastUplink={item.last_uplink} lastDownlink={item.last_downlink} />
+          <TrafficRow key={item.label} label={item.label} uplink={item.uplink} downlink={item.downlink} showSpeed={false} />
         ))}
       </div>
       <PaginationControls page={page} totalPages={totalPages} onPageChange={onPageChange} />
@@ -1034,7 +1045,52 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1024 / 1024 / 1024 / 1024).toFixed(2)} TB`
 }
 
-function estimateSpeed(current: number, last: number): number {
-  const delta = current - last
-  return delta > 0 ? delta / 5 : 0
+// useDeltaSpeeds 在前端把"两次轮询之间 cycle 累计的真实差值 / 真实时间间隔"作为速度。
+//
+// 历史 bug：原 estimateSpeed(cycle_uplink, user.last_uplink) 把后端 user_traffic.last_uplink 当成"5 秒前的快照"使用，
+// 但 last_uplink 的语义其实是"agent 上次上报时的累计值"（xray 进程未重启时常接近 cycle 值；xray 刚重启会很小），
+// 完全不是 5 秒前的快照。结果 jimlee 累计 1.68GB 时算出 ~344 MB/s，超出网卡 1G 上限。
+//
+// 这里在前端用 useRef 持有上一轮的 cycle 快照 + 时间戳，下一轮 fetch 进来时差分得到真实速度。
+// 若 dt < 0.5s（如 React.StrictMode 开发期同步双调用）则保持上一次结果不更新缓存。
+function useDeltaSpeeds<T>(
+  items: T[],
+  keyFn: (x: T) => string,
+  upFn: (x: T) => number,
+  downFn: (x: T) => number,
+): Map<string, { up: number; down: number }> {
+  const prevRef = useRef<{ ts: number; map: Map<string, { up: number; down: number }> }>({
+    ts: 0,
+    map: new Map(),
+  })
+  return useMemo(() => {
+    const now = Date.now()
+    const speeds = new Map<string, { up: number; down: number }>()
+    const prev = prevRef.current
+    const dtSec = prev.ts > 0 ? (now - prev.ts) / 1000 : 0
+    if (dtSec >= 0.5) {
+      for (const it of items) {
+        const key = keyFn(it)
+        const p = prev.map.get(key)
+        if (p) {
+          const up = (upFn(it) - p.up) / dtSec
+          const down = (downFn(it) - p.down) / dtSec
+          speeds.set(key, {
+            up: up > 0 ? up : 0,
+            down: down > 0 ? down : 0,
+          })
+        }
+      }
+      const newMap = new Map<string, { up: number; down: number }>()
+      for (const it of items) newMap.set(keyFn(it), { up: upFn(it), down: downFn(it) })
+      prevRef.current = { ts: now, map: newMap }
+    } else if (prev.ts === 0) {
+      // 首次填充快照，本轮不显示速度
+      const newMap = new Map<string, { up: number; down: number }>()
+      for (const it of items) newMap.set(keyFn(it), { up: upFn(it), down: downFn(it) })
+      prevRef.current = { ts: now, map: newMap }
+    }
+    return speeds
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items])
 }
