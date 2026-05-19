@@ -200,14 +200,27 @@ function UserDashboard() {
     []
   )
 
+  // 普通用户 dashboard 轮询间隔(ms),含义同 admin 视图,详见 admin 部分注释。
+  const { data: refetchCfg } = useQuery({
+    queryKey: ['public-refetch-interval'],
+    queryFn: async () => {
+      const response = await api.get('/api/system-config/refetch-interval')
+      return response.data as { success: boolean; refetch_interval_ms: number }
+    },
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+    enabled: Boolean(auth.accessToken),
+  })
+  const refetchMs = Math.min(Math.max(refetchCfg?.refetch_interval_ms ?? 5000, 1000), 60_000)
+
   const { data, isLoading, isError } = useQuery({
     queryKey: ['traffic-summary'],
     queryFn: async () => {
       const response = await api.get('/api/traffic/summary')
       return response.data
     },
-    staleTime: 5_000,
-    refetchInterval: 5_000,
+    staleTime: refetchMs,
+    refetchInterval: refetchMs,
     enabled: Boolean(auth.accessToken),
   })
 
@@ -483,14 +496,30 @@ function AdminDashboard() {
     []
   )
 
+  // dashboard 轮询间隔(ms)。由后端 traffic_collect_interval × 1000 派生,
+  // admin 在"系统设置 > 定时配置"改后 master 热重载 ticker(无需重启),
+  // 前端每 30s 拉一次 `/api/system-config/refetch-interval` 跟上。
+  // 默认 5000ms;clamp 到 [1000, 60000] 防极端配置浪费带宽。
+  const { data: refetchCfg } = useQuery({
+    queryKey: ['public-refetch-interval'],
+    queryFn: async () => {
+      const response = await api.get('/api/system-config/refetch-interval')
+      return response.data as { success: boolean; refetch_interval_ms: number }
+    },
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+    enabled: Boolean(auth.accessToken),
+  })
+  const refetchMs = Math.min(Math.max(refetchCfg?.refetch_interval_ms ?? 5000, 1000), 60_000)
+
   const { data, isLoading, isError } = useQuery({
     queryKey: ['traffic-summary'],
     queryFn: async () => {
       const response = await api.get('/api/traffic/summary')
       return response.data
     },
-    staleTime: 5_000,
-    refetchInterval: 5_000,
+    staleTime: refetchMs,
+    refetchInterval: refetchMs,
     enabled: Boolean(auth.accessToken),
   })
 
@@ -500,8 +529,8 @@ function AdminDashboard() {
       const response = await api.get('/api/admin/remote-servers')
       return response.data as { success: boolean; servers: Array<{ name: string; current_upload_speed?: number; current_download_speed?: number; traffic_limit: number; traffic_used: number }> }
     },
-    staleTime: 3000,
-    refetchInterval: 3000,
+    staleTime: refetchMs,
+    refetchInterval: refetchMs,
     enabled: Boolean(auth.accessToken),
   })
 
@@ -514,8 +543,8 @@ function AdminDashboard() {
         servers: Array<{ server_id: number; server_name: string; inbounds: any[]; users: any[] }>
       }
     },
-    staleTime: 10_000,
-    refetchInterval: 5_000,
+    staleTime: refetchMs * 2,
+    refetchInterval: refetchMs,
     enabled: Boolean(auth.accessToken),
   })
 

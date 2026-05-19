@@ -515,9 +515,16 @@ func (h *RemoteTrafficHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// 在 traffic 上报响应里捎带最新的 config 更新(HTTP-mode agent 没有持久连接,
+	// 走 traffic POST 的 response 把变化推回去,agent 收到后调 handleConfigUpdate 应用)。
+	configUpdates := map[string]string{}
+	if val, _ := h.repo.GetSystemSetting(ctx, "dashboard_refresh_interval_ms"); val != "" {
+		configUpdates["traffic_report_interval_ms"] = val
+	}
 	respData, _ := json.Marshal(map[string]interface{}{
-		"success": true,
-		"message": "Traffic data received",
+		"success":        true,
+		"message":        "Traffic data received",
+		"config_updates": configUpdates,
 	})
 	writeHTTPCryptoResponse(w, crypto.Session, respData)
 }

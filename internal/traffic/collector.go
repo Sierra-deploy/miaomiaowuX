@@ -70,6 +70,12 @@ type Collector struct {
 
 	OnServerOffline func(ctx context.Context, serverName, ip string)
 
+	// 已激活的 ticker 引用,用于支持 hot-reload(系统设置改 interval 时立即生效)。
+	// 由 Start 内部赋值, SetInterval / SetSpeedInterval 在已运行时会 Reset。
+	tickerMu      sync.Mutex
+	tickerTraffic *time.Ticker
+	tickerSpeed   *time.Ticker
+
 	// 本地服务器的速度跟踪
 	speedMu      sync.RWMutex
 	serverSpeeds map[int64]*ServerSpeed           // serverID -> 速度数据
@@ -90,17 +96,30 @@ func NewCollector(repo *storage.TrafficRepository) *Collector {
 	}
 }
 
-// 设置采集间隔
+// SetInterval 设置 traffic 采集间隔。如果 Start() 已在跑,会立即 Reset ticker(hot-reload)。
 func (c *Collector) SetInterval(interval time.Duration) {
-	if interval > 0 {
-		c.interval = interval
+	if interval <= 0 {
+		return
 	}
+	c.interval = interval
+	c.tickerMu.Lock()
+	if c.tickerTraffic != nil {
+		c.tickerTraffic.Reset(interval)
+	}
+	c.tickerMu.Unlock()
 }
 
+// SetSpeedInterval 同 SetInterval,作用于 speed 采集 ticker。
 func (c *Collector) SetSpeedInterval(interval time.Duration) {
-	if interval > 0 {
-		c.speedInterval = interval
+	if interval <= 0 {
+		return
 	}
+	c.speedInterval = interval
+	c.tickerMu.Lock()
+	if c.tickerSpeed != nil {
+		c.tickerSpeed.Reset(interval)
+	}
+	c.tickerMu.Unlock()
 }
 
 // 开始流量收集循环
@@ -112,6 +131,14 @@ func (c *Collector) Start(ctx context.Context) {
 
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
+	c.tickerMu.Lock()
+	c.tickerTraffic = ticker
+	c.tickerMu.Unlock()
+	defer func() {
+		c.tickerMu.Lock()
+		c.tickerTraffic = nil
+		c.tickerMu.Unlock()
+	}()
 
 	for {
 		select {
@@ -461,6 +488,14 @@ func (c *Collector) CollectFromRemoteServer(ctx context.Context, server storage.
 func (c *Collector) StartSpeedCollection(ctx context.Context) {
 	ticker := time.NewTicker(c.speedInterval)
 	defer ticker.Stop()
+	c.tickerMu.Lock()
+	c.tickerSpeed = ticker
+	c.tickerMu.Unlock()
+	defer func() {
+		c.tickerMu.Lock()
+		c.tickerSpeed = nil
+		c.tickerMu.Unlock()
+	}()
 
 	log.Printf("[Speed Collector] Starting speed collection with %v interval", c.speedInterval)
 

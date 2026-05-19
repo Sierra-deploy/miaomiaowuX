@@ -5,19 +5,31 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"time"
 
 	"miaomiaowux/internal/agentlog"
 	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/traffic"
 )
 
 type SystemSettingsHandler struct {
-	repo   *storage.TrafficRepository
-	crypto *CryptoConfig
+	repo      *storage.TrafficRepository
+	crypto    *CryptoConfig
+	collector *traffic.Collector // 可选,SetIntervals 时调 hot-reload ticker;nil 时仅落库
+	wsHandler *RemoteWSHandler   // 可选,SetDashboardRefresh 后广播 config_update 给所有 WS-mode agent
 }
 
 func NewSystemSettingsHandler(repo *storage.TrafficRepository, crypto *CryptoConfig) *SystemSettingsHandler {
 	return &SystemSettingsHandler{repo: repo, crypto: crypto}
 }
+
+// SetCollector 注入 traffic.Collector 让 SetIntervals 修改间隔后立即热重载 ticker。
+// main.go 在创建 collector 之后调用一次。
+func (h *SystemSettingsHandler) SetCollector(c *traffic.Collector) { h.collector = c }
+
+// SetWSHandler 注入 WS handler 让 SetDashboardRefresh 后向所有 agent 广播 config_update。
+func (h *SystemSettingsHandler) SetWSHandler(ws *RemoteWSHandler) { h.wsHandler = ws }
 
 type GetAPITokenResponse struct {
 	Success bool   `json:"success"`
@@ -163,6 +175,72 @@ func (h *SystemSettingsHandler) SetShortLinkEnabled(w http.ResponseWriter, r *ht
 	json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "短链接设置已更新"})
 }
 
+// dashboardRefreshKey 是前端 dashboard 轮询间隔的 system_settings key,毫秒。
+// 跟 traffic_collect_interval(master collector 内部 polling)解耦:
+// agent 5s push 决定数据新鲜度,collector 60s 只是兜底;前端轮询频率是 UX 选项,默认 5000ms。
+const dashboardRefreshKey = "dashboard_refresh_interval_ms"
+const dashboardRefreshDefault = 5000
+
+// GetPublicIntervals 给所有登录用户(包括普通用户),返回前端 dashboard 应用的轮询间隔(ms)。
+func (h *SystemSettingsHandler) GetPublicIntervals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	val, _ := h.repo.GetSystemSetting(r.Context(), dashboardRefreshKey)
+	ms := dashboardRefreshDefault
+	if val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n >= 1000 && n <= 60000 {
+			ms = n
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"success":             true,
+		"refetch_interval_ms": ms,
+	})
+}
+
+// SetDashboardRefresh admin-only,设置前端 dashboard 轮询间隔(ms)。生效:下次前端拉到该值。
+// clamp 到 [1000, 60000] 范围,默认 5000。
+func (h *SystemSettingsHandler) SetDashboardRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		RefetchIntervalMs int `json:"refetch_interval_ms"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "请求格式错误"})
+		return
+	}
+	if req.RefetchIntervalMs < 1000 {
+		req.RefetchIntervalMs = 1000
+	}
+	if req.RefetchIntervalMs > 60000 {
+		req.RefetchIntervalMs = 60000
+	}
+	if err := h.repo.SetSystemSetting(r.Context(), dashboardRefreshKey, strconv.Itoa(req.RefetchIntervalMs)); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "保存失败"})
+		return
+	}
+	// 同步给所有 agent (用于 traffic 上报 ticker):WS-mode 立即推 config_update,
+	// HTTP-mode 通过下次 traffic POST 的 response 携带 (见 RemoteTrafficHandler),
+	// Pull-mode 因 master 是 GET agent,无现成回带通道,需要 agent 端轮询/重启生效。
+	if h.wsHandler != nil {
+		h.wsHandler.BroadcastConfigUpdate(map[string]string{
+			"traffic_report_interval_ms": strconv.Itoa(req.RefetchIntervalMs),
+		})
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "refetch_interval_ms": req.RefetchIntervalMs})
+}
+
 func (h *SystemSettingsHandler) GetIntervals(w http.ResponseWriter, r *http.Request) {
 	cfg, err := h.repo.GetSystemConfig(r.Context())
 	if err != nil {
@@ -224,10 +302,24 @@ func (h *SystemSettingsHandler) SetIntervals(w http.ResponseWriter, r *http.Requ
 		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "保存失败"})
 		return
 	}
+	// 热重载 master 端 collector ticker,无需重启服务。
+	// (traffic_check_interval / heartbeat_interval 需要其他子系统也支持热重载,目前仅落库。)
+	hotReloaded := false
+	if h.collector != nil {
+		h.collector.SetInterval(time.Duration(req.TrafficCollectInterval) * time.Second)
+		h.collector.SetSpeedInterval(time.Duration(req.SpeedCollectInterval) * time.Second)
+		hotReloaded = true
+	}
+	msg := "定时配置已更新"
+	if hotReloaded {
+		msg += "(traffic/speed 采集 ticker 已热重载,立即生效)"
+	} else {
+		msg += "(重启服务后生效)"
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"success": true,
-		"message": "定时配置已更新，重启服务后生效",
+		"message": msg,
 	})
 }
 

@@ -795,6 +795,30 @@ func (h *RemoteWSHandler) SendConfigUpdate(serverID int64, updates map[string]st
 	})
 }
 
+// BroadcastConfigUpdate 把 config_update 推给所有当前 WS-mode 在线 agent。
+// 用于 admin 在主控修改全局配置(如 traffic_report_interval_ms)后立即生效。
+// 非 WS mode (HTTP/Pull) 通过其他通道 (HTTP traffic response 携带) 同步,见 RemoteTrafficHandler。
+func (h *RemoteWSHandler) BroadcastConfigUpdate(updates map[string]string) {
+	payload, err := json.Marshal(updates)
+	if err != nil {
+		log.Printf("[Remote WS] BroadcastConfigUpdate marshal failed: %v", err)
+		return
+	}
+	h.conns.Range(func(_, v any) bool {
+		wsConn, ok := v.(*RemoteWSConnection)
+		if !ok {
+			return true
+		}
+		wsConn.mu.Lock()
+		_ = h.sendEncryptedMessage(wsConn, WSMessage{
+			Type:    WSMsgTypeConfigUpdate,
+			Payload: payload,
+		})
+		wsConn.mu.Unlock()
+		return true
+	})
+}
+
 // SendLicenseStatus 向指定连接推送许可证状态
 func (h *RemoteWSHandler) SendLicenseStatus(wsConn *RemoteWSConnection) {
 	if h.licenseManager == nil {
