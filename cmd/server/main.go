@@ -532,6 +532,7 @@ func main() {
 	// 系统设置 API（仅限管理员）
 	systemSettingsHandler := handler.NewSystemSettingsHandler(repo, cryptoConfig)
 	systemSettingsHandler.SetCollector(trafficCollector)
+	systemSettingsHandler.SetWSHandler(remoteWSHandler)
 	// 启动时加载加密设置
 	if encVal, _ := repo.GetSystemSetting(context.Background(), "require_encryption"); encVal == "true" {
 		cryptoConfig.SetRequireEncryption(true)

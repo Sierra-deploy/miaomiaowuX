@@ -11,10 +11,11 @@ import (
 type TrafficLimitEnforcer struct {
 	repo         *storage.TrafficRepository
 	remoteManage *RemoteManageHandler
+	pusher       *LimiterConfigPusher
 }
 
-func NewTrafficLimitEnforcer(repo *storage.TrafficRepository, remoteManage *RemoteManageHandler) *TrafficLimitEnforcer {
-	return &TrafficLimitEnforcer{repo: repo, remoteManage: remoteManage}
+func NewTrafficLimitEnforcer(repo *storage.TrafficRepository, remoteManage *RemoteManageHandler, pusher *LimiterConfigPusher) *TrafficLimitEnforcer {
+	return &TrafficLimitEnforcer{repo: repo, remoteManage: remoteManage, pusher: pusher}
 }
 
 func (e *TrafficLimitEnforcer) Start(ctx context.Context, interval time.Duration) {
@@ -57,6 +58,11 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 			}
 			if err := e.repo.RemovePackageFromUser(ctx, user.Username); err != nil {
 				log.Printf("[TrafficLimitEnforcer] Failed to remove package from %s: %v", user.Username, err)
+			}
+			// 套餐过期跟 user delete 一样,需要通知所有 agent limiter 同步移除该用户
+			// 否则 agent 内存里的 limiter UserInfo 还有这个用户,旧 IP 复用时仍能匹配 bucket。
+			if e.pusher != nil {
+				go e.pusher.PushToAllServersForUser(context.Background(), user.Username)
 			}
 			continue
 		}
