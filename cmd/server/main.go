@@ -99,6 +99,8 @@ func main() {
 	cryptoConfig := handler.NewCryptoConfig(masterIdentity, securechan.NewSessionCache(1*time.Hour))
 
 	licenseManager := license.NewManager(repo, license.GetMachineID())
+	// 注入 usage 来源,让心跳把"本机当前 used_servers/nodes/users" 上报给 license 服务器。
+	licenseManager.SetUsageReporter(repo)
 	licenseManager.Start(context.Background())
 	defer licenseManager.Stop()
 

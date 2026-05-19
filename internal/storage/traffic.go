@@ -6585,6 +6585,33 @@ func (r *TrafficRepository) CountUsers(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
+// LicenseUsage 返回当前本机激活的"license usage 三联":
+//   servers — 在线远程服务器(用心跳判定,activated 但未离线即算占用一个 server 名额)
+//   nodes   — 启用中的节点条目
+//   users   — 启用中的非管理员用户(管理员不占 license 名额)
+//
+// 设计意图:让 license 服务器看到的 used_* 跟"plan 限额检查"用到的口径一致,避免出现
+// "面板显示 used=N,但 enforce 时按 M 判定"的语义偏差。
+func (r *TrafficRepository) LicenseUsage(ctx context.Context) (servers, nodes, users int, err error) {
+	if r == nil || r.db == nil {
+		return 0, 0, 0, errors.New("traffic repository not initialized")
+	}
+	// connected = 心跳正常;若全部 offline 这台主控其实没在用 license,但我们仍记 0 即可。
+	if err = r.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM remote_servers WHERE status = 'connected'`).Scan(&servers); err != nil {
+		return 0, 0, 0, fmt.Errorf("count active servers: %w", err)
+	}
+	if err = r.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM nodes WHERE enabled = 1`).Scan(&nodes); err != nil {
+		return 0, 0, 0, fmt.Errorf("count enabled nodes: %w", err)
+	}
+	if err = r.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM users WHERE is_active = 1 AND role != 'admin'`).Scan(&users); err != nil {
+		return 0, 0, 0, fmt.Errorf("count active non-admin users: %w", err)
+	}
+	return servers, nodes, users, nil
+}
+
 // 远程服务器CRUD操作
 
 // 返回所有远程服务器。

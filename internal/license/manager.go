@@ -28,6 +28,11 @@ type Status struct {
 	ExpiresAt  string    `json:"expires_at,omitempty"`
 	Plan       *PlanInfo `json:"plan,omitempty"`
 	LastCheck  time.Time `json:"last_check"`
+
+	// HardRevoked 为 true 表示 license 服务器明确返回了"无效"(unbind / revoked / expired / wrong machine_id),
+	// 跟"网络故障导致没拿到响应"区分开。IsValid() 在 HardRevoked=true 时直接 return false,
+	// 不再走 24h grace period;反之网络故障下保留 grace,容忍短暂中断。
+	HardRevoked bool `json:"hard_revoked,omitempty"`
 }
 
 func (s *Status) HasFeature(name string) bool {
@@ -66,6 +71,13 @@ type SettingsStore interface {
 	SetSystemSetting(ctx context.Context, key, value string) error
 }
 
+// UsageReporter 让 manager 在心跳时取本机当前 license 占用数。
+// 通常用 *storage.TrafficRepository 实现(已在 storage.LicenseUsage 提供)。
+// 实现可以返回 err 表示采集失败,heartbeat 会跳过 usage 字段不影响验签。
+type UsageReporter interface {
+	LicenseUsage(ctx context.Context) (servers, nodes, users int, err error)
+}
+
 type Manager struct {
 	mu        sync.RWMutex
 	status    Status
@@ -73,8 +85,16 @@ type Manager struct {
 	key       string
 	machineID string
 	settings  SettingsStore
+	usage     UsageReporter
 	client    *http.Client
 	cancel    context.CancelFunc
+}
+
+// SetUsageReporter 注入 usage 来源,启动前调一次。nil 时 heartbeat payload 不带 used_* 字段。
+func (m *Manager) SetUsageReporter(r UsageReporter) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.usage = r
 }
 
 const DefaultServerURL = "https://license.miaomiaowu.net"
@@ -117,7 +137,12 @@ func (m *Manager) GetStatus() Status {
 func (m *Manager) IsValid() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if m.status.HardRevoked {
+		// 服务器明确否决 → 立即失效,不进 grace。
+		return false
+	}
 	if !m.status.Valid {
+		// valid=false 但不是 HardRevoked → 通常是网络故障 / 启动期未 activate,允许 grace。
 		return m.withinGracePeriod()
 	}
 	return true
@@ -149,6 +174,11 @@ func (m *Manager) loadSettings(ctx context.Context) {
 	}
 	if key, err := m.settings.GetSystemSetting(ctx, "license_key"); err == nil && key != "" {
 		m.key = key
+	}
+	// 可选 override:不写则用 DefaultServerURL。
+	// 测试环境用:在 system_settings 表写 license_server_url=https://iloli.vip:2233
+	if url, err := m.settings.GetSystemSetting(ctx, "license_server_url"); err == nil && url != "" {
+		m.serverURL = url
 	}
 }
 
@@ -213,10 +243,25 @@ func (m *Manager) heartbeat(ctx context.Context) {
 		return
 	}
 
-	body, _ := json.Marshal(map[string]string{
+	// 带上本机当前 usage,license server 用来在面板上展示 + 兜底比对配额。
+	// 采集失败(repo 错)不影响心跳本身,只是这次不传 used_* 字段。
+	payload := map[string]any{
 		"key":        m.key,
 		"machine_id": m.machineID,
-	})
+	}
+	m.mu.RLock()
+	usage := m.usage
+	m.mu.RUnlock()
+	if usage != nil {
+		if s, n, u, err := usage.LicenseUsage(ctx); err == nil {
+			payload["used_servers"] = s
+			payload["used_nodes"] = n
+			payload["used_users"] = u
+		} else {
+			log.Printf("[license] usage report skipped: %v", err)
+		}
+	}
+	body, _ := json.Marshal(payload)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.serverURL+"/api/v1/heartbeat", bytes.NewReader(body))
 	if err != nil {
@@ -226,7 +271,8 @@ func (m *Manager) heartbeat(ctx context.Context) {
 
 	resp, err := m.client.Do(req)
 	if err != nil {
-		log.Printf("[license] heartbeat failed: %v", err)
+		// 网络故障 → 静默,IsValid 走 grace 容忍。LastCheck 不更新避免 grace 永远续命。
+		log.Printf("[license] heartbeat network error: %v (grace period in effect)", err)
 		return
 	}
 	defer resp.Body.Close()
@@ -254,6 +300,8 @@ func (m *Manager) parseResponse(ctx context.Context, resp *http.Response) {
 	m.status.LastCheck = time.Now()
 
 	if result.Valid {
+		// 服务器明确"有效" → 清除 HardRevoked(用于解绑后续绑生效场景)。
+		m.status.HardRevoked = false
 		m.status.MaxServers = result.MaxServers
 		m.status.ExpiresAt = result.ExpiresAt
 		if result.Plan != nil {
@@ -271,6 +319,12 @@ func (m *Manager) parseResponse(ctx context.Context, resp *http.Response) {
 				m.status.Plan = &plan
 			}
 		}
+	} else {
+		// 收到了 HTTP 响应但 valid=false → 服务器明确否决(unbind / revoked / wrong machine_id 等),
+		// 立即失效,不走 24h grace。这是跟"网络故障"的本质区别 —— 网络故障在 heartbeat() 早就 return 了,
+		// 走不到这里。
+		m.status.HardRevoked = true
+		log.Printf("[license] HARD REVOKED by server: %s", result.Error)
 	}
 
 	m.mu.Unlock()
@@ -281,7 +335,13 @@ func (m *Manager) parseResponse(ctx context.Context, resp *http.Response) {
 func (m *Manager) heartbeatLoop(ctx context.Context) {
 	m.loadSettings(ctx)
 
-	ticker := time.NewTicker(30 * time.Minute)
+	// 启动后立即先跑一次心跳,把 used_* 数据 + 当前激活状态推上去,
+	// 避免之前 "first heartbeat 要等 30 分钟" 的尴尬。
+	m.heartbeat(ctx)
+
+	// 之前 30 分钟太长,解绑生效慢。5 分钟兼顾"unbind 快速生效"和"心跳负担"。
+	// 进一步缩到 1 分钟需要 license server 加版本号协议(见 B 方案),当前 5 分钟够用。
+	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
 	for {
