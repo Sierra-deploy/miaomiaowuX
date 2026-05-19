@@ -39,7 +39,7 @@
     "nodeExternal": "External",
     "speedLimit": "Speed Limit (Mbps)",
     "speedLimitPlaceholder": "0 for unlimited",
-    "speedLimitDesc": "Max download speed per user, 0 for unlimited",
+    "speedLimitDesc": "Max download speed per user. Unit: Mbps (megabits/sec). Conversion: 8 Mbps ≈ 1 MB/s, 100 Mbps ≈ 12.5 MB/s. 0 = unlimited. Per-user \"Speed Limit Override\" takes precedence over this field.",
     "deviceLimit": "Device Limit",
     "deviceLimitPlaceholder": "0 for unlimited",
     "deviceLimitDesc": "Max concurrent devices per user, 0 for unlimited",

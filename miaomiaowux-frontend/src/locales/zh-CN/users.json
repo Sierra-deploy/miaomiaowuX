@@ -52,7 +52,7 @@
     "override": "覆写",
     "speedLimit": "限速覆写 (Mbps)",
     "speedPlaceholder": "留空使用套餐默认值",
-    "speedDesc": "覆写套餐的限速设置，留空则使用套餐默认值",
+    "speedDesc": "覆盖套餐限速设置（用户覆写 > 套餐限速）。单位 Mbps（兆比特/秒）。换算: 8 Mbps ≈ 1 MB/s, 100 Mbps ≈ 12.5 MB/s。填 0 = 显式不限速；留空 = 沿用套餐默认。",
     "deviceLimit": "设备数覆写",
     "devicePlaceholder": "留空使用套餐默认值",
     "deviceDesc": "覆写套餐的设备数限制，留空则使用套餐默认值"

@@ -39,7 +39,7 @@
     "nodeExternal": "外部",
     "speedLimit": "限速 (Mbps)",
     "speedLimitPlaceholder": "0 表示不限速",
-    "speedLimitDesc": "每用户最大下载速度，0 表示不限速",
+    "speedLimitDesc": "每用户最大下载速度。单位 Mbps（兆比特/秒）。换算: 8 Mbps ≈ 1 MB/s, 100 Mbps ≈ 12.5 MB/s。0 表示不限速。用户级\"限速覆写\"会覆盖本字段。",
     "deviceLimit": "设备数限制",
     "deviceLimitPlaceholder": "0 表示不限制",
     "deviceLimitDesc": "每用户最大在线设备数，0 表示不限制",

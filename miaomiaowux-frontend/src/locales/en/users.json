@@ -52,7 +52,7 @@
     "override": "Override",
     "speedLimit": "Speed Limit Override (Mbps)",
     "speedPlaceholder": "Leave empty to use package default",
-    "speedDesc": "Override package speed limit, leave empty for package default",
+    "speedDesc": "Overrides package speed limit (user override > package). Unit: Mbps (megabits/sec). Conversion: 8 Mbps ≈ 1 MB/s, 100 Mbps ≈ 12.5 MB/s. Enter 0 = explicit unlimited; leave empty = inherit package default.",
     "deviceLimit": "Device Limit Override",
     "devicePlaceholder": "Leave empty to use package default",
     "deviceDesc": "Override package device limit, leave empty for package default"
