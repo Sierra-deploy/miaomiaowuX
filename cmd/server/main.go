@@ -213,7 +213,7 @@ func main() {
 	userCreateHandler := handler.NewUserCreateHandler(repo)
 	userCreateHandler.SetLicenseManager(licenseManager)
 	mux.Handle("/api/admin/users/create", auth.RequireAdmin(tokenStore, userRepo, userCreateHandler))
-	mux.Handle("/api/admin/users/delete", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserDeleteHandler(repo)))
+	// /api/admin/users/delete 依赖 remoteManageHandler + limiterPusher 做 xray client 清理，注册下移到 ~line 348 之后
 	mux.Handle("/api/admin/users/status", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserStatusHandler(repo)))
 	mux.Handle("/api/admin/users/reset-password", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserResetPasswordHandler(repo)))
 	mux.Handle("/api/admin/users/remark", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserRemarkHandler(repo)))
@@ -347,6 +347,7 @@ func main() {
 	mux.Handle("/api/admin/packages/assign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageAssignHandler(repo, remoteManageHandler, limiterPusher)))
 	mux.Handle("/api/admin/packages/unassign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageUnassignHandler(repo, remoteManageHandler, limiterPusher)))
 	mux.Handle("/api/admin/users/limits", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserLimitsHandler(repo, limiterPusher)))
+	mux.Handle("/api/admin/users/delete", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserDeleteHandler(repo, remoteManageHandler, limiterPusher)))
 
 	// 用户节点管理（普通用户查看套餐节点、管理自己的出站）
 	userNodesHandler := handler.NewUserNodesHandler(repo, remoteManageHandler)

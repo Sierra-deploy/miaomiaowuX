@@ -1,10 +1,12 @@
 package handler
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -355,7 +357,7 @@ type userDeleteRequest struct {
 	Username string `json:"username"`
 }
 
-func NewUserDeleteHandler(repo *storage.TrafficRepository) http.Handler {
+func NewUserDeleteHandler(repo *storage.TrafficRepository, remoteManage *RemoteManageHandler, pusher *LimiterConfigPusher) http.Handler {
 	if repo == nil {
 		panic("user delete handler requires repository")
 	}
@@ -378,8 +380,10 @@ func NewUserDeleteHandler(repo *storage.TrafficRepository) http.Handler {
 			return
 		}
 
+		ctx := r.Context()
+
 		// 检查目标用户是否是admin
-		targetUser, err := repo.GetUser(r.Context(), username)
+		targetUser, err := repo.GetUser(ctx, username)
 		if err != nil {
 			if errors.Is(err, storage.ErrUserNotFound) {
 				writeError(w, http.StatusNotFound, errors.New("user not found"))
@@ -394,13 +398,37 @@ func NewUserDeleteHandler(repo *storage.TrafficRepository) http.Handler {
 			return
 		}
 
-		if err := repo.DeleteUser(r.Context(), username); err != nil {
+		// 删除前从所有 xray inbound 里清掉该用户的 client，
+		// 否则节点上还残留着该用户的 uuid/password，套餐节点上会出现"幽灵用户"。
+		// 这里复用 packages.go 里的 removeUserFromInbound 路径，跟 PackageUnassign 行为一致。
+		if remoteManage != nil {
+			configs, cfgErr := repo.GetUserInboundConfigs(ctx, username)
+			if cfgErr != nil {
+				log.Printf("[UserDelete] get inbound configs for %s failed: %v", username, cfgErr)
+			}
+			for _, cfg := range configs {
+				if err := removeUserFromInbound(ctx, remoteManage, cfg); err != nil {
+					log.Printf("[UserDelete] remove %s from inbound %s on server %d failed: %v",
+						username, cfg.InboundTag, cfg.ServerID, err)
+				}
+			}
+			if err := repo.DeleteUserInboundConfigs(ctx, username); err != nil {
+				log.Printf("[UserDelete] delete inbound config records for %s failed: %v", username, err)
+			}
+		}
+
+		if err := repo.DeleteUser(ctx, username); err != nil {
 			if errors.Is(err, storage.ErrUserNotFound) {
 				writeError(w, http.StatusNotFound, errors.New("user not found"))
 				return
 			}
 			writeError(w, http.StatusInternalServerError, err)
 			return
+		}
+
+		// 通知 agent limiter 移除该用户
+		if pusher != nil {
+			go pusher.PushToAllServersForUser(context.Background(), username)
 		}
 
 		w.Header().Set("Content-Type", "application/json")

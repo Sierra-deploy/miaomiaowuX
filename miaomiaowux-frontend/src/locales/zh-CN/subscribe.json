@@ -20,7 +20,8 @@
     "typeLabels": {
       "create": "创建",
       "import": "导入",
-      "upload": "上传"
+      "upload": "上传",
+      "package": "套餐"
     },
     "fileList": {
       "title": "订阅列表",

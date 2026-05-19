@@ -778,8 +778,11 @@ func addUserToInbound(ctx context.Context, rm *RemoteManageHandler, repo *storag
 		credJSON = existing.CredentialJSON
 	}
 	if credential == nil {
+		// 对 shadowsocks 需要把 settings.method 传给 generator,因为 SS2022 的 key 长度跟着 method 走
+		// (2022-blake3-aes-128-gcm = 16B, 其余 2022-* = 32B, 普通 SS = 16B)
+		method, _ := settings["method"].(string)
 		var err error
-		credential, credJSON, err = generateCredential(protocol, user)
+		credential, credJSON, err = generateCredential(protocol, user, method)
 		if err != nil {
 			return fmt.Errorf("generate credential: %w", err)
 		}
@@ -898,8 +901,26 @@ func removeUserFromInbound(ctx context.Context, rm *RemoteManageHandler, cfg sto
 	return nil
 }
 
-// generateCredential 根据协议类型生成用户凭据
-func generateCredential(protocol string, user storage.User) (map[string]interface{}, string, error) {
+// shadowsocksKeyLength 根据 SS method 返回 password 应有的字节数（base64 解码后）。
+func shadowsocksKeyLength(method string) int {
+	switch strings.ToLower(strings.TrimSpace(method)) {
+	case "2022-blake3-aes-128-gcm":
+		return 16
+	case "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305":
+		return 32
+	}
+	// 老 SS 算法对 key 长度宽松,16 字节够大多数场景。
+	return 16
+}
+
+// generateCredential 生成单用户在指定 inbound 上的认证凭据。
+// shadowsocks 协议要求 password 与 method 的 key length 严格匹配,否则 xray reload 会失败。
+// SS2022 :
+//   2022-blake3-aes-128-gcm           → 16 bytes (base64 24 chars)
+//   2022-blake3-aes-256-gcm           → 32 bytes
+//   2022-blake3-chacha20-poly1305     → 32 bytes
+// 老 SS / 非 2022 method → 任意长度都接受,默认给 16 bytes 即可。
+func generateCredential(protocol string, user storage.User, method string) (map[string]interface{}, string, error) {
 	cred := make(map[string]interface{})
 	email := user.Email
 	if email == "" {
@@ -917,7 +938,8 @@ func generateCredential(protocol string, user storage.User) (map[string]interfac
 		cred["email"] = email
 		cred["level"] = 0
 	case "shadowsocks":
-		key := make([]byte, 16)
+		keyLen := shadowsocksKeyLength(method)
+		key := make([]byte, keyLen)
 		rand.Read(key)
 		cred["password"] = base64.StdEncoding.EncodeToString(key)
 		cred["email"] = email

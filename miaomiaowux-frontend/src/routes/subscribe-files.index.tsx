@@ -132,16 +132,18 @@ type SubscribeFile = {
   latest_version?: number
 }
 
-const TYPE_COLORS = {
+const TYPE_COLORS: Record<string, string> = {
   create: 'bg-blue-500/10 text-blue-700 dark:text-blue-400',
   import: 'bg-green-500/10 text-green-700 dark:text-green-400',
   upload: 'bg-purple-500/10 text-purple-700 dark:text-purple-400',
+  package: 'bg-amber-500/10 text-amber-700 dark:text-amber-400',
 }
 
-const TYPE_LABELS = {
+const TYPE_LABELS: Record<string, string> = {
   create: '创建',
   import: '导入',
   upload: '上传',
+  package: '套餐',
 }
 
 type ExternalSubscription = {
@@ -3037,10 +3039,19 @@ function SubscribeFilesPage() {
                           <Button
                             variant='ghost'
                             size='sm'
+                            title={t('management.fileList.editInfo')}
                             onClick={() => handleEditMetadata(file)}
                             disabled={updateMetadataMutation.isPending}
                           >
                             <Settings className='h-4 w-4' />
+                          </Button>
+                          <Button
+                            variant='ghost'
+                            size='sm'
+                            title={t('management.fileList.editConfig')}
+                            onClick={() => handleEditConfig(file)}
+                          >
+                            <Edit className='h-4 w-4' />
                           </Button>
                           <AlertDialog>
                             <AlertDialogTrigger asChild>
@@ -3074,7 +3085,7 @@ function SubscribeFilesPage() {
                       ),
                       headerClassName: 'text-center',
                       cellClassName: 'text-center',
-                      width: '120px',
+                      width: '140px',
                     },
                   ] as DataTableColumn<SubscribeFile>[]
                 }
