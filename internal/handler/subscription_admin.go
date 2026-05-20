@@ -428,10 +428,11 @@ func NewSubscriptionListHandler(repo *storage.TrafficRepository) http.Handler {
 			enableShortLink = systemConfig.EnableShortLink
 		}
 
-		// 仅在启用短链接时获取用户短代码
+		// 仅在启用短链接时获取用户短代码(优先用户自定义短码,否则系统自动短码)。
+		// 管理员不追加用户短码:管理员直接用文件短码 /x/{fileShortCode} 即可访问全部订阅。
 		var userShortCode string
-		if enableShortLink {
-			userShortCode, err = repo.GetUserShortCode(r.Context(), username)
+		if enableShortLink && user.Role != storage.RoleAdmin {
+			userShortCode, err = repo.GetEffectiveUserShortCode(r.Context(), username)
 			if err != nil {
 				// 如果用户短代码不存在，它将在下次令牌访问时生成
 				userShortCode = ""

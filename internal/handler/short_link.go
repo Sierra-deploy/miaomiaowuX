@@ -196,8 +196,13 @@ func NewUserCustomShortCodeSelfHandler(repo *storage.TrafficRepository) http.Han
 				writeError(w, http.StatusInternalServerError, err)
 				return
 			}
+			// effective = 自定义短码优先,否则系统自动短码(供前端预填当前短码)
+			effective, eerr := repo.GetEffectiveUserShortCode(r.Context(), username)
+			if eerr != nil {
+				effective = code
+			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"custom_short_code": code})
+			json.NewEncoder(w).Encode(map[string]string{"custom_short_code": code, "effective_short_code": effective})
 
 		case http.MethodPost:
 			var payload struct {

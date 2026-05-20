@@ -104,6 +104,7 @@ function SubscriptionPage() {
   })
 
   const subscribeFiles = subscribeFilesData?.subscriptions ?? []
+  const userShortCode = subscribeFilesData?.user_short_code ?? ''
 
   const { data: tokenData } = useQuery({
     queryKey: ['user-token'],
@@ -111,7 +112,7 @@ function SubscriptionPage() {
       const response = await api.get('/api/user/token')
       return response.data as { token: string }
     },
-    enabled: Boolean(auth.accessToken),
+    enabled: Boolean(auth.accessToken) && !userShortCode,
     staleTime: 5 * 60 * 1000,
   })
 
@@ -126,7 +127,8 @@ function SubscriptionPage() {
   const buildSubscriptionURL = (filename: string, fileShortCode: string | undefined, clientType?: string, fileType?: string, customShortCode?: string) => {
     const shortCode = customShortCode || fileShortCode
     if (shortCode) {
-      const url = new URL(`/x/${shortCode}`, baseURL)
+      // 普通用户:订阅短链接末尾追加用户短码(/x/{文件短码}{用户短码});管理员 userShortCode 为空,直接用文件短码。
+      const url = new URL(`/x/${shortCode + userShortCode}`, baseURL)
       if (clientType) url.searchParams.set('t', clientType)
       return url.toString()
     }

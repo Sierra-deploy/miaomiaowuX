@@ -621,7 +621,9 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		go h.pusher.PushToAllServersForUser(context.Background(), req.Username)
 	}
 
-	go h.autoGenerateSubscription(context.Background(), req.Username, req.PackageID)
+	// 不再预生成套餐订阅文件:套餐订阅由 PackageSubscribeHandler 通过
+	// /x/{套餐短码}{用户短码} 或 /api/user/package-subscribe 动态生成(默认模板 + 套餐节点),
+	// 预生成的 pkg_<user>.yaml 既不被读取、又会污染订阅管理列表,故移除。
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
