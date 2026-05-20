@@ -78,14 +78,27 @@ func (h *subscribeFilesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 }
 
 func (h *subscribeFilesHandler) handleList(w http.ResponseWriter, r *http.Request) {
-	files, err := h.repo.ListSubscribeFiles(r.Context())
+	ctx := r.Context()
+	files, err := h.repo.ListSubscribeFiles(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
+	// 数据隔离:普通用户只看自己创建的;admin 看全部。
+	username := auth.UsernameFromContext(ctx)
+	if !userIsAdmin(ctx, h.repo, username) {
+		filtered := make([]storage.SubscribeFile, 0, len(files))
+		for _, f := range files {
+			if f.CreatedBy == username {
+				filtered = append(filtered, f)
+			}
+		}
+		files = filtered
+	}
+
 	respondJSON(w, http.StatusOK, map[string]any{
-		"files": h.convertSubscribeFilesWithVersions(r.Context(), files),
+		"files": h.convertSubscribeFilesWithVersions(ctx, files),
 	})
 }
 
@@ -115,6 +128,12 @@ func (h *subscribeFilesHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 
 	username := auth.UsernameFromContext(r.Context())
 
+	// 配额校验:普通用户创建订阅受全局配额限制(admin 不限)。
+	if err := checkUserQuota(r.Context(), h.repo, username, "subscribe"); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+
 	file := storage.SubscribeFile{
 		Name:             req.Name,
 		Description:      req.Description,
@@ -123,6 +142,8 @@ func (h *subscribeFilesHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 		Filename:         req.Filename,
 		TemplateFilename: req.TemplateFilename,
 		SelectedTags:     req.SelectedTags,
+		SelectedCustomRuleIDs:     req.SelectedCustomRuleIDs,
+		SelectedOverrideScriptIDs: req.SelectedOverrideScriptIDs,
 		StatsServerIDs:   req.StatsServerIDs,
 		TrafficLimit:     req.TrafficLimit,
 		CustomShortCode:  req.CustomShortCode,
@@ -246,6 +267,15 @@ func (h *subscribeFilesHandler) handleImport(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	username := auth.UsernameFromContext(r.Context())
+
+	// 配额校验:普通用户创建订阅受全局配额限制(admin 不限)。
+	if err := checkUserQuota(r.Context(), h.repo, username, "subscribe"); err != nil {
+		_ = os.Remove(filePath)
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+
 	// 保存到数据库
 	file := storage.SubscribeFile{
 		Name:        req.Name,
@@ -253,6 +283,7 @@ func (h *subscribeFilesHandler) handleImport(w http.ResponseWriter, r *http.Requ
 		URL:         req.URL,
 		Type:        storage.SubscribeTypeImport,
 		Filename:    filename,
+		CreatedBy:   username,
 	}
 
 	created, err := h.repo.CreateSubscribeFile(r.Context(), file)
@@ -332,6 +363,15 @@ func (h *subscribeFilesHandler) handleUpload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	username := auth.UsernameFromContext(r.Context())
+
+	// 配额校验:普通用户创建订阅受全局配额限制(admin 不限)。
+	if err := checkUserQuota(r.Context(), h.repo, username, "subscribe"); err != nil {
+		_ = os.Remove(filePath)
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+
 	// 保存到数据库
 	subscribeFile := storage.SubscribeFile{
 		Name:        name,
@@ -339,6 +379,7 @@ func (h *subscribeFilesHandler) handleUpload(w http.ResponseWriter, r *http.Requ
 		URL:         "", // 上传的文件没有URL
 		Type:        storage.SubscribeTypeUpload,
 		Filename:    filename,
+		CreatedBy:   username,
 	}
 
 	created, err := h.repo.CreateSubscribeFile(r.Context(), subscribeFile)
@@ -378,6 +419,12 @@ func (h *subscribeFilesHandler) handleUpdate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// 所有权校验:普通用户只能改自己创建的订阅。
+	if uname := auth.UsernameFromContext(r.Context()); !userIsAdmin(r.Context(), h.repo, uname) && existing.CreatedBy != uname {
+		writeError(w, http.StatusNotFound, storage.ErrSubscribeFileNotFound)
+		return
+	}
+
 	var req subscribeFileRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeBadRequest(w, "请求格式不正确")
@@ -405,6 +452,12 @@ func (h *subscribeFilesHandler) handleUpdate(w http.ResponseWriter, r *http.Requ
 	existing.TemplateFilename = req.TemplateFilename
 	if req.SelectedTags != nil {
 		existing.SelectedTags = req.SelectedTags
+	}
+	if req.SelectedCustomRuleIDs != nil {
+		existing.SelectedCustomRuleIDs = req.SelectedCustomRuleIDs
+	}
+	if req.SelectedOverrideScriptIDs != nil {
+		existing.SelectedOverrideScriptIDs = req.SelectedOverrideScriptIDs
 	}
 	existing.StatsServerIDs = req.StatsServerIDs
 	existing.TrafficLimit = req.TrafficLimit
@@ -505,6 +558,12 @@ func (h *subscribeFilesHandler) handleDelete(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	// 所有权校验:普通用户只能删自己创建的订阅。
+	if uname := auth.UsernameFromContext(r.Context()); !userIsAdmin(r.Context(), h.repo, uname) && file.CreatedBy != uname {
+		writeError(w, http.StatusNotFound, storage.ErrSubscribeFileNotFound)
 		return
 	}
 
@@ -687,6 +746,8 @@ type subscribeFileRequest struct {
 	AutoSyncCustomRules *bool    `json:"auto_sync_custom_rules,omitempty"`
 	TemplateFilename    string   `json:"template_filename"`
 	SelectedTags        []string `json:"selected_tags"`
+	SelectedCustomRuleIDs     []int64 `json:"selected_custom_rule_ids"`
+	SelectedOverrideScriptIDs []int64 `json:"selected_override_script_ids"`
 	StatsServerIDs      string   `json:"stats_server_ids"`
 	TrafficLimit        *float64 `json:"traffic_limit"`
 	CustomShortCode     string   `json:"custom_short_code"`
@@ -705,6 +766,8 @@ type subscribeFileDTO struct {
 	AutoSyncCustomRules bool       `json:"auto_sync_custom_rules"`
 	TemplateFilename    string     `json:"template_filename"`
 	SelectedTags        []string   `json:"selected_tags"`
+	SelectedCustomRuleIDs     []int64 `json:"selected_custom_rule_ids"`
+	SelectedOverrideScriptIDs []int64 `json:"selected_override_script_ids"`
 	StatsServerIDs      string     `json:"stats_server_ids"`
 	TrafficLimit        *float64   `json:"traffic_limit"`
 	SortOrder           int        `json:"sort_order"`
@@ -727,6 +790,8 @@ func convertSubscribeFile(file storage.SubscribeFile) subscribeFileDTO {
 		AutoSyncCustomRules: file.AutoSyncCustomRules,
 		TemplateFilename:    file.TemplateFilename,
 		SelectedTags:        file.SelectedTags,
+		SelectedCustomRuleIDs:     file.SelectedCustomRuleIDs,
+		SelectedOverrideScriptIDs: file.SelectedOverrideScriptIDs,
 		StatsServerIDs:      file.StatsServerIDs,
 		TrafficLimit:        file.TrafficLimit,
 		SortOrder:           file.SortOrder,
@@ -900,6 +965,13 @@ func (h *subscribeFilesHandler) handleCreateFromConfig(w http.ResponseWriter, r 
 		return
 	}
 
+	// 配额校验:普通用户创建订阅受全局配额限制(admin 不限)。
+	if err := checkUserQuota(r.Context(), h.repo, username, "subscribe"); err != nil {
+		_ = os.Remove(filePath)
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+
 	// 保存到数据库
 	file := storage.SubscribeFile{
 		Name:        req.Name,
@@ -907,6 +979,7 @@ func (h *subscribeFilesHandler) handleCreateFromConfig(w http.ResponseWriter, r 
 		URL:         "",
 		Type:        storage.SubscribeTypeCreate,
 		Filename:    filename,
+		CreatedBy:   username,
 	}
 
 	created, err := h.repo.CreateSubscribeFile(r.Context(), file)
@@ -944,13 +1017,19 @@ func (h *subscribeFilesHandler) handleGetContent(w http.ResponseWriter, r *http.
 	}
 
 	// 检查文件是否存在于数据库
-	_, err = h.repo.GetSubscribeFileByFilename(r.Context(), filename)
+	sf, err := h.repo.GetSubscribeFileByFilename(r.Context(), filename)
 	if err != nil {
 		if errors.Is(err, storage.ErrSubscribeFileNotFound) {
 			writeError(w, http.StatusNotFound, errors.New("订阅文件不存在"))
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	// 所有权校验:普通用户只能看自己创建的订阅内容。
+	if uname := auth.UsernameFromContext(r.Context()); !userIsAdmin(r.Context(), h.repo, uname) && sf.CreatedBy != uname {
+		writeError(w, http.StatusNotFound, errors.New("订阅文件不存在"))
 		return
 	}
 
@@ -993,6 +1072,12 @@ func (h *subscribeFilesHandler) handleUpdateContent(w http.ResponseWriter, r *ht
 			return
 		}
 		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	// 所有权校验:普通用户只能改自己创建的订阅内容。
+	if uname := auth.UsernameFromContext(r.Context()); !userIsAdmin(r.Context(), h.repo, uname) && subscribeFile.CreatedBy != uname {
+		writeError(w, http.StatusNotFound, errors.New("订阅文件不存在"))
 		return
 	}
 

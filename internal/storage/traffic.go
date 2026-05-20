@@ -250,6 +250,8 @@ type SubscribeFile struct {
 	AutoSyncCustomRules bool
 	TemplateFilename    string   // 绑定的 V3 模板文件名
 	SelectedTags        []string // 选中的节点标签（DB 中 JSON 数组）
+	SelectedCustomRuleIDs     []int64 // 该订阅生效的覆写规则 ID（空=全部启用的生效）
+	SelectedOverrideScriptIDs []int64 // 该订阅生效的覆写脚本 ID（空=全部启用的生效）
 	StatsServerIDs      string   // 流量统计服务器 ID（逗号分隔 remote_servers.id）
 	TrafficLimit        *float64 // 手动流量上限(GB)，nil=跟随服务器
 	SortOrder           int
@@ -336,6 +338,7 @@ type CustomRule struct {
 	Mode      string // "替换"、"前置"
 	Content   string
 	Enabled   bool
+	CreatedBy string // 创建者用户名(用户权限隔离);'' 视为 admin 历史数据
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -1145,6 +1148,12 @@ CREATE INDEX IF NOT EXISTS idx_custom_rules_enabled ON custom_rules(enabled);
 	if err := r.ensureSubscribeFileColumn("template_filename", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	if err := r.ensureSubscribeFileColumn("selected_custom_rule_ids", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+	if err := r.ensureSubscribeFileColumn("selected_override_script_ids", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
 	if err := r.ensureSubscribeFileColumn("selected_tags", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
 		return err
 	}
@@ -1169,6 +1178,15 @@ CREATE INDEX IF NOT EXISTS idx_custom_rules_enabled ON custom_rules(enabled);
 	// 的 autoGenerateSubscription 写入失败。这里 idempotent rebuild 加上 'package'。
 	if err := r.ensureSubscribeFileTypeAllowsPackage(); err != nil {
 		return fmt.Errorf("migrate subscribe_files type CHECK: %w", err)
+	}
+
+	// 用户权限功能:templates / custom_rules 加 created_by 列,用于"普通用户只看自己创建的"数据隔离。
+	// (override_scripts 已有 username, subscribe_files 已有 created_by。)历史行 created_by='' 视为 admin 创建。
+	if err := r.ensureTableColumn("templates", "created_by", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate templates.created_by: %w", err)
+	}
+	if err := r.ensureTableColumn("custom_rules", "created_by", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate custom_rules.created_by: %w", err)
 	}
 
 	// 创建 custom_rule_applications 表用于跟踪应用的内容
@@ -2149,6 +2167,36 @@ func (r *TrafficRepository) ensureNodeColumn(name, definition string) error {
 		return fmt.Errorf("add column %s: %w", name, err)
 	}
 
+	return nil
+}
+
+// ensureTableColumn 通用列迁移:表名作参数,列不存在时 ALTER ADD。
+// 注意 table 必须是代码内写死的常量(非用户输入),避免 SQL 注入。
+func (r *TrafficRepository) ensureTableColumn(table, name, definition string) error {
+	rows, err := r.db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return fmt.Errorf("%s table info: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid        int
+			colName    string
+			colType    string
+			notNull    int
+			defaultVal sql.NullString
+			pk         int
+		)
+		if err := rows.Scan(&cid, &colName, &colType, &notNull, &defaultVal, &pk); err != nil {
+			return fmt.Errorf("scan %s table info: %w", table, err)
+		}
+		if strings.EqualFold(colName, name) {
+			return nil
+		}
+	}
+	if _, err := r.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, name, definition)); err != nil {
+		return fmt.Errorf("add column %s.%s: %w", table, name, err)
+	}
 	return nil
 }
 
@@ -4516,10 +4564,10 @@ func (r *TrafficRepository) ListCustomRules(ctx context.Context, ruleType string
 	var args []interface{}
 
 	if ruleType != "" {
-		query = `SELECT id, name, type, mode, content, enabled, created_at, updated_at FROM custom_rules WHERE type = ? ORDER BY created_at DESC`
+		query = `SELECT id, name, type, mode, content, enabled, COALESCE(created_by,''), created_at, updated_at FROM custom_rules WHERE type = ? ORDER BY created_at DESC`
 		args = append(args, ruleType)
 	} else {
-		query = `SELECT id, name, type, mode, content, enabled, created_at, updated_at FROM custom_rules ORDER BY created_at DESC`
+		query = `SELECT id, name, type, mode, content, enabled, COALESCE(created_by,''), created_at, updated_at FROM custom_rules ORDER BY created_at DESC`
 	}
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
@@ -4532,7 +4580,7 @@ func (r *TrafficRepository) ListCustomRules(ctx context.Context, ruleType string
 	for rows.Next() {
 		var rule CustomRule
 		var enabled int
-		if err := rows.Scan(&rule.ID, &rule.Name, &rule.Type, &rule.Mode, &rule.Content, &enabled, &rule.CreatedAt, &rule.UpdatedAt); err != nil {
+		if err := rows.Scan(&rule.ID, &rule.Name, &rule.Type, &rule.Mode, &rule.Content, &enabled, &rule.CreatedBy, &rule.CreatedAt, &rule.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan custom rule: %w", err)
 		}
 		rule.Enabled = enabled != 0
@@ -4556,11 +4604,11 @@ func (r *TrafficRepository) GetCustomRule(ctx context.Context, id int64) (*Custo
 		return nil, errors.New("custom rule id is required")
 	}
 
-	const query = `SELECT id, name, type, mode, content, enabled, created_at, updated_at FROM custom_rules WHERE id = ?`
+	const query = `SELECT id, name, type, mode, content, enabled, COALESCE(created_by,''), created_at, updated_at FROM custom_rules WHERE id = ?`
 
 	var rule CustomRule
 	var enabled int
-	err := r.db.QueryRowContext(ctx, query, id).Scan(&rule.ID, &rule.Name, &rule.Type, &rule.Mode, &rule.Content, &enabled, &rule.CreatedAt, &rule.UpdatedAt)
+	err := r.db.QueryRowContext(ctx, query, id).Scan(&rule.ID, &rule.Name, &rule.Type, &rule.Mode, &rule.Content, &enabled, &rule.CreatedBy, &rule.CreatedAt, &rule.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrCustomRuleNotFound
@@ -4609,14 +4657,14 @@ func (r *TrafficRepository) CreateCustomRule(ctx context.Context, rule *CustomRu
 		return errors.New("custom rule content is required")
 	}
 
-	const stmt = `INSERT INTO custom_rules (name, type, mode, content, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+	const stmt = `INSERT INTO custom_rules (name, type, mode, content, enabled, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
 
 	enabled := 0
 	if rule.Enabled {
 		enabled = 1
 	}
 
-	result, err := r.db.ExecContext(ctx, stmt, rule.Name, rule.Type, rule.Mode, rule.Content, enabled)
+	result, err := r.db.ExecContext(ctx, stmt, rule.Name, rule.Type, rule.Mode, rule.Content, enabled, rule.CreatedBy)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return errors.New("custom rule with this name and type already exists")
@@ -4739,10 +4787,10 @@ func (r *TrafficRepository) ListEnabledCustomRules(ctx context.Context, ruleType
 	var args []interface{}
 
 	if ruleType != "" {
-		query = `SELECT id, name, type, mode, content, enabled, created_at, updated_at FROM custom_rules WHERE type = ? AND enabled = 1 ORDER BY created_at DESC`
+		query = `SELECT id, name, type, mode, content, enabled, COALESCE(created_by, ''), created_at, updated_at FROM custom_rules WHERE type = ? AND enabled = 1 ORDER BY created_at DESC`
 		args = append(args, ruleType)
 	} else {
-		query = `SELECT id, name, type, mode, content, enabled, created_at, updated_at FROM custom_rules WHERE enabled = 1 ORDER BY created_at DESC`
+		query = `SELECT id, name, type, mode, content, enabled, COALESCE(created_by, ''), created_at, updated_at FROM custom_rules WHERE enabled = 1 ORDER BY created_at DESC`
 	}
 
 	rows4, err := r.db.QueryContext(ctx, query, args...)
@@ -4755,7 +4803,7 @@ func (r *TrafficRepository) ListEnabledCustomRules(ctx context.Context, ruleType
 	for rows4.Next() {
 		var rule CustomRule
 		var enabled int
-		if err := rows4.Scan(&rule.ID, &rule.Name, &rule.Type, &rule.Mode, &rule.Content, &enabled, &rule.CreatedAt, &rule.UpdatedAt); err != nil {
+		if err := rows4.Scan(&rule.ID, &rule.Name, &rule.Type, &rule.Mode, &rule.Content, &enabled, &rule.CreatedBy, &rule.CreatedAt, &rule.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan custom rule: %w", err)
 		}
 		rule.Enabled = enabled != 0
@@ -6583,6 +6631,32 @@ func (r *TrafficRepository) CountUsers(ctx context.Context) (int64, error) {
 		return 0, fmt.Errorf("count users: %w", err)
 	}
 	return count, nil
+}
+
+// CountUserTemplates / CountUserOverrideScripts / CountUserSubscribeFiles
+// 统计某用户创建的资源数量,用于"普通用户配额"校验。created_by/username 空串视为 admin 创建。
+func (r *TrafficRepository) CountUserTemplates(ctx context.Context, username string) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM templates WHERE created_by = ?`, username).Scan(&n)
+	return n, err
+}
+
+func (r *TrafficRepository) CountUserOverrideScripts(ctx context.Context, username string) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM override_scripts WHERE username = ?`, username).Scan(&n)
+	return n, err
+}
+
+func (r *TrafficRepository) CountUserSubscribeFiles(ctx context.Context, username string) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM subscribe_files WHERE created_by = ?`, username).Scan(&n)
+	return n, err
+}
+
+func (r *TrafficRepository) CountUserCustomRules(ctx context.Context, username string) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM custom_rules WHERE created_by = ?`, username).Scan(&n)
+	return n, err
 }
 
 // LicenseUsage 返回当前本机激活的"license usage 三联":

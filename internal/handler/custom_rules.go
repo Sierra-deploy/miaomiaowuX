@@ -50,23 +50,13 @@ func NewCustomRulesHandler(repo *storage.TrafficRepository) http.Handler {
 			return
 		}
 
-		// 检查用户是否是管理员
-		user, err := repo.GetUser(r.Context(), username)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-
-		if user.Role != storage.RoleAdmin {
-			writeError(w, http.StatusForbidden, errors.New("only admin can manage custom rules"))
-			return
-		}
+		isAdmin := userIsAdmin(r.Context(), repo, username)
 
 		switch r.Method {
 		case http.MethodGet:
-			handleListCustomRules(w, r, repo)
+			handleListCustomRules(w, r, repo, username, isAdmin)
 		case http.MethodPost:
-			handleCreateCustomRule(w, r, repo)
+			handleCreateCustomRule(w, r, repo, username)
 		default:
 			writeError(w, http.StatusMethodNotAllowed, errors.New("only GET and POST are supported"))
 		}
@@ -85,17 +75,7 @@ func NewCustomRuleHandler(repo *storage.TrafficRepository) http.Handler {
 			return
 		}
 
-		// 检查用户是否是管理员
-		user, err := repo.GetUser(r.Context(), username)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-
-		if user.Role != storage.RoleAdmin {
-			writeError(w, http.StatusForbidden, errors.New("only admin can manage custom rules"))
-			return
-		}
+		isAdmin := userIsAdmin(r.Context(), repo, username)
 
 		// 从 URL 路径中提取规则 ID
 		path := strings.TrimPrefix(r.URL.Path, "/api/admin/custom-rules/")
@@ -111,6 +91,23 @@ func NewCustomRuleHandler(repo *storage.TrafficRepository) http.Handler {
 			return
 		}
 
+		// 所有权校验:普通用户只能操作自己创建的规则。
+		if !isAdmin {
+			existing, err := repo.GetCustomRule(r.Context(), id)
+			if err != nil {
+				if errors.Is(err, storage.ErrCustomRuleNotFound) {
+					writeError(w, http.StatusNotFound, errors.New("custom rule not found"))
+					return
+				}
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			if existing.CreatedBy != username {
+				writeError(w, http.StatusNotFound, errors.New("custom rule not found"))
+				return
+			}
+		}
+
 		switch r.Method {
 		case http.MethodGet:
 			handleGetCustomRule(w, r, repo, id)
@@ -124,7 +121,7 @@ func NewCustomRuleHandler(repo *storage.TrafficRepository) http.Handler {
 	})
 }
 
-func handleListCustomRules(w http.ResponseWriter, r *http.Request, repo *storage.TrafficRepository) {
+func handleListCustomRules(w http.ResponseWriter, r *http.Request, repo *storage.TrafficRepository, username string, isAdmin bool) {
 	ruleType := strings.TrimSpace(r.URL.Query().Get("type"))
 
 	rules, err := repo.ListCustomRules(r.Context(), ruleType)
@@ -135,6 +132,10 @@ func handleListCustomRules(w http.ResponseWriter, r *http.Request, repo *storage
 
 	response := make([]customRuleResponse, 0, len(rules))
 	for _, rule := range rules {
+		// 数据隔离:普通用户只看自己创建的规则。
+		if !isAdmin && rule.CreatedBy != username {
+			continue
+		}
 		response = append(response, customRuleResponse{
 			ID:        rule.ID,
 			Name:      rule.Name,
@@ -179,10 +180,16 @@ func handleGetCustomRule(w http.ResponseWriter, r *http.Request, repo *storage.T
 	_ = json.NewEncoder(w).Encode(response)
 }
 
-func handleCreateCustomRule(w http.ResponseWriter, r *http.Request, repo *storage.TrafficRepository) {
+func handleCreateCustomRule(w http.ResponseWriter, r *http.Request, repo *storage.TrafficRepository, username string) {
 	var payload customRuleRequest
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	// 配额校验:普通用户创建覆写规则受全局配额限制(admin 不限)。覆写 = 脚本 + 规则。
+	if qerr := checkUserQuota(r.Context(), repo, username, "override"); qerr != nil {
+		writeError(w, http.StatusForbidden, qerr)
 		return
 	}
 
@@ -206,11 +213,12 @@ func handleCreateCustomRule(w http.ResponseWriter, r *http.Request, repo *storag
 	}
 
 	rule := &storage.CustomRule{
-		Name:    payload.Name,
-		Type:    payload.Type,
-		Mode:    payload.Mode,
-		Content: payload.Content,
-		Enabled: payload.Enabled,
+		Name:      payload.Name,
+		Type:      payload.Type,
+		Mode:      payload.Mode,
+		Content:   payload.Content,
+		Enabled:   payload.Enabled,
+		CreatedBy: username,
 	}
 
 	if err := repo.CreateCustomRule(r.Context(), rule); err != nil {

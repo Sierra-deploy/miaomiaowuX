@@ -18,6 +18,7 @@ type Template struct {
 	RuleSource       string // ACL配置网址
 	UseProxy         bool   // 是否使用代理下载
 	EnableIncludeAll bool   // 是否启用包含全部模式
+	CreatedBy        string // 创建者用户名(用户权限隔离);'' 视为 admin 历史数据
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 }
@@ -34,7 +35,7 @@ func (r *TrafficRepository) ListTemplates(ctx context.Context) ([]Template, erro
 	}
 
 	rows, err := r.db.QueryContext(ctx, `
-		SELECT id, name, category, template_url, rule_source, use_proxy, enable_include_all, created_at, updated_at
+		SELECT id, name, category, template_url, rule_source, use_proxy, enable_include_all, COALESCE(created_by, ''), created_at, updated_at
 		FROM templates
 		ORDER BY created_at DESC
 	`)
@@ -67,7 +68,7 @@ func (r *TrafficRepository) GetTemplateByID(ctx context.Context, id int64) (Temp
 	}
 
 	row := r.db.QueryRowContext(ctx, `
-		SELECT id, name, category, template_url, rule_source, use_proxy, enable_include_all, created_at, updated_at
+		SELECT id, name, category, template_url, rule_source, use_proxy, enable_include_all, COALESCE(created_by, ''), created_at, updated_at
 		FROM templates
 		WHERE id = ?
 	`, id)
@@ -96,7 +97,7 @@ func (r *TrafficRepository) GetTemplateByName(ctx context.Context, name string) 
 	}
 
 	row := r.db.QueryRowContext(ctx, `
-		SELECT id, name, category, template_url, rule_source, use_proxy, enable_include_all, created_at, updated_at
+		SELECT id, name, category, template_url, rule_source, use_proxy, enable_include_all, COALESCE(created_by, ''), created_at, updated_at
 		FROM templates
 		WHERE name = ?
 	`, name)
@@ -137,9 +138,9 @@ func (r *TrafficRepository) CreateTemplate(ctx context.Context, t Template) (int
 	}
 
 	result, err := r.db.ExecContext(ctx, `
-		INSERT INTO templates (name, category, template_url, rule_source, use_proxy, enable_include_all, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-	`, t.Name, t.Category, t.TemplateURL, t.RuleSource, boolToInt(t.UseProxy), boolToInt(t.EnableIncludeAll))
+		INSERT INTO templates (name, category, template_url, rule_source, use_proxy, enable_include_all, created_by, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+	`, t.Name, t.Category, t.TemplateURL, t.RuleSource, boolToInt(t.UseProxy), boolToInt(t.EnableIncludeAll), t.CreatedBy)
 	if err != nil {
 		return 0, fmt.Errorf("create template: %w", err)
 	}
@@ -231,7 +232,7 @@ func scanTemplate(scanner rowScanner) (Template, error) {
 	var t Template
 	var useProxy, enableIncludeAll int
 
-	if err := scanner.Scan(&t.ID, &t.Name, &t.Category, &t.TemplateURL, &t.RuleSource, &useProxy, &enableIncludeAll, &t.CreatedAt, &t.UpdatedAt); err != nil {
+	if err := scanner.Scan(&t.ID, &t.Name, &t.Category, &t.TemplateURL, &t.RuleSource, &useProxy, &enableIncludeAll, &t.CreatedBy, &t.CreatedAt, &t.UpdatedAt); err != nil {
 		return Template{}, err
 	}
 

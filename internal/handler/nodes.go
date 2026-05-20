@@ -132,14 +132,45 @@ func NewNodesHandler(repo *storage.TrafficRepository, subscribeDir string, remot
 	}
 }
 
+// fetchNodeForAccess 按权限获取节点:管理员可取任意节点,普通用户只能取自己创建的(否则 NotFound)。
+func (h *nodesHandler) fetchNodeForAccess(ctx context.Context, id int64, username string, isAdmin bool) (storage.Node, error) {
+	if isAdmin {
+		return h.repo.GetNodeByID(ctx, id)
+	}
+	return h.repo.GetNode(ctx, id, username)
+}
+
+// deleteNodeForAccess 按权限删除节点:管理员可删任意,普通用户只能删自己的。
+func (h *nodesHandler) deleteNodeForAccess(ctx context.Context, id int64, username string, isAdmin bool) error {
+	if isAdmin {
+		return h.repo.DeleteNodeByID(ctx, id)
+	}
+	return h.repo.DeleteNode(ctx, id, username)
+}
+
 func (h *nodesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/admin/nodes")
 	path = strings.Trim(path, "/")
+
+	// 普通用户开放:列表 / 标签 / 解析订阅 / 批量导入(自己的外部节点) / 查看关联入站。
+	// 仅管理员:手动单个新增、改名/改标签/改服务器/改配置、删除/清空/批量删改
+	//（这些写操作会同步到共享 YAML 订阅文件,影响管理员)。
+	isAdmin := userIsAdmin(r.Context(), h.repo, auth.UsernameFromContext(r.Context()))
+	denyNonAdmin := func() bool {
+		if !isAdmin {
+			writeError(w, http.StatusForbidden, errors.New("该操作仅管理员可用"))
+			return true
+		}
+		return false
+	}
 
 	switch {
 	case path == "" && r.Method == http.MethodGet:
 		h.handleList(w, r)
 	case path == "" && r.Method == http.MethodPost:
+		if denyNonAdmin() {
+			return
+		}
 		h.handleCreate(w, r)
 	case path == "batch" && r.Method == http.MethodPost:
 		h.handleBatchCreate(w, r)
@@ -149,23 +180,47 @@ func (h *nodesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		idSegment := strings.TrimSuffix(path, "/related-inbounds")
 		h.handleGetRelatedInbounds(w, r, idSegment)
 	case strings.HasSuffix(path, "/server") && r.Method == http.MethodPut:
+		if denyNonAdmin() {
+			return
+		}
 		idSegment := strings.TrimSuffix(path, "/server")
 		h.handleUpdateServer(w, r, idSegment)
 	case strings.HasSuffix(path, "/restore-server") && r.Method == http.MethodPut:
+		if denyNonAdmin() {
+			return
+		}
 		idSegment := strings.TrimSuffix(path, "/restore-server")
 		h.handleRestoreServer(w, r, idSegment)
 	case strings.HasSuffix(path, "/config") && r.Method == http.MethodPut:
+		if denyNonAdmin() {
+			return
+		}
 		idSegment := strings.TrimSuffix(path, "/config")
 		h.handleUpdateConfig(w, r, idSegment)
 	case path != "" && path != "batch" && path != "fetch-subscription" && !strings.HasSuffix(path, "/server") && !strings.HasSuffix(path, "/restore-server") && !strings.HasSuffix(path, "/config") && !strings.HasSuffix(path, "/related-inbounds") && (r.Method == http.MethodPut || r.Method == http.MethodPatch):
+		if denyNonAdmin() {
+			return
+		}
 		h.handleUpdate(w, r, path)
 	case path != "" && path != "batch" && path != "fetch-subscription" && !strings.HasSuffix(path, "/related-inbounds") && r.Method == http.MethodDelete:
+		if denyNonAdmin() {
+			return
+		}
 		h.handleDelete(w, r, path)
 	case path == "clear" && r.Method == http.MethodPost:
+		if denyNonAdmin() {
+			return
+		}
 		h.handleClearAll(w, r)
 	case path == "batch-delete" && r.Method == http.MethodPost:
+		if denyNonAdmin() {
+			return
+		}
 		h.handleBatchDelete(w, r)
 	case path == "batch-rename" && r.Method == http.MethodPost:
+		if denyNonAdmin() {
+			return
+		}
 		h.handleBatchRename(w, r)
 	case path == "tags" && r.Method == http.MethodGet:
 		h.handleListTags(w, r)
@@ -182,12 +237,39 @@ func (h *nodesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 由于此路由通过 RequireAdmin 中间件，所以用户一定是 admin
-	// admin 用户可以看到所有节点
-	nodes, err := h.repo.ListAllNodes(r.Context())
+	// 数据隔离:管理员看全部节点。
+	if userIsAdmin(r.Context(), h.repo, username) {
+		nodes, err := h.repo.ListAllNodes(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]any{"nodes": convertNodes(nodes)})
+		return
+	}
+
+	// 普通用户:自己导入的节点 + 绑定套餐内的节点(只读)。
+	nodes, err := h.repo.ListNodes(r.Context(), username)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+	seen := make(map[int64]bool, len(nodes))
+	for _, n := range nodes {
+		seen[n.ID] = true
+	}
+	if user, uerr := h.repo.GetUser(r.Context(), username); uerr == nil && user.PackageID > 0 {
+		if pkg, perr := h.repo.GetPackage(r.Context(), user.PackageID); perr == nil && pkg != nil {
+			for _, nid := range pkg.Nodes {
+				if seen[nid] {
+					continue
+				}
+				if pn, nerr := h.repo.GetNodeByID(r.Context(), nid); nerr == nil {
+					nodes = append(nodes, pn)
+					seen[nid] = true
+				}
+			}
+		}
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{
@@ -370,7 +452,7 @@ func (h *nodesHandler) handleUpdate(w http.ResponseWriter, r *http.Request, idSe
 		return
 	}
 
-	existing, err := h.repo.GetNode(r.Context(), id, username)
+	existing, err := h.fetchNodeForAccess(r.Context(), id, username, userIsAdmin(r.Context(), h.repo, username))
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, storage.ErrNodeNotFound) {
@@ -399,8 +481,8 @@ func (h *nodesHandler) handleUpdate(w http.ResponseWriter, r *http.Request, idSe
 			return
 		}
 
-		// 校验节点名称是否重复（数据库层面）
-		exists, err := h.repo.CheckNodeNameExists(r.Context(), req.NodeName, username, id)
+		// 校验节点名称是否重复（在节点所有者的命名空间内）
+		exists, err := h.repo.CheckNodeNameExists(r.Context(), req.NodeName, existing.Username, id)
 		if err != nil {
 			logger.Info("[节点更新] 检查节点名称重复失败", "error", err)
 			writeError(w, http.StatusInternalServerError, errors.New("服务器错误"))
@@ -489,13 +571,19 @@ func (h *nodesHandler) handleUpdate(w http.ResponseWriter, r *http.Request, idSe
 }
 
 func (h *nodesHandler) handleUpdateServer(w http.ResponseWriter, r *http.Request, idSegment string) {
+	username := auth.UsernameFromContext(r.Context())
+	if username == "" {
+		writeError(w, http.StatusUnauthorized, errors.New("用户未认证"))
+		return
+	}
+
 	id, err := strconv.ParseInt(idSegment, 10, 64)
 	if err != nil || id <= 0 {
 		writeBadRequest(w, "无效的节点标识")
 		return
 	}
 
-	existing, err := h.repo.GetNodeByID(r.Context(), id)
+	existing, err := h.fetchNodeForAccess(r.Context(), id, username, userIsAdmin(r.Context(), h.repo, username))
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, storage.ErrNodeNotFound) {
@@ -569,13 +657,19 @@ func (h *nodesHandler) handleUpdateServer(w http.ResponseWriter, r *http.Request
 }
 
 func (h *nodesHandler) handleRestoreServer(w http.ResponseWriter, r *http.Request, idSegment string) {
+	username := auth.UsernameFromContext(r.Context())
+	if username == "" {
+		writeError(w, http.StatusUnauthorized, errors.New("用户未认证"))
+		return
+	}
+
 	id, err := strconv.ParseInt(idSegment, 10, 64)
 	if err != nil || id <= 0 {
 		writeBadRequest(w, "无效的节点标识")
 		return
 	}
 
-	existing, err := h.repo.GetNodeByID(r.Context(), id)
+	existing, err := h.fetchNodeForAccess(r.Context(), id, username, userIsAdmin(r.Context(), h.repo, username))
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, storage.ErrNodeNotFound) {
@@ -639,6 +733,12 @@ func (h *nodesHandler) handleRestoreServer(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *nodesHandler) handleUpdateConfig(w http.ResponseWriter, r *http.Request, idSegment string) {
+	username := auth.UsernameFromContext(r.Context())
+	if username == "" {
+		writeError(w, http.StatusUnauthorized, errors.New("用户未认证"))
+		return
+	}
+
 	id, err := strconv.ParseInt(idSegment, 10, 64)
 	if err != nil || id <= 0 {
 		writeBadRequest(w, "无效的节点标识")
@@ -669,8 +769,8 @@ func (h *nodesHandler) handleUpdateConfig(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// 获取现有节点
-	node, err := h.repo.GetNodeByID(r.Context(), id)
+	// 获取现有节点(按权限:管理员任意,普通用户仅自己的)
+	node, err := h.fetchNodeForAccess(r.Context(), id, username, userIsAdmin(r.Context(), h.repo, username))
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, storage.ErrNodeNotFound) {
@@ -730,9 +830,11 @@ func (h *nodesHandler) handleDelete(w http.ResponseWriter, r *http.Request, idSe
 	// 检查delete_inbound参数是否设置
 	deleteInbound := r.URL.Query().Get("delete_inbound") == "true"
 
-	// 在删除之前获取节点名称以进行 YAML 同步（使用 GetNodeByID 进行管理员访问）
+	isAdmin := userIsAdmin(r.Context(), h.repo, username)
+
+	// 在删除之前获取节点名称以进行 YAML 同步(按权限:管理员任意,普通用户仅自己的)
 	// 如果没有找到节点，我们仍然继续删除（可能已经在其他地方删除了）
-	node, err := h.repo.GetNodeByID(r.Context(), id)
+	node, err := h.fetchNodeForAccess(r.Context(), id, username, isAdmin)
 	nodeNotFound := errors.Is(err, storage.ErrNodeNotFound)
 	if err != nil && !nodeNotFound {
 		writeError(w, http.StatusInternalServerError, err)
@@ -757,8 +859,8 @@ func (h *nodesHandler) handleDelete(w http.ResponseWriter, r *http.Request, idSe
 		h.deleteRemoteInbound(r.Context(), node.OriginalServer, node.InboundTag)
 	}
 
-	// 尝试使用DeleteNodeByID删除节点（管理员可以删除任何节点）
-	if err := h.repo.DeleteNodeByID(r.Context(), id); err != nil {
+	// 删除节点(按权限:管理员任意,普通用户仅自己的)
+	if err := h.deleteNodeForAccess(r.Context(), id, username, isAdmin); err != nil {
 		if !errors.Is(err, storage.ErrNodeNotFound) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -869,12 +971,17 @@ func (h *nodesHandler) handleBatchDelete(w http.ResponseWriter, r *http.Request)
 		originalServer string
 		inboundTag     string
 	}
+	isAdmin := userIsAdmin(r.Context(), h.repo, username)
+
+	// 只处理调用者有权访问的节点(管理员任意,普通用户仅自己的)。
+	accessibleIDs := make([]int64, 0, len(req.NodeIDs))
 	nodes := make([]nodeInfo, 0, len(req.NodeIDs))
 	for _, id := range req.NodeIDs {
-		node, err := h.repo.GetNodeByID(r.Context(), id)
+		node, err := h.fetchNodeForAccess(r.Context(), id, username, isAdmin)
 		if err != nil {
 			continue
 		}
+		accessibleIDs = append(accessibleIDs, id)
 		nodes = append(nodes, nodeInfo{
 			name:           node.NodeName,
 			originalServer: node.OriginalServer,
@@ -889,10 +996,10 @@ func (h *nodesHandler) handleBatchDelete(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// 从数据库中删除节点（使用DeleteNodeByID进行管理员访问）
+	// 从数据库中删除节点(按权限)
 	deletedCount := 0
-	for _, id := range req.NodeIDs {
-		if err := h.repo.DeleteNodeByID(r.Context(), id); err != nil {
+	for _, id := range accessibleIDs {
+		if err := h.deleteNodeForAccess(r.Context(), id, username, isAdmin); err != nil {
 			continue
 		}
 		deletedCount++
@@ -966,6 +1073,8 @@ func (h *nodesHandler) handleBatchRename(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	isAdmin := userIsAdmin(r.Context(), h.repo, username)
+
 	successCount := 0
 	failCount := 0
 	var updatedNodes []nodeDTO
@@ -977,8 +1086,8 @@ func (h *nodesHandler) handleBatchRename(w http.ResponseWriter, r *http.Request)
 			continue
 		}
 
-		// 获取现有节点
-		node, err := h.repo.GetNode(r.Context(), update.NodeID, username)
+		// 获取现有节点(按权限:管理员任意,普通用户仅自己的)
+		node, err := h.fetchNodeForAccess(r.Context(), update.NodeID, username, isAdmin)
 		if err != nil {
 			failCount++
 			continue
@@ -1255,7 +1364,20 @@ func (h *nodesHandler) handleFetchSubscription(w http.ResponseWriter, r *http.Re
 }
 
 func (h *nodesHandler) handleListTags(w http.ResponseWriter, r *http.Request) {
-	allNodes, err := h.repo.ListAllNodes(r.Context())
+	username := auth.UsernameFromContext(r.Context())
+	if username == "" {
+		writeError(w, http.StatusUnauthorized, errors.New("用户未认证"))
+		return
+	}
+
+	// 数据隔离:管理员看全部标签,普通用户只看自己节点的标签。
+	var allNodes []storage.Node
+	var err error
+	if userIsAdmin(r.Context(), h.repo, username) {
+		allNodes, err = h.repo.ListAllNodes(r.Context())
+	} else {
+		allNodes, err = h.repo.ListNodes(r.Context(), username)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

@@ -94,13 +94,20 @@ function TemplatesPage() {
   const [listPreviewTemplateContent, setListPreviewTemplateContent] = useState('')
 
   // Fetch templates list
-  const { data: templates = [], isLoading } = useQuery<string[]>({
+  const { data: ruleTemplatesResp, isLoading } = useQuery({
     queryKey: ['rule-templates'],
     queryFn: async () => {
       const response = await api.get('/api/admin/rule-templates')
-      return response.data.templates || []
+      return response.data as { templates: string[]; owners?: Record<string, string>; username?: string; is_admin?: boolean }
     },
   })
+  const templates: string[] = ruleTemplatesResp?.templates ?? []
+  const templateOwners: Record<string, string> = ruleTemplatesResp?.owners ?? {}
+  const currentUsername = ruleTemplatesResp?.username ?? ''
+  const currentIsAdmin = Boolean(ruleTemplatesResp?.is_admin)
+  // 删除/重命名仅限管理员或模板所有者(归属为空视为管理员历史模板,普通用户不可动)
+  const canModifyTemplate = (filename: string) =>
+    currentIsAdmin || (templateOwners[filename] && templateOwners[filename] === currentUsername)
 
   // Default template
   const { data: defaultTemplateData } = useQuery({
@@ -544,23 +551,29 @@ function TemplatesPage() {
       header: t('list.actions'),
       cell: (name) => (
         <div className="flex items-center gap-1">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => setDefaultTemplateMutation.mutate(name === defaultTemplateFilename ? '' : name)}
-            title={name === defaultTemplateFilename ? t('defaultTemplate.unset') : t('defaultTemplate.set')}
-          >
-            <Star className={cn("h-4 w-4", name === defaultTemplateFilename ? "fill-primary text-primary" : "")} />
-          </Button>
-          <Button variant="ghost" size="icon" onClick={() => handleEdit(name)} title={t('list.edit')}>
-            <Pencil className="h-4 w-4" />
-          </Button>
+          {currentIsAdmin && (
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setDefaultTemplateMutation.mutate(name === defaultTemplateFilename ? '' : name)}
+              title={name === defaultTemplateFilename ? t('defaultTemplate.unset') : t('defaultTemplate.set')}
+            >
+              <Star className={cn("h-4 w-4", name === defaultTemplateFilename ? "fill-primary text-primary" : "")} />
+            </Button>
+          )}
+          {canModifyTemplate(name) && (
+            <Button variant="ghost" size="icon" onClick={() => handleEdit(name)} title={t('list.edit')}>
+              <Pencil className="h-4 w-4" />
+            </Button>
+          )}
           <Button variant="ghost" size="icon" onClick={() => handleListPreview(name)} title={t('list.preview')}>
             <Eye className="h-4 w-4" />
           </Button>
-          <Button variant="ghost" size="icon" onClick={() => handleDelete(name)} title={t('list.delete')}>
-            <Trash2 className="h-4 w-4 text-destructive" />
-          </Button>
+          {canModifyTemplate(name) && (
+            <Button variant="ghost" size="icon" onClick={() => handleDelete(name)} title={t('list.delete')}>
+              <Trash2 className="h-4 w-4 text-destructive" />
+            </Button>
+          )}
         </div>
       ),
     },
@@ -591,15 +604,19 @@ function TemplatesPage() {
               header: (name) => <span className="font-medium text-base">{name}</span>,
               actions: (name) => (
                 <div className="flex items-center gap-4 w-full justify-between px-2">
-                  <Button variant="ghost" size="sm" onClick={() => handleEdit(name)} className="flex-1">
-                    <Pencil className="h-4 w-4 mr-1.5" /> {t('list.edit')}
-                  </Button>
+                  {canModifyTemplate(name) && (
+                    <Button variant="ghost" size="sm" onClick={() => handleEdit(name)} className="flex-1">
+                      <Pencil className="h-4 w-4 mr-1.5" /> {t('list.edit')}
+                    </Button>
+                  )}
                   <Button variant="ghost" size="sm" onClick={() => handleListPreview(name)} className="flex-1">
                     <Eye className="h-4 w-4 mr-1.5" /> {t('list.preview')}
                   </Button>
-                  <Button variant="ghost" size="sm" onClick={() => handleDelete(name)} className="flex-1 text-destructive hover:text-destructive hover:bg-destructive/10">
-                    <Trash2 className="h-4 w-4 mr-1.5" /> {t('list.delete')}
-                  </Button>
+                  {canModifyTemplate(name) && (
+                    <Button variant="ghost" size="sm" onClick={() => handleDelete(name)} className="flex-1 text-destructive hover:text-destructive hover:bg-destructive/10">
+                      <Trash2 className="h-4 w-4 mr-1.5" /> {t('list.delete')}
+                    </Button>
+                  )}
                 </div>
               )
             }}

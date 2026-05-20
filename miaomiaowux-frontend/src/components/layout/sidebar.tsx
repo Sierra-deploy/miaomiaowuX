@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next'
 import { useAuthStore } from '@/stores/auth-store'
 import { useLayoutStore } from '@/stores/layout-store'
 import { profileQueryFn } from '@/lib/profile'
+import { userPermissionsQueryFn, type UserPageKey } from '@/lib/user-permissions'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
@@ -21,14 +22,14 @@ const coreAdminNavLinks = [
 ]
 
 const mmwTopNavLinks = [
-  { titleKey: 'nav.subscriptionLinks' as const, to: '/subscription', icon: LinkIcon },
-  { titleKey: 'nav.subscriptionGenerator' as const, to: '/generator', icon: Link2 },
+  { titleKey: 'nav.subscriptionLinks' as const, to: '/subscription', icon: LinkIcon, pageKey: 'subscription' as UserPageKey },
+  { titleKey: 'nav.subscriptionGenerator' as const, to: '/generator', icon: Link2, pageKey: 'generator' as UserPageKey },
 ]
 
 const mmwBottomNavLinks = [
-  { titleKey: 'nav.templateManagement' as const, to: '/templates', icon: LayoutTemplate },
-  { titleKey: 'nav.subscriptionManagement' as const, to: '/subscribe-files', icon: FileText },
-  { titleKey: 'nav.customRulesManagement' as const, to: '/custom-rules', icon: Scissors },
+  { titleKey: 'nav.templateManagement' as const, to: '/templates', icon: LayoutTemplate, pageKey: 'templates' as UserPageKey },
+  { titleKey: 'nav.subscriptionManagement' as const, to: '/subscribe-files', icon: FileText, pageKey: 'subscribe-files' as UserPageKey },
+  { titleKey: 'nav.customRulesManagement' as const, to: '/custom-rules', icon: Scissors, pageKey: 'custom-rules' as UserPageKey },
 ]
 
 const tailAdminNavLinks = [
@@ -60,8 +61,23 @@ export function Sidebar() {
   })
   const enableMmwFeatures = mmwFeaturesData?.enable_miaomiaowu_features ?? true
 
-  const adminNavLinks = [...(enableMmwFeatures ? mmwTopNavLinks : []), ...coreAdminNavLinks, ...(enableMmwFeatures ? mmwBottomNavLinks : []), ...tailAdminNavLinks]
-  const allNavLinks = isAdmin ? [...baseNavLinks, ...adminNavLinks] : baseNavLinks
+  // 普通用户:按全局权限策略动态显示妙妙屋页面。
+  const { data: userPerms } = useQuery({
+    queryKey: ['user-permissions'],
+    queryFn: userPermissionsQueryFn,
+    enabled: Boolean(auth.accessToken) && !isAdmin,
+    staleTime: 5 * 60 * 1000,
+  })
+
+  let allNavLinks
+  if (isAdmin) {
+    const adminNavLinks = [...(enableMmwFeatures ? mmwTopNavLinks : []), ...coreAdminNavLinks, ...(enableMmwFeatures ? mmwBottomNavLinks : []), ...tailAdminNavLinks]
+    allNavLinks = [...baseNavLinks, ...adminNavLinks]
+  } else {
+    const allowed = new Set(userPerms?.pages ?? [])
+    const permittedMmwLinks = [...mmwTopNavLinks, ...mmwBottomNavLinks].filter((l) => allowed.has(l.pageKey))
+    allNavLinks = [...baseNavLinks, ...permittedMmwLinks]
+  }
 
   return (
     <aside

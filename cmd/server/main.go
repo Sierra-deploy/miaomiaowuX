@@ -223,24 +223,24 @@ func main() {
 	mux.Handle("/api/admin/users/", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserSubscriptionsHandler(repo)))
 	mux.Handle("/api/admin/subscriptions", auth.RequireAdmin(tokenStore, userRepo, handler.NewSubscriptionAdminHandler(subscribeDir, repo)))
 	mux.Handle("/api/admin/subscriptions/", auth.RequireAdmin(tokenStore, userRepo, handler.NewSubscriptionAdminHandler(subscribeDir, repo)))
-	mux.Handle("/api/admin/subscribe-files", auth.RequireAdmin(tokenStore, userRepo, handler.NewSubscribeFilesHandler(repo)))
-	mux.Handle("/api/admin/subscribe-files/", auth.RequireAdmin(tokenStore, userRepo, handler.NewSubscribeFilesHandler(repo)))
+	mux.Handle("/api/admin/subscribe-files", auth.RequireToken(tokenStore, userRepo, handler.NewSubscribeFilesHandler(repo)))
+	mux.Handle("/api/admin/subscribe-files/", auth.RequireToken(tokenStore, userRepo, handler.NewSubscribeFilesHandler(repo)))
 	mux.Handle("/api/admin/rules/", auth.RequireAdmin(tokenStore, userRepo, http.StripPrefix("/api/admin/rules/", handler.NewRuleEditorHandler(subscribeDir, repo))))
-	mux.Handle("/api/admin/rule-templates", auth.RequireAdmin(tokenStore, userRepo, handler.NewRuleTemplatesHandler()))
-	mux.Handle("/api/admin/rule-templates/", auth.RequireAdmin(tokenStore, userRepo, handler.NewRuleTemplatesHandler()))
+	mux.Handle("/api/admin/rule-templates", auth.RequireToken(tokenStore, userRepo, handler.NewRuleTemplatesHandler(repo)))
+	mux.Handle("/api/admin/rule-templates/", auth.RequireToken(tokenStore, userRepo, handler.NewRuleTemplatesHandler(repo)))
 	// 在remoteManageHandler之后注册的节点处理程序（见下文）
 	mux.Handle("/api/admin/sync-external-subscriptions", auth.RequireAdmin(tokenStore, userRepo, handler.NewSyncExternalSubscriptionsHandler(repo, subscribeDir)))
 	mux.Handle("/api/admin/sync-external-subscription", auth.RequireAdmin(tokenStore, userRepo, handler.NewSyncSingleExternalSubscriptionHandler(repo, subscribeDir)))
 	mux.Handle("/api/admin/rules/latest", auth.RequireAdmin(tokenStore, userRepo, handler.NewRuleMetadataHandler(subscribeDir, repo)))
-	mux.Handle("/api/admin/custom-rules", auth.RequireAdmin(tokenStore, userRepo, handler.NewCustomRulesHandler(repo)))
-	mux.Handle("/api/admin/custom-rules/", auth.RequireAdmin(tokenStore, userRepo, handler.NewCustomRuleHandler(repo)))
-	mux.Handle("/api/admin/apply-custom-rules", auth.RequireAdmin(tokenStore, userRepo, handler.NewApplyCustomRulesHandler(repo)))
-	mux.Handle("/api/admin/override-scripts", auth.RequireAdmin(tokenStore, userRepo, handler.NewOverrideScriptsHandler(repo)))
-	mux.Handle("/api/admin/override-scripts/", auth.RequireAdmin(tokenStore, userRepo, handler.NewOverrideScriptsHandler(repo)))
-	mux.Handle("/api/admin/templates", auth.RequireAdmin(tokenStore, userRepo, handler.NewTemplatesHandler(repo)))
-	mux.Handle("/api/admin/templates/", auth.RequireAdmin(tokenStore, userRepo, handler.NewTemplateHandler(repo)))
-	mux.Handle("/api/admin/templates/convert", auth.RequireAdmin(tokenStore, userRepo, handler.NewTemplateConvertHandler()))
-	mux.Handle("/api/admin/templates/fetch-source", auth.RequireAdmin(tokenStore, userRepo, handler.NewTemplateFetchSourceHandler()))
+	mux.Handle("/api/admin/custom-rules", auth.RequireToken(tokenStore, userRepo, handler.NewCustomRulesHandler(repo)))
+	mux.Handle("/api/admin/custom-rules/", auth.RequireToken(tokenStore, userRepo, handler.NewCustomRuleHandler(repo)))
+	mux.Handle("/api/admin/apply-custom-rules", auth.RequireToken(tokenStore, userRepo, handler.NewApplyCustomRulesHandler(repo)))
+	mux.Handle("/api/admin/override-scripts", auth.RequireToken(tokenStore, userRepo, handler.NewOverrideScriptsHandler(repo)))
+	mux.Handle("/api/admin/override-scripts/", auth.RequireToken(tokenStore, userRepo, handler.NewOverrideScriptsHandler(repo)))
+	mux.Handle("/api/admin/templates", auth.RequireToken(tokenStore, userRepo, handler.NewTemplatesHandler(repo)))
+	mux.Handle("/api/admin/templates/", auth.RequireToken(tokenStore, userRepo, handler.NewTemplateHandler(repo)))
+	mux.Handle("/api/admin/templates/convert", auth.RequireToken(tokenStore, userRepo, handler.NewTemplateConvertHandler()))
+	mux.Handle("/api/admin/templates/fetch-source", auth.RequireToken(tokenStore, userRepo, handler.NewTemplateFetchSourceHandler()))
 	mux.Handle("/api/admin/backup/download", auth.RequireAdmin(tokenStore, userRepo, handler.NewBackupDownloadHandler(repo)))
 	mux.Handle("/api/admin/backup/restore", auth.RequireAdmin(tokenStore, userRepo, handler.NewBackupRestoreHandler(repo)))
 	mux.Handle("/api/admin/update/check", auth.RequireAdmin(tokenStore, userRepo, handler.NewUpdateCheckHandler()))
@@ -250,8 +250,8 @@ func main() {
 
 	// Template V3 端点（仅限管理员）
 	templateV3Handler := handler.NewTemplateV3Handler(repo)
-	mux.Handle("/api/admin/template-v3", auth.RequireAdmin(tokenStore, userRepo, templateV3Handler))
-	mux.Handle("/api/admin/template-v3/", auth.RequireAdmin(tokenStore, userRepo, templateV3Handler))
+	mux.Handle("/api/admin/template-v3", auth.RequireToken(tokenStore, userRepo, templateV3Handler))
+	mux.Handle("/api/admin/template-v3/", auth.RequireToken(tokenStore, userRepo, templateV3Handler))
 
 	// 包管理端点（仅限管理员）— list/create/delete 不依赖 limiterPusher
 	mux.Handle("/api/admin/packages", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageListHandler(repo)))
@@ -359,8 +359,8 @@ func main() {
 	mux.Handle("/api/user/nodes/outbounds", auth.RequireToken(tokenStore, userRepo, http.HandlerFunc(userNodesHandler.HandleListOutbounds)))
 
 	// 注册节点处理程序（需要remoteManageHandler进行远程入站清理）
-	mux.Handle("/api/admin/nodes", auth.RequireAdmin(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler, licenseManager)))
-	mux.Handle("/api/admin/nodes/", auth.RequireAdmin(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler, licenseManager)))
+	mux.Handle("/api/admin/nodes", auth.RequireToken(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler, licenseManager)))
+	mux.Handle("/api/admin/nodes/", auth.RequireToken(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler, licenseManager)))
 
 	// 初始化事件系统以进行入站同步
 	eventBus := event.GetBus()
@@ -575,6 +575,21 @@ func main() {
 	mux.Handle("/api/system-config/refetch-interval", auth.RequireToken(tokenStore, userRepo, http.HandlerFunc(systemSettingsHandler.GetPublicIntervals)))
 	// admin:写前端 dashboard 刷新间隔,clamp [1000, 60000] ms
 	mux.Handle("/api/admin/system-settings/dashboard-refresh", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(systemSettingsHandler.SetDashboardRefresh)))
+
+	// 用户权限 / 配额(全局策略)
+	userPermsHandler := handler.NewUserPermissionsHandler(repo)
+	mux.Handle("/api/admin/system-settings/user-permissions", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			userPermsHandler.AdminGet(w, r)
+		case http.MethodPut, http.MethodPost:
+			userPermsHandler.AdminSet(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
+	// 普通用户拿自己适用的可见页面 + 配额 + 已用量
+	mux.Handle("/api/user/permissions", auth.RequireToken(tokenStore, userRepo, http.HandlerFunc(userPermsHandler.UserGet)))
 	mux.Handle("/api/admin/system-settings/agent-log", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:

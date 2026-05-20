@@ -21,6 +21,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAuthStore } from '@/stores/auth-store'
+import { profileQueryFn } from '@/lib/profile'
 import { api } from '@/lib/api'
 import {
   validateClashConfig,
@@ -122,6 +123,8 @@ type SubscribeFile = {
   auto_sync_custom_rules: boolean
   template_filename: string
   selected_tags: string[]
+  selected_custom_rule_ids?: number[]
+  selected_override_script_ids?: number[]
   stats_server_ids: string
   traffic_limit: number | null
   sort_order: number
@@ -455,6 +458,13 @@ function SubscribeFilesPage() {
   const { auth } = useAuthStore()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
+  const { data: profileInfo } = useQuery({
+    queryKey: ['profile'],
+    queryFn: profileQueryFn,
+    enabled: Boolean(auth.accessToken),
+    staleTime: 5 * 60 * 1000,
+  })
+  const isAdmin = Boolean(profileInfo?.is_admin)
   const isMobile = useMediaQuery('(max-width: 640px)')
 
   // 获取代理组配置
@@ -541,6 +551,8 @@ function SubscribeFilesPage() {
     filename: '',
     template_filename: '',
     selected_tags: [] as string[],
+    selected_custom_rule_ids: [] as number[],
+    selected_override_script_ids: [] as number[],
     stats_server_ids: '',
     traffic_limit: '' as string,
     custom_short_code: '',
@@ -720,6 +732,24 @@ function SubscribeFilesPage() {
     },
   })
 
+  // 覆写规则列表（仅本人可见，供订阅选择生效规则）
+  const { data: customRulesList } = useQuery({
+    queryKey: ['custom-rules-for-select'],
+    queryFn: async () => {
+      const { data } = await api.get('/api/admin/custom-rules')
+      return data as { id: number; name: string; type: string }[]
+    },
+  })
+
+  // 覆写脚本列表（仅本人可见，供订阅选择生效脚本）
+  const { data: overrideScriptsList } = useQuery({
+    queryKey: ['override-scripts-for-select'],
+    queryFn: async () => {
+      const { data } = await api.get('/api/admin/override-scripts')
+      return data as { id: number; name: string; hook: string }[]
+    },
+  })
+
   // 获取订阅流量统计（独立接口，可能耗时）
   const { data: trafficData, isLoading: isTrafficLoading } = useQuery({
     queryKey: ['subscribe-files-traffic'],
@@ -830,7 +860,7 @@ function SubscribeFilesPage() {
       toast.success(t('toast.updateSuccess'))
       setEditMetadataDialogOpen(false)
       setEditingMetadata(null)
-      setMetadataForm({ name: '', description: '', filename: '', template_filename: '', selected_tags: [], stats_server_ids: '', traffic_limit: '', custom_short_code: '', raw_output: false })
+      setMetadataForm({ name: '', description: '', filename: '', template_filename: '', selected_tags: [], selected_custom_rule_ids: [], selected_override_script_ids: [], stats_server_ids: '', traffic_limit: '', custom_short_code: '', raw_output: false })
     },
     onError: (error: any) => {
       toast.error(error.response?.data?.error || t('toast.updateFailed'))
@@ -1790,6 +1820,8 @@ function SubscribeFilesPage() {
       filename: file.filename,
       template_filename: file.template_filename || '',
       selected_tags: file.selected_tags || [],
+      selected_custom_rule_ids: file.selected_custom_rule_ids || [],
+      selected_override_script_ids: file.selected_override_script_ids || [],
       stats_server_ids: file.stats_server_ids || '',
       traffic_limit: file.traffic_limit != null ? String(file.traffic_limit) : '',
       custom_short_code: file.custom_short_code || '',
@@ -1816,6 +1848,8 @@ function SubscribeFilesPage() {
         filename: metadataForm.filename,
         template_filename: metadataForm.template_filename,
         selected_tags: metadataForm.selected_tags,
+        selected_custom_rule_ids: metadataForm.selected_custom_rule_ids,
+        selected_override_script_ids: metadataForm.selected_override_script_ids,
         stats_server_ids: metadataForm.stats_server_ids,
         traffic_limit: metadataForm.traffic_limit ? parseFloat(metadataForm.traffic_limit) : null,
         custom_short_code: metadataForm.custom_short_code,
@@ -3087,7 +3121,7 @@ function SubscribeFilesPage() {
                       cellClassName: 'text-center',
                       width: '140px',
                     },
-                  ] as DataTableColumn<SubscribeFile>[]
+                  ].filter((c: any) => isAdmin || (c.header !== '' && c.header !== t('management.fileList.descriptionCol'))) as DataTableColumn<SubscribeFile>[]
                 }
                 mobileCard={{
                   header: (file) => (
@@ -4848,6 +4882,8 @@ function SubscribeFilesPage() {
               filename: '',
               template_filename: '',
               selected_tags: [],
+              selected_custom_rule_ids: [],
+              selected_override_script_ids: [],
               stats_server_ids: '',
               traffic_limit: '',
               custom_short_code: '',
@@ -4918,6 +4954,54 @@ function SubscribeFilesPage() {
                 </SelectContent>
               </Select>
             </div>
+            {customRulesList && customRulesList.length > 0 && (
+              <div className='space-y-2'>
+                <Label>生效的覆写规则</Label>
+                <p className='text-muted-foreground text-xs'>不勾选则该订阅应用你全部启用的覆写规则；勾选后仅应用所选规则。</p>
+                <div className='flex flex-col gap-1.5 rounded-md border p-2 max-h-40 overflow-y-auto'>
+                  {customRulesList.map(rule => (
+                    <label key={rule.id} className='flex items-center gap-2 text-sm'>
+                      <Checkbox
+                        checked={metadataForm.selected_custom_rule_ids.includes(rule.id)}
+                        onCheckedChange={(checked) => {
+                          setMetadataForm(prev => ({
+                            ...prev,
+                            selected_custom_rule_ids: checked === true
+                              ? [...prev.selected_custom_rule_ids, rule.id]
+                              : prev.selected_custom_rule_ids.filter(id => id !== rule.id),
+                          }))
+                        }}
+                      />
+                      <span>{rule.name} <span className='text-muted-foreground'>({rule.type})</span></span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+            {overrideScriptsList && overrideScriptsList.length > 0 && (
+              <div className='space-y-2'>
+                <Label>生效的覆写脚本</Label>
+                <p className='text-muted-foreground text-xs'>不勾选则该订阅应用你全部启用的覆写脚本；勾选后仅应用所选脚本。</p>
+                <div className='flex flex-col gap-1.5 rounded-md border p-2 max-h-40 overflow-y-auto'>
+                  {overrideScriptsList.map(script => (
+                    <label key={script.id} className='flex items-center gap-2 text-sm'>
+                      <Checkbox
+                        checked={metadataForm.selected_override_script_ids.includes(script.id)}
+                        onCheckedChange={(checked) => {
+                          setMetadataForm(prev => ({
+                            ...prev,
+                            selected_override_script_ids: checked === true
+                              ? [...prev.selected_override_script_ids, script.id]
+                              : prev.selected_override_script_ids.filter(id => id !== script.id),
+                          }))
+                        }}
+                      />
+                      <span>{script.name} <span className='text-muted-foreground'>({script.hook})</span></span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
             {metadataForm.template_filename && nodeTagsData && nodeTagsData.length > 0 && (
               <div className='space-y-2'>
                 <Label>节点标签筛选</Label>

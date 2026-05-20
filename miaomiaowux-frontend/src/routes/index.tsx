@@ -364,7 +364,7 @@ function UserDashboard() {
             const clashURL = `clash://install-config?url=${encodeURIComponent(subscribeURL)}`
             return (
               <Card key={file.id} className="sm:col-span-2 lg:col-span-4">
-                <CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center">
+                <CardContent className="flex items-start gap-3 py-4">
                   <button
                     onClick={() => setQrValue(displayURL)}
                     className="bg-primary/10 text-primary hover:bg-primary/20 flex size-10 shrink-0 cursor-pointer items-center justify-center rounded-lg transition-all hover:scale-110 active:scale-95"
@@ -372,7 +372,7 @@ function UserDashboard() {
                   >
                     <QrCode className="size-5" />
                   </button>
-                  <div className="min-w-0 flex-1 space-y-1">
+                  <div className="min-w-0 flex-1 space-y-2">
                     <div className="flex items-center gap-2">
                       <span className="truncate text-sm font-semibold" title={file.name}>{file.name}</span>
                       {file.expire_at ? (
@@ -383,29 +383,31 @@ function UserDashboard() {
                         <span className="inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] text-muted-foreground">{t('user.subscribe.permanent')}</span>
                       )}
                     </div>
-                    <div className="bg-muted/40 rounded-md border px-2 py-1 font-mono text-xs break-all">{displayURL}</div>
-                  </div>
-                  <div className="flex shrink-0 gap-2">
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button size="sm" className="transition-transform hover:-translate-y-0.5 hover:shadow-md active:translate-y-0.5 active:scale-95">
-                          <Copy className="mr-1 size-3.5" />{t('user.subscribe.copy')}<ChevronDown className="ml-1 size-3.5" />
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+                      <div className="bg-muted/40 flex min-w-0 flex-1 items-center rounded-md border px-3 font-mono text-xs break-all min-h-9">{displayURL}</div>
+                      <div className="flex shrink-0 gap-2">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button size="sm" className="h-9 transition-transform hover:-translate-y-0.5 hover:shadow-md active:translate-y-0.5 active:scale-95">
+                              <Copy className="mr-1 size-3.5" />{t('user.subscribe.copy')}<ChevronDown className="ml-1 size-3.5" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-56">
+                            {CLIENT_TYPES.map((client) => {
+                              const clientURL = buildSubscriptionURL(file.filename, file.file_short_code, client.type, file.type)
+                              return (
+                                <DropdownMenuItem key={client.type} onClick={() => handleCopy(file.id, clientURL, client.name)} className="cursor-pointer">
+                                  <img src={client.icon} alt={client.name} className="mr-2 size-4" />{client.name}
+                                </DropdownMenuItem>
+                              )
+                            })}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                        <Button size="sm" variant="secondary" className="h-9 transition-transform hover:-translate-y-0.5 hover:shadow-md active:translate-y-0.5 active:scale-95" asChild>
+                          <a href={clashURL}><Download className="mr-1 size-3.5" />{t('user.subscribe.import')}</a>
                         </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="w-56">
-                        {CLIENT_TYPES.map((client) => {
-                          const clientURL = buildSubscriptionURL(file.filename, file.file_short_code, client.type, file.type)
-                          return (
-                            <DropdownMenuItem key={client.type} onClick={() => handleCopy(file.id, clientURL, client.name)} className="cursor-pointer">
-                              <img src={client.icon} alt={client.name} className="mr-2 size-4" />{client.name}
-                            </DropdownMenuItem>
-                          )
-                        })}
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                    <Button size="sm" variant="secondary" className="transition-transform hover:-translate-y-0.5 hover:shadow-md active:translate-y-0.5 active:scale-95" asChild>
-                      <a href={clashURL}><Download className="mr-1 size-3.5" />{t('user.subscribe.import')}</a>
-                    </Button>
+                      </div>
+                    </div>
                   </div>
                 </CardContent>
               </Card>

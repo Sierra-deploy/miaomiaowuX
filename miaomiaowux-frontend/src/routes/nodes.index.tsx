@@ -7,6 +7,7 @@ import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
 import { Topbar } from '@/components/layout/topbar'
 import { useAuthStore } from '@/stores/auth-store'
+import { profileQueryFn } from '@/lib/profile'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -355,6 +356,14 @@ function NodesPage() {
   const { t } = useTranslation('nodes')
   const { auth } = useAuthStore()
   const queryClient = useQueryClient()
+
+  const { data: profile } = useQuery({
+    queryKey: ['profile'],
+    queryFn: profileQueryFn,
+    enabled: Boolean(auth.accessToken),
+    staleTime: 5 * 60 * 1000,
+  })
+  const isAdmin = Boolean(profile?.is_admin)
 
   // 视口宽度判断 - 用于条件渲染 SortableContext，避免重复注册导致拖动偏移
   const isDesktop = useMediaQuery('(min-width: 1024px)')
@@ -2208,12 +2217,13 @@ function NodesPage() {
               </CollapsibleTrigger>
               <CollapsibleContent className='CollapsibleContent'>
                 <CardContent>
-                  <Tabs defaultValue='manual' className='w-full'>
-                    <TabsList className='grid w-full grid-cols-2'>
-                      <TabsTrigger value='manual'>{t('importCard.tabs.manual')}</TabsTrigger>
+                  <Tabs defaultValue={isAdmin ? 'manual' : 'subscription'} className='w-full'>
+                    <TabsList className={cn('grid w-full', isAdmin ? 'grid-cols-2' : 'grid-cols-1')}>
+                      {isAdmin && <TabsTrigger value='manual'>{t('importCard.tabs.manual')}</TabsTrigger>}
                       <TabsTrigger value='subscription'>{t('importCard.tabs.subscription')}</TabsTrigger>
                     </TabsList>
 
+                    {isAdmin && (
                     <TabsContent value='manual' className='space-y-4 mt-4'>
                       <Textarea
                         placeholder={`vmess://eyJwcyI6IuWPsOa5vualviIsImFkZCI6ImV4YW1wbGUuY29tIiwicG9ydCI6IjQ0MyIsImlkIjoidXVpZCIsImFpZCI6IjAiLCJzY3kiOiJhdXRvIiwibmV0Ijoid3MiLCJ0bHMiOiJ0bHMifQ==
@@ -2251,6 +2261,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                         </Button>
                       </div>
                     </TabsContent>
+                    )}
 
                     <TabsContent value='subscription' className='space-y-4 mt-4'>
                       <div className='space-y-2'>
@@ -2341,7 +2352,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                       <Link2 className='h-4 w-4 inline' /> {t('nodeList.tempSubscription')}
                     </p>
                   </div>
-                  <div className='flex flex-wrap gap-2 justify-end'>
+                  <div className={cn('flex flex-wrap gap-2 justify-end', !isAdmin && 'hidden')}>
                     <Button
                       variant='outline'
                       size='sm'
@@ -2717,6 +2728,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                             {/* 编辑、交换按钮 */}
                             {editingNode?.id !== node.id && (
                               <div className='flex items-center gap-1 shrink-0' onClick={(e) => e.stopPropagation()}>
+                                {(isAdmin || !node.isSaved) && (
                                 <Button
                                   variant='ghost'
                                   size='icon'
@@ -2726,6 +2738,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                 >
                                   <Pencil className='size-4' />
                                 </Button>
+                                )}
                                 <FlagEmojiPicker
                                   onSelect={(flag) => handleSetNodeFlag(node.id, flag)}
                                   onAutoDetect={node.isSaved && node.dbNode ? () => handleAddSingleNodeEmoji(node.dbNode!.id) : undefined}
@@ -2734,7 +2747,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   currentFlag={hasRegionEmoji(node.name) ? node.name.match(/[\u{1F1E6}-\u{1F1FF}]{2}/u)?.[0] : undefined}
                                   className='size-7 text-[#d97757] hover:text-[#c66647]'
                                 />
-                                {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
+                                {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
                                   <Button
                                     variant='ghost'
                                     size='icon'
@@ -2754,7 +2767,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                     />
                                   </Button>
                                 )}
-                                {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
+                                {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
                                   <Tooltip>
                                     <TooltipTrigger asChild>
                                       <Button
@@ -2780,7 +2793,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                     <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                   </Tooltip>
                                 )}
-                                {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
+                                {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
                                   <Tooltip>
                                     <TooltipTrigger asChild>
                                       <Button
@@ -2884,6 +2897,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                 {t('actions.copy')}
                               </Button>
                             )}
+                            {(isAdmin || !node.isSaved) && (
                             <AlertDialog>
                               <AlertDialogTrigger asChild>
                                 <Button
@@ -2913,6 +2927,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                 </AlertDialogFooter>
                               </AlertDialogContent>
                             </AlertDialog>
+                            )}
                           </div>
                         </CardContent>
                       </SortableCard>
@@ -3078,6 +3093,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       </div>
                                     )}
                                   </div>
+                                  {(isAdmin || !node.isSaved) && (
                                   <Button
                                     variant='ghost'
                                     size='icon'
@@ -3087,6 +3103,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   >
                                     <Pencil className='size-4' />
                                   </Button>
+                                  )}
                                   <FlagEmojiPicker
                                     onSelect={(flag) => handleSetNodeFlag(node.id, flag)}
                                     onAutoDetect={node.isSaved && node.dbNode ? () => handleAddSingleNodeEmoji(node.dbNode!.id) : undefined}
@@ -3095,7 +3112,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                     currentFlag={hasRegionEmoji(node.name) ? node.name.match(/[\u{1F1E6}-\u{1F1FF}]{2}/u)?.[0] : undefined}
                                     className='size-7 text-[#d97757] hover:text-[#c66647] shrink-0'
                                   />
-                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
+                                  {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
                                     <Button
                                       variant='ghost'
                                       size='icon'
@@ -3115,7 +3132,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       />
                                     </Button>
                                   )}
-                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
+                                  {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
                                     <Tooltip>
                                       <TooltipTrigger asChild>
                                         <Button
@@ -3141,7 +3158,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                     </Tooltip>
                                   )}
-                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
+                                  {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
                                     <Tooltip>
                                       <TooltipTrigger asChild>
                                         <Button
@@ -3208,6 +3225,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                               )}
                             </TableCell>
                             <TableCell className='text-center'>
+                              {(isAdmin || !node.isSaved) && (
                               <AlertDialog>
                                 <AlertDialogTrigger asChild>
                                   <Button
@@ -3237,6 +3255,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   </AlertDialogFooter>
                                 </AlertDialogContent>
                               </AlertDialog>
+                              )}
                             </TableCell>
                           </SortableTableRow>
                         ))
@@ -3348,6 +3367,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   {node.isSaved && (
                                     <Check className='size-4 text-green-600 shrink-0' />
                                   )}
+                                  {(isAdmin || !node.isSaved) && (
                                   <Button
                                     variant='ghost'
                                     size='icon'
@@ -3357,7 +3377,8 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   >
                                     <Pencil className='size-4' />
                                   </Button>
-                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
+                                  )}
+                                  {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
                                     <Button
                                       variant='ghost'
                                       size='icon'
@@ -3377,7 +3398,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       />
                                     </Button>
                                   )}
-                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
+                                  {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
                                     <Tooltip>
                                       <TooltipTrigger asChild>
                                         <Button
@@ -3403,7 +3424,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                     </Tooltip>
                                   )}
-                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
+                                  {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
                                     <Tooltip>
                                       <TooltipTrigger asChild>
                                         <Button
@@ -3771,6 +3792,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                               )}
                             </TableCell>
                             <TableCell className='text-center'>
+                              {(isAdmin || !node.isSaved) && (
                               <AlertDialog>
                                 <AlertDialogTrigger asChild>
                                   <Button
@@ -3799,6 +3821,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   </AlertDialogFooter>
                                 </AlertDialogContent>
                               </AlertDialog>
+                              )}
                                 </TableCell>
                               </SortableTableRow>
                             ))

@@ -23,6 +23,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { api } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
 import { useAuthStore } from '@/stores/auth-store'
+import { UserPermissionsDialog } from '@/components/user-permissions-dialog'
 
 export const Route = createFileRoute('/system-settings')({
   beforeLoad: () => {
@@ -747,6 +748,7 @@ function SystemSettingsPage() {
                 {/* 妙妙屋功能 */}
                 <div className='flex items-center justify-between rounded-lg border p-3'>
                   <div className='flex items-center gap-2'>
+                    <UserPermissionsDialog />
                     <Label htmlFor='mmw-features-toggle' className='cursor-pointer'>
                       {t('miaomiaowuFeatures.enableLabel')}
                     </Label>

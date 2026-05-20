@@ -42,16 +42,6 @@ func NewOverrideScriptsHandler(repo *storage.TrafficRepository) http.Handler {
 			return
 		}
 
-		user, err := repo.GetUser(r.Context(), username)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, err)
-			return
-		}
-		if user.Role != storage.RoleAdmin {
-			writeError(w, http.StatusForbidden, errors.New("admin access required"))
-			return
-		}
-
 		pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 		var idStr string
 		if len(pathParts) >= 4 {
@@ -102,6 +92,12 @@ func NewOverrideScriptsHandler(repo *storage.TrafficRepository) http.Handler {
 			}
 			if req.Hook != "post_fetch" && req.Hook != "pre_save_nodes" {
 				writeError(w, http.StatusBadRequest, errors.New("hook must be 'post_fetch' or 'pre_save_nodes'"))
+				return
+			}
+
+			// 配额校验:普通用户创建覆写脚本受全局配额限制(admin 不限)。
+			if qerr := checkUserQuota(r.Context(), repo, username, "override"); qerr != nil {
+				writeError(w, http.StatusForbidden, qerr)
 				return
 			}
 

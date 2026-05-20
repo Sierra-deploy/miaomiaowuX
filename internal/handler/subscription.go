@@ -543,9 +543,14 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	stepStart = time.Now()
 	if username != "" && h.repo != nil {
 		if sysCfg, err := h.repo.GetSystemConfig(r.Context()); err == nil && sysCfg.EnableOverrideScripts {
+			// 该订阅选中的覆写脚本(空=全部启用的生效)。脚本本就按 username 隔离,不会混入管理员的。
+			selectedScriptIDs := makeIDSet(subscribeFile.SelectedOverrideScriptIDs)
 			scripts, _ := h.repo.ListOverrideScripts(r.Context(), username, "post_fetch")
 			for _, s := range scripts {
 				if !s.Enabled {
+					continue
+				}
+				if len(selectedScriptIDs) > 0 && !selectedScriptIDs[s.ID] {
 					continue
 				}
 				modified, err := h.runPostFetchScript(r.Context(), s.Content, data)
@@ -753,6 +758,18 @@ func (h *SubscriptionHandler) resolveSubscription(ctx context.Context, name stri
 
 // generateFromTemplate 基于绑定的 V3 模板生成订阅配置
 // 代理节点来源：所有远程服务器的节点（ListAllNodes），按 SelectedTags 过滤
+// makeIDSet 把 ID 切片转成集合;空切片返回 nil(调用方据此判断"不过滤=全部生效")。
+func makeIDSet(ids []int64) map[int64]bool {
+	if len(ids) == 0 {
+		return nil
+	}
+	m := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		m[id] = true
+	}
+	return m
+}
+
 func (h *SubscriptionHandler) generateFromTemplate(ctx context.Context, subscribeFile storage.SubscribeFile) ([]byte, error) {
 	if subscribeFile.TemplateFilename == "" {
 		return nil, errors.New("订阅未绑定模板")
