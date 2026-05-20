@@ -261,8 +261,11 @@ export function InboundWizard({
   const [selectedFlag, setSelectedFlag] = useState('')
   const [showFlagPicker, setShowFlagPicker] = useState(false)
 
-  // Frequent users quick-add
-  const [frequentUsers, setFrequentUsers] = useState<any[]>([])
+  // Frequent users quick-add (锁死自身模式下不再使用,保留变量避免大改)
+  const [frequentUsers] = useState<any[]>([])
+  // 当前登录用户名 —— 添加节点时用户卡片锁死为"自己"
+  const [currentUsername, setCurrentUsername] = useState<string>('')
+  const selfFilledRef = useRef(false)
 
   useEffect(() => {
     if (tunnelInPort <= 0 || resolvedUsedPorts.includes(tunnelInPort)) return
@@ -436,21 +439,12 @@ export function InboundWizard({
       .catch(() => {})
   }, [effectiveServerId, servers])
 
-  // Load frequent users
+  // 加载当前登录用户名(添加节点时用户卡片锁死成"自己")
   useEffect(() => {
-    const cached = localStorage.getItem('inbound-wizard-frequent-users')
-    if (cached) {
-      try { setFrequentUsers(JSON.parse(cached)) } catch {}
-    } else {
-      api.get('/api/admin/users').then((res) => {
-        const users = Array.isArray(res.data) ? res.data : (res.data?.users || [])
-        const admin = users.find((u: any) => u.role === 'admin')
-        const others = users.filter((u: any) => u.role !== 'admin').sort((a: any, b: any) => b.id - a.id).slice(0, 2)
-        const defaults = admin ? [admin, ...others] : others
-        setFrequentUsers(defaults)
-        localStorage.setItem('inbound-wizard-frequent-users', JSON.stringify(defaults))
-      }).catch(() => {})
-    }
+    api.get('/api/user/profile').then((res) => {
+      const uname = res.data?.username || ''
+      if (uname) setCurrentUsername(uname)
+    }).catch(() => {})
   }, [])
 
   // Auto-generate server/user passwords when entering SS2022 or switching method
@@ -580,13 +574,22 @@ export function InboundWizard({
     }
     const newClient = buildClientFromUser(user)
     handleFieldChange(fieldName, [...existing, newClient])
-    // Update frequent users cache
-    setFrequentUsers((prev) => {
-      const updated = [user, ...prev.filter((u: any) => u.id !== user.id)].slice(0, 5)
-      localStorage.setItem('inbound-wizard-frequent-users', JSON.stringify(updated))
-      return updated
-    })
   }
+
+  // 添加节点:用户卡片锁死为"当前登录账号自己"。
+  // currentUsername 拿到后(及切换协议时)把 clients/accounts 重置为唯一一条 = 自己,凭证当场生成。
+  useEffect(() => {
+    if (!currentUsername) return
+    const fieldName = (selectedProtocol === 'Socks5' || selectedProtocol === 'HTTP') ? 'accounts' : 'clients'
+    const selfClient = buildClientFromUser({ username: currentUsername })
+    setFormData((prev: any) => ({
+      ...prev,
+      clients: fieldName === 'clients' ? [selfClient] : [],
+      accounts: fieldName === 'accounts' ? [selfClient] : [],
+    }))
+    selfFilledRef.current = true
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUsername, selectedProtocol])
 
   const handleFieldChange = (fieldName: string, value: any) => {
     setFormData((prev: any) => {
@@ -1369,6 +1372,7 @@ export function InboundWizard({
                                   selectedProtocol === 'HTTP'
                                 }
                                 required
+                                locked
                                 ss2022Method={
                                   selectedProtocol === 'Shadowsocks2022'
                                     ? formData.method
@@ -1545,6 +1549,7 @@ export function InboundWizard({
                                 selectedProtocol === 'HTTP'
                               }
                               required
+                              locked
                               ss2022Method={
                                 selectedProtocol === 'Shadowsocks2022'
                                   ? formData.method

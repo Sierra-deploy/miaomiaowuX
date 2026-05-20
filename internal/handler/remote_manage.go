@@ -16,6 +16,7 @@ import (
 	"encoding/base64"
 	"sync"
 
+	"miaomiaowux/internal/auth"
 	"miaomiaowux/internal/event"
 	"miaomiaowux/internal/securechan"
 	"miaomiaowux/internal/storage"
@@ -1011,6 +1012,55 @@ func (h *RemoteManageHandler) getRemoteServerPort(server *storage.RemoteServer) 
 // ================== X 射线入库管理 ==================
 
 // 将入站管理请求代理到远程服务器
+// validateInboundClientsSelfOnly 校验 add inbound 请求里的 clients/accounts 只包含当前登录账号自己。
+// 返回空字符串表示通过,否则返回错误信息。
+//
+// 身份口径:xray 的 vless/vmess/trojan/shadowsocks 用 client.email 标识用户;socks/http 用 account.user。
+// mmwx 约定 email/user == 用户名。校验要求每一条 client 的身份都等于当前登录用户名。
+// 允许 0 条(空 clients,纯创建 inbound 不挂用户的场景)。
+func validateInboundClientsSelfOnly(ctx context.Context, inboundReq map[string]interface{}) string {
+	username := auth.UsernameFromContext(ctx)
+	if username == "" {
+		return "无法识别当前登录用户"
+	}
+	inbound, ok := inboundReq["inbound"].(map[string]interface{})
+	if !ok {
+		return "" // 没有 inbound 体(可能是别的 action),不拦
+	}
+	settings, _ := inbound["settings"].(map[string]interface{})
+	if settings == nil {
+		return ""
+	}
+	check := func(entries []interface{}, idField string) string {
+		for _, e := range entries {
+			m, ok := e.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			// 优先 email,其次 idField(user)。两者都为空视为非法(无法归属)。
+			identity, _ := m["email"].(string)
+			if identity == "" {
+				identity, _ = m[idField].(string)
+			}
+			if identity != username {
+				return fmt.Sprintf("节点只能添加你自己(%s)的用户配置,检测到非法用户 %q", username, identity)
+			}
+		}
+		return ""
+	}
+	if clients, ok := settings["clients"].([]interface{}); ok {
+		if msg := check(clients, "id"); msg != "" {
+			return msg
+		}
+	}
+	if accounts, ok := settings["accounts"].([]interface{}); ok {
+		if msg := check(accounts, "user"); msg != "" {
+			return msg
+		}
+	}
+	return ""
+}
+
 func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Request) {
 	serverID := r.URL.Query().Get("server_id")
 	if serverID == "" {
@@ -1036,6 +1086,19 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 		if err := json.Unmarshal(body, &inboundReq); err != nil {
 			remoteWriteError(w, http.StatusBadRequest, "invalid JSON body")
 			return
+		}
+	}
+
+	// 添加节点(add inbound)时校验:inbound.settings.clients/accounts 只能包含"当前登录账号自己"。
+	// 用户卡片在前端已锁死,但后端必须独立校验,防止绕过前端直接构造请求把别人的 uuid/email 塞进节点。
+	// 注:套餐分配用户走的是 addUserToInbound → forwardToRemoteServer,不经过本 HTTP handler,不受影响。
+	if r.Method == http.MethodPost && inboundReq != nil {
+		action, _ := inboundReq["action"].(string)
+		if al := strings.ToLower(action); al == "" || al == "add" {
+			if msg := validateInboundClientsSelfOnly(r.Context(), inboundReq); msg != "" {
+				remoteWriteError(w, http.StatusForbidden, msg)
+				return
+			}
 		}
 	}
 
