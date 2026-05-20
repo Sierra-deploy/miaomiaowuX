@@ -163,6 +163,11 @@ function XrayServersPage() {
   const [addWebsiteValidating, setAddWebsiteValidating] = useState(false)
   const [addWebsiteValidResult, setAddWebsiteValidResult] = useState<{ ok: boolean; msg: string } | null>(null)
   const [addWebsiteSubmitting, setAddWebsiteSubmitting] = useState(false)
+  // 一键升级所有 agent
+  type UpgradeProgress = { name: string; status: 'pending' | 'running' | 'success' | 'error'; log: string; message?: string }
+  const [isUpgradeAllDialogOpen, setIsUpgradeAllDialogOpen] = useState(false)
+  const [upgradeAllProgress, setUpgradeAllProgress] = useState<Record<number, UpgradeProgress>>({})
+  const [upgradeAllRunning, setUpgradeAllRunning] = useState(false)
   const [isDeleteRemoteServerDialogOpen, setIsDeleteRemoteServerDialogOpen] = useState(false)
   const [deletingRemoteServerId, setDeletingRemoteServerId] = useState<number | null>(null)
   const [selectedRemoteServer, setSelectedRemoteServer] = useState<RemoteServer | null>(null)
@@ -425,6 +430,70 @@ function XrayServersPage() {
   const handleRemoteInstallNginx = (serverId: number) => streamRemoteOp(`/api/admin/remote/nginx/install-stream?server_id=${serverId}`, t('servers.installNginx'), () => { loadRemoteServerStatusToCache(serverId, true); if (managingRemoteServer) loadRemoteServicesStatus(managingRemoteServer.id) })
   const handleRemoteRemoveNginx = (serverId: number) => streamRemoteOp(`/api/admin/remote/nginx/remove-stream?server_id=${serverId}`, t('servers.removeNginx'), () => { loadRemoteServerStatusToCache(serverId, true); if (managingRemoteServer) loadRemoteServicesStatus(managingRemoteServer.id) })
   const handleAgentUpgrade = (serverId: number) => streamRemoteOp(`/api/admin/remote/agent/upgrade-stream?server_id=${serverId}`, t('servers.upgradeAgentAction'))
+
+  // 单台 agent 升级 stream,把进度写进 upgradeAllProgress[serverId]。返回是否成功。供"一键升级所有 agent"复用。
+  const streamUpgradeOneAgent = async (serverId: number): Promise<boolean> => {
+    setUpgradeAllProgress(prev => ({ ...prev, [serverId]: { ...prev[serverId], status: 'running' } }))
+    let ok = true
+    try {
+      const token = getAuthToken()
+      const response = await fetch(`/api/admin/remote/agent/upgrade-stream?server_id=${serverId}`, {
+        method: 'POST', headers: { 'MM-Authorization': token || '', 'Content-Type': 'application/json' },
+      })
+      if (!response.ok) throw new Error(`HTTP ${response.status}`)
+      const reader = response.body?.getReader()
+      const decoder = new TextDecoder()
+      if (!reader) throw new Error('No reader available')
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        const text = decoder.decode(value, { stream: true })
+        for (const line of text.split('\n')) {
+          if (!line.startsWith('data: ')) continue
+          try {
+            const data = JSON.parse(line.slice(6))
+            if (data.type === 'output') {
+              setUpgradeAllProgress(prev => ({ ...prev, [serverId]: { ...prev[serverId], log: prev[serverId].log + data.data.replace(/\x1B\[[0-9;]*[a-zA-Z]/g, '') + '\n' } }))
+            } else if (data.type === 'complete') {
+              setUpgradeAllProgress(prev => ({ ...prev, [serverId]: { ...prev[serverId], status: 'success', message: data.message } }))
+            } else if (data.type === 'error') {
+              ok = false
+              setUpgradeAllProgress(prev => ({ ...prev, [serverId]: { ...prev[serverId], status: 'error', message: data.message } }))
+            }
+          } catch { /* incomplete JSON chunk */ }
+        }
+      }
+      // stream 正常结束但没收到 complete/error,兜底标记成功
+      setUpgradeAllProgress(prev => {
+        const cur = prev[serverId]
+        if (cur && cur.status === 'running') return { ...prev, [serverId]: { ...cur, status: 'success' } }
+        return prev
+      })
+      return ok
+    } catch (error: any) {
+      setUpgradeAllProgress(prev => ({ ...prev, [serverId]: { ...prev[serverId], status: 'error', message: error?.message || t('servers.unknownError') } }))
+      return false
+    }
+  }
+
+  // 一键升级所有 agent:顺序逐台升级(避免并发拉 GitHub release 造成限流),实时展示每台进度。
+  const handleUpgradeAllAgents = async () => {
+    const targets = remoteServers
+    if (targets.length === 0) return
+    const initial: Record<number, UpgradeProgress> = {}
+    for (const s of targets) initial[s.id] = { name: s.name, status: 'pending', log: '' }
+    setUpgradeAllProgress(initial)
+    setIsUpgradeAllDialogOpen(true)
+    setUpgradeAllRunning(true)
+    let failed = 0
+    for (const s of targets) {
+      const ok = await streamUpgradeOneAgent(s.id)
+      if (!ok) failed++
+    }
+    setUpgradeAllRunning(false)
+    if (failed === 0) toast.success(t('servers.upgradeAllDone', { count: targets.length }))
+    else toast.error(t('servers.upgradeAllPartial', { failed, total: targets.length }))
+  }
   const handleAgentUninstall = (serverId: number) => streamRemoteOp(`/api/admin/remote/agent/uninstall-stream?server_id=${serverId}`, t('servers.uninstallAgentAction'))
 
   const resetAddWebsiteDialog = () => { setAddWebsiteDomain(''); setAddWebsiteSiteType('static'); setAddWebsiteSiteValue(''); setAddWebsiteValidating(false); setAddWebsiteValidResult(null); setAddWebsiteSubmitting(false) }
@@ -788,6 +857,10 @@ function XrayServersPage() {
             <DialogFooter><Button variant="outline" onClick={() => { setIsAddDialogOpen(false); resetAddDialog() }}>{generatedToken ? t('servers.complete') : tc('actions.cancel')}</Button></DialogFooter>
           </DialogContent>
         </Dialog>
+        <Button variant="outline" disabled={remoteServers.length === 0 || upgradeAllRunning} onClick={handleUpgradeAllAgents} title={t('servers.upgradeAllAgentsTip')}>
+          {upgradeAllRunning ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowUpCircle className="mr-2 h-4 w-4" />}
+          {t('servers.upgradeAllAgents')}
+        </Button>
       </div>
 
       {/* --- VIEWS --- */}
@@ -1290,6 +1363,37 @@ function XrayServersPage() {
           <DialogFooter>
             <Button variant="outline" size="sm" onClick={() => managingRemoteServer && loadRemoteServicesStatus(managingRemoteServer.id)} disabled={remoteServicesLoading}><RefreshCw className={cn("h-4 w-4 mr-1", remoteServicesLoading && "animate-spin")} />{t('servers.refreshStatus')}</Button>
             <Button variant="outline" onClick={() => setIsRemoteManageDialogOpen(false)}>{tc('actions.close')}</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 一键升级所有 Agent — 进度 Dialog */}
+      <Dialog open={isUpgradeAllDialogOpen} onOpenChange={(open) => { if (!upgradeAllRunning) setIsUpgradeAllDialogOpen(open) }}>
+        <DialogContent className="w-[95vw] md:w-[70vw] max-w-3xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2"><ArrowUpCircle className="h-5 w-5" />{t('servers.upgradeAllAgents')}</DialogTitle>
+            <DialogDescription>{t('servers.upgradeAllAgentsProgressDesc')}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            {Object.entries(upgradeAllProgress).map(([sid, p]) => (
+              <details key={sid} className="rounded-md border px-3 py-2 text-sm">
+                <summary className="flex items-center justify-between cursor-pointer list-none">
+                  <span className="font-medium truncate mr-3">{p.name}</span>
+                  <span className="shrink-0 flex items-center gap-1">
+                    {p.status === 'pending' && <span className="text-muted-foreground text-xs">{t('servers.upgradeStatusPending')}</span>}
+                    {p.status === 'running' && <><Loader2 className="h-4 w-4 animate-spin text-primary" /><span className="text-primary text-xs">{t('servers.upgradeStatusRunning')}</span></>}
+                    {p.status === 'success' && <><CheckCircle className="h-4 w-4 text-green-500" /><span className="text-green-500 text-xs">{t('servers.upgradeStatusSuccess')}</span></>}
+                    {p.status === 'error' && <><XCircle className="h-4 w-4 text-red-500" /><span className="text-red-500 text-xs">{p.message || t('servers.upgradeStatusError')}</span></>}
+                  </span>
+                </summary>
+                {p.log && <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-all bg-muted/50 rounded p-2 text-xs font-mono">{p.log}</pre>}
+              </details>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" disabled={upgradeAllRunning} onClick={() => setIsUpgradeAllDialogOpen(false)}>
+              {upgradeAllRunning ? t('servers.upgradeAllRunning') : tc('actions.close')}
+            </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
