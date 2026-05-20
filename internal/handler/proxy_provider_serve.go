@@ -677,6 +677,8 @@ func parseShadowsocksURI(uri string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("invalid ss uri: invalid server:port")
 	}
 
+	password = urlDecode(password)
+
 	proxy := map[string]interface{}{
 		"type":     "ss",
 		"name":     name,

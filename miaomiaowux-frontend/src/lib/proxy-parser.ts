@@ -432,25 +432,10 @@ function parseShadowsocks(url: string): ProxyNode | null {
       const matchedCipher = knownCiphers.find(cipher => authPart.startsWith(cipher + ':'))
 
       if (matchedCipher) {
-        // 格式3 或 格式4: 明文加密方式
+        // 格式3: method:password@server:port(明文加密方式),密码直接使用。
+        // 旧逻辑会尝试 base64 解码密码,把恰好是合法 base64 的明文密码错误解码,导致密码错误。
         method = matchedCipher
-        const passwordPart = authPart.substring(matchedCipher.length + 1)
-
-        // 尝试 base64 解码密码，如果解码后是有效字符串则使用解码结果（格式4）
-        // 否则直接使用原始密码（格式3）
-        try {
-          const decodedPassword = base64Decode(passwordPart)
-          // 检查解码结果是否看起来像有效密码（不含乱码）
-          // 如果原始密码本身就是 base64 格式的有效字符串，使用解码后的值
-          if (decodedPassword && /^[\x20-\x7E]+$/.test(decodedPassword)) {
-            password = decodedPassword
-          } else {
-            password = passwordPart
-          }
-        } catch {
-          // base64 解码失败，使用原始密码
-          password = passwordPart
-        }
+        password = authPart.substring(matchedCipher.length + 1)
       } else {
         // 格式1: base64(method:password)@server:port
         const encodedPart = authPart

@@ -66,6 +66,11 @@ func (p *SingboxProducer) Produce(proxies []Proxy, outputType string, opts *Prod
 		var parsed map[string]interface{}
 		var err error
 
+		// sing-box 不支持 xhttp 传输,跳过
+		if GetString(proxy, "network") == "xhttp" {
+			continue
+		}
+
 		switch proxyType {
 		case "ssh":
 			parsed, err = p.sshParser(proxy)
@@ -104,11 +109,16 @@ func (p *SingboxProducer) Produce(proxies []Proxy, outputType string, opts *Prod
 				err = fmt.Errorf("platform sing-box does not support proxy type: %s with network %s", proxyType, network)
 			}
 		case "vless":
-			flow := GetString(proxy, "flow")
-			if flow == "" || flow == "xtls-rprx-vision" {
-				parsed, err = p.vlessParser(proxy)
+			encryption := GetString(proxy, "encryption")
+			if encryption != "" && encryption != "none" {
+				err = fmt.Errorf("VLESS encryption is not supported")
 			} else {
-				err = fmt.Errorf("platform sing-box does not support proxy type: %s with flow %s", proxyType, flow)
+				flow := GetString(proxy, "flow")
+				if flow == "" || flow == "xtls-rprx-vision" {
+					parsed, err = p.vlessParser(proxy)
+				} else {
+					err = fmt.Errorf("platform sing-box does not support proxy type: %s with flow %s", proxyType, flow)
+				}
 			}
 		case "trojan":
 			if GetString(proxy, "flow") == "" {
@@ -224,6 +234,17 @@ var singboxConsumedKeys = map[string]bool{
 	"headers": true, "path": true,
 	"version": true, "token": true,
 	"idle-timeout": true, "padding": true,
+	"encryption": true,
+	"udp-over-tcp": true, "udp-over-tcp-version": true,
+	"insecure": true, "peer": true, "disable-sni": true,
+	"ech-opts": true, "server-fingerprint": true,
+	"udp-over-stream": true, "udp-timeout": true,
+	"insecure-concurrency": true, "extra-headers": true,
+	"idle-session-check-interval": true, "idle-session-timeout": true, "min-idle-session": true,
+	"system": true, "workers": true,
+	"ws-headers": true, "ws-path": true, "ws-host": true,
+	"http-host": true, "http-path": true, "h2-host": true, "h2-path": true,
+	"obfs-host": true,
 }
 
 func (p *SingboxProducer) passthroughExtraFields(proxy Proxy, parsed map[string]interface{}) {
