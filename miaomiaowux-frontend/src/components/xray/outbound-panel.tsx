@@ -184,9 +184,12 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
           >
             {hideDefaultOutbounds ? t('outbounds.showDefault') : t('outbounds.hideDefault')}
           </Button>
-          <Button size="sm" onClick={() => setIsWizardDialogOpen(true)}>
-            <Plus className="h-4 w-4 mr-1" />{t('outbounds.addOutbound')}
-          </Button>
+          {/* 添加出站按钮暂时隐藏 */}
+          {false && (
+            <Button size="sm" onClick={() => setIsWizardDialogOpen(true)}>
+              <Plus className="h-4 w-4 mr-1" />{t('outbounds.addOutbound')}
+            </Button>
+          )}
         </div>
       </div>
 

@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, useRef, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { Plus, RefreshCw, Search, Trash2, Download, Cog, ChevronDown, Terminal, Play, Square, RotateCcw, Copy, Pencil, X, Settings, Wifi, Radio, Eye, ArrowUpCircle, Globe, CheckCircle, XCircle, Loader2, AlertTriangle, Lock, LockOpen } from 'lucide-react'
+import { Plus, RefreshCw, Search, Trash2, Download, Cog, ChevronDown, Terminal, Play, Square, RotateCcw, Copy, Pencil, X, Settings, Wifi, Radio, Eye, ArrowUpCircle, Globe, CheckCircle, XCircle, Loader2, AlertTriangle, Lock, LockOpen, Share2 } from 'lucide-react'
 import { ViewToggle, type ViewMode } from '@/components/ui/view-toggle'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { useLicenseUsage } from '@/hooks/use-license'
@@ -873,7 +873,7 @@ function XrayServersPage() {
           {remoteServers.map((server: RemoteServer) => {
             const remoteStatus = remoteServicesStatusMap[server.id]
             return (
-              <Card key={`remote-${server.id}`} className={server.status !== 'connected' ? 'cursor-pointer hover:border-primary/50 transition-colors' : ''} onClick={() => { if (server.status !== 'connected') { setSelectedRemoteServer(server); setIsRemoteServerDetailDialogOpen(true) } }}>
+              <Card key={`remote-${server.id}`} className={cn('min-w-0 overflow-hidden', server.status !== 'connected' ? 'cursor-pointer hover:border-primary/50 transition-colors' : '')} onClick={() => { if (server.status !== 'connected') { setSelectedRemoteServer(server); setIsRemoteServerDetailDialogOpen(true) } }}>
                 <CardHeader className="pb-3">
                   <div className="flex items-center justify-between gap-2">
                     <div className="flex items-center gap-2 min-w-0">
@@ -900,7 +900,7 @@ function XrayServersPage() {
                       <Badge variant="outline" className={cn("text-xs shrink-0", server.xray_mode === 'embedded' ? "border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-400" : "border-gray-300 text-gray-600 dark:border-gray-600 dark:text-gray-400")}>{server.xray_mode === 'embedded' ? t('servers.xrayModeEmbedded') : t('servers.xrayModeExternal')}</Badge>
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
-                      {server.status === 'connected' && (<Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); handleOpenXrayRawConfig(server) }} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title={t('servers.viewXrayConfig')}><Eye className="h-4 w-4" /></Button>)}
+                      <Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); toast.info('分享服务器功能开发中，敬请期待') }} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title="分享服务器（PRO）"><Share2 className="h-4 w-4" /></Button>
                       {server.status === 'connected' && (<Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); remoteScanMutation.mutate(server.id) }} disabled={remoteScanMutation.isPending} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title={t('servers.scan')}><Search className={cn("h-4 w-4", remoteScanMutation.isPending && "animate-spin")} /></Button>)}
                       <Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); handleEditRemoteServer(server) }} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title={t('servers.editServer')}><Pencil className="h-4 w-4" /></Button>
                       <Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); handleDeleteRemoteServer(server.id) }} className="h-8 w-8 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950" title={t('servers.deleteServer')}><X className="h-4 w-4" /></Button>
@@ -940,7 +940,7 @@ function XrayServersPage() {
                     {remoteStatus?.nginx?.installed && (<RemoteServiceStatusIndicator status={remoteStatus?.nginx} name="Nginx" serverId={server.id} />)}
                     {remoteStatus?.loading && (<span className="text-xs text-muted-foreground">{t('servers.loadingStatus')}</span>)}
                   </div>
-                  <div className="mt-4 flex gap-3">
+                  <div className="mt-4 flex flex-col sm:flex-row gap-3">
                     <div className="flex-1 min-w-0 bg-muted/50 rounded-lg p-3">
                       <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-2">
                         <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v20M2 12h20M7 7l5-5 5 5M7 17l5 5 5-5" /></svg>
@@ -961,7 +961,7 @@ function XrayServersPage() {
                         </div>
                         {server.traffic_limit && server.traffic_limit > 0 ? <span>{t('servers.usedTotal')}</span> : <span>{t('servers.unlimited')}</span>}
                       </div>
-                      <div className="text-sm font-mono font-medium mb-2">{server.traffic_limit && server.traffic_limit > 0 ? `${formatTraffic(server.traffic_used || 0)} / ${formatTraffic(server.traffic_limit)}` : formatTraffic(server.traffic_used || 0)}</div>
+                      <div className="text-sm font-mono font-medium mb-2 break-all">{server.traffic_limit && server.traffic_limit > 0 ? `${formatTraffic(server.traffic_used || 0)} / ${formatTraffic(server.traffic_limit)}` : formatTraffic(server.traffic_used || 0)}</div>
                       {server.traffic_limit > 0 && (
                         <div className="space-y-2">
                           <div className="h-1.5 bg-muted rounded-full overflow-hidden"><div className={cn("h-full rounded-full transition-all", getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 90 ? "bg-red-500" : getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 70 ? "bg-yellow-500" : "bg-primary")} style={{ width: `${Math.min(getTrafficPercent(server.traffic_used || 0, server.traffic_limit), 100)}%` }} /></div>
@@ -972,7 +972,7 @@ function XrayServersPage() {
                   </div>
                   {server.last_heartbeat && (<div className="mt-3 text-xs text-muted-foreground">{t('servers.lastHeartbeat')}: {new Date(server.last_heartbeat).toLocaleString()}</div>)}
                 </CardHeader>
-                <CardFooter className="flex gap-2 pt-4">
+                <CardFooter className="flex flex-wrap gap-2 pt-4">
                   {server.status === 'connected' && (
                     <>
                       <InstallPopover serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} />
@@ -1113,7 +1113,7 @@ function XrayServersPage() {
                                 </DropdownMenuContent>
                               </DropdownMenu>
                             )}
-                            <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => handleOpenXrayRawConfig(server)} title={t('servers.viewXrayConfig')}><Eye className="h-3.5 w-3.5" /></Button>
+                            <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => toast.info('分享服务器功能开发中，敬请期待')} title="分享服务器（PRO）"><Share2 className="h-3.5 w-3.5" /></Button>
                             <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => remoteScanMutation.mutate(server.id)} disabled={remoteScanMutation.isPending} title={t('servers.scan')}><Search className={cn("h-3.5 w-3.5", remoteScanMutation.isPending && "animate-spin")} /></Button>
                           </>
                         )}
