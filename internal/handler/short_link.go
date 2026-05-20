@@ -189,6 +189,13 @@ func NewUserCustomShortCodeSelfHandler(repo *storage.TrafficRepository) http.Han
 			return
 		}
 
+		// 不向普通用户开放:用户短码现为系统随机生成(3-10 位)不可自定义,
+		// 仅管理员保留设置入口,避免普通用户自定义引发的短码冲突可用性预言机。
+		if !userIsAdmin(r.Context(), repo, username) {
+			writeError(w, http.StatusForbidden, errors.New("该功能未开放"))
+			return
+		}
+
 		switch r.Method {
 		case http.MethodGet:
 			code, err := repo.GetUserCustomShortCode(r.Context(), username)
@@ -225,14 +232,15 @@ func NewUserCustomShortCodeSelfHandler(repo *storage.TrafficRepository) http.Han
 				userCodes, err := repo.GetAllUserShortCodes(r.Context())
 				if err == nil {
 					if un, exists := userCodes[code]; exists && un != username {
-						writeError(w, http.StatusConflict, errors.New("该自定义连接已被其他用户使用"))
+						// 不透露被谁占用,避免泄露其他用户的短码(可用性预言机)。
+						writeError(w, http.StatusConflict, errors.New("该短码已被占用，请更换一个"))
 						return
 					}
 				}
 			}
 
 			if err := repo.UpdateUserCustomShortCode(r.Context(), username, code); err != nil {
-				writeError(w, http.StatusConflict, errors.New(err.Error()))
+				writeError(w, http.StatusConflict, errors.New("该短码已被占用，请更换一个"))
 				return
 			}
 

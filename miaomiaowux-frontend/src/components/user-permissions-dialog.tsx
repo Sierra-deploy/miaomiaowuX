@@ -30,6 +30,7 @@ const PAGE_OPTIONS: { key: string; label: string }[] = [
   { key: 'templates', label: '模板管理' },
   { key: 'subscribe-files', label: '订阅管理' },
   { key: 'custom-rules', label: '覆写管理' },
+  { key: 'nodes', label: '节点管理' },
 ]
 
 const emptyConfig: UserPermConfig = {

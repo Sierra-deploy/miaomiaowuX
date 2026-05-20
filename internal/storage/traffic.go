@@ -151,6 +151,7 @@ var (
 	ErrNodeNotFound                 = errors.New("node not found")
 	ErrSubscribeFileNotFound        = errors.New("subscribe file not found")
 	ErrSubscribeFileExists          = errors.New("subscribe file already exists")
+	ErrCustomShortCodeExists        = errors.New("该短码已被占用，请更换一个")
 	ErrUserSettingsNotFound         = errors.New("user settings not found")
 	ErrExternalSubscriptionNotFound = errors.New("external subscription not found")
 	ErrExternalSubscriptionExists   = errors.New("external subscription already exists")
@@ -2806,10 +2807,17 @@ func generateFileShortCode() (string, error) {
 	return string(bytes), nil
 }
 
-// 为用户短代码生成随机的 3 个字符的字符串。
+// 为用户短代码生成随机字符串,长度随机 3-10 位。
+// 随机长度 + 不可由用户自定义,使短码不可枚举,从根本上消除"自定义短码冲突可用性预言机"问题。
 func generateUserShortCode() (string, error) {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	const length = 3
+
+	// 先随机决定长度(3-10)
+	lenByte := make([]byte, 1)
+	if _, err := rand.Read(lenByte); err != nil {
+		return "", fmt.Errorf("generate random length: %w", err)
+	}
+	length := 3 + int(lenByte[0])%8 // 3..10
 
 	bytes := make([]byte, length)
 	if _, err := rand.Read(bytes); err != nil {
@@ -3214,7 +3222,7 @@ func (r *TrafficRepository) UpdateUserCustomShortCode(ctx context.Context, usern
 	res, err := r.db.ExecContext(ctx, `UPDATE user_tokens SET custom_user_short_code = ?, updated_at = CURRENT_TIMESTAMP WHERE username = ?`, code, username)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
-			return errors.New("该自定义连接已被使用")
+			return errors.New("该短码已被占用，请更换一个")
 		}
 		return fmt.Errorf("update user custom short code: %w", err)
 	}

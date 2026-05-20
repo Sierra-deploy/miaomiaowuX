@@ -57,17 +57,17 @@ func NewPackageCreateHandler(repo *storage.TrafficRepository) *PackageCreateHand
 }
 
 type createPackageRequest struct {
-	Name           string                     `json:"name"`
-	Description    string                     `json:"description"`
-	TrafficLimitGB float64                    `json:"traffic_limit_gb"`
-	CycleDays      int                        `json:"cycle_days"`
-	IsReset        bool                       `json:"is_reset"`
-	ResetDay       int                        `json:"reset_day"`
-	Nodes          []int64                    `json:"nodes"`
-	SpeedLimitMbps float64                    `json:"speed_limit_mbps"`
-	DeviceLimit    int                        `json:"device_limit"`
+	Name           string                       `json:"name"`
+	Description    string                       `json:"description"`
+	TrafficLimitGB float64                      `json:"traffic_limit_gb"`
+	CycleDays      int                          `json:"cycle_days"`
+	IsReset        bool                         `json:"is_reset"`
+	ResetDay       int                          `json:"reset_day"`
+	Nodes          []int64                      `json:"nodes"`
+	SpeedLimitMbps float64                      `json:"speed_limit_mbps"`
+	DeviceLimit    int                          `json:"device_limit"`
 	AutoSpeedRules []storage.AutoSpeedLimitRule `json:"auto_speed_rules"`
-	TrafficMode    string                     `json:"traffic_mode"`
+	TrafficMode    string                       `json:"traffic_mode"`
 }
 
 func (h *PackageCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -159,18 +159,18 @@ func NewPackageUpdateHandler(repo *storage.TrafficRepository, remoteManage *Remo
 }
 
 type updatePackageRequest struct {
-	ID             int64                       `json:"id"`
-	Name           string                      `json:"name"`
-	Description    string                      `json:"description"`
-	TrafficLimitGB float64                     `json:"traffic_limit_gb"`
-	CycleDays      int                         `json:"cycle_days"`
-	IsReset        bool                        `json:"is_reset"`
-	ResetDay       int                         `json:"reset_day"`
-	Nodes          []int64                     `json:"nodes"`
-	SpeedLimitMbps float64                     `json:"speed_limit_mbps"`
-	DeviceLimit    int                         `json:"device_limit"`
+	ID             int64                        `json:"id"`
+	Name           string                       `json:"name"`
+	Description    string                       `json:"description"`
+	TrafficLimitGB float64                      `json:"traffic_limit_gb"`
+	CycleDays      int                          `json:"cycle_days"`
+	IsReset        bool                         `json:"is_reset"`
+	ResetDay       int                          `json:"reset_day"`
+	Nodes          []int64                      `json:"nodes"`
+	SpeedLimitMbps float64                      `json:"speed_limit_mbps"`
+	DeviceLimit    int                          `json:"device_limit"`
 	AutoSpeedRules []storage.AutoSpeedLimitRule `json:"auto_speed_rules"`
-	TrafficMode    string                      `json:"traffic_mode"`
+	TrafficMode    string                       `json:"traffic_mode"`
 }
 
 func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -363,11 +363,45 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 
 // PackageDeleteHandler 处理删除包模板
 type PackageDeleteHandler struct {
-	repo *storage.TrafficRepository
+	repo         *storage.TrafficRepository
+	remoteManage *RemoteManageHandler
+	pusher       *LimiterConfigPusher
 }
 
-func NewPackageDeleteHandler(repo *storage.TrafficRepository) *PackageDeleteHandler {
-	return &PackageDeleteHandler{repo: repo}
+func NewPackageDeleteHandler(repo *storage.TrafficRepository, remoteManage *RemoteManageHandler, pusher *LimiterConfigPusher) *PackageDeleteHandler {
+	return &PackageDeleteHandler{repo: repo, remoteManage: remoteManage, pusher: pusher}
+}
+
+// unbindUserPackage 解除单个用户的套餐绑定:从入站移除凭据、删本地入站配置、推送 limiter、
+// 清空 package_id,并删除该用户残留的套餐订阅(历史 auto-gen)。best-effort,只记日志。
+func unbindUserPackage(ctx context.Context, repo *storage.TrafficRepository, remoteManage *RemoteManageHandler, pusher *LimiterConfigPusher, username string) {
+	configs, err := repo.GetUserInboundConfigs(ctx, username)
+	if err != nil {
+		log.Printf("[PackageUnbind] 获取用户 %s 入站配置失败: %v", username, err)
+	}
+	for _, cfg := range configs {
+		if err := removeUserFromInbound(ctx, remoteManage, cfg); err != nil {
+			log.Printf("[PackageUnbind] 从入站 %s(server %d)移除用户 %s 失败: %v", cfg.InboundTag, cfg.ServerID, username, err)
+		}
+	}
+	if err := repo.DeleteUserInboundConfigs(ctx, username); err != nil {
+		log.Printf("[PackageUnbind] 删除用户 %s 入站配置记录失败: %v", username, err)
+	}
+	if pusher != nil {
+		go pusher.PushToAllServersForUser(context.Background(), username)
+	}
+	if err := repo.RemovePackageFromUser(ctx, username); err != nil && err != storage.ErrUserNotFound {
+		log.Printf("[PackageUnbind] 解绑用户 %s 套餐失败: %v", username, err)
+	}
+	// 删除该用户残留的套餐订阅(历史 auto-gen 文件)
+	if sf, err := repo.GetUserPackageSubscription(ctx, username); err == nil && sf.ID > 0 {
+		if derr := repo.DeleteSubscribeFile(ctx, sf.ID); derr != nil {
+			log.Printf("[PackageUnbind] 删除用户 %s 套餐订阅记录失败: %v", username, derr)
+		}
+		if sf.Filename != "" {
+			_ = os.Remove(filepath.Join("subscribes", sf.Filename))
+		}
+	}
 }
 
 func (h *PackageDeleteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -407,7 +441,23 @@ func (h *PackageDeleteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := h.repo.DeletePackage(r.Context(), id); err != nil {
+	ctx := r.Context()
+
+	// 删除套餐前,先把绑定该套餐的所有用户解绑(移除入站凭据 + 清 package_id + 删套餐订阅),
+	// 否则会残留无效绑定和孤立订阅。
+	unbound := 0
+	if users, err := h.repo.ListUsersWithPackage(ctx); err == nil {
+		for _, u := range users {
+			if u.PackageID == id {
+				unbindUserPackage(ctx, h.repo, h.remoteManage, h.pusher, u.Username)
+				unbound++
+			}
+		}
+	} else {
+		log.Printf("[PackageDelete] 获取绑定用户列表失败: %v", err)
+	}
+
+	if err := h.repo.DeletePackage(ctx, id); err != nil {
 		if err == storage.ErrPackageNotFound {
 			http.Error(w, "Package not found", http.StatusNotFound)
 			return
@@ -418,7 +468,8 @@ func (h *PackageDeleteHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "Package deleted successfully",
+		"message":       "Package deleted successfully",
+		"unbound_users": unbound,
 	})
 }
 
@@ -918,9 +969,11 @@ func shadowsocksKeyLength(method string) int {
 // generateCredential 生成单用户在指定 inbound 上的认证凭据。
 // shadowsocks 协议要求 password 与 method 的 key length 严格匹配,否则 xray reload 会失败。
 // SS2022 :
-//   2022-blake3-aes-128-gcm           → 16 bytes (base64 24 chars)
-//   2022-blake3-aes-256-gcm           → 32 bytes
-//   2022-blake3-chacha20-poly1305     → 32 bytes
+//
+//	2022-blake3-aes-128-gcm           → 16 bytes (base64 24 chars)
+//	2022-blake3-aes-256-gcm           → 32 bytes
+//	2022-blake3-chacha20-poly1305     → 32 bytes
+//
 // 老 SS / 非 2022 method → 任意长度都接受,默认给 16 bytes 即可。
 func generateCredential(protocol string, user storage.User, method string) (map[string]interface{}, string, error) {
 	cred := make(map[string]interface{})

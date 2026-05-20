@@ -750,30 +750,6 @@ function SubscribeFilesPage() {
     },
   })
 
-  // 当前用户短码（链接后缀，所有订阅通用；自定义优先，否则系统自动短码）
-  const { data: userShortCodeData } = useQuery({
-    queryKey: ['user-custom-short-code'],
-    queryFn: async () => {
-      const { data } = await api.get('/api/user/custom-short-code')
-      return data as { custom_short_code: string; effective_short_code: string }
-    },
-  })
-  const updateUserShortCodeMutation = useMutation({
-    mutationFn: async (code: string) => {
-      await api.post('/api/user/custom-short-code', { custom_short_code: code })
-    },
-    onSuccess: () => {
-      toast.success('用户短码已更新')
-      queryClient.invalidateQueries({ queryKey: ['user-custom-short-code'] })
-      queryClient.invalidateQueries({ queryKey: ['subscribe-files'] })
-      queryClient.invalidateQueries({ queryKey: ['user-subscriptions'] })
-      queryClient.invalidateQueries({ queryKey: ['subscriptions'] })
-    },
-    onError: (e: any) => {
-      toast.error(e.response?.data?.error || e.response?.data?.message || '用户短码更新失败')
-    },
-  })
-
   // 获取订阅流量统计（独立接口，可能耗时）
   const { data: trafficData, isLoading: isTrafficLoading } = useQuery({
     queryKey: ['subscribe-files-traffic'],
@@ -2985,24 +2961,6 @@ function SubscribeFilesPage() {
                                 />
                                 <p className='text-[10px] text-muted-foreground'>
                                   回车保存，留空恢复自动短码{file.file_short_code ? ` (${file.file_short_code})` : ''}
-                                </p>
-                              </div>
-                              <div className='space-y-2 border-t pt-2 mt-2'>
-                                <Label className='text-xs'>用户短码（链接后缀，所有订阅通用）</Label>
-                                <Input
-                                  key={userShortCodeData?.effective_short_code}
-                                  className='h-8 text-xs font-mono'
-                                  defaultValue={userShortCodeData?.effective_short_code || ''}
-                                  placeholder='3位字母/数字'
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter') {
-                                      const val = (e.target as HTMLInputElement).value.trim()
-                                      updateUserShortCodeMutation.mutate(val)
-                                    }
-                                  }}
-                                />
-                                <p className='text-[10px] text-muted-foreground'>
-                                  回车保存，订阅短链接的末尾即此短码；管理员可不设，用文件短码访问全部
                                 </p>
                               </div>
                             </PopoverContent>

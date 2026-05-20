@@ -240,6 +240,9 @@ func (r *TrafficRepository) CreateSubscribeFile(ctx context.Context, file Subscr
 			if strings.Contains(strings.ToLower(err.Error()), "unique") && strings.Contains(strings.ToLower(err.Error()), "file_short_code") {
 				continue
 			}
+			if strings.Contains(strings.ToLower(err.Error()), "unique") && strings.Contains(strings.ToLower(err.Error()), "custom_short_code") {
+				return SubscribeFile{}, ErrCustomShortCodeExists
+			}
 			if strings.Contains(strings.ToLower(err.Error()), "unique") {
 				return SubscribeFile{}, ErrSubscribeFileExists
 			}
@@ -303,6 +306,9 @@ func (r *TrafficRepository) UpdateSubscribeFile(ctx context.Context, file Subscr
 		file.TrafficLimit, file.SortOrder, boolToInt(file.RawOutput),
 		file.ID)
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") && strings.Contains(strings.ToLower(err.Error()), "custom_short_code") {
+			return SubscribeFile{}, ErrCustomShortCodeExists
+		}
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return SubscribeFile{}, ErrSubscribeFileExists
 		}

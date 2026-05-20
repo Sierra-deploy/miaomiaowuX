@@ -1,6 +1,6 @@
 import { api } from '@/lib/api'
 
-export type UserPageKey = 'subscription' | 'generator' | 'templates' | 'subscribe-files' | 'custom-rules'
+export type UserPageKey = 'subscription' | 'generator' | 'templates' | 'subscribe-files' | 'custom-rules' | 'nodes'
 
 export interface QuotaItem {
   used: number

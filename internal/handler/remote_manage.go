@@ -891,6 +891,16 @@ func (h *RemoteManageHandler) doEncryptedPullRequest(ctx context.Context, method
 		return nil, fmt.Errorf("failed to read response: %v", err)
 	}
 
+	// agent 对所有响应都加密(含错误响应),必须先解密再判断状态码,
+	// 否则错误响应体仍是密文,前端 toast 会显示乱码。
+	if resp.Header.Get("X-Encrypted") == "1" {
+		decrypted, derr := session.Decrypt(respBody)
+		if derr != nil {
+			return nil, fmt.Errorf("decrypt response: %w", derr)
+		}
+		respBody = decrypted
+	}
+
 	if resp.StatusCode >= 400 {
 		var errResp map[string]interface{}
 		if json.Unmarshal(respBody, &errResp) == nil {
@@ -901,13 +911,6 @@ func (h *RemoteManageHandler) doEncryptedPullRequest(ctx context.Context, method
 		return nil, fmt.Errorf("remote server returned status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	if resp.Header.Get("X-Encrypted") == "1" {
-		decrypted, err := session.Decrypt(respBody)
-		if err != nil {
-			return nil, fmt.Errorf("decrypt response: %w", err)
-		}
-		return decrypted, nil
-	}
 	return respBody, nil
 }
 

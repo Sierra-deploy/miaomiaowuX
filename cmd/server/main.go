@@ -253,10 +253,9 @@ func main() {
 	mux.Handle("/api/admin/template-v3", auth.RequireToken(tokenStore, userRepo, templateV3Handler))
 	mux.Handle("/api/admin/template-v3/", auth.RequireToken(tokenStore, userRepo, templateV3Handler))
 
-	// 包管理端点（仅限管理员）— list/create/delete 不依赖 limiterPusher
+	// 包管理端点（仅限管理员）— list/create 不依赖 limiterPusher;delete 需解绑用户,延后到 remoteManageHandler/limiterPusher 创建后注册
 	mux.Handle("/api/admin/packages", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageListHandler(repo)))
 	mux.Handle("/api/admin/packages/create", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageCreateHandler(repo)))
-	mux.Handle("/api/admin/packages/", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageDeleteHandler(repo)))
 
 	// 用户端点（所有经过身份验证的用户）
 	mux.Handle("/api/proxy-groups", auth.RequireToken(tokenStore, userRepo, handler.NewProxyGroupsHandler(proxyGroupsStore)))
@@ -348,6 +347,8 @@ func main() {
 	mux.Handle("/api/admin/packages/update", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageUpdateHandler(repo, remoteManageHandler, limiterPusher)))
 	mux.Handle("/api/admin/packages/assign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageAssignHandler(repo, remoteManageHandler, limiterPusher)))
 	mux.Handle("/api/admin/packages/unassign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageUnassignHandler(repo, remoteManageHandler, limiterPusher)))
+	// 删除套餐:解绑所有绑定用户(移除入站凭据/清 package_id/删套餐订阅)后再删,故依赖 remoteManageHandler/limiterPusher
+	mux.Handle("/api/admin/packages/", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageDeleteHandler(repo, remoteManageHandler, limiterPusher)))
 	mux.Handle("/api/admin/users/limits", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserLimitsHandler(repo, limiterPusher)))
 	mux.Handle("/api/admin/users/delete", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserDeleteHandler(repo, remoteManageHandler, limiterPusher)))
 	mux.Handle("/api/admin/users/status", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserStatusHandler(repo, remoteManageHandler, limiterPusher)))
@@ -726,12 +727,22 @@ func main() {
 	// 所有其他路径都转到 Web 处理程序
 	shortLinkHandler := handler.NewShortLinkHandler(repo, subscriptionHandler, packageSubscribeHandler)
 	bruteForceProtector := handler.NewBruteForceProtector()
+	// 订阅获取频率限制(每 IP 每小时 30 次),覆盖 /x/ 短链接与 /t/ 临时订阅,防枚举/抓取滥用。
+	subRateLimiter := handler.NewSubscriptionRateLimiter(30, time.Hour)
+	go subRateLimiter.StartCleanup(context.Background())
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.Trim(r.URL.Path, "/")
 		clientIP := handler.GetClientIP(r)
 
 		if bruteForceProtector.IsBlocked(clientIP, r.URL.Path) {
 			http.NotFound(w, r)
+			return
+		}
+
+		isSubscriptionFetch := (strings.HasPrefix(path, "t/") && len(path) == 10) ||
+			(strings.HasPrefix(path, "x/") && len(path) > 2 && isAlphanumeric(path[2:]))
+		if isSubscriptionFetch && !subRateLimiter.Allow(clientIP) {
+			http.Error(w, "请求过于频繁，请稍后再试", http.StatusTooManyRequests)
 			return
 		}
 

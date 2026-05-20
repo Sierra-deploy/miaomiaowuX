@@ -158,6 +158,10 @@ func (h *subscribeFilesHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 
 	created, err := h.repo.CreateSubscribeFile(r.Context(), file)
 	if err != nil {
+		if errors.Is(err, storage.ErrCustomShortCodeExists) {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
 		if errors.Is(err, storage.ErrSubscribeFileExists) {
 			writeError(w, http.StatusConflict, errors.New("订阅名称已存在"))
 			return
@@ -290,6 +294,10 @@ func (h *subscribeFilesHandler) handleImport(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		// 如果数据库保存失败，删除已保存的文件
 		_ = os.Remove(filePath)
+		if errors.Is(err, storage.ErrCustomShortCodeExists) {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
 		if errors.Is(err, storage.ErrSubscribeFileExists) {
 			writeError(w, http.StatusConflict, errors.New("订阅名称已存在"))
 			return
@@ -386,6 +394,10 @@ func (h *subscribeFilesHandler) handleUpload(w http.ResponseWriter, r *http.Requ
 	if err != nil {
 		// 如果数据库保存失败，删除已保存的文件
 		_ = os.Remove(filePath)
+		if errors.Is(err, storage.ErrCustomShortCodeExists) {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
 		if errors.Is(err, storage.ErrSubscribeFileExists) {
 			writeError(w, http.StatusConflict, errors.New("订阅名称已存在"))
 			return
@@ -492,6 +504,10 @@ func (h *subscribeFilesHandler) handleUpdate(w http.ResponseWriter, r *http.Requ
 
 	updated, err := h.repo.UpdateSubscribeFile(r.Context(), existing)
 	if err != nil {
+		if errors.Is(err, storage.ErrCustomShortCodeExists) {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
 		if errors.Is(err, storage.ErrSubscribeFileExists) {
 			writeError(w, http.StatusConflict, errors.New("订阅名称已存在"))
 			return
@@ -986,6 +1002,10 @@ func (h *subscribeFilesHandler) handleCreateFromConfig(w http.ResponseWriter, r 
 	if err != nil {
 		// 如果数据库保存失败，删除已保存的文件
 		_ = os.Remove(filePath)
+		if errors.Is(err, storage.ErrCustomShortCodeExists) {
+			writeError(w, http.StatusConflict, err)
+			return
+		}
 		if errors.Is(err, storage.ErrSubscribeFileExists) {
 			writeError(w, http.StatusConflict, errors.New("订阅名称已存在"))
 			return

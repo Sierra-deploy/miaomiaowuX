@@ -42,6 +42,11 @@ const mmwBottomNavLinks = [
   { titleKey: 'nav.customRulesManagement' as const, to: '/custom-rules', icon: Scissors, pageKey: 'custom-rules' as UserPageKey },
 ]
 
+// 普通用户可被授权的核心页面(管理员始终可见,见 coreAdminNavLinks)
+const userGrantableNavLinks = [
+  { titleKey: 'nav.nodeManagement' as const, to: '/nodes', icon: Network, pageKey: 'nodes' as UserPageKey },
+]
+
 const tailAdminNavLinks = [
   { titleKey: 'nav.systemSettings' as const, to: '/system-settings', icon: Settings },
 ]
@@ -85,7 +90,7 @@ export function Topbar() {
     staleTime: 5 * 60 * 1000,
   })
   const allowedPages = new Set(userPerms?.pages ?? [])
-  const permittedMmwLinks = [...mmwTopNavLinks, ...mmwBottomNavLinks].filter((l) => allowedPages.has(l.pageKey))
+  const permittedMmwLinks = [...mmwTopNavLinks, ...mmwBottomNavLinks, ...userGrantableNavLinks].filter((l) => allowedPages.has(l.pageKey))
 
   // 计算所有导航链接
   const adminNavLinks = [...(enableMmwFeatures ? mmwTopNavLinks : []), ...coreAdminNavLinks, ...(enableMmwFeatures ? mmwBottomNavLinks : []), ...tailAdminNavLinks]
