@@ -34,6 +34,9 @@ type trafficSummaryMetrics struct {
 	TotalUsedGB      float64 `json:"total_used_gb"`
 	TotalRemainingGB float64 `json:"total_remaining_gb"`
 	UsagePercentage  float64 `json:"usage_percentage"`
+	// UnlimitedUsedGB 仅管理员视角:不限流量服务器(traffic_limit=0)的已用流量合计,
+	// 不计入上面的百分比;前端在"已用流量"旁用图标 hover 展示。
+	UnlimitedUsedGB float64 `json:"unlimited_used_gb"`
 }
 
 type trafficDailyUsage struct {
@@ -67,28 +70,67 @@ func (h *TrafficSummaryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	ctx := r.Context()
 	username := auth.UsernameFromContext(ctx)
 
-	var totalLimit, totalRemaining, totalUsed int64
+	var user storage.User
+	haveUser := false
+	if username != "" && h.repo != nil {
+		if u, err := h.repo.GetUser(ctx, username); err == nil {
+			user = u
+			haveUser = true
+		}
+	}
+	isAdmin := haveUser && user.Role == storage.RoleAdmin
 
-	if username != "" {
-		externalLimit, externalUsed := h.fetchExternalSubscriptionTraffic(ctx, username)
-		totalLimit += externalLimit
-		totalUsed += externalUsed
-		totalRemaining = totalLimit - totalUsed
+	var totalLimit, totalUsed, unlimitedUsed int64
+
+	if isAdmin {
+		// 管理员:汇总所有服务器(含主控本机,它也是 remote_servers 一行)。
+		// 限流服务器(traffic_limit>0)计入 已用/限额;不限流量服务器(=0)的已用单独汇总,
+		// 前端在"已用流量"旁用图标 hover 展示,不计入百分比(否则分母没有限额会失真)。
+		if servers, err := h.repo.ListRemoteServers(ctx); err == nil {
+			for _, s := range servers {
+				aggregated, _ := h.repo.GetServerTrafficUsed(ctx, s.ID)
+				used := aggregated + s.TrafficUsedOffset
+				if s.TrafficLimit > 0 {
+					totalLimit += s.TrafficLimit
+					totalUsed += used
+				} else {
+					unlimitedUsed += used
+				}
+			}
+		}
+		// 外部订阅流量:仅当系统级"外部订阅同步"开关开启时并入。
+		if enabled, _ := h.repo.IsSyncTrafficEnabled(ctx); enabled {
+			extLimit, extUsed := h.fetchExternalSubscriptionTraffic(ctx, username)
+			totalLimit += extLimit
+			totalUsed += extUsed
+		}
+	} else if haveUser {
+		// 普通用户:套餐流量。已用按套餐流量倍率(oneway×1 / twoway×2)计费,
+		// 与限额判定口径一致(见 traffic_limit_enforcer:已用×TrafficMultiplier 比限额)。
+		if user.PackageID > 0 {
+			if pkg, perr := h.repo.GetPackage(ctx, user.PackageID); perr == nil {
+				totalLimit += pkg.TrafficLimitBytes
+				if raw, terr := h.repo.GetUserTotalTraffic(ctx, username); terr == nil {
+					totalUsed += raw * pkg.TrafficMultiplier()
+				}
+			}
+		}
+		// 外部订阅(该用户开启 sync_traffic 时)叠加。
+		extLimit, extUsed := h.fetchExternalSubscriptionTraffic(ctx, username)
+		totalLimit += extLimit
+		totalUsed += extUsed
 	}
 
-	// 判断是否为管理员
-	isAdmin := false
-	if username != "" && h.repo != nil {
-		if user, err := h.repo.GetUser(ctx, username); err == nil {
-			isAdmin = user.Role == storage.RoleAdmin
-		}
+	totalRemaining := totalLimit - totalUsed
+	if totalRemaining < 0 {
+		totalRemaining = 0
 	}
 
 	if isAdmin {
 		if err := h.recordSnapshot(ctx, totalLimit, totalUsed, totalRemaining); err != nil {
 			logger.Info("[流量] 记录快照失败", "error", err)
 		}
-	} else if username != "" && h.repo != nil {
+	} else if haveUser {
 		if err := h.repo.RecordUserDaily(ctx, username, time.Now(), totalLimit, totalUsed, totalRemaining); err != nil {
 			logger.Info("[流量] 记录用户快照失败", "error", err)
 		}
@@ -106,6 +148,7 @@ func (h *TrafficSummaryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		TotalUsedGB:      roundUpTwoDecimals(bytesToGigabytes(totalUsed)),
 		TotalRemainingGB: roundUpTwoDecimals(bytesToGigabytes(totalRemaining)),
 		UsagePercentage:  roundUpTwoDecimals(usagePercentage(totalUsed, totalLimit)),
+		UnlimitedUsedGB:  roundUpTwoDecimals(bytesToGigabytes(unlimitedUsed)),
 	}
 
 	response := trafficSummaryResponse{

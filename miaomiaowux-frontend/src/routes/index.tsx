@@ -19,6 +19,7 @@ import {
   Copy,
   Download,
   HardDrive,
+  Info,
   Maximize2,
   PieChart,
   QrCode,
@@ -564,7 +565,7 @@ function AdminDashboard() {
     queryKey: ['admin-users'],
     queryFn: async () => {
       const response = await api.get('/api/admin/users')
-      return response.data as { users: Array<{ username: string }> }
+      return response.data as { users: Array<{ username: string; traffic_multiplier?: number }> }
     },
     staleTime: 5 * 60 * 1000,
     enabled: Boolean(auth.accessToken),
@@ -572,6 +573,16 @@ function AdminDashboard() {
 
   const validUsernames = useMemo(() => {
     return new Set((usersData?.users ?? []).map(u => u.username))
+  }, [usersData])
+
+  // username -> 套餐流量倍率(oneway=1/twoway=2)。首页「按用户」流量列表显示计费流量=裸流量×倍率,
+  // 与用户自己看到的已用、与限额断流口径一致。速度仍用裸流量计算,不受倍率影响。
+  const multiplierByUser = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const u of usersData?.users ?? []) {
+      if (u.traffic_multiplier && u.traffic_multiplier > 1) m.set(u.username, u.traffic_multiplier)
+    }
+    return m
   }, [usersData])
 
   const nodeNameMap = useMemo(() => {
@@ -725,12 +736,21 @@ function AdminDashboard() {
   }, [trafficData, validUsernames, timeRange, snapshotData])
 
   // 基于"两次轮询的真实差值/真实时间间隔"算速度。详见 useDeltaSpeeds。
+  // 注意:speed 用裸流量(userTrafficList)算,不受套餐倍率影响。
   const userSpeedsMap = useDeltaSpeeds(
     userTrafficList,
     (u) => u.username,
     (u) => u.cycle_uplink,
     (u) => u.cycle_downlink,
   )
+
+  // 显示用列表:计费流量 = 裸流量 × 套餐倍率(twoway×2)。与用户自己看到的已用、与限额断流口径一致。
+  // speed 仍来自上面基于裸流量的 userSpeedsMap(按 username 取,不受影响)。
+  const userTrafficListDisplay = useMemo(() =>
+    userTrafficList.map((u) => {
+      const mult = multiplierByUser.get(u.username) ?? 1
+      return mult === 1 ? u : { ...u, cycle_uplink: u.cycle_uplink * mult, cycle_downlink: u.cycle_downlink * mult }
+    }), [userTrafficList, multiplierByUser])
 
   const drilldownData = useMemo<DrilldownItem[]>(() => {
     if (!drilldown || !trafficData?.servers) return []
@@ -765,7 +785,7 @@ function AdminDashboard() {
 
   const cards = useMemo(() => [
     { title: t('admin.stats.totalQuota'), description: t('admin.stats.totalQuotaDesc'), value: formatMetric(metrics.total_limit_gb, numberFormatter), icon: TrendingUp },
-    { title: t('admin.stats.usedTraffic'), description: t('admin.stats.usedTrafficDesc'), value: formatMetric(metrics.total_used_gb, numberFormatter), icon: Activity },
+    { title: t('admin.stats.usedTraffic'), description: t('admin.stats.usedTrafficDesc'), value: formatMetric(metrics.total_used_gb, numberFormatter), icon: Activity, info: (metrics.unlimited_used_gb ?? 0) > 0 ? t('admin.stats.unlimitedUsedHint', { value: formatMetric(metrics.unlimited_used_gb, numberFormatter) }) : undefined },
     { title: t('admin.stats.remainingTraffic'), description: t('admin.stats.remainingTrafficDesc'), value: formatMetric(metrics.total_remaining_gb, numberFormatter), icon: HardDrive },
     { title: t('admin.stats.realtimeSpeed'), description: t('admin.stats.realtimeSpeedDesc'), value: '', speedData: { upload: aggregatedSpeed.upload, download: aggregatedSpeed.download }, icon: Activity },
   ], [metrics, numberFormatter, aggregatedSpeed, t])
@@ -791,10 +811,13 @@ function AdminDashboard() {
                   <CardContent><Skeleton className="h-9 w-28" /></CardContent>
                 </Card>
               ))
-            : cards.map(({ title, description, value, icon: Icon, speedData }) => (
+            : cards.map(({ title, description, value, icon: Icon, speedData, info }) => (
                 <Card key={title}>
                   <CardHeader className="space-y-2">
-                    <CardTitle className="flex flex-row items-center justify-between text-base">{title}<Icon className="size-8 text-primary" /></CardTitle>
+                    <CardTitle className="flex flex-row items-center justify-between text-base">
+                      <span className="flex items-center gap-1.5">{title}{info && <Info className="size-4 text-muted-foreground cursor-help" title={info} />}</span>
+                      <Icon className="size-8 text-primary" />
+                    </CardTitle>
                     <CardDescription>{description}</CardDescription>
                   </CardHeader>
                   <CardContent>
@@ -864,7 +887,7 @@ function AdminDashboard() {
                 <div className="text-sm text-muted-foreground text-center py-6">{t('admin.userView.noData')}</div>
               ) : (
                 <div className="space-y-1">
-                  {userTrafficList.slice(0, PREVIEW_COUNT).map((user) => {
+                  {userTrafficListDisplay.slice(0, PREVIEW_COUNT).map((user) => {
                     const speed = userSpeedsMap.get(user.username)
                     const upSpeed = speed?.up ?? 0
                     const downSpeed = speed?.down ?? 0
@@ -937,7 +960,7 @@ function AdminDashboard() {
               <FullscreenNodeList items={nodeTrafficList} page={fullscreenPage} onPageChange={setFullscreenPage}
                 onDrilldown={(key, label) => { setDrilldown({ type: 'node', key, label }); setDrilldownPage(0) }} />
             ) : fullscreenView === 'users' ? (
-              <FullscreenUserList items={userTrafficList} speeds={userSpeedsMap} page={fullscreenPage} onPageChange={setFullscreenPage}
+              <FullscreenUserList items={userTrafficListDisplay} speeds={userSpeedsMap} page={fullscreenPage} onPageChange={setFullscreenPage}
                 onDrilldown={(key) => { setDrilldown({ type: 'user', key }); setDrilldownPage(0) }} />
             ) : null}
           </DialogContent>

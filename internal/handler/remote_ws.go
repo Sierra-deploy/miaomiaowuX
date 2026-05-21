@@ -539,6 +539,21 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 		go h.SendLicenseStatus(wsConn)
 	}
 
+	// 连接/重连时把当前「上报间隔」(dashboard_refresh_interval_ms) 下发给该 agent,
+	// 使其立即采用配置值。否则 agent 在 admin 没改动过该设置的情况下会一直用自己的默认值
+	// (老 agent 默认 60s)——BroadcastConfigUpdate 只在 admin 主动改动时触发,
+	// 覆盖不到"新连接/重连采用现有配置"这一场景。
+	if h.repo != nil {
+		if val, _ := h.repo.GetSystemSetting(context.Background(), "dashboard_refresh_interval_ms"); val != "" {
+			go func(c *RemoteWSConnection, v string) {
+				payload, _ := json.Marshal(map[string]string{"traffic_report_interval_ms": v})
+				c.mu.Lock()
+				defer c.mu.Unlock()
+				_ = h.sendEncryptedMessage(c, WSMessage{Type: WSMsgTypeConfigUpdate, Payload: payload})
+			}(wsConn, val)
+		}
+	}
+
 	// embedded 模式：认证成功后推送限速配置
 	if server.XrayMode == "embedded" && h.limiterPusher != nil {
 		go h.limiterPusher.PushToServer(context.Background(), server.ID)

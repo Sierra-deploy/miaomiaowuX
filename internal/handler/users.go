@@ -29,6 +29,7 @@ type userEntry struct {
 	TrafficLimitGB      float64  `json:"traffic_limit_gb,omitempty"`
 	TrafficUsed         int64    `json:"traffic_used,omitempty"`
 	TrafficLimit        int64    `json:"traffic_limit,omitempty"`
+	TrafficMultiplier   int64    `json:"traffic_multiplier,omitempty"` // 套餐流量倍率(oneway=1/twoway=2),供首页按用户流量列表换算计费流量
 	IsOverLimit         bool     `json:"is_over_limit"`
 	IsReset             bool     `json:"is_reset"`
 	ResetDay            int      `json:"reset_day"`
@@ -119,6 +120,7 @@ func NewUserListHandler(repo *storage.TrafficRepository) http.Handler {
 				}
 				used := trafficMap[user.Username]
 				if pkg, ok := pkgMap[pid]; ok {
+					entry.TrafficMultiplier = pkg.TrafficMultiplier()
 					used *= pkg.TrafficMultiplier()
 				}
 				entry.TrafficUsed = used

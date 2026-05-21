@@ -41,6 +41,7 @@
       "totalQuotaDesc": "Total quota across all nodes",
       "usedTraffic": "Used Traffic",
       "usedTrafficDesc": "Accumulated usage across all nodes",
+      "unlimitedUsedHint": "Unlimited-traffic servers used {{value}} (not counted above)",
       "remainingTraffic": "Remaining",
       "remainingTrafficDesc": "Available balance",
       "realtimeSpeed": "Realtime Speed",

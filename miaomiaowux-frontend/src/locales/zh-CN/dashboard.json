@@ -41,6 +41,7 @@
       "totalQuotaDesc": "所有节点的总配额",
       "usedTraffic": "已用流量",
       "usedTrafficDesc": "所有节点累计消耗",
+      "unlimitedUsedHint": "不限流量的服务器已用 {{value}}（不计入上方统计）",
       "remainingTraffic": "剩余流量",
       "remainingTrafficDesc": "仍可分配的余量",
       "realtimeSpeed": "实时网速",

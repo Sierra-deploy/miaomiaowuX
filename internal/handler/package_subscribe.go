@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -110,7 +111,7 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	if clientType == "" || clientType == "clash" || clientType == "clashmeta" {
 		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
 		w.Header().Set("Content-Disposition", "attachment; filename=\""+pkg.Name+".yaml\"")
-		h.writeTrafficHeader(w, user, pkg)
+		h.writeTrafficHeader(r.Context(), w, user, pkg)
 		w.Write([]byte(result))
 		return
 	}
@@ -122,7 +123,7 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	h.writeTrafficHeader(w, user, pkg)
+	h.writeTrafficHeader(r.Context(), w, user, pkg)
 	w.Write(converted)
 }
 
@@ -205,10 +206,21 @@ func (h *PackageSubscribeHandler) serveAllNodes(w http.ResponseWriter, r *http.R
 	w.Write(converted)
 }
 
-func (h *PackageSubscribeHandler) writeTrafficHeader(w http.ResponseWriter, user storage.User, pkg *storage.Package) {
-	if pkg.TrafficLimitBytes > 0 {
-		w.Header().Set("subscription-userinfo", fmt.Sprintf("upload=0; download=0; total=%d", pkg.TrafficLimitBytes))
+func (h *PackageSubscribeHandler) writeTrafficHeader(ctx context.Context, w http.ResponseWriter, user storage.User, pkg *storage.Package) {
+	if pkg.TrafficLimitBytes <= 0 {
+		return
 	}
+	// 已用流量 = 裸流量(SUM(uplink+downlink)) × 套餐倍率(oneway×1 / twoway×2),
+	// 与限额判定口径一致(traffic_limit_enforcer.go:已用×TrafficMultiplier 比限额),
+	// 这样客户端显示的已用/剩余与实际被断流的时机吻合。
+	// 之前这里硬编码 download=0,导致客户端永远显示已用 0。
+	raw, _ := h.repo.GetUserTotalTraffic(ctx, user.Username)
+	used := raw * pkg.TrafficMultiplier()
+	info := fmt.Sprintf("upload=0; download=%d; total=%d", used, pkg.TrafficLimitBytes)
+	if user.PackageEndDate != nil {
+		info += fmt.Sprintf("; expire=%d", user.PackageEndDate.Unix())
+	}
+	w.Header().Set("subscription-userinfo", info)
 }
 
 func (h *PackageSubscribeHandler) convertFormat(r *http.Request, yamlData []byte, clientType string) ([]byte, error) {
