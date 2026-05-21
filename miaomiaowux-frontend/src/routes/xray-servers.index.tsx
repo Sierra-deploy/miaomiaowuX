@@ -130,7 +130,7 @@ function XrayServersPage() {
     name: '',
     traffic_limit_gb: '',
     traffic_used_gb: '',
-    traffic_reset_day: '',
+    traffic_reset_day: '1',
   })
   const [isXrayRawConfigDialogOpen, setIsXrayRawConfigDialogOpen] = useState(false)
   const [xrayRawConfig, setXrayRawConfig] = useState('')
@@ -638,7 +638,7 @@ function XrayServersPage() {
   const resetAddDialog = () => {
     setRemoteServerName(''); setGeneratedToken(''); setInstallCommand(''); setIsGeneratingToken(false)
     setPullAddress(''); setPullPort('23889'); setPullToken(''); setCreateStealSelf(false); setCreateFrontService('xray'); setCreateStealMode('tunnel'); setCreateUse443(false); setCreateDomain(''); setDomainAutoFilled(false); setCreateSiteType('static'); setCreateSiteValue(''); setCreateXrayMode('external')
-    setFormData({ ...formData, traffic_limit_gb: '', traffic_used_gb: '', traffic_reset_day: '' })
+    setFormData({ ...formData, traffic_limit_gb: '', traffic_used_gb: '', traffic_reset_day: '1' })
   }
 
   const handleDeleteRemoteServer = (id: number) => { setDeletingRemoteServerId(id); setIsDeleteRemoteServerDialogOpen(true) }
@@ -979,7 +979,7 @@ function XrayServersPage() {
                       {server.traffic_limit > 0 && (
                         <div className="space-y-2">
                           <div className="h-1.5 bg-muted rounded-full overflow-hidden"><div className={cn("h-full rounded-full transition-all", getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 90 ? "bg-red-500" : getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 70 ? "bg-yellow-500" : "bg-primary")} style={{ width: `${Math.min(getTrafficPercent(server.traffic_used || 0, server.traffic_limit), 100)}%` }} /></div>
-                          {server.traffic_reset_day && server.traffic_reset_day > 0 && (<div className="flex items-center justify-between text-xs text-muted-foreground"><span>{t('servers.resetLabel')}</span><span>{t('servers.monthlyReset', { day: server.traffic_reset_day })}</span></div>)}
+                          {!!server.traffic_reset_day && server.traffic_reset_day > 0 && (<div className="flex items-center justify-between text-xs text-muted-foreground"><span>{t('servers.resetLabel')}</span><span>{t('servers.monthlyReset', { day: server.traffic_reset_day })}</span></div>)}
                         </div>
                       )}
                     </div>
@@ -1095,7 +1095,7 @@ function XrayServersPage() {
                         <div className="min-w-[100px]">
                           <div className="text-xs text-muted-foreground mb-1">{formatTraffic(server.traffic_used || 0)} / {formatTraffic(server.traffic_limit)}</div>
                           <div className="h-1.5 bg-muted rounded-full overflow-hidden"><div className={cn("h-full rounded-full", getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 90 ? "bg-red-500" : getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 70 ? "bg-yellow-500" : "bg-green-500")} style={{ width: `${Math.min(getTrafficPercent(server.traffic_used || 0, server.traffic_limit), 100)}%` }} /></div>
-                          {server.traffic_reset_day && server.traffic_reset_day > 0 && (<div className="text-xs text-muted-foreground mt-0.5">{t('servers.monthlyResetFull', { day: server.traffic_reset_day })}</div>)}
+                          {!!server.traffic_reset_day && server.traffic_reset_day > 0 && (<div className="text-xs text-muted-foreground mt-0.5">{t('servers.monthlyResetFull', { day: server.traffic_reset_day })}</div>)}
                         </div>
                       ) : (<span className="text-xs text-muted-foreground">{t('servers.noLimit')}</span>)}
                     </TableCell>
