@@ -457,6 +457,7 @@
     "matchCondition": "Match Condition",
     "matchConditionPlaceholder": "Multiple conditions separated by comma",
     "outbound": "Outbound",
+    "balancer": "Balancer",
     "markTag": "Mark (optional)",
     "markTagPlaceholder": "Rule mark",
     "addBtn": "Add",

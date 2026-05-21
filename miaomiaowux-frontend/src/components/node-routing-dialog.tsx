@@ -14,12 +14,14 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Twemoji } from '@/components/twemoji'
+import { Scale } from 'lucide-react'
+import { BalancerManagerDialog } from '@/components/xray/balancer-manager-dialog'
 import { api } from '@/lib/api'
 
 interface RoutingRule {
   type?: string; domain?: string[]; ip?: string[]; protocol?: string[]
   port?: string | number; network?: string; source?: string[]; user?: string[]
-  inboundTag?: string[]; outboundTag?: string; marktag?: string
+  inboundTag?: string[]; outboundTag?: string; balancerTag?: string; marktag?: string
 }
 
 interface ParsedNode {
@@ -84,7 +86,7 @@ function RuleRow({ rule, index, allRulesCount, onView, onDelete, outboundDisplay
   const { t } = useTranslation('nodes')
   const { ruleType, matchCondition } = getRuleDisplayInfo(rule, t)
   const friendlyName = getRuleFriendlyName(rule, t)
-  const displayTag = outboundDisplayName || rule.outboundTag || t('nodeRoutingDialog.notSet')
+  const displayTag = rule.balancerTag ? `⚖ ${rule.balancerTag}` : (outboundDisplayName || rule.outboundTag || t('nodeRoutingDialog.notSet'))
   return (
     <div className='flex items-center gap-2 py-2 px-3 rounded-md border bg-card text-sm'>
       <Badge variant='outline' className='shrink-0 text-xs'>{ruleType}</Badge>
@@ -93,7 +95,7 @@ function RuleRow({ rule, index, allRulesCount, onView, onDelete, outboundDisplay
         {matchCondition || '-'}
       </span>
       <span className='text-muted-foreground mx-1'>→</span>
-      <Badge variant={outboundBadgeVariant(rule.outboundTag || '')} className='shrink-0 text-xs' title={rule.outboundTag}>
+      <Badge variant={rule.balancerTag ? 'secondary' : outboundBadgeVariant(rule.outboundTag || '')} className='shrink-0 text-xs' title={rule.balancerTag || rule.outboundTag}>
         {displayTag}
       </Badge>
       <Button variant='ghost' size='icon' className='size-6 shrink-0' onClick={onView}><Eye className='size-3' /></Button>
@@ -120,6 +122,7 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
   const [customOutbound, setCustomOutbound] = useState('')
   const [customMarktag, setCustomMarktag] = useState('')
   const [customScope, setCustomScope] = useState<'dedicated' | 'global'>('dedicated')
+  const [balancerDialogOpen, setBalancerDialogOpen] = useState(false)
 
   const { data: routingData, isLoading: routingLoading } = useQuery({
     queryKey: ['remote-routing', serverId],
@@ -145,6 +148,8 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
 
   const outbounds = useMemo(() => outboundsData?.outbounds || [], [outboundsData])
   const defaultOutbound = outbounds[0]
+  // 负载均衡器(在「服务管理 → 负载均衡」创建)。这里只引用,规则目标可选 balancerTag。
+  const balancers = useMemo(() => ((routingData?.routing as any)?.balancers || []).map((b: any) => ({ tag: b.tag })), [routingData])
 
   const outboundTagToName = useMemo(() => {
     const map: Record<string, string> = {}
@@ -249,9 +254,16 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
     }
   }
 
+  // selectedOutbound 形如 "balancer:<tag>" 表示走负载均衡器(balancerTag),否则普通出站(outboundTag),二者互斥。
+  const applyTarget = (rule: any, target: string) => {
+    if (target.startsWith('balancer:')) { rule.balancerTag = target.slice('balancer:'.length); delete rule.outboundTag }
+    else { rule.outboundTag = target; delete rule.balancerTag }
+    return rule
+  }
+
   const handleConfirmOutbound = () => {
     if (!pendingRule || !selectedOutbound) return
-    addRuleMutation.mutate({ ...pendingRule.rule, outboundTag: selectedOutbound })
+    addRuleMutation.mutate(applyTarget({ ...pendingRule.rule }, selectedOutbound))
     setOutboundSelectOpen(false)
     setPendingRule(null)
   }
@@ -259,7 +271,7 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
   const handleAddCustom = () => {
     if (!customValue.trim()) { toast.error(t('toast.enterMatchCondition')); return }
     if (!customOutbound) { toast.error(t('toast.selectOutbound')); return }
-    const rule: any = { type: 'field', outboundTag: customOutbound }
+    const rule: any = applyTarget({ type: 'field' }, customOutbound)
     const values = customValue.split(',').map(v => v.trim()).filter(Boolean)
     if (customType === 'domain') rule.domain = values
     else if (customType === 'ip') rule.ip = values
@@ -393,6 +405,9 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
               <Button variant='outline' size='sm' onClick={() => { setCustomScope('dedicated'); setCustomOpen(true) }}>
                 <Plus className='size-4 mr-1' />{t('nodeRoutingDialog.customRule')}
               </Button>
+              <Button variant='outline' size='sm' onClick={() => setBalancerDialogOpen(true)}>
+                <Scale className='size-4 mr-1' />{t('nodeRoutingDialog.balancer')}{balancers.length > 0 ? ` (${balancers.length})` : ''}
+              </Button>
               <div className='flex-1' />
               <Button variant='outline' size='sm' onClick={() => onOpenChange(false)}>{t('actions.close', { ns: 'common' })}</Button>
             </div>
@@ -436,6 +451,7 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
             <SelectTrigger><SelectValue placeholder={t('nodeRoutingDialog.selectOutboundPlaceholder')} /></SelectTrigger>
             <SelectContent>
               {outbounds.map((o: any) => <SelectItem key={o.tag} value={o.tag}>{o.tag} ({o.protocol})</SelectItem>)}
+              {balancers.map((b: any) => <SelectItem key={`bal-${b.tag}`} value={`balancer:${b.tag}`}>⚖ {b.tag} ({t('nodeRoutingDialog.balancer')})</SelectItem>)}
             </SelectContent>
           </Select>
           <DialogFooter>
@@ -481,6 +497,7 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
                 <SelectTrigger><SelectValue placeholder={t('nodeRoutingDialog.selectOutboundPlaceholder')} /></SelectTrigger>
                 <SelectContent>
                   {outbounds.map((o: any) => <SelectItem key={o.tag} value={o.tag}>{o.tag} ({o.protocol})</SelectItem>)}
+                  {balancers.map((b: any) => <SelectItem key={`bal-${b.tag}`} value={`balancer:${b.tag}`}>⚖ {b.tag} ({t('nodeRoutingDialog.balancer')})</SelectItem>)}
                 </SelectContent>
               </Select>
             </div>
@@ -495,6 +512,16 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 负载均衡器管理(共享组件) */}
+      <BalancerManagerDialog
+        open={balancerDialogOpen}
+        onOpenChange={setBalancerDialogOpen}
+        serverId={serverId}
+        routing={routingData?.routing}
+        outbounds={outbounds}
+        onSaved={async () => { queryClient.invalidateQueries({ queryKey: ['remote-routing', serverId] }); await restartXray() }}
+      />
     </>
   )
 }

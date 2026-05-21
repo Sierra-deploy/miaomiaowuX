@@ -457,6 +457,7 @@
     "matchCondition": "匹配条件",
     "matchConditionPlaceholder": "多个条件用逗号分隔",
     "outbound": "出站",
+    "balancer": "负载均衡",
     "markTag": "标记 (可选)",
     "markTagPlaceholder": "规则标记",
     "addBtn": "添加",

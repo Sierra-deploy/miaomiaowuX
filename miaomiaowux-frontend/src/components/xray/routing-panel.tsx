@@ -3,7 +3,7 @@ import { useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { RefreshCw, Trash2, Plus, ChevronDown, GripVertical } from 'lucide-react'
+import { RefreshCw, Trash2, Plus, ChevronDown, GripVertical, Scale } from 'lucide-react'
 import {
   DndContext, PointerSensor, useSensor, useSensors, closestCenter, type DragEndEvent,
 } from '@dnd-kit/core'
@@ -32,13 +32,17 @@ import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { api } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
+import { type Balancer, normalizeBalancers } from '@/lib/xray-balancer'
+import { BalancerManagerDialog } from './balancer-manager-dialog'
 
 interface RoutingRule {
   type?: string; domain?: string[]; ip?: string[]; protocol?: string[]
   port?: string | number; sourcePort?: string | number; network?: string
   source?: string[]; user?: string[]; inboundTag?: string[]
-  outboundTag?: string; marktag?: string; attrs?: string
+  outboundTag?: string; balancerTag?: string; marktag?: string; attrs?: string
 }
+
+// Balancer 类型与 buildObservatory/normalizeBalancers/toXrayBalancers 见 @/lib/xray-balancer(与节点路由共用)。
 
 interface RoutingPanelProps {
   serverId: number
@@ -129,6 +133,9 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
   const [customOutbound, setCustomOutbound] = useState('')
   const [customMarktag, setCustomMarktag] = useState('')
 
+  // 负载均衡器管理(弹窗为共享组件 BalancerManagerDialog)
+  const [isBalancerDialogOpen, setIsBalancerDialogOpen] = useState(false)
+
   const routingQueryKey = isRemote ? ['remote-routing', serverId] : ['xray-routing', serverId]
   const outboundsQueryKey = isRemote ? ['remote-outbounds', serverId] : ['xray-outbounds']
 
@@ -177,6 +184,10 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
     if (!outboundsData?.outbounds || !localServerId) return []
     return outboundsData.outbounds.filter((item: any) => item.server_id === localServerId).map((item: any) => item.outbound)
   }, [outboundsData, isRemote, localServerId])
+
+  const balancers: Balancer[] = useMemo(() => {
+    return normalizeBalancers(isRemote ? routingData?.routing?.balancers : routingData?.balancers)
+  }, [routingData, isRemote])
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
   const sortableIds = useMemo(() => rules.map((_, i) => `rule-${i}`), [rules])
@@ -268,7 +279,10 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
 
   const handleAddCustomRule = () => {
     if (!customOutbound) { toast.error(t('routing.selectOutboundRequired')); return }
-    const rule: any = { type: 'field', outboundTag: customOutbound }
+    // customOutbound 形如 "balancer:<tag>" 表示走负载均衡器(balancerTag),否则是普通出站(outboundTag)。二者互斥。
+    const rule: any = { type: 'field' }
+    if (customOutbound.startsWith('balancer:')) rule.balancerTag = customOutbound.slice('balancer:'.length)
+    else rule.outboundTag = customOutbound
     const split = (v: string) => v.split(',').map(s => s.trim()).filter(Boolean)
     if (customDomain.trim()) rule.domain = split(customDomain)
     if (customIp.trim()) rule.ip = split(customIp)
@@ -319,6 +333,11 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
             <Button variant='outline' size='sm' onClick={() => { resetCustomForm(); setIsCustomRuleDialogOpen(true) }}>
               <Plus className='size-4 mr-1' />{t('routing.customRule')}
             </Button>
+            {isRemote && (
+              <Button variant='outline' size='sm' onClick={() => setIsBalancerDialogOpen(true)}>
+                <Scale className='size-4 mr-1' />{t('routing.balancer')}{balancers.length > 0 ? ` (${balancers.length})` : ''}
+              </Button>
+            )}
           </div>
         </div>
 
@@ -360,7 +379,9 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
                     {selectedRule.user?.length && <div><span className='text-muted-foreground'>user: </span>{selectedRule.user.join(', ')}</div>}
                     {selectedRule.inboundTag?.length && <div><span className='text-muted-foreground'>inboundTag: </span>{selectedRule.inboundTag.join(', ')}</div>}
                     {selectedRule.attrs && <div><span className='text-muted-foreground'>attrs: </span>{selectedRule.attrs}</div>}
-                    <div><span className='text-muted-foreground'>outboundTag: </span><Badge variant={outboundBadgeVariant(selectedRule.outboundTag || '')} className='text-xs'>{selectedRule.outboundTag || t('routing.notSet')}</Badge></div>
+                    {selectedRule.balancerTag
+                      ? <div><span className='text-muted-foreground'>balancerTag: </span><Badge variant='secondary' className='text-xs'>⚖ {selectedRule.balancerTag}</Badge></div>
+                      : <div><span className='text-muted-foreground'>outboundTag: </span><Badge variant={outboundBadgeVariant(selectedRule.outboundTag || '')} className='text-xs'>{selectedRule.outboundTag || t('routing.notSet')}</Badge></div>}
                     {selectedRule.marktag && <div><span className='text-muted-foreground'>marktag: </span>{selectedRule.marktag}</div>}
                   </div>
                   <div>
@@ -460,6 +481,7 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
                   <SelectTrigger className='text-xs'><SelectValue placeholder={t('routing.selectOutboundPlaceholder')} /></SelectTrigger>
                   <SelectContent>
                     {outbounds.map((o: any) => <SelectItem key={o.tag} value={o.tag}>{o.tag} ({o.protocol})</SelectItem>)}
+                    {balancers.map((b) => <SelectItem key={`bal-${b.tag}`} value={`balancer:${b.tag}`}>⚖ {b.tag} ({t('routing.balancer')})</SelectItem>)}
                   </SelectContent>
                 </Select>
               </div>
@@ -475,6 +497,16 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Balancers (负载均衡器) - 共享组件 */}
+      <BalancerManagerDialog
+        open={isBalancerDialogOpen}
+        onOpenChange={setIsBalancerDialogOpen}
+        serverId={serverId}
+        routing={routingData?.routing}
+        outbounds={outbounds}
+        onSaved={async () => { queryClient.invalidateQueries({ queryKey: routingQueryKey }); await restartXray() }}
+      />
 
       {/* Delete Confirm */}
       <AlertDialog open={deletingIndex !== null} onOpenChange={o => !o && setDeletingIndex(null)}>
