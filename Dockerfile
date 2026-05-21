@@ -1,5 +1,7 @@
 # Build stage for frontend
-FROM node:20-slim AS frontend-builder
+# 用 BUILDPLATFORM(构建机原生架构,通常 amd64)构建,避免 arm64 在 QEMU 模拟下跑 npm ci 缓慢/网络超时。
+# 前端产物(internal/web/dist)是架构无关的静态文件,只需构建一次,供各架构后端 COPY。
+FROM --platform=$BUILDPLATFORM node:20-slim AS frontend-builder
 
 WORKDIR /app
 
@@ -8,7 +10,8 @@ COPY miaomiaowux-frontend/package*.json ./miaomiaowux-frontend/
 
 # Install dependencies
 WORKDIR /app/miaomiaowux-frontend
-RUN npm ci
+# 加长网络超时,容忍 CI 偶发的 registry 抖动
+RUN npm ci --fetch-timeout=600000
 
 # Copy frontend source
 COPY miaomiaowux-frontend/ ./

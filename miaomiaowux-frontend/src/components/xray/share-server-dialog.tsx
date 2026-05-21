@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Copy, Trash2, Plus } from 'lucide-react'
 import { api } from '@/lib/api'
+import { ProFeatureGate } from '@/components/pro-feature-gate'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -97,9 +98,11 @@ export function ShareServerDialog({ server, onClose }: ShareServerDialogProps) {
             </div>
           )}
 
-          <Button onClick={() => createMutation.mutate()} disabled={createMutation.isPending} className="w-full">
-            <Plus className="h-4 w-4 mr-1" />{createMutation.isPending ? '生成中…' : '生成分享令牌'}
-          </Button>
+          <ProFeatureGate feature="server_share">
+            <Button onClick={() => createMutation.mutate()} disabled={createMutation.isPending} className="w-full">
+              <Plus className="h-4 w-4 mr-1" />{createMutation.isPending ? '生成中…' : '生成分享令牌'}
+            </Button>
+          </ProFeatureGate>
 
           <div className="space-y-2">
             <Label className="text-xs">已分享（{sharesData?.shares?.length ?? 0}）</Label>
