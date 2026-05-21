@@ -217,9 +217,11 @@ func (m *Manager) persistStatus(ctx context.Context) {
 }
 
 func (m *Manager) activate(ctx context.Context) {
+	nonce := genNonce()
 	body, _ := json.Marshal(map[string]string{
 		"key":        m.key,
 		"machine_id": m.machineID,
+		"nonce":      nonce,
 	})
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.serverURL+"/api/v1/activate", bytes.NewReader(body))
@@ -235,7 +237,7 @@ func (m *Manager) activate(ctx context.Context) {
 	}
 	defer resp.Body.Close()
 
-	m.parseResponse(ctx, resp)
+	m.parseResponse(ctx, resp, nonce)
 }
 
 func (m *Manager) heartbeat(ctx context.Context) {
@@ -245,9 +247,11 @@ func (m *Manager) heartbeat(ctx context.Context) {
 
 	// 带上本机当前 usage,license server 用来在面板上展示 + 兜底比对配额。
 	// 采集失败(repo 错)不影响心跳本身,只是这次不传 used_* 字段。
+	nonce := genNonce()
 	payload := map[string]any{
 		"key":        m.key,
 		"machine_id": m.machineID,
+		"nonce":      nonce,
 	}
 	m.mu.RLock()
 	usage := m.usage
@@ -277,20 +281,48 @@ func (m *Manager) heartbeat(ctx context.Context) {
 	}
 	defer resp.Body.Close()
 
-	m.parseResponse(ctx, resp)
+	m.parseResponse(ctx, resp, nonce)
 }
 
-func (m *Manager) parseResponse(ctx context.Context, resp *http.Response) {
+func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce string) {
 	var result struct {
 		Valid      bool            `json:"valid"`
 		Error      string          `json:"error,omitempty"`
 		MaxServers int             `json:"max_servers"`
 		ExpiresAt  string          `json:"expires_at,omitempty"`
 		Plan       json.RawMessage `json:"plan,omitempty"`
+		Sig        string          `json:"sig,omitempty"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		log.Printf("[license] parse response error: %v", err)
 		return
+	}
+
+	// 解析 plan + features(同时用于验签和写入 status)。
+	var plan PlanInfo
+	var hasPlan bool
+	if result.Valid && result.Plan != nil {
+		if err := json.Unmarshal(result.Plan, &plan); err == nil {
+			if plan.Features == nil {
+				var raw struct {
+					Features json.RawMessage `json:"features"`
+				}
+				_ = json.Unmarshal(result.Plan, &raw)
+				if raw.Features != nil {
+					_ = json.Unmarshal(raw.Features, &plan.Features)
+				}
+			}
+			hasPlan = true
+		}
+	}
+
+	// valid=true 的响应必须通过 ed25519 签名校验,否则视为"未拿到有效响应":
+	// 不更新 status(保留上一次的合法状态 + 走 grace),从而假许可证服务/MITM 无法把 TRIAL 提权成 PRO。
+	if result.Valid {
+		if !verifyLicenseSig(nonce, m.machineID, true, result.MaxServers, result.ExpiresAt, plan.Features, result.Sig) {
+			log.Printf("[license] response signature verification FAILED — ignoring response (possible forged license server / MITM)")
+			return
+		}
 	}
 
 	m.mu.Lock()
@@ -300,24 +332,12 @@ func (m *Manager) parseResponse(ctx context.Context, resp *http.Response) {
 	m.status.LastCheck = time.Now()
 
 	if result.Valid {
-		// 服务器明确"有效" → 清除 HardRevoked(用于解绑后续绑生效场景)。
+		// 服务器明确"有效"且验签通过 → 清除 HardRevoked(用于解绑后续绑生效场景)。
 		m.status.HardRevoked = false
 		m.status.MaxServers = result.MaxServers
 		m.status.ExpiresAt = result.ExpiresAt
-		if result.Plan != nil {
-			var plan PlanInfo
-			if err := json.Unmarshal(result.Plan, &plan); err == nil {
-				if plan.Features == nil {
-					var raw struct {
-						Features json.RawMessage `json:"features"`
-					}
-					_ = json.Unmarshal(result.Plan, &raw)
-					if raw.Features != nil {
-						_ = json.Unmarshal(raw.Features, &plan.Features)
-					}
-				}
-				m.status.Plan = &plan
-			}
+		if hasPlan {
+			m.status.Plan = &plan
 		}
 	} else {
 		// 收到了 HTTP 响应但 valid=false → 服务器明确否决(unbind / revoked / wrong machine_id 等),

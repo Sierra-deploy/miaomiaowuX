@@ -44,3 +44,4 @@ server
 CLAUDE.md
 e2e
 MERGE_PLAN.md
+*test.go
