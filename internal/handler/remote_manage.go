@@ -723,6 +723,23 @@ func (h *RemoteManageHandler) ForwardToAgent(ctx context.Context, serverID int64
 	return h.forwardToRemoteServer(ctx, serverID, method, path, body)
 }
 
+// isSessionInvalidErr 判断错误是否意味着 securechan 会话失效,需要重新协商密钥后重试。
+// 覆盖三种信号:
+//   - agent/拥有方"无会话"返回 412 "no session, re-negotiate"
+//   - agent 解密我方请求失败返回 400 "decrypt failed"(我方持有的会话已过期/被新 KX 覆盖,与对端错位)
+//   - 我方解密对端响应失败 "decrypt response/federation response"(同上,会话错位)
+// 密钥轮换窗口(agent 会话 1h TTL 过期 / 同 token 并发请求触发重新 KX 覆盖旧会话)会出现后两种,
+// 仅靠重协商一次即可自愈(doPullKeyExchange 是 KX+请求+明文响应一次往返,不涉及解密,必定成功)。
+func isSessionInvalidErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "412") ||
+		strings.Contains(s, "re-negotiate") ||
+		strings.Contains(s, "decrypt")
+}
+
 func (h *RemoteManageHandler) forwardToRemoteServer(ctx context.Context, serverID int64, method, path string, body []byte) ([]byte, error) {
 	// 联邦(分享)服务器:不直连 agent,改走拥有方主控的 /api/federation/manage
 	if fed, ferr := h.repo.GetFederatedServer(ctx, serverID); ferr == nil {
@@ -771,9 +788,9 @@ func (h *RemoteManageHandler) forwardToRemoteServer(ctx context.Context, serverI
 
 	session := sessionVal.(*securechan.Session)
 	respBody, err := h.doEncryptedPullRequest(ctx, method, childURL, server.Token, body, session)
-	if err != nil && (strings.Contains(err.Error(), "412") || strings.Contains(err.Error(), "re-negotiate")) {
+	if isSessionInvalidErr(err) {
 		h.pullSessions.Delete(serverID)
-		log.Printf("[Remote Manage] Pull session expired for server %d, re-negotiating", serverID)
+		log.Printf("[Remote Manage] Pull session invalid for server %d (%v), re-negotiating", serverID, err)
 		return h.doPullKeyExchange(ctx, serverID, method, childURL, server.Token, body)
 	}
 	return respBody, err
@@ -792,9 +809,9 @@ func (h *RemoteManageHandler) doFederationRequest(ctx context.Context, fed stora
 	if sessionVal, ok := h.fedSessions.Load(fed.ServerID); ok {
 		session := sessionVal.(*securechan.Session)
 		respBody, err := h.doEncryptedFederationRequest(ctx, fed, payload, session)
-		if err != nil && (strings.Contains(err.Error(), "412") || strings.Contains(err.Error(), "re-negotiate")) {
+		if isSessionInvalidErr(err) {
 			h.fedSessions.Delete(fed.ServerID)
-			log.Printf("[Federation] session expired for server %d, re-negotiating", fed.ServerID)
+			log.Printf("[Federation] session invalid for server %d (%v), re-negotiating", fed.ServerID, err)
 			return h.doFederationKeyExchange(ctx, fed, payload)
 		}
 		return respBody, err
