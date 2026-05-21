@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -292,9 +293,15 @@ func main() {
 
 	// 流量收集器（早期创建，以便可以与处理程序共享）
 	trafficCollector := traffic.NewCollector(repo)
-	if systemConfig.TrafficCollectInterval > 0 {
-		trafficCollector.SetInterval(time.Duration(systemConfig.TrafficCollectInterval) * time.Second)
+	// 主控本机自采间隔跟随「上报间隔」(dashboard_refresh_interval_ms,会同步给所有 agent),
+	// 与 agent 保持一致;未设置时用默认 5000ms。speed 仍用 speed_collect_interval。
+	reportMs := 5000
+	if val, _ := repo.GetSystemSetting(context.Background(), "dashboard_refresh_interval_ms"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n >= 1000 && n <= 60000 {
+			reportMs = n
+		}
 	}
+	trafficCollector.SetInterval(time.Duration(reportMs) * time.Millisecond)
 	if systemConfig.SpeedCollectInterval > 0 {
 		trafficCollector.SetSpeedInterval(time.Duration(systemConfig.SpeedCollectInterval) * time.Second)
 	}

@@ -498,8 +498,8 @@ function AdminDashboard() {
     []
   )
 
-  // dashboard 轮询间隔(ms)。由后端 traffic_collect_interval × 1000 派生,
-  // admin 在"系统设置 > 定时配置"改后 master 热重载 ticker(无需重启),
+  // dashboard 轮询间隔(ms)。即「上报间隔」dashboard_refresh_interval_ms,
+  // admin 在"系统设置 > 定时配置 > 上报间隔"改后:同步给所有 agent + master 热重载自采 ticker(无需重启),
   // 前端每 30s 拉一次 `/api/system-config/refetch-interval` 跟上。
   // 默认 5000ms;clamp 到 [1000, 60000] 防极端配置浪费带宽。
   const { data: refetchCfg } = useQuery({

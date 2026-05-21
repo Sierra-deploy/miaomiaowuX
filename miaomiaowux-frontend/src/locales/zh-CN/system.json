@@ -9,12 +9,12 @@
   },
   "intervals": {
     "title": "定时配置",
-    "description": "配置各项定时任务的执行间隔，修改后需重启服务生效",
+    "description": "配置各项定时任务的执行间隔；网速/上报间隔即时生效，其余修改后需重启服务",
     "speedCollect": "网速采集间隔（秒）",
-    "trafficCollect": "流量采集间隔（秒）",
+    "reportInterval": "上报间隔（秒）",
     "trafficCheck": "流量限额检查间隔（秒）",
     "heartbeat": "心跳间隔（秒）",
-    "updated": "定时配置已更新，重启服务后生效"
+    "updated": "定时配置已更新；上报间隔已同步至所有 agent 并即时生效"
   },
   "masterUrl": {
     "title": "主服务器地址",

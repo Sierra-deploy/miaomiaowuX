@@ -251,7 +251,7 @@ function SystemSettingsPage() {
 
   // 定时配置
   const [speedCollectInterval, setSpeedCollectInterval] = useState(3)
-  const [trafficCollectInterval, setTrafficCollectInterval] = useState(60)
+  const [reportInterval, setReportInterval] = useState(5)
   const [trafficCheckInterval, setTrafficCheckInterval] = useState(120)
   const [heartbeatInterval, setHeartbeatInterval] = useState(30)
 
@@ -262,7 +262,7 @@ function SystemSettingsPage() {
       return response.data as {
         success: boolean
         speed_collect_interval: number
-        traffic_collect_interval: number
+        report_interval: number
         traffic_check_interval: number
         heartbeat_interval: number
       }
@@ -274,7 +274,7 @@ function SystemSettingsPage() {
   useEffect(() => {
     if (intervalsData) {
       setSpeedCollectInterval(intervalsData.speed_collect_interval)
-      setTrafficCollectInterval(intervalsData.traffic_collect_interval)
+      setReportInterval(intervalsData.report_interval)
       setTrafficCheckInterval(intervalsData.traffic_check_interval)
       setHeartbeatInterval(intervalsData.heartbeat_interval)
     }
@@ -283,7 +283,7 @@ function SystemSettingsPage() {
   const updateIntervalsMutation = useMutation({
     mutationFn: async (data: {
       speed_collect_interval: number
-      traffic_collect_interval: number
+      report_interval: number
       traffic_check_interval: number
       heartbeat_interval: number
     }) => {
@@ -1022,13 +1022,14 @@ function SystemSettingsPage() {
                   />
                 </div>
                 <div className='space-y-1'>
-                  <Label htmlFor='traffic-interval' className='text-sm'>{t('intervals.trafficCollect')}</Label>
+                  <Label htmlFor='report-interval' className='text-sm'>{t('intervals.reportInterval')}</Label>
                   <Input
-                    id='traffic-interval'
+                    id='report-interval'
                     type='number'
-                    min={10}
-                    value={trafficCollectInterval}
-                    onChange={(e) => setTrafficCollectInterval(Number(e.target.value))}
+                    min={1}
+                    max={60}
+                    value={reportInterval}
+                    onChange={(e) => setReportInterval(Number(e.target.value))}
                   />
                 </div>
                 <div className='space-y-1'>
@@ -1056,7 +1057,7 @@ function SystemSettingsPage() {
                 size='sm'
                 onClick={() => updateIntervalsMutation.mutate({
                   speed_collect_interval: speedCollectInterval,
-                  traffic_collect_interval: trafficCollectInterval,
+                  report_interval: reportInterval,
                   traffic_check_interval: trafficCheckInterval,
                   heartbeat_interval: heartbeatInterval,
                 })}

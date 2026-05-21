@@ -237,6 +237,10 @@ func (h *SystemSettingsHandler) SetDashboardRefresh(w http.ResponseWriter, r *ht
 			"traffic_report_interval_ms": strconv.Itoa(req.RefetchIntervalMs),
 		})
 	}
+	// 主控本机自采也跟随同一个「上报间隔」,与 agent 保持一致(热重载,无需重启)。
+	if h.collector != nil {
+		h.collector.SetInterval(time.Duration(req.RefetchIntervalMs) * time.Millisecond)
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"success": true, "refetch_interval_ms": req.RefetchIntervalMs})
 }
@@ -249,6 +253,14 @@ func (h *SystemSettingsHandler) GetIntervals(w http.ResponseWriter, r *http.Requ
 		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "获取设置失败"})
 		return
 	}
+	// report_interval(秒):即 dashboard_refresh_interval_ms / 1000,这是会同步给所有 agent
+	// 的「上报间隔」,主控本机自采也跟随它(见 SetIntervals / SetDashboardRefresh)。
+	reportSec := dashboardRefreshDefault / 1000
+	if val, _ := h.repo.GetSystemSetting(r.Context(), dashboardRefreshKey); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n >= 1000 && n <= 60000 {
+			reportSec = n / 1000
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"success":                  true,
@@ -256,6 +268,7 @@ func (h *SystemSettingsHandler) GetIntervals(w http.ResponseWriter, r *http.Requ
 		"traffic_collect_interval": cfg.TrafficCollectInterval,
 		"traffic_check_interval":   cfg.TrafficCheckInterval,
 		"heartbeat_interval":       cfg.HeartbeatInterval,
+		"report_interval":          reportSec,
 	})
 }
 
@@ -265,6 +278,7 @@ func (h *SystemSettingsHandler) SetIntervals(w http.ResponseWriter, r *http.Requ
 		TrafficCollectInterval int `json:"traffic_collect_interval"`
 		TrafficCheckInterval   int `json:"traffic_check_interval"`
 		HeartbeatInterval      int `json:"heartbeat_interval"`
+		ReportInterval         int `json:"report_interval"` // 秒,会同步给所有 agent 的「上报间隔」;主控自采也跟随它
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -284,6 +298,13 @@ func (h *SystemSettingsHandler) SetIntervals(w http.ResponseWriter, r *http.Requ
 	if req.HeartbeatInterval < 5 {
 		req.HeartbeatInterval = 30
 	}
+	// 上报间隔(秒)→ dashboard_refresh_interval_ms,clamp 到 [1,60]s。
+	if req.ReportInterval < 1 {
+		req.ReportInterval = dashboardRefreshDefault / 1000
+	}
+	if req.ReportInterval > 60 {
+		req.ReportInterval = 60
+	}
 
 	cfg, err := h.repo.GetSystemConfig(r.Context())
 	if err != nil {
@@ -302,11 +323,25 @@ func (h *SystemSettingsHandler) SetIntervals(w http.ResponseWriter, r *http.Requ
 		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "保存失败"})
 		return
 	}
-	// 热重载 master 端 collector ticker,无需重启服务。
+	// 「上报间隔」落库为 dashboard_refresh_interval_ms,并同步给所有 agent。
+	reportMs := req.ReportInterval * 1000
+	if err := h.repo.SetSystemSetting(r.Context(), dashboardRefreshKey, strconv.Itoa(reportMs)); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "保存失败"})
+		return
+	}
+	if h.wsHandler != nil {
+		h.wsHandler.BroadcastConfigUpdate(map[string]string{
+			"traffic_report_interval_ms": strconv.Itoa(reportMs),
+		})
+	}
+	// 热重载 master 端 collector ticker,无需重启服务。speed 用 speed_collect_interval,
+	// traffic 采集跟随「上报间隔」(与 agent 一致)。
 	// (traffic_check_interval / heartbeat_interval 需要其他子系统也支持热重载,目前仅落库。)
 	hotReloaded := false
 	if h.collector != nil {
-		h.collector.SetInterval(time.Duration(req.TrafficCollectInterval) * time.Second)
+		h.collector.SetInterval(time.Duration(reportMs) * time.Millisecond)
 		h.collector.SetSpeedInterval(time.Duration(req.SpeedCollectInterval) * time.Second)
 		hotReloaded = true
 	}

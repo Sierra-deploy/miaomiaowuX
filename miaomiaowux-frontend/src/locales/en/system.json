@@ -9,12 +9,12 @@
   },
   "intervals": {
     "title": "Scheduled Tasks",
-    "description": "Configure task intervals. Restart required for changes to take effect.",
+    "description": "Configure task intervals. Speed/report intervals apply instantly; others need a restart.",
     "speedCollect": "Speed Collection Interval (s)",
-    "trafficCollect": "Traffic Collection Interval (s)",
+    "reportInterval": "Report Interval (s)",
     "trafficCheck": "Traffic Quota Check Interval (s)",
     "heartbeat": "Heartbeat Interval (s)",
-    "updated": "Task intervals updated, restart required"
+    "updated": "Task intervals updated; report interval synced to all agents instantly"
   },
   "masterUrl": {
     "title": "Master Server URL",
