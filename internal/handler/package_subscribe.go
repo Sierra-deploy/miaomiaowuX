@@ -340,5 +340,10 @@ func applyUserCredentials(proxy map[string]any, node storage.Node, credMap map[c
 		if password, ok := cred["password"].(string); ok && password != "" {
 			proxy["password"] = password
 		}
+	case "hysteria2", "hysteria", "hy2":
+		// HY2 客户端凭据 auth → clash hysteria2 节点的 password 字段。
+		if auth, ok := cred["auth"].(string); ok && auth != "" {
+			proxy["password"] = auth
+		}
 	}
 }

@@ -42,6 +42,10 @@ export function generateInboundConfig(formData: any, protocol: string, transport
 
   // Generate streamSettings
   if (protocol === 'Hysteria2') {
+    // fork 的 xray-core HY2 schema(infra/conf/hysteria.go + transport_internet.go HysteriaConfig):
+    // protocol=hysteria + settings{version:2, clients:[{auth,email}]} +
+    // streamSettings{network:hysteria, security:tls, tlsSettings, hysteriaSettings:{version:2}}。
+    // 注意:该 fork 的 HysteriaConfig 不支持 obfs/salamander(无此字段),故不下发。
     config.streamSettings = {
       network: 'hysteria',
       security: 'tls',
@@ -52,11 +56,10 @@ export function generateInboundConfig(formData: any, protocol: string, transport
         }],
         alpn: ['h3'],
       },
+      hysteriaSettings: { version: 2 },
     }
-    if (formData.obfs === 'salamander' && formData.obfsPassword) {
-      config.streamSettings.hysteriaSettings = {
-        password: formData.obfsPassword,
-      }
+    if (formData.serverName) {
+      config.streamSettings.tlsSettings.serverName = formData.serverName
     }
   } else if (protocol !== 'HTTP' && protocol !== 'Dokodemo' && transport !== 'None') {
     config.streamSettings = generateStreamSettings(formData, transport, security)

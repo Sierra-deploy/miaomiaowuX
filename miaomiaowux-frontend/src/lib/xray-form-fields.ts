@@ -456,27 +456,9 @@ export const protocolFields: Record<string, Field[]> = {
     },
   ],
   VMess: [],
-  Hysteria2: [
-    {
-      name: 'obfs',
-      label: 'fields.obfsType',
-      type: 'select',
-      options: [
-        { label: 'fields.obfsNone', value: '' },
-        { label: 'Salamander', value: 'salamander' },
-      ],
-      defaultValue: '',
-      renderAs: 'radio',
-      description: 'fields.obfsDesc',
-    },
-    {
-      name: 'obfsPassword',
-      label: 'fields.obfsPassword',
-      type: 'password',
-      placeholder: 'fields.obfsPassword',
-      description: 'fields.obfsPasswordDesc',
-    },
-  ],
+  // 该 fork 的 xray-core HY2 不支持 obfs/salamander(HysteriaConfig 无此字段),故无 server 级专属字段。
+  // HY2 入站 = clients(auth/email) + TLS 证书(由 security/证书字段处理)。
+  Hysteria2: [],
   HTTP: [
     {
       name: 'auth',

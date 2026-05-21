@@ -550,7 +550,8 @@ export function InboundWizard({
         userObj[field.name] = hasUserOrIdField
           ? (user.email || user.username)
           : user.username
-      } else if (field.name === 'password' || field.name === 'pass') {
+      } else if (field.name === 'password' || field.name === 'pass' || field.name === 'auth') {
+        // auth = Hysteria2 客户端密码,和 Trojan password 一样当场生成随机值。
         const isSS2022PskField = field.label?.includes('psk')
         if (isSS2022PskField) {
           const method = formData.method || '2022-blake3-aes-128-gcm'

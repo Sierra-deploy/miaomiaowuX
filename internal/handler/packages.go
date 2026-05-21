@@ -859,7 +859,7 @@ func addUserToInbound(ctx context.Context, rm *RemoteManageHandler, repo *storag
 	}
 
 	switch strings.ToLower(protocol) {
-	case "vless", "vmess", "trojan", "shadowsocks":
+	case "vless", "vmess", "trojan", "shadowsocks", "hysteria":
 		clients, _ := settings["clients"].([]interface{})
 		clients = append(clients, credential)
 		settings["clients"] = clients
@@ -933,7 +933,7 @@ func removeUserFromInbound(ctx context.Context, rm *RemoteManageHandler, cfg sto
 
 	protocol := strings.ToLower(cfg.Protocol)
 	switch protocol {
-	case "vless", "vmess", "trojan", "shadowsocks":
+	case "vless", "vmess", "trojan", "shadowsocks", "hysteria":
 		clients, _ := settings["clients"].([]interface{})
 		settings["clients"] = filterCredentials(clients, savedCred, protocol)
 	case "socks", "http":
@@ -992,6 +992,11 @@ func generateCredential(protocol string, user storage.User, method string) (map[
 		cred["password"] = uuid.New().String()
 		cred["email"] = email
 		cred["level"] = 0
+	case "hysteria":
+		// HY2 客户端凭据:auth(密码) + email(用于 per-user 流量统计,接入套餐限额)。
+		cred["auth"] = uuid.New().String()
+		cred["email"] = email
+		cred["level"] = 0
 	case "shadowsocks":
 		keyLen := shadowsocksKeyLength(method)
 		key := make([]byte, keyLen)
@@ -1033,6 +1038,8 @@ func matchCredential(a, b map[string]interface{}, protocol string) bool {
 		return fmt.Sprint(a["id"]) == fmt.Sprint(b["id"])
 	case "trojan":
 		return fmt.Sprint(a["password"]) == fmt.Sprint(b["password"])
+	case "hysteria":
+		return fmt.Sprint(a["auth"]) == fmt.Sprint(b["auth"])
 	case "shadowsocks":
 		return fmt.Sprint(a["password"]) == fmt.Sprint(b["password"])
 	case "socks", "http":
