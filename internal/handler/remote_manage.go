@@ -129,7 +129,20 @@ func remoteWriteJSON(w http.ResponseWriter, status int, data interface{}) {
 
 // RemoteWriteError 写入错误响应
 func remoteWriteError(w http.ResponseWriter, status int, message string) {
-	remoteWriteJSON(w, status, map[string]string{"error": message})
+	// Cloudflare 等 CDN 会把源站 5xx 响应替换成自己的错误页(Error 502 Bad Gateway),
+	// 导致真实错误信息(agent 转发失败 / xray·nginx 启动失败原因)丢失。
+	// CF 默认透传 4xx,所以把 5xx 统一降为 4xx(语义上是"无法完成该远程操作"),
+	// body 仍带真实 error/message,前端 onError 逻辑不变即可拿到真实原因。
+	httpStatus := status
+	if status >= 500 {
+		httpStatus = http.StatusBadRequest
+	}
+	remoteWriteJSON(w, httpStatus, map[string]any{
+		"success": false,
+		"error":   message,
+		"message": message,
+		"status":  status,
+	})
 }
 
 // 代理对远程服务器的服务状态请求
@@ -1212,6 +1225,57 @@ func validateInboundClientsSelfOnly(ctx context.Context, inboundReq map[string]i
 	return ""
 }
 
+// resolveInboundCert 处理「添加 tls 入站时选了主控托管证书」(前端通过带外字段 cert_id 指定):
+// 同步把证书下发到该 agent 的 xray 证书目录,再把 tlsSettings.certificates 改写成 agent 上的真实路径,
+// 并在 serverName 为空时补成证书域名。返回改写后的 body(未触发则返回 nil);失败返回错误,由调用方透传给前端。
+func (h *RemoteManageHandler) resolveInboundCert(ctx context.Context, serverID int64, inboundReq map[string]interface{}) ([]byte, error) {
+	inbound, _ := inboundReq["inbound"].(map[string]interface{})
+	if inbound == nil {
+		return nil, nil
+	}
+	// cert_id 是前端塞进 inbound 的带外字段(选了主控托管证书时);处理后剥离,不传给 agent。
+	certIDf, _ := inbound["cert_id"].(float64)
+	certID := int64(certIDf)
+	if certID <= 0 {
+		return nil, nil // 未选托管证书:用户手填路径或非 tls,不处理
+	}
+	ss, _ := inbound["streamSettings"].(map[string]interface{})
+	if ss == nil {
+		return nil, fmt.Errorf("入站缺少 streamSettings,无法应用证书")
+	}
+	if sec, _ := ss["security"].(string); sec != "tls" {
+		return nil, nil // 非 tls 不处理
+	}
+	if h.certHandler == nil {
+		return nil, fmt.Errorf("证书功能未初始化")
+	}
+	cert, err := h.repo.GetCertificate(ctx, certID)
+	if err != nil || cert == nil {
+		return nil, fmt.Errorf("所选证书不存在(id=%d)", certID)
+	}
+	server, err := h.repo.GetRemoteServer(ctx, serverID)
+	if err != nil {
+		return nil, err
+	}
+	certPath, keyPath, derr := h.certHandler.DeployCertToServerSync(ctx, server, cert)
+	if derr != nil {
+		return nil, fmt.Errorf("下发证书到服务器失败: %v", derr)
+	}
+	tls, _ := ss["tlsSettings"].(map[string]interface{})
+	if tls == nil {
+		tls = map[string]interface{}{}
+		ss["tlsSettings"] = tls
+	}
+	tls["certificates"] = []interface{}{
+		map[string]interface{}{"certificateFile": certPath, "keyFile": keyPath},
+	}
+	if sn, _ := tls["serverName"].(string); sn == "" {
+		tls["serverName"] = cert.Domain
+	}
+	delete(inbound, "cert_id") // 剥离带外字段,xray 不认识它
+	return json.Marshal(inboundReq)
+}
+
 func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Request) {
 	serverID := r.URL.Query().Get("server_id")
 	if serverID == "" {
@@ -1241,14 +1305,18 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 	}
 
 	// 添加节点(add inbound)时校验:inbound.settings.clients/accounts 只能包含"当前登录账号自己"。
-	// 用户卡片在前端已锁死,但后端必须独立校验,防止绕过前端直接构造请求把别人的 uuid/email 塞进节点。
+	// 用户卡片在前端已锁死,但后端必须独立校验,防止普通用户绕过前端直接构造请求把别人的 uuid/email 塞进节点。
+	// 管理员是节点管理者,可添加任意 client(任意 uuid/email),不受此限制。
 	// 注:套餐分配用户走的是 addUserToInbound → forwardToRemoteServer,不经过本 HTTP handler,不受影响。
 	if r.Method == http.MethodPost && inboundReq != nil {
 		action, _ := inboundReq["action"].(string)
 		if al := strings.ToLower(action); al == "" || al == "add" {
-			if msg := validateInboundClientsSelfOnly(r.Context(), inboundReq); msg != "" {
-				remoteWriteError(w, http.StatusForbidden, msg)
-				return
+			uname := auth.UsernameFromContext(r.Context())
+			if !userIsAdmin(r.Context(), h.repo, uname) {
+				if msg := validateInboundClientsSelfOnly(r.Context(), inboundReq); msg != "" {
+					remoteWriteError(w, http.StatusForbidden, msg)
+					return
+				}
 			}
 		}
 	}
@@ -1260,6 +1328,19 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 		if strings.ToLower(action) == "remove" {
 			if tag, _ := inboundReq["tag"].(string); tag != "" {
 				preDeleteRealityDomains = h.getRealityServerNames(r.Context(), id, tag)
+			}
+		}
+	}
+
+	// 添加 tls 入站若选了主控托管证书(cert_id),先同步下发证书到 agent 并把路径注入到入站配置,
+	// 避免「agent 上没有该证书 → xray 加载失败 → 502」。失败明确报错(已透传,不被 CF 吞)。
+	if r.Method == http.MethodPost && inboundReq != nil {
+		if action, _ := inboundReq["action"].(string); action == "" || strings.ToLower(action) == "add" {
+			if newBody, certErr := h.resolveInboundCert(r.Context(), id, inboundReq); certErr != nil {
+				remoteWriteError(w, http.StatusBadGateway, "证书处理失败: "+certErr.Error())
+				return
+			} else if newBody != nil {
+				body = newBody
 			}
 		}
 	}

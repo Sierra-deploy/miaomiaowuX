@@ -874,6 +874,27 @@ func (h *CertificateHandler) deployToRemoteServer(server *storage.RemoteServer, 
 	}
 }
 
+// DeployCertToServerSync 同步把证书下发到指定 agent 的 xray 证书目录,返回 agent 上的 cert/key 路径。
+// 用于「添加 tls 入站时自动确保证书已在 agent 上」,避免证书缺失导致 xray 加载失败(502)。
+// Reload 用 "none":证书只写文件,真正生效由随后的 add inbound(gRPC) 触发,避免无谓重启。
+func (h *CertificateHandler) DeployCertToServerSync(ctx context.Context, server *storage.RemoteServer, cert *storage.Certificate) (string, string, error) {
+	name := certDeployFilename(cert.Domain)
+	certPath := "/usr/local/etc/xray/certs/" + name + ".pem"
+	keyPath := "/usr/local/etc/xray/certs/" + name + ".key"
+	payload := WSCertDeployPayload{
+		Domain:   cert.Domain,
+		CertPEM:  cert.CertPEM,
+		KeyPEM:   cert.KeyPEM,
+		CertPath: certPath,
+		KeyPath:  keyPath,
+		Reload:   "none",
+	}
+	if err := h.deployRemoteCertificateHTTP(ctx, server, payload); err != nil {
+		return "", "", err
+	}
+	return certPath, keyPath, nil
+}
+
 // 将证书部署到所有连接的远程服务器。
 func (h *CertificateHandler) deployToAllRemotes(domain, certPEM, keyPEM, certPath, keyPath, reloadTarget string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

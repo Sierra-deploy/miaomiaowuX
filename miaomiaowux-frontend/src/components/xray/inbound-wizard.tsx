@@ -13,6 +13,7 @@ import {
 import { toast } from 'sonner'
 import { api } from '@/lib/api'
 import { generateInboundConfig } from '@/lib/xray-config-generator'
+import { CertSelectField } from '@/components/xray/cert-select-field'
 import {
   getAllProtocols,
   getTransportOptions,
@@ -954,6 +955,12 @@ export function InboundWizard({
       customNodeName = flag + nodeName
     }
 
+    // 选了主控托管证书时,把 cert_id 塞进 inbound(带外字段);后端会同步下发证书到 agent 并改写成真实路径,
+    // 避免证书缺失导致 xray 加载失败(502)。
+    if (formData.cert_id) {
+      inbound.cert_id = formData.cert_id
+    }
+
     await onSubmit(effectiveServerIds, inbound, tag, customNodeName)
   }
 
@@ -1652,6 +1659,23 @@ export function InboundWizard({
                                 </div>
                               </div>
                             )}
+
+                            {selectedSecurity.includes('TLS') &&
+                              !selectedSecurity.includes('REALITY') && (
+                                <CertSelectField
+                                  value={formData.cert_id ?? null}
+                                  remoteServerId={0}
+                                  onChange={(certId, certPath, keyPath) =>
+                                    setFormData((prev: any) => ({
+                                      ...prev,
+                                      cert_id: certId,
+                                      ...(certId
+                                        ? { certificateFile: certPath, keyFile: keyPath }
+                                        : {}),
+                                    }))
+                                  }
+                                />
+                              )}
 
                             {currentSecurityFields.map((field) => (
                               <FormField
