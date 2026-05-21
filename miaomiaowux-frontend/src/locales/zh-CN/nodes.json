@@ -46,7 +46,9 @@
     "restoreDomain": "恢复原始域名，",
     "viewEditConfig": "查看修改配置，",
     "copyUri": "复制URI，",
-    "tempSubscription": "生成临时订阅",
+    "tempSubscription": "生成临时订阅，",
+    "tcpingTest": "TCPing 延迟测试，",
+    "specifyOutbound": "指定出站",
     "noMatchingNodes": "没有找到匹配的节点",
     "parseFailed": "解析失败",
     "unknown": "未知"

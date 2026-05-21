@@ -32,6 +32,7 @@ type RemoteManageHandler struct {
 	certHandler       *CertificateHandler
 	crypto            *CryptoConfig
 	pullSessions      sync.Map // serverID (int64) → *securechan.Session
+	fedSessions       sync.Map // serverID (int64) → *securechan.Session (联邦:消费方↔拥有方)
 	stealSelfDeployer func(ctx context.Context, serverID int64) error
 }
 
@@ -704,7 +705,17 @@ func (h *RemoteManageHandler) BroadcastMasterURLUpdate(ctx context.Context, newM
 	}
 }
 
+// ForwardToAgent 导出包装,供联邦(分享服务器)转发使用。
+func (h *RemoteManageHandler) ForwardToAgent(ctx context.Context, serverID int64, method, path string, body []byte) ([]byte, error) {
+	return h.forwardToRemoteServer(ctx, serverID, method, path, body)
+}
+
 func (h *RemoteManageHandler) forwardToRemoteServer(ctx context.Context, serverID int64, method, path string, body []byte) ([]byte, error) {
+	// 联邦(分享)服务器:不直连 agent,改走拥有方主控的 /api/federation/manage
+	if fed, ferr := h.repo.GetFederatedServer(ctx, serverID); ferr == nil {
+		return h.doFederationRequest(ctx, fed, method, path, body)
+	}
+
 	server, err := h.repo.GetRemoteServer(ctx, serverID)
 	if err != nil {
 		return nil, fmt.Errorf("server not found: %v", err)
@@ -753,6 +764,143 @@ func (h *RemoteManageHandler) forwardToRemoteServer(ctx context.Context, serverI
 		return h.doPullKeyExchange(ctx, serverID, method, childURL, server.Token, body)
 	}
 	return respBody, err
+}
+
+// doFederationRequest 把一条远程管理命令通过拥有方主控的 /api/federation/manage 转发(分享服务器)。
+// 在 HTTPS 之上叠加"令牌揭示的 ECDH"端到端加密:已有会话则加密发送,无会话则先做密钥交换,
+// 会话失效(412/re-negotiate)自动重新协商。
+func (h *RemoteManageHandler) doFederationRequest(ctx context.Context, fed storage.FederatedServer, method, path string, body []byte) ([]byte, error) {
+	payload, _ := json.Marshal(map[string]string{
+		"method": method,
+		"path":   path,
+		"body":   base64.StdEncoding.EncodeToString(body),
+	})
+
+	if sessionVal, ok := h.fedSessions.Load(fed.ServerID); ok {
+		session := sessionVal.(*securechan.Session)
+		respBody, err := h.doEncryptedFederationRequest(ctx, fed, payload, session)
+		if err != nil && (strings.Contains(err.Error(), "412") || strings.Contains(err.Error(), "re-negotiate")) {
+			h.fedSessions.Delete(fed.ServerID)
+			log.Printf("[Federation] session expired for server %d, re-negotiating", fed.ServerID)
+			return h.doFederationKeyExchange(ctx, fed, payload)
+		}
+		return respBody, err
+	}
+	return h.doFederationKeyExchange(ctx, fed, payload)
+}
+
+// doFederationKeyExchange 发起密钥交换:明文发送 payload + 临时公钥,从响应头取拥有方临时公钥建会话。
+func (h *RemoteManageHandler) doFederationKeyExchange(ctx context.Context, fed storage.FederatedServer, payload []byte) ([]byte, error) {
+	consPriv, consPub, err := securechan.GenerateEphemeral()
+	if err != nil {
+		return h.doPlainFederationRequest(ctx, fed, payload)
+	}
+	url := strings.TrimRight(fed.OwnerURL, "/") + "/api/federation/manage"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("create federation request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Share-Token", fed.ShareToken)
+	req.Header.Set("User-Agent", version.AgentUserAgent)
+	req.Header.Set(fedKeyExchangeHeader, encodeKey(consPub))
+
+	resp, err := h.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("federation request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, rerr := io.ReadAll(resp.Body)
+	if rerr != nil {
+		return nil, fmt.Errorf("read federation response: %v", rerr)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, federationErrorFromBody(resp.StatusCode, respBody)
+	}
+
+	// 拥有方支持加密时回带临时公钥,建会话供后续请求复用;不支持则保持明文(自动降级)。
+	if kx := resp.Header.Get(fedKeyExchangeHeader); kx != "" {
+		if ownerPub, ok := decodeKey(kx); ok {
+			if session, derr := deriveFederationSession(consPriv, ownerPub, consPub, fed.ShareToken, true); derr == nil {
+				h.fedSessions.Store(fed.ServerID, session)
+				log.Printf("[Federation] key exchange completed for server %d", fed.ServerID)
+			}
+		}
+	}
+	return respBody, nil
+}
+
+// doEncryptedFederationRequest 用已建立的会话加密 payload 发送,并解密响应。
+func (h *RemoteManageHandler) doEncryptedFederationRequest(ctx context.Context, fed storage.FederatedServer, payload []byte, session *securechan.Session) ([]byte, error) {
+	encrypted, err := session.Encrypt(payload)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt federation payload: %w", err)
+	}
+	url := strings.TrimRight(fed.OwnerURL, "/") + "/api/federation/manage"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(encrypted))
+	if err != nil {
+		return nil, fmt.Errorf("create federation request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("X-Share-Token", fed.ShareToken)
+	req.Header.Set("User-Agent", version.AgentUserAgent)
+	req.Header.Set("X-Encrypted", "1")
+
+	resp, err := h.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("federation request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, rerr := io.ReadAll(resp.Body)
+	if rerr != nil {
+		return nil, fmt.Errorf("read federation response: %v", rerr)
+	}
+	// 拥有方对响应(含错误)加密,先解密再判状态码。
+	if resp.Header.Get("X-Encrypted") == "1" {
+		decrypted, derr := session.Decrypt(respBody)
+		if derr != nil {
+			return nil, fmt.Errorf("decrypt federation response: %w", derr)
+		}
+		respBody = decrypted
+	}
+	if resp.StatusCode >= 400 {
+		return nil, federationErrorFromBody(resp.StatusCode, respBody)
+	}
+	return respBody, nil
+}
+
+func (h *RemoteManageHandler) doPlainFederationRequest(ctx context.Context, fed storage.FederatedServer, payload []byte) ([]byte, error) {
+	url := strings.TrimRight(fed.OwnerURL, "/") + "/api/federation/manage"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("create federation request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Share-Token", fed.ShareToken)
+	req.Header.Set("User-Agent", version.AgentUserAgent)
+	resp, err := h.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("federation request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	respBody, rerr := io.ReadAll(resp.Body)
+	if rerr != nil {
+		return nil, fmt.Errorf("read federation response: %v", rerr)
+	}
+	if resp.StatusCode >= 400 {
+		return nil, federationErrorFromBody(resp.StatusCode, respBody)
+	}
+	return respBody, nil
+}
+
+func federationErrorFromBody(status int, body []byte) error {
+	var er map[string]any
+	if json.Unmarshal(body, &er) == nil {
+		if msg, ok := er["error"].(string); ok {
+			return fmt.Errorf("%s", msg)
+		}
+	}
+	return fmt.Errorf("federation returned status %d: %s", status, string(body))
 }
 
 func (h *RemoteManageHandler) doPlainPullRequest(ctx context.Context, method, childURL, token string, body []byte) ([]byte, error) {

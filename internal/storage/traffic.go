@@ -152,6 +152,8 @@ var (
 	ErrSubscribeFileNotFound        = errors.New("subscribe file not found")
 	ErrSubscribeFileExists          = errors.New("subscribe file already exists")
 	ErrCustomShortCodeExists        = errors.New("该短码已被占用，请更换一个")
+	ErrSharedServerNotFound         = errors.New("shared server not found")
+	ErrFederatedServerNotFound      = errors.New("federated server not found")
 	ErrUserSettingsNotFound         = errors.New("user settings not found")
 	ErrExternalSubscriptionNotFound = errors.New("external subscription not found")
 	ErrExternalSubscriptionExists   = errors.New("external subscription already exists")
@@ -496,6 +498,8 @@ type RemoteServer struct {
 	XrayMode              string     `json:"xray_mode"`            // "external" (默认) 或 "embedded"
 	TimeOffsetSeconds     *int64     `json:"time_offset_seconds,omitempty"` // agent 与主控的时钟偏差（秒）
 	TrafficUsedOffset     int64      `json:"traffic_used_offset"`
+	IsFederated           bool       `json:"is_federated"`       // 是否为接入的"分享服务器"(联邦)，非持久化字段
+	FederationPrefix      string     `json:"federation_prefix"`  // 分享服务器上新增入站的 tag 前缀，非持久化字段
 	CreatedAt             time.Time  `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 }
@@ -1807,6 +1811,14 @@ CREATE TABLE IF NOT EXISTS traffic_threshold_notified (
 `
 	if _, err := r.db.Exec(trafficThresholdNotifiedSchema); err != nil {
 		return fmt.Errorf("migrate traffic_threshold_notified: %w", err)
+	}
+
+	// 服务器分享(联邦)相关表:必须在迁移阶段建好,因为 ListRemoteServers 会 EXISTS 查询 federated_servers。
+	if err := r.ensureSharedServersTable(context.Background()); err != nil {
+		return fmt.Errorf("migrate shared_servers: %w", err)
+	}
+	if err := r.ensureFederatedServersTable(context.Background()); err != nil {
+		return fmt.Errorf("migrate federated_servers: %w", err)
 	}
 
 	return nil
@@ -6716,6 +6728,8 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		COALESCE(xray_mode, 'external'),
 		COALESCE(time_offset_seconds, 0),
 		COALESCE(traffic_used_offset, 0),
+		EXISTS(SELECT 1 FROM federated_servers fs WHERE fs.server_id = remote_servers.id),
+		COALESCE((SELECT prefix FROM federated_servers fs WHERE fs.server_id = remote_servers.id), ''),
 		created_at, updated_at
 		FROM remote_servers ORDER BY created_at DESC`
 	rows, err := r.db.QueryContext(ctx, query)
@@ -6746,6 +6760,8 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 			&server.XrayMode,
 			&timeOffsetSeconds,
 			&server.TrafficUsedOffset,
+			&server.IsFederated,
+			&server.FederationPrefix,
 			&server.CreatedAt, &server.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan remote server: %w", err)
 		}
@@ -6815,6 +6831,10 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		COALESCE(use_443, 0), COALESCE(steal_mode, 'tunnel'),
 		COALESCE(site_type, ''), COALESCE(site_value, ''),
 		COALESCE(xray_mode, 'external'),
+		COALESCE(traffic_limit, 0), COALESCE(traffic_reset_day, 0),
+		COALESCE(current_upload_speed, 0), COALESCE(current_download_speed, 0),
+		COALESCE(xray_running, 0), COALESCE(xray_version, ''),
+		COALESCE(traffic_used_offset, 0),
 		created_at, updated_at
 		FROM remote_servers WHERE id = ?`
 
@@ -6822,6 +6842,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 	var lastHeartbeat, tokenExpiresAt, lastTokenRefresh, lastPullAt sql.NullTime
 	var bootTime, xrayBootTime sql.NullString
 	var agentTokenExpiresAt, lastAgentTokenRefresh sql.NullTime
+	var xrayRunningInt int
 	err := r.db.QueryRowContext(ctx, query, id).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.Domain,
 		&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 		&tokenExpiresAt, &lastTokenRefresh,
@@ -6831,6 +6852,10 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		&server.Use443, &server.StealMode,
 		&server.SiteType, &server.SiteValue,
 		&server.XrayMode,
+		&server.TrafficLimit, &server.TrafficResetDay,
+		&server.CurrentUploadSpeed, &server.CurrentDownloadSpeed,
+		&xrayRunningInt, &server.XrayVersion,
+		&server.TrafficUsedOffset,
 		&server.CreatedAt, &server.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -6839,6 +6864,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		return nil, fmt.Errorf("get remote server: %w", err)
 	}
 
+	server.XrayRunning = xrayRunningInt != 0
 	if lastHeartbeat.Valid {
 		server.LastHeartbeat = &lastHeartbeat.Time
 	}
@@ -7708,6 +7734,18 @@ func (r *TrafficRepository) UpdateRemoteServerTrafficOffset(ctx context.Context,
 	return nil
 }
 
+// UpdateRemoteServerTrafficMeta 仅更新流量限额与重置日(联邦轮询透传拥有方的限额信息用)。
+func (r *TrafficRepository) UpdateRemoteServerTrafficMeta(ctx context.Context, id int64, trafficLimit int64, trafficResetDay int) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	_, err := r.db.ExecContext(ctx, `UPDATE remote_servers SET traffic_limit = ?, traffic_reset_day = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, trafficLimit, trafficResetDay, id)
+	if err != nil {
+		return fmt.Errorf("update traffic meta: %w", err)
+	}
+	return nil
+}
+
 func (r *TrafficRepository) UpdateRemoteServerStealMode(ctx context.Context, id int64, stealMode string) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
@@ -7751,6 +7789,9 @@ func (r *TrafficRepository) DeleteRemoteServer(ctx context.Context, id int64) er
 	if err != nil {
 		return fmt.Errorf("delete remote server: %w", err)
 	}
+
+	// 清理联邦(分享接入)标记,避免孤立记录
+	_ = r.DeleteFederatedServer(ctx, id)
 
 	affected, err := result.RowsAffected()
 	if err != nil {

@@ -1,0 +1,110 @@
+package handler
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"strings"
+	"time"
+
+	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/version"
+)
+
+// 消费方:定时从拥有方主控拉取被分享服务器的状态/流量快照,写回本地 remote_servers 行,
+// 让分享服务器在服务管理列表里像普通服务器一样显示速率、流量、心跳。
+// 拥有方那一跳依赖 HTTPS;后续可叠加 securechan 端到端加密。
+
+const federationPollInterval = 5 * time.Second
+
+func StartFederationPoller(ctx context.Context, repo *storage.TrafficRepository) {
+	client := &http.Client{Timeout: 15 * time.Second}
+	ticker := time.NewTicker(federationPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			pollFederatedServers(ctx, repo, client)
+		}
+	}
+}
+
+func pollFederatedServers(ctx context.Context, repo *storage.TrafficRepository, client *http.Client) {
+	feds, err := repo.ListFederatedServers(ctx)
+	if err != nil {
+		return
+	}
+	for _, fed := range feds {
+		info, err := fetchFederationServerInfo(ctx, client, fed)
+		if err != nil {
+			continue
+		}
+		applyFederationInfo(ctx, repo, fed.ServerID, info)
+	}
+}
+
+func fetchFederationServerInfo(ctx context.Context, client *http.Client, fed storage.FederatedServer) (map[string]any, error) {
+	url := strings.TrimRight(fed.OwnerURL, "/") + "/api/federation/server-info"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("X-Share-Token", fed.ShareToken)
+	req.Header.Set("User-Agent", version.AgentUserAgent)
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return nil, errFederationInfo
+	}
+	var info map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+var errFederationInfo = &federationError{"federation server-info error"}
+
+type federationError struct{ msg string }
+
+func (e *federationError) Error() string { return e.msg }
+
+func applyFederationInfo(ctx context.Context, repo *storage.TrafficRepository, serverID int64, info map[string]any) {
+	up := jsonInt(info["current_upload_speed"])
+	down := jsonInt(info["current_download_speed"])
+	_ = repo.UpdateRemoteServerSpeed(ctx, serverID, up, down)
+
+	// 联邦服务器本地无节点流量,用 offset 承载拥有方透传的已用流量
+	_ = repo.UpdateRemoteServerTrafficOffset(ctx, serverID, jsonInt(info["traffic_used"]))
+
+	// 透传拥有方的流量限额与重置日(否则消费方显示"不限流量")
+	_ = repo.UpdateRemoteServerTrafficMeta(ctx, serverID, jsonInt(info["traffic_limit"]), int(jsonInt(info["traffic_reset_day"])))
+
+	if running, ok := info["xray_running"].(bool); ok {
+		ver, _ := info["xray_version"].(string)
+		_ = repo.UpdateRemoteServerXrayStatus(ctx, serverID, running, ver)
+	}
+
+	// 拥有方报告 connected 时刷新心跳/状态
+	if st, _ := info["status"].(string); st == "connected" {
+		_ = repo.UpdateRemoteServerLastActivity(ctx, serverID)
+	}
+}
+
+func jsonInt(v any) int64 {
+	switch n := v.(type) {
+	case float64:
+		return int64(n)
+	case int64:
+		return n
+	case int:
+		return int64(n)
+	default:
+		return 0
+	}
+}

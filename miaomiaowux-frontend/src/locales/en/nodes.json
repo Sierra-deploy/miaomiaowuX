@@ -46,7 +46,9 @@
     "restoreDomain": "Restore original domain, ",
     "viewEditConfig": "View/edit config, ",
     "copyUri": "Copy URI, ",
-    "tempSubscription": "Generate temp subscription",
+    "tempSubscription": "Generate temp subscription, ",
+    "tcpingTest": "TCPing latency test, ",
+    "specifyOutbound": "Specify outbound",
     "noMatchingNodes": "No matching nodes found",
     "parseFailed": "Parse Failed",
     "unknown": "Unknown"

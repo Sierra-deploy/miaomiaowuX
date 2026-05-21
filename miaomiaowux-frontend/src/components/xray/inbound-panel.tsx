@@ -34,9 +34,10 @@ interface InboundItem {
 interface InboundPanelProps {
   serverId: number
   serverName: string
+  federationPrefix?: string
 }
 
-export function InboundPanel({ serverId, serverName }: InboundPanelProps) {
+export function InboundPanel({ serverId, serverName, federationPrefix }: InboundPanelProps) {
   const { t } = useTranslation('xray')
   const { t: tc } = useTranslation('common')
   const queryClient = useQueryClient()
@@ -141,8 +142,12 @@ export function InboundPanel({ serverId, serverName }: InboundPanelProps) {
   }
 
   const handleInboundSubmit = async (serverIds: number[], inbound: XrayInbound, tag: string) => {
-    const trimmedTag = tag?.trim() || inbound.tag || ''
+    let trimmedTag = tag?.trim() || inbound.tag || ''
     if (!trimmedTag) { toast.error(t('inbounds.fillTag')); return }
+    // 分享服务器:统一加前缀,避免与拥有方已有入站 tag 冲突
+    if (federationPrefix && !trimmedTag.startsWith(federationPrefix)) {
+      trimmedTag = federationPrefix + trimmedTag
+    }
     try {
       await remoteAddInboundMutation.mutateAsync({ inbound: { ...inbound, tag: trimmedTag } })
       toast.success(t('inbounds.inboundAddedToRemote'))

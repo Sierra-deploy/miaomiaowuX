@@ -11,6 +11,8 @@ import { useLicenseUsage } from '@/hooks/use-license'
 
 import { InboundPanel } from '@/components/xray/inbound-panel'
 import { OutboundPanel } from '@/components/xray/outbound-panel'
+import { ShareServerDialog } from '@/components/xray/share-server-dialog'
+import { AddSharedServerDialog } from '@/components/xray/add-shared-server-dialog'
 import { RoutingPanel } from '@/components/xray/routing-panel'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Button } from '@/components/ui/button'
@@ -122,6 +124,7 @@ function XrayServersPage() {
   const { data: licenseUsage } = useLicenseUsage()
   const serversAtLimit = Boolean(licenseUsage?.usage?.servers && licenseUsage.usage.servers.current >= licenseUsage.usage.servers.max)
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false)
+  const [shareServer, setShareServer] = useState<{ id: number; name: string } | null>(null)
   const [viewMode, setViewMode] = useState<ViewMode>(() => (localStorage.getItem('servers-view-mode') as ViewMode) || 'card')
   const [formData, setFormData] = useState({
     name: '',
@@ -649,10 +652,15 @@ function XrayServersPage() {
     return <Badge variant={config.variant}>{config.label}</Badge>
   }
 
-  const RemoteServiceStatusIndicator = ({ status, name, serverId, isEmbedded }: { status?: { installed: boolean; running: boolean; version?: string }, name: string, serverId: number, isEmbedded?: boolean }) => {
+  const RemoteServiceStatusIndicator = ({ status, name, serverId, isEmbedded, isFederated }: { status?: { installed: boolean; running: boolean; version?: string }, name: string, serverId: number, isEmbedded?: boolean, isFederated?: boolean }) => {
     const [open, setOpen] = useState(false)
     const timeoutRef = useRef<ReturnType<typeof setTimeout>>()
     const serviceName = name.toLowerCase() as 'xray' | 'nginx'
+    // 分享服务器(联邦):服务由拥有方控制,这里仅展示状态、不提供启停控制
+    if (isFederated) {
+      const running = !!status?.running
+      return (<div className={cn("flex items-center gap-1.5 text-xs px-2 py-1 rounded", running ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" : "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400")}><div className={cn("w-2 h-2 rounded-full", running ? "bg-green-500" : "bg-gray-400")} />{name}</div>)
+    }
     const handleOpen = () => { clearTimeout(timeoutRef.current); if (status?.installed || isEmbedded) setOpen(true) }
     const handleClose = () => { timeoutRef.current = setTimeout(() => setOpen(false), 150) }
     const handleControl = (action: 'start' | 'stop' | 'restart') => {
@@ -857,6 +865,7 @@ function XrayServersPage() {
             <DialogFooter><Button variant="outline" onClick={() => { setIsAddDialogOpen(false); resetAddDialog() }}>{generatedToken ? t('servers.complete') : tc('actions.cancel')}</Button></DialogFooter>
           </DialogContent>
         </Dialog>
+        <AddSharedServerDialog />
         <Button variant="outline" disabled={remoteServers.length === 0 || upgradeAllRunning} onClick={handleUpgradeAllAgents} title={t('servers.upgradeAllAgentsTip')}>
           {upgradeAllRunning ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowUpCircle className="mr-2 h-4 w-4" />}
           {t('servers.upgradeAllAgents')}
@@ -875,34 +884,39 @@ function XrayServersPage() {
             return (
               <Card key={`remote-${server.id}`} className={cn('min-w-0 overflow-hidden', server.status !== 'connected' ? 'cursor-pointer hover:border-primary/50 transition-colors' : '')} onClick={() => { if (server.status !== 'connected') { setSelectedRemoteServer(server); setIsRemoteServerDetailDialogOpen(true) } }}>
                 <CardHeader className="pb-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <div className={cn("w-3 h-3 rounded-full flex-shrink-0", server.status === 'connected' ? "bg-green-500" : server.status === 'pending' ? "bg-yellow-500" : "bg-red-500")} title={server.status === 'connected' ? t('servers.online') : server.status === 'pending' ? t('servers.pending') : t('servers.offline')} />
-                      <CardTitle className="text-lg truncate">{server.name}</CardTitle>
-                      <RemoteServerStatusBadge status={server.status} />
-                      {server.status === 'connected' && (
-                        server.encrypted
-                          ? <Lock className="h-3.5 w-3.5 text-green-500 flex-shrink-0" title={t('servers.encrypted')} />
-                          : <LockOpen className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" title={t('servers.unencrypted')} />
-                      )}
-                      {Math.abs(server.time_offset_seconds ?? 0) > 10 && (
-                        <TooltipProvider>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <AlertTriangle className="h-4 w-4 text-yellow-500 cursor-help flex-shrink-0" />
-                            </TooltipTrigger>
-                            <TooltipContent>{t('servers.timeOffsetWarning')}</TooltipContent>
-                          </Tooltip>
-                        </TooltipProvider>
-                      )}
-                      {server.fallback_to_pull && (<Badge variant="secondary" className="text-xs bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 shrink-0">{t('servers.degraded')}</Badge>)}
-                      {server.steal_mode && server.steal_mode !== 'tunnel' && (<Badge variant="outline" className="text-xs shrink-0">{server.steal_mode === 'fallback' ? t('servers.fallbackLabel') : t('servers.stealModeDefault')}</Badge>)}
-                      <Badge variant="outline" className={cn("text-xs shrink-0", server.xray_mode === 'embedded' ? "border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-400" : "border-gray-300 text-gray-600 dark:border-gray-600 dark:text-gray-400")}>{server.xray_mode === 'embedded' ? t('servers.xrayModeEmbedded') : t('servers.xrayModeExternal')}</Badge>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex flex-col gap-1.5 min-w-0 flex-1">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <div className={cn("w-3 h-3 rounded-full flex-shrink-0", server.status === 'connected' ? "bg-green-500" : server.status === 'pending' ? "bg-yellow-500" : "bg-red-500")} title={server.status === 'connected' ? t('servers.online') : server.status === 'pending' ? t('servers.pending') : t('servers.offline')} />
+                        <CardTitle className="text-lg truncate">{server.name}</CardTitle>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <RemoteServerStatusBadge status={server.status} />
+                        {server.status === 'connected' && (
+                          server.encrypted
+                            ? <Lock className="h-3.5 w-3.5 text-green-500 flex-shrink-0" title={t('servers.encrypted')} />
+                            : <LockOpen className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" title={t('servers.unencrypted')} />
+                        )}
+                        {Math.abs(server.time_offset_seconds ?? 0) > 10 && (
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <AlertTriangle className="h-4 w-4 text-yellow-500 cursor-help flex-shrink-0" />
+                              </TooltipTrigger>
+                              <TooltipContent>{t('servers.timeOffsetWarning')}</TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                        )}
+                        {server.fallback_to_pull && (<Badge variant="secondary" className="text-xs bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 shrink-0">{t('servers.degraded')}</Badge>)}
+                        {server.steal_mode && server.steal_mode !== 'tunnel' && (<Badge variant="outline" className="text-xs shrink-0">{server.steal_mode === 'fallback' ? t('servers.fallbackLabel') : t('servers.stealModeDefault')}</Badge>)}
+                        <Badge variant="outline" className={cn("text-xs shrink-0", server.xray_mode === 'embedded' ? "border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-400" : "border-gray-300 text-gray-600 dark:border-gray-600 dark:text-gray-400")}>{server.xray_mode === 'embedded' ? t('servers.xrayModeEmbedded') : t('servers.xrayModeExternal')}</Badge>
+                      </div>
                     </div>
                     <div className="flex items-center gap-1 shrink-0">
-                      <Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); toast.info('分享服务器功能开发中，敬请期待') }} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title="分享服务器（PRO）"><Share2 className="h-4 w-4" /></Button>
+                      {server.is_federated && (<Badge variant="outline" className="text-xs shrink-0 border-purple-300 text-purple-700 dark:border-purple-700 dark:text-purple-400">分享</Badge>)}
+                      {!server.is_federated && (<Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); setShareServer({ id: server.id, name: server.name }) }} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title="分享服务器（PRO）"><Share2 className="h-4 w-4" /></Button>)}
                       {server.status === 'connected' && (<Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); remoteScanMutation.mutate(server.id) }} disabled={remoteScanMutation.isPending} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title={t('servers.scan')}><Search className={cn("h-4 w-4", remoteScanMutation.isPending && "animate-spin")} /></Button>)}
-                      <Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); handleEditRemoteServer(server) }} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title={t('servers.editServer')}><Pencil className="h-4 w-4" /></Button>
+                      {!server.is_federated && (<Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); handleEditRemoteServer(server) }} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title={t('servers.editServer')}><Pencil className="h-4 w-4" /></Button>)}
                       <Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); handleDeleteRemoteServer(server.id) }} className="h-8 w-8 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950" title={t('servers.deleteServer')}><X className="h-4 w-4" /></Button>
                     </div>
                   </div>
@@ -936,11 +950,11 @@ function XrayServersPage() {
                     )}
                   </CardDescription>
                   <div className="flex items-center gap-4 mt-3">
-                    <RemoteServiceStatusIndicator status={remoteStatus?.xray} name="Xray" serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} />
-                    {remoteStatus?.nginx?.installed && (<RemoteServiceStatusIndicator status={remoteStatus?.nginx} name="Nginx" serverId={server.id} />)}
+                    <RemoteServiceStatusIndicator status={remoteStatus?.xray} name="Xray" serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} isFederated={server.is_federated} />
+                    {remoteStatus?.nginx?.installed && (<RemoteServiceStatusIndicator status={remoteStatus?.nginx} name="Nginx" serverId={server.id} isFederated={server.is_federated} />)}
                     {remoteStatus?.loading && (<span className="text-xs text-muted-foreground">{t('servers.loadingStatus')}</span>)}
                   </div>
-                  <div className="mt-4 flex flex-col sm:flex-row gap-3">
+                  <div className="mt-4 flex flex-col gap-3">
                     <div className="flex-1 min-w-0 bg-muted/50 rounded-lg p-3">
                       <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-2">
                         <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v20M2 12h20M7 7l5-5 5 5M7 17l5 5 5-5" /></svg>
@@ -948,8 +962,8 @@ function XrayServersPage() {
                       </div>
                       {(server.current_upload_speed !== undefined && server.current_upload_speed > 0) || (server.current_download_speed !== undefined && server.current_download_speed > 0) ? (
                         <div className="space-y-1">
-                          <div className="flex items-center justify-between"><span className="text-xs text-muted-foreground">{t('servers.upload')}</span><span className="text-sm font-mono font-medium text-green-600 dark:text-green-400 truncate ml-1">↑ {formatSpeed(server.current_upload_speed || 0)}</span></div>
-                          <div className="flex items-center justify-between"><span className="text-xs text-muted-foreground">{t('servers.download')}</span><span className="text-sm font-mono font-medium text-blue-600 dark:text-blue-400 truncate ml-1">↓ {formatSpeed(server.current_download_speed || 0)}</span></div>
+                          <div className="flex items-center justify-between gap-1"><span className="text-xs text-muted-foreground shrink-0">{t('servers.upload')}</span><span className="text-sm font-mono font-medium text-green-600 dark:text-green-400 truncate min-w-0">↑ {formatSpeed(server.current_upload_speed || 0)}</span></div>
+                          <div className="flex items-center justify-between gap-1"><span className="text-xs text-muted-foreground shrink-0">{t('servers.download')}</span><span className="text-sm font-mono font-medium text-blue-600 dark:text-blue-400 truncate min-w-0">↓ {formatSpeed(server.current_download_speed || 0)}</span></div>
                         </div>
                       ) : server.status === 'connected' ? (<p className="text-sm font-mono text-muted-foreground">{t('servers.waitingData')}</p>) : server.status === 'pending' ? (<p className="text-sm font-mono text-muted-foreground">{t('servers.pendingShort')}</p>) : (<p className="text-sm font-mono text-muted-foreground">{t('servers.offline')}</p>)}
                     </div>
@@ -975,11 +989,11 @@ function XrayServersPage() {
                 <CardFooter className="flex flex-wrap gap-2 pt-4">
                   {server.status === 'connected' && (
                     <>
-                      <InstallPopover serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} />
+                      {!server.is_federated && (<InstallPopover serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} />)}
                       {(remoteStatus?.xray?.installed || server.xray_mode === 'embedded') && (<Button variant="outline" size="sm" className="flex-1 min-w-0" onClick={(e) => { e.stopPropagation(); handleOpenRemoteXrayConfig(server) }}><Cog className="h-4 w-4 mr-1" />{t('servers.xrayConfig')}</Button>)}
-                      {(remoteStatus?.xray?.installed || server.xray_mode === 'embedded') && (
+                      {!server.is_federated && (remoteStatus?.xray?.installed || server.xray_mode === 'embedded') && (
                         <DropdownMenu>
-                          <DropdownMenuTrigger asChild><Button variant="outline" size="sm" className="flex-1 min-w-0"><Settings className="mr-1 h-3.5 w-3.5 shrink-0" />{t('servers.agentManagement')}<ChevronDown className="ml-1 h-3.5 w-3.5 shrink-0" /></Button></DropdownMenuTrigger>
+                          <DropdownMenuTrigger asChild><Button variant="outline" size="sm" className="flex-1 min-w-0" title={t('servers.agentManagement')}><Settings className="mr-1 h-3.5 w-3.5 shrink-0" /><span className="truncate">Agent</span></Button></DropdownMenuTrigger>
                           <DropdownMenuContent align="start">
                             <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setSyncingServerId(server.id); setSyncServerHost(server.ip_address || ''); setIsSyncNodesDialogOpen(true) }}><RefreshCw className="mr-2 h-4 w-4" />{t('servers.syncNodes')}</DropdownMenuItem>
                             {server.domain && (<><DropdownMenuSeparator /><DropdownMenuItem onClick={(e) => { e.stopPropagation(); deployStealSelfMutation.mutate(server.id) }} disabled={deployStealSelfMutation.isPending}><Download className="mr-2 h-4 w-4" />{deployStealSelfMutation.isPending ? t('servers.deploying') : t('servers.deployConfig')}</DropdownMenuItem></>)}
@@ -1088,8 +1102,8 @@ function XrayServersPage() {
                     <TableCell>
                       {server.status === 'connected' ? (remoteStatus?.loading ? (<span className="text-xs text-muted-foreground">{t('servers.loadingStatus')}</span>) : (
                         <div className="flex items-center gap-3">
-                          <RemoteServiceStatusIndicator status={remoteStatus?.xray} name="Xray" serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} />
-                          {remoteStatus?.nginx?.installed && (<RemoteServiceStatusIndicator status={remoteStatus?.nginx} name="Nginx" serverId={server.id} />)}
+                          <RemoteServiceStatusIndicator status={remoteStatus?.xray} name="Xray" serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} isFederated={server.is_federated} />
+                          {remoteStatus?.nginx?.installed && (<RemoteServiceStatusIndicator status={remoteStatus?.nginx} name="Nginx" serverId={server.id} isFederated={server.is_federated} />)}
                         </div>
                       )) : (<span className="text-xs text-muted-foreground">{t('servers.notConnected')}</span>)}
                     </TableCell>
@@ -1097,9 +1111,9 @@ function XrayServersPage() {
                       <div className="flex justify-end gap-1">
                         {server.status === 'connected' && (
                           <>
-                            <InstallPopover serverId={server.id} compact isEmbedded={server.xray_mode === 'embedded'} />
+                            {!server.is_federated && (<InstallPopover serverId={server.id} compact isEmbedded={server.xray_mode === 'embedded'} />)}
                             {(remoteStatus?.xray?.installed || server.xray_mode === 'embedded') && (<Button variant="outline" size="sm" className="h-7 px-2" onClick={() => handleOpenRemoteXrayConfig(server)} title={t('servers.xrayConfig')}><Cog className="h-3.5 w-3.5" /></Button>)}
-                            {(remoteStatus?.xray?.installed || server.xray_mode === 'embedded') && (
+                            {!server.is_federated && (remoteStatus?.xray?.installed || server.xray_mode === 'embedded') && (
                               <DropdownMenu>
                                 <DropdownMenuTrigger asChild><Button variant="outline" size="sm" className="h-7 px-2" title={t('servers.agentManagement')}><Settings className="h-3.5 w-3.5" /><ChevronDown className="h-3 w-3 ml-1" /></Button></DropdownMenuTrigger>
                                 <DropdownMenuContent>
@@ -1113,11 +1127,11 @@ function XrayServersPage() {
                                 </DropdownMenuContent>
                               </DropdownMenu>
                             )}
-                            <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => toast.info('分享服务器功能开发中，敬请期待')} title="分享服务器（PRO）"><Share2 className="h-3.5 w-3.5" /></Button>
+                            {!server.is_federated && (<Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => setShareServer({ id: server.id, name: server.name })} title="分享服务器（PRO）"><Share2 className="h-3.5 w-3.5" /></Button>)}
                             <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => remoteScanMutation.mutate(server.id)} disabled={remoteScanMutation.isPending} title={t('servers.scan')}><Search className={cn("h-3.5 w-3.5", remoteScanMutation.isPending && "animate-spin")} /></Button>
                           </>
                         )}
-                        <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => handleEditRemoteServer(server)} title={t('servers.editServer')}><Pencil className="h-3.5 w-3.5" /></Button>
+                        {!server.is_federated && (<Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => handleEditRemoteServer(server)} title={t('servers.editServer')}><Pencil className="h-3.5 w-3.5" /></Button>)}
                         <Button variant="ghost" size="sm" className="h-7 px-2 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950" onClick={() => handleDeleteRemoteServer(server.id)} title={t('servers.deleteServer')}><X className="h-3.5 w-3.5" /></Button>
                       </div>
                     </TableCell>
@@ -1197,7 +1211,7 @@ function XrayServersPage() {
               </div>
             </TabsContent>
             <TabsContent value="inbounds" className="flex-1 overflow-y-auto mt-2">
-              {xrayRawConfigServerId !== null && (<InboundPanel serverId={xrayRawConfigServerId} serverName={xrayRawConfigServerName} />)}
+              {xrayRawConfigServerId !== null && (<InboundPanel serverId={xrayRawConfigServerId} serverName={xrayRawConfigServerName} federationPrefix={remoteServers.find((s: RemoteServer) => s.id === xrayRawConfigServerId)?.federation_prefix || ''} />)}
             </TabsContent>
             <TabsContent value="outbounds" className="flex-1 overflow-y-auto mt-2">
               {xrayRawConfigServerId !== null && (<OutboundPanel serverId={xrayRawConfigServerId} serverName={xrayRawConfigServerName} />)}
@@ -1460,6 +1474,8 @@ function XrayServersPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ShareServerDialog server={shareServer} onClose={() => setShareServer(null)} />
     </div>
   )
 }

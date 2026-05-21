@@ -2217,13 +2217,13 @@ function NodesPage() {
               </CollapsibleTrigger>
               <CollapsibleContent className='CollapsibleContent'>
                 <CardContent>
-                  <Tabs defaultValue={isAdmin ? 'manual' : 'subscription'} className='w-full'>
-                    <TabsList className={cn('grid w-full', isAdmin ? 'grid-cols-2' : 'grid-cols-1')}>
-                      {isAdmin && <TabsTrigger value='manual'>{t('importCard.tabs.manual')}</TabsTrigger>}
+                  <Tabs defaultValue='manual' className='w-full'>
+                    <TabsList className='grid w-full grid-cols-2'>
+                      <TabsTrigger value='manual'>{t('importCard.tabs.manual')}</TabsTrigger>
                       <TabsTrigger value='subscription'>{t('importCard.tabs.subscription')}</TabsTrigger>
                     </TabsList>
 
-                    {isAdmin && (
+                    {(
                     <TabsContent value='manual' className='space-y-4 mt-4'>
                       <Textarea
                         placeholder={`vmess://eyJwcyI6IuWPsOa5vualviIsImFkZCI6ImV4YW1wbGUuY29tIiwicG9ydCI6IjQ0MyIsImlkIjoidXVpZCIsImFpZCI6IjAiLCJzY3kiOiJhdXRvIiwibmV0Ijoid3MiLCJ0bHMiOiJ0bHMifQ==
@@ -2340,17 +2340,25 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                 <div className='flex flex-col gap-4 md:flex-row md:items-center md:justify-between'>
                   <div>
                     <CardTitle>{t('nodeList.titleWithCount', { count: deferredFilteredNodes.length })}</CardTitle>
-                    <p className='mt-2 text-sm font-semibold text-destructive'>{t('nodeList.warning')}</p>
-                    <p className='mt-2 text-xs text-primary flex flex-wrap items-center gap-1'>
-                      <Pencil className='h-4 w-4 inline' /> {t('nodeList.editNodeName')}
-                      <img src={ExchangeIcon} alt='chain proxy' className='h-4 w-4 inline [filter:invert(63%)_sepia(45%)_saturate(1068%)_hue-rotate(327deg)_brightness(95%)_contrast(88%)]' /> {t('nodeList.chainProxy')}
-                      <Flag className='h-4 w-4 inline' /> {t('nodeList.addRegionEmoji')}
-                      <img src={IpIcon} alt='resolve IP' className='h-4 w-4 inline [filter:invert(63%)_sepia(45%)_saturate(1068%)_hue-rotate(327deg)_brightness(95%)_contrast(88%)]' /> {t('nodeList.resolveIp')}
-                      <Undo2 className='h-4 w-4 inline' /> {t('nodeList.restoreDomain')}
-                      <Eye className='h-4 w-4 inline' /> {t('nodeList.viewEditConfig')}
-                      <Copy className='h-4 w-4 inline' /> {t('nodeList.copyUri')}
-                      <Link2 className='h-4 w-4 inline' /> {t('nodeList.tempSubscription')}
-                    </p>
+                    {isAdmin && <p className='mt-2 text-sm font-semibold text-destructive'>{t('nodeList.warning')}</p>}
+                    {isAdmin ? (
+                      <p className='mt-2 text-xs text-primary flex flex-wrap items-center gap-1'>
+                        <Pencil className='h-4 w-4 inline' /> {t('nodeList.editNodeName')}
+                        <img src={ExchangeIcon} alt='chain proxy' className='h-4 w-4 inline [filter:invert(63%)_sepia(45%)_saturate(1068%)_hue-rotate(327deg)_brightness(95%)_contrast(88%)]' /> {t('nodeList.chainProxy')}
+                        <Flag className='h-4 w-4 inline' /> {t('nodeList.addRegionEmoji')}
+                        <img src={IpIcon} alt='resolve IP' className='h-4 w-4 inline [filter:invert(63%)_sepia(45%)_saturate(1068%)_hue-rotate(327deg)_brightness(95%)_contrast(88%)]' /> {t('nodeList.resolveIp')}
+                        <Undo2 className='h-4 w-4 inline' /> {t('nodeList.restoreDomain')}
+                        <Eye className='h-4 w-4 inline' /> {t('nodeList.viewEditConfig')}
+                        <Copy className='h-4 w-4 inline' /> {t('nodeList.copyUri')}
+                        <Link2 className='h-4 w-4 inline' /> {t('nodeList.tempSubscription')}
+                        <Activity className='h-4 w-4 inline' /> {t('nodeList.tcpingTest')}
+                        <RouteIcon className='h-4 w-4 inline' /> {t('nodeList.specifyOutbound')}
+                      </p>
+                    ) : (
+                      <p className='mt-2 text-xs text-primary flex flex-wrap items-center gap-1'>
+                        <Activity className='h-4 w-4 inline' /> {t('nodeList.tcpingTest')}
+                      </p>
+                    )}
                   </div>
                   <div className={cn('flex flex-wrap gap-2 justify-end', !isAdmin && 'hidden')}>
                     <Button
@@ -2739,6 +2747,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                   <Pencil className='size-4' />
                                 </Button>
                                 )}
+                                {isAdmin && (
                                 <FlagEmojiPicker
                                   onSelect={(flag) => handleSetNodeFlag(node.id, flag)}
                                   onAutoDetect={node.isSaved && node.dbNode ? () => handleAddSingleNodeEmoji(node.dbNode!.id) : undefined}
@@ -2747,7 +2756,8 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                   currentFlag={hasRegionEmoji(node.name) ? node.name.match(/[\u{1F1E6}-\u{1F1FF}]{2}/u)?.[0] : undefined}
                                   className='size-7 text-[#d97757] hover:text-[#c66647]'
                                 />
-                                {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('â‡‹') && node.dbNode.inbound_tag && (
+                                )}
+                                {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('â‡‹') && node.dbNode.inbound_tag && (
                                   <Button
                                     variant='ghost'
                                     size='icon'
@@ -2793,7 +2803,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                     <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                   </Tooltip>
                                 )}
-                                {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('â‡‹') && !node.dbNode.inbound_tag && (
+                                {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('â‡‹') && !node.dbNode.inbound_tag && (
                                   <Tooltip>
                                     <TooltipTrigger asChild>
                                       <Button
@@ -2969,7 +2979,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                           <TableHead>{t('columns.nodeName')}</TableHead>
                           <TableHead style={{ width: '100px' }}>{t('columns.tag')}</TableHead>
                           <TableHead style={{ width: '70px' }} className='text-center'>{t('columns.config')}</TableHead>
-                        <TableHead style={{ width: '70px' }} className='text-center'>{t('columns.actions')}</TableHead>
+                        {isAdmin && <TableHead style={{ width: '70px' }} className='text-center'>{t('columns.actions')}</TableHead>}
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -3104,6 +3114,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                     <Pencil className='size-4' />
                                   </Button>
                                   )}
+                                  {isAdmin && (
                                   <FlagEmojiPicker
                                     onSelect={(flag) => handleSetNodeFlag(node.id, flag)}
                                     onAutoDetect={node.isSaved && node.dbNode ? () => handleAddSingleNodeEmoji(node.dbNode!.id) : undefined}
@@ -3112,7 +3123,8 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                     currentFlag={hasRegionEmoji(node.name) ? node.name.match(/[\u{1F1E6}-\u{1F1FF}]{2}/u)?.[0] : undefined}
                                     className='size-7 text-[#d97757] hover:text-[#c66647] shrink-0'
                                   />
-                                  {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('â‡‹') && node.dbNode.inbound_tag && (
+                                  )}
+                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('â‡‹') && node.dbNode.inbound_tag && (
                                     <Button
                                       variant='ghost'
                                       size='icon'
@@ -3158,7 +3170,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                       <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                     </Tooltip>
                                   )}
-                                  {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('â‡‹') && !node.dbNode.inbound_tag && (
+                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('â‡‹') && !node.dbNode.inbound_tag && (
                                     <Tooltip>
                                       <TooltipTrigger asChild>
                                         <Button
@@ -3224,6 +3236,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                 <span className='text-xs text-muted-foreground'>-</span>
                               )}
                             </TableCell>
+                            {isAdmin && (
                             <TableCell className='text-center'>
                               {(isAdmin || !node.isSaved) && (
                               <AlertDialog>
@@ -3257,6 +3270,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                               </AlertDialog>
                               )}
                             </TableCell>
+                            )}
                           </SortableTableRow>
                         ))
                       )}
@@ -3282,7 +3296,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                             <TableHead style={{ width: '120px' }}>{t('columns.tag')}</TableHead>
                             <TableHead style={{ width: '280px', maxWidth: '280px' }}>{t('columns.serverAddress')}</TableHead>
                             <TableHead style={{ width: '80px' }} className='text-center'>{t('columns.config')}</TableHead>
-                            <TableHead style={{ width: '80px' }} className='text-center'>{t('columns.actions')}</TableHead>
+                            {isAdmin && <TableHead style={{ width: '80px' }} className='text-center'>{t('columns.actions')}</TableHead>}
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -3378,7 +3392,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                     <Pencil className='size-4' />
                                   </Button>
                                   )}
-                                  {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('â‡‹') && node.dbNode.inbound_tag && (
+                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('â‡‹') && node.dbNode.inbound_tag && (
                                     <Button
                                       variant='ghost'
                                       size='icon'
@@ -3424,7 +3438,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                       <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                     </Tooltip>
                                   )}
-                                  {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('â‡‹') && !node.dbNode.inbound_tag && (
+                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('â‡‹') && !node.dbNode.inbound_tag && (
                                     <Tooltip>
                                       <TooltipTrigger asChild>
                                         <Button
@@ -3447,6 +3461,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                       <TooltipContent>{t('tooltip.chainProxy')}</TooltipContent>
                                     </Tooltip>
                                   )}
+                                  {isAdmin && (
                                   <FlagEmojiPicker
                                     onSelect={(flag) => handleSetNodeFlag(node.id, flag)}
                                     onAutoDetect={node.isSaved && node.dbNode ? () => handleAddSingleNodeEmoji(node.dbNode!.id) : undefined}
@@ -3455,6 +3470,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                     currentFlag={hasRegionEmoji(node.name) ? node.name.match(/[\u{1F1E6}-\u{1F1FF}]{2}/u)?.[0] : undefined}
                                     className='size-7 text-[#d97757] hover:text-[#c66647] shrink-0'
                                   />
+                                  )}
                                 </div>
                               )}
                             </TableCell>
@@ -3488,7 +3504,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                         </div>
                                       )}
                                     </div>
-                                    {node.parsed?.server && (
+                                    {isAdmin && node.parsed?.server && (
                                       (() => {
                                         const nodeKey = node.isSaved ? String(node.dbId) : node.id
                                         const serverIsIp = isIpAddress(node.parsed.server)
@@ -3570,7 +3586,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                         )
                                       })()
                                     )}
-                                    {node.isSaved && node.dbNode?.original_server && (
+                                    {isAdmin && node.isSaved && node.dbNode?.original_server && (
                                       <Button
                                         variant='ghost'
                                         size='sm'
@@ -3733,7 +3749,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                           onChange={(e) => handleClashConfigChange(e.target.value)}
                                           className='font-mono text-xs flex-1 min-h-[400px] resize-none border-0 rounded-none focus-visible:ring-0 leading-5'
                                           placeholder={t('dialog.clashConfig.inputPlaceholder')}
-                                          readOnly={editingClashConfig?.nodeId === -1}
+                                          readOnly={editingClashConfig?.nodeId === -1 || !isAdmin}
                                         />
                                       </div>
                                       {clashConfigError && (
@@ -3749,7 +3765,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                         >
                                           {editingClashConfig?.nodeId === -1 ? t('dialog.clashConfig.close') : t('actions.cancel', { ns: 'common' })}
                                         </Button>
-                                        {editingClashConfig?.nodeId !== -1 && (
+                                        {editingClashConfig?.nodeId !== -1 && isAdmin && (
                                           <Button
                                             size='sm'
                                             onClick={handleSaveClashConfig}
@@ -3791,6 +3807,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                 <span className='text-xs text-muted-foreground'>-</span>
                               )}
                             </TableCell>
+                            {isAdmin && (
                             <TableCell className='text-center'>
                               {(isAdmin || !node.isSaved) && (
                               <AlertDialog>
@@ -3823,6 +3840,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                               </AlertDialog>
                               )}
                                 </TableCell>
+                                )}
                               </SortableTableRow>
                             ))
                           )}
@@ -3893,7 +3911,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                 onChange={(e) => handleClashConfigChange(e.target.value)}
                 className='font-mono text-xs flex-1 min-h-[400px] resize-none border-0 rounded-none focus-visible:ring-0 leading-5'
                 placeholder={t('dialog.clashConfig.inputPlaceholder')}
-                readOnly={editingClashConfig?.nodeId === -1}
+                readOnly={editingClashConfig?.nodeId === -1 || !isAdmin}
               />
             </div>
             {clashConfigError && (
@@ -3909,7 +3927,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
               >
                 {editingClashConfig?.nodeId === -1 ? t('dialog.clashConfig.close') : t('actions.cancel', { ns: 'common' })}
               </Button>
-              {editingClashConfig?.nodeId !== -1 && (
+              {editingClashConfig?.nodeId !== -1 && isAdmin && (
                 <Button
                   size='sm'
                   onClick={handleSaveClashConfig}

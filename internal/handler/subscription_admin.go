@@ -419,6 +419,20 @@ func NewSubscriptionListHandler(repo *storage.TrafficRepository) http.Handler {
 					}}
 				}
 			}
+
+			// 追加用户自己创建的订阅(套餐之外用户手动创建的),否则在订阅链接页面看不到
+			seen := make(map[int64]bool, len(files))
+			for _, f := range files {
+				seen[f.ID] = true
+			}
+			if own, oerr := repo.ListSubscribeFiles(r.Context()); oerr == nil {
+				for _, f := range own {
+					if f.CreatedBy == username && !seen[f.ID] {
+						files = append(files, f)
+						seen[f.ID] = true
+					}
+				}
+			}
 		}
 
 		// 从系统设置检查是否全局启用短链接
