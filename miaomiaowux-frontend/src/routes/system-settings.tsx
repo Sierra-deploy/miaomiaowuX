@@ -404,7 +404,8 @@ function SystemSettingsPage() {
       setCacheExpireMinutes(userConfig.cache_expire_minutes)
       setSyncTraffic(userConfig.sync_traffic)
       setNodeNameFilter(userConfig.node_name_filter || '剩余|流量|到期|订阅|时间|重置')
-      setEnableShortLink(userConfig.enable_short_link || false)
+      // 短链接是系统级开关,只由 shortLinkData(/short-link)驱动 + toggleShortLinkMutation 保存。
+      // 这里不能再用 per-user 的 userConfig.enable_short_link 覆盖它,否则刷新后被(默认 false)覆盖掉。
       setUseNewTemplateSystem(userConfig.use_new_template_system !== false) // 默认为 true
       setEnableProxyProvider(userConfig.enable_proxy_provider || false)
       setProxyGroupsSourceUrl(userConfig.proxy_groups_source_url || '')

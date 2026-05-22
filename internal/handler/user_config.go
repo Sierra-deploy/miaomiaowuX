@@ -195,11 +195,15 @@ func handleUpdateUserConfig(w http.ResponseWriter, r *http.Request, repo *storag
 		return
 	}
 
-	// 使用代理组源 URL 更新系统配置
-	systemConfig := storage.SystemConfig{
-		ProxyGroupsSourceURL:    proxyGroupsSourceURL,
-		ClientCompatibilityMode: payload.ClientCompatibilityMode,
+	// 只更新 system_config 的这两项。必须先读全量再改,否则 UpdateSystemConfig 会把其它系统设置
+	// (短链接 / 通知 / 各间隔 / 静默模式 / 妙妙屋功能 / 默认模板 …)全部清零 —— 这正是"系统设置概率性重置"的根因。
+	systemConfig, err := repo.GetSystemConfig(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("get system config: %w", err))
+		return
 	}
+	systemConfig.ProxyGroupsSourceURL = proxyGroupsSourceURL
+	systemConfig.ClientCompatibilityMode = payload.ClientCompatibilityMode
 	if err := repo.UpdateSystemConfig(r.Context(), systemConfig); err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("update system config: %w", err))
 		return
