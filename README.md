@@ -158,6 +158,9 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.1.1 (2026-05-23)
+- 🌈增加MCP服务，可以接入openclaw或hermes
+- 🛠️ fix:数据库增量更新顺序错误
 ### v0.1.0 (2026-05-22)
 - 🛠️ fix:测速代码丢失
 ### v0.0.10 (2026-05-22)
