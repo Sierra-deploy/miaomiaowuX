@@ -219,25 +219,37 @@ func (s *TokenStore) generateToken() (string, error) {
 
 func RequireToken(store *TokenStore, repo UserRepository, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 首先尝试标题
+		// 首先尝试 MM-Authorization 标题
 		token := strings.TrimSpace(r.Header.Get(AuthHeader))
+		// 兼容 Authorization: Bearer <token>(OpenClaw / MCP 客户端习惯)
+		if token == "" {
+			if bearer := strings.TrimSpace(r.Header.Get("Authorization")); bearer != "" {
+				token = strings.TrimSpace(strings.TrimPrefix(bearer, "Bearer "))
+			}
+		}
 		// 回退到查询参数（对于不支持自定义标头的 SSE）
 		if token == "" {
 			token = strings.TrimSpace(r.URL.Query().Get("token"))
 		}
 
-		// 首先检查是否是有效的会话 token
+		// 1) 会话 token
 		if username, ok := store.Lookup(token); ok {
 			ctx := ContextWithUsername(r.Context(), username)
 			next.ServeHTTP(w, r.WithContext(ctx))
 			return
 		}
 
-		// 如果不是会话 token，检查是否是 API token
 		if repo != nil {
+			// 2) 每用户 API 令牌(MCP / 程序化访问):解析为真实用户名,权限随该用户登录态
+			if username, ok := repo.ResolveAPIToken(r.Context(), token); ok && username != "" {
+				ctx := ContextWithUsername(r.Context(), username)
+				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
+			// 3) 全局 API token(兼容旧用法,授予管理员)
 			apiToken, err := repo.GetAPIToken(r.Context())
 			if err == nil && token == apiToken && apiToken != "" {
-				// API token 有效，设置特殊的管理员用户名
 				ctx := ContextWithUsername(r.Context(), "api-token-admin")
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
@@ -252,6 +264,8 @@ func RequireToken(store *TokenStore, repo UserRepository, next http.Handler) htt
 type UserRepository interface {
 	GetUser(ctx context.Context, username string) (User, error)
 	GetAPIToken(ctx context.Context) (string, error)
+	// ResolveAPIToken 用每用户 API 令牌(明文)解析所属用户名;未命中返回 ok=false。
+	ResolveAPIToken(ctx context.Context, token string) (username string, ok bool)
 }
 
 // User表示授权所需的基本用户信息。

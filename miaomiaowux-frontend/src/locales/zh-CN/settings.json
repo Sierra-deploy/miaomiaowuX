@@ -51,6 +51,25 @@
     "reset": "Token 已重置",
     "resetFailed": "重置 Token 失败"
   },
+  "apiToken": {
+    "title": "API 令牌",
+    "description": "供 MCP / 程序化访问(如接入 OpenClaw)。令牌权限与你的登录账号完全一致;明文仅创建时显示一次,请妥善保存。",
+    "nameLabel": "名称",
+    "namePlaceholder": "例如:openclaw",
+    "createButton": "生成令牌",
+    "created": "已生成,请立即复制明文",
+    "createFailed": "生成失败",
+    "tokenOnce": "令牌明文(仅显示一次,请立即复制)",
+    "openclawSnippet": "OpenClaw 配置片段(openclaw.json)",
+    "copySnippet": "复制配置片段",
+    "listTitle": "已生成的令牌",
+    "empty": "暂无令牌",
+    "lastUsed": "最近使用",
+    "neverUsed": "从未使用",
+    "revoke": "删除",
+    "revoked": "令牌已删除",
+    "revokeFailed": "删除失败"
+  },
   "shortLink": {
     "title": "订阅短链接",
     "hint": "重置所有订阅的短链接。短链接在订阅链接页面显示。",

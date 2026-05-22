@@ -51,6 +51,25 @@
     "reset": "Token has been reset",
     "resetFailed": "Failed to reset token"
   },
+  "apiToken": {
+    "title": "API Tokens",
+    "description": "For MCP / programmatic access (e.g. OpenClaw). A token has the exact same permissions as your account; the plaintext is shown only once at creation — save it now.",
+    "nameLabel": "Name",
+    "namePlaceholder": "e.g. openclaw",
+    "createButton": "Generate",
+    "created": "Created — copy the plaintext now",
+    "createFailed": "Failed to create",
+    "tokenOnce": "Token plaintext (shown once — copy it now)",
+    "openclawSnippet": "OpenClaw config snippet (openclaw.json)",
+    "copySnippet": "Copy snippet",
+    "listTitle": "Your tokens",
+    "empty": "No tokens yet",
+    "lastUsed": "last used",
+    "neverUsed": "never used",
+    "revoke": "Delete",
+    "revoked": "Token deleted",
+    "revokeFailed": "Failed to delete"
+  },
   "shortLink": {
     "title": "Subscription Short Links",
     "hint": "Reset all subscription short links. Short links are shown on the subscription page.",

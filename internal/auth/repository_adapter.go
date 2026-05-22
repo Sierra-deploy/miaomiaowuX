@@ -33,3 +33,8 @@ func (a *RepositoryAdapter) GetUser(ctx context.Context, username string) (User,
 func (a *RepositoryAdapter) GetAPIToken(ctx context.Context) (string, error) {
 	return a.repo.GetAPIToken(ctx)
 }
+
+// ResolveAPIToken 用每用户 API 令牌解析所属用户名。
+func (a *RepositoryAdapter) ResolveAPIToken(ctx context.Context, token string) (string, bool) {
+	return a.repo.ResolveUsernameByAPIToken(ctx, token)
+}

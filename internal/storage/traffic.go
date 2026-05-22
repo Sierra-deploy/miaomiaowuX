@@ -704,6 +704,24 @@ CREATE TABLE IF NOT EXISTS user_tokens (
 		return fmt.Errorf("migrate user_tokens: %w", err)
 	}
 
+	// 每用户 API 令牌(供 MCP / 程序化访问)。与订阅 token、全局 api_token 隔离;
+	// 库里只存 token 的 sha256(token_hash),明文仅创建时返回一次。鉴权时按 hash 解析出 username,
+	// 权限完全等同该用户登录态(普通用户令牌调 admin 接口会被 RequireAdmin 拦截)。
+	const userAPITokenSchema = `
+CREATE TABLE IF NOT EXISTS user_api_tokens (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    username     TEXT NOT NULL,
+    name         TEXT NOT NULL DEFAULT '',
+    token_hash   TEXT NOT NULL UNIQUE,
+    created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_used_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_user_api_tokens_username ON user_api_tokens(username);
+`
+	if _, err := r.db.Exec(userAPITokenSchema); err != nil {
+		return fmt.Errorf("migrate user_api_tokens: %w", err)
+	}
+
 	// 如果 user_short_code 列不存在，则将其添加到 user_tokens 表中（3 字符代码）
 	if err := r.ensureUserTokenColumn("user_short_code", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err

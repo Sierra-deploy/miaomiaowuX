@@ -439,6 +439,8 @@ function SettingsPage() {
                 </div>
               </CardContent>
             </Card>
+
+            <ApiTokensCard />
           </div>
         </div>
       </main>
@@ -698,5 +700,112 @@ function TwoFactorCard() {
         </DialogContent>
       </Dialog>
     </>
+  )
+}
+
+// 每用户 API 令牌:供 MCP / 程序化访问。明文仅创建时显示一次。
+function ApiTokensCard() {
+  const { t } = useTranslation('settings')
+  const queryClient = useQueryClient()
+  const [name, setName] = useState('')
+  const [newToken, setNewToken] = useState('') // 刚创建的明文,仅本次会话显示
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['api-tokens'],
+    queryFn: async () => (await api.get('/api/user/api-tokens')).data as { tokens: any[] },
+  })
+  const tokens = data?.tokens || []
+
+  const createMut = useMutation({
+    mutationFn: async () => (await api.post('/api/user/api-tokens', { name: name.trim() })).data,
+    onSuccess: (d) => {
+      setNewToken(d.token)
+      setName('')
+      queryClient.invalidateQueries({ queryKey: ['api-tokens'] })
+      toast.success(t('apiToken.created'))
+    },
+    onError: () => toast.error(t('apiToken.createFailed')),
+  })
+  const revokeMut = useMutation({
+    mutationFn: async (id: number) => api.delete(`/api/user/api-tokens/${id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['api-tokens'] })
+      toast.success(t('apiToken.revoked'))
+    },
+    onError: () => toast.error(t('apiToken.revokeFailed')),
+  })
+
+  const copy = (s: string) =>
+    navigator.clipboard?.writeText(s).then(() => toast.success(t('token.copied')), () => {})
+
+  const masterURL = typeof window !== 'undefined' ? window.location.origin : 'https://your-mmwx'
+  const snippet = `{
+  "mcp": {
+    "servers": {
+      "miaomiaowux": {
+        "url": "${masterURL}/mcp",
+        "transport": "streamable-http",
+        "headers": { "Authorization": "Bearer ${newToken || '<your-api-token>'}" }
+      }
+    }
+  }
+}`
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{t('apiToken.title')}</CardTitle>
+        <CardDescription>{t('apiToken.description')}</CardDescription>
+      </CardHeader>
+      <CardContent className='space-y-4'>
+        {/* 新建 */}
+        <div className='flex items-end gap-2'>
+          <div className='flex-1 space-y-1'>
+            <Label className='text-xs'>{t('apiToken.nameLabel')}</Label>
+            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t('apiToken.namePlaceholder')} />
+          </div>
+          <Button size='sm' onClick={() => createMut.mutate()} disabled={createMut.isPending}>
+            {t('apiToken.createButton')}
+          </Button>
+        </div>
+
+        {/* 刚创建的明文(仅此一次) */}
+        {newToken && (
+          <div className='space-y-2 rounded-md border border-primary/40 bg-primary/5 p-3'>
+            <Label className='text-primary text-xs'>{t('apiToken.tokenOnce')}</Label>
+            <div className='flex gap-2'>
+              <Input readOnly value={newToken} className='font-mono text-xs' />
+              <Button variant='outline' size='sm' className='shrink-0' onClick={() => copy(newToken)}>{t('token.copyButton')}</Button>
+            </div>
+            <Label className='text-xs'>{t('apiToken.openclawSnippet')}</Label>
+            <pre className='max-h-48 overflow-auto rounded bg-muted/60 p-2 text-[11px]'>{snippet}</pre>
+            <Button variant='ghost' size='sm' onClick={() => copy(snippet)}>{t('apiToken.copySnippet')}</Button>
+          </div>
+        )}
+
+        {/* 列表 */}
+        <div className='space-y-1.5'>
+          <Label className='text-xs'>{t('apiToken.listTitle')}</Label>
+          {isLoading ? (
+            <p className='text-muted-foreground text-xs'>{t('actions.loading', { ns: 'common' })}</p>
+          ) : tokens.length === 0 ? (
+            <p className='text-muted-foreground text-xs'>{t('apiToken.empty')}</p>
+          ) : tokens.map((tk) => (
+            <div key={tk.id} className='flex items-center justify-between rounded-md border px-3 py-1.5 text-xs'>
+              <div className='min-w-0'>
+                <span className='font-medium'>{tk.name || `#${tk.id}`}</span>
+                <span className='text-muted-foreground ml-2'>
+                  {new Date(tk.created_at).toLocaleDateString()}
+                  {tk.last_used_at ? ` · ${t('apiToken.lastUsed')} ${new Date(tk.last_used_at).toLocaleDateString()}` : ` · ${t('apiToken.neverUsed')}`}
+                </span>
+              </div>
+              <Button variant='ghost' size='sm' className='h-6 shrink-0 text-red-600 hover:text-red-700' disabled={revokeMut.isPending} onClick={() => revokeMut.mutate(tk.id)}>
+                {t('apiToken.revoke')}
+              </Button>
+            </div>
+          ))}
+        </div>
+      </CardContent>
+    </Card>
   )
 }

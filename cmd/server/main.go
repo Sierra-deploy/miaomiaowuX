@@ -21,6 +21,7 @@ import (
 	"miaomiaowux/internal/child"
 	"miaomiaowux/internal/event"
 	"miaomiaowux/internal/handler"
+	mcpserver "miaomiaowux/internal/mcp"
 	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/logger"
 	"miaomiaowux/internal/proxygroups"
@@ -269,6 +270,9 @@ func main() {
 	mux.Handle("/api/user/settings", auth.RequireToken(tokenStore, userRepo, handler.NewUserSettingsHandler(repo, tokenStore)))
 	mux.Handle("/api/user/config", auth.RequireToken(tokenStore, userRepo, handler.NewUserConfigHandler(repo)))
 	mux.Handle("/api/user/token", auth.RequireToken(tokenStore, userRepo, handler.NewUserTokenHandler(repo)))
+	// 每用户 API 令牌(供 MCP / 程序化访问);明文仅创建时返回一次
+	mux.Handle("/api/user/api-tokens", auth.RequireToken(tokenStore, userRepo, handler.NewUserAPITokensHandler(repo)))
+	mux.Handle("/api/user/api-tokens/", auth.RequireToken(tokenStore, userRepo, handler.NewUserAPITokensHandler(repo)))
 	mux.Handle("/api/user/external-subscriptions", auth.RequireToken(tokenStore, userRepo, handler.NewExternalSubscriptionsHandler(repo)))
 	mux.Handle("/api/user/external-subscriptions/nodes", auth.RequireToken(tokenStore, userRepo, handler.NewExternalSubscriptionNodesHandler(repo)))
 	mux.Handle("/api/user/external-subscriptions/check-filter", auth.RequireToken(tokenStore, userRepo, handler.NewExternalSubscriptionCheckFilterHandler(repo)))
@@ -793,6 +797,9 @@ func main() {
 		// 否则，传递给 Web 处理程序
 		web.Handler().ServeHTTP(w, r)
 	})
+
+	// 嵌入式 MCP server(streamable-HTTP):供 OpenClaw 等 agent 运维。鉴权在工具调用时按 API 令牌经 mux 复用现有链。
+	mux.Handle("/mcp", mcpserver.NewHandler(mux))
 
 	silentModeManager := handler.NewSilentModeManager(repo, tokenStore)
 	handlerWithSilentMode := silentModeManager.Middleware(mux)
