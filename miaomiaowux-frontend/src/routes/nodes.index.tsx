@@ -38,7 +38,9 @@ import { useMediaQuery } from '@/hooks/use-media-query'
 import { InboundWizard } from '@/components/xray/inbound-wizard'
 import { NodeRoutingDialog } from '@/components/node-routing-dialog'
 import { TunnelManagerDialog } from '@/components/tunnel-manager-dialog'
-import { NodeSpeedTestButton } from '@/components/node-speedtest-button'
+import { SpeedTestDialog } from '@/components/speedtest-dialog'
+import { useLicenseFeature } from '@/hooks/use-license'
+import { Gauge } from 'lucide-react'
 import { clashConfigToOutbound } from '@/lib/xray-config-generator'
 import {
   DndContext,
@@ -367,6 +369,7 @@ function NodesPage() {
     staleTime: 5 * 60 * 1000,
   })
   const isAdmin = Boolean(profile?.is_admin)
+  const { hasFeature: hasSpeedTest } = useLicenseFeature('speed_test')
 
   // 视口宽度判断 - 用于条件渲染 SortableContext，避免重复注册导致拖动偏移
   const isDesktop = useMediaQuery('(min-width: 1024px)')
@@ -399,6 +402,8 @@ function NodesPage() {
   const [routingDialogOpen, setRoutingDialogOpen] = useState(false)
   const [routingSourceNode, setRoutingSourceNode] = useState<any>(null)
   const [tunnelDialogOpen, setTunnelDialogOpen] = useState(false)
+  const [speedDialogOpen, setSpeedDialogOpen] = useState(false) // 节点测速工作台是否打开
+  const [speedDialogMin, setSpeedDialogMin] = useState(false)   // 是否收起为右侧悬浮按钮(点外部时,而非点 X)
   const [routingServerId, setRoutingServerId] = useState<number | null>(null)
   const [routingServerName, setRoutingServerName] = useState<string>('')
 
@@ -2459,6 +2464,16 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                       <RouteIcon className='h-4 w-4 mr-1' />
                       {t('actions.tunnelManager')}
                     </Button>
+                    {hasSpeedTest && (
+                      <Button
+                        variant='outline'
+                        size='sm'
+                        onClick={() => { setSpeedDialogOpen(true); setSpeedDialogMin(false) }}
+                      >
+                        <Gauge className='h-4 w-4 mr-1' />
+                        {t('speedtest.dialogTitle')}
+                      </Button>
+                    )}
                     <Button
                       variant='outline'
                       size='sm'
@@ -2884,9 +2899,6 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                     <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                   </Tooltip>
                                 )}
-                                {node.isSaved && node.dbNode && (
-                                  <NodeSpeedTestButton nodeId={node.dbNode.id} nodeName={node.dbNode.node_name} />
-                                )}
                                 {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
                                   <Tooltip>
                                     <TooltipTrigger asChild>
@@ -3255,9 +3267,6 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                     </Tooltip>
                                   )}
-                                  {node.isSaved && node.dbNode && (
-                                    <NodeSpeedTestButton nodeId={node.dbNode.id} nodeName={node.dbNode.node_name} />
-                                  )}
                                   {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
                                     <Tooltip>
                                       <TooltipTrigger asChild>
@@ -3526,9 +3535,6 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       </TooltipTrigger>
                                       <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                     </Tooltip>
-                                  )}
-                                  {node.isSaved && node.dbNode && (
-                                    <NodeSpeedTestButton nodeId={node.dbNode.id} nodeName={node.dbNode.node_name} />
                                   )}
                                   {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
                                     <Tooltip>
@@ -4824,6 +4830,23 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
         open={tunnelDialogOpen}
         onOpenChange={setTunnelDialogOpen}
       />
+      <SpeedTestDialog
+        open={speedDialogOpen}
+        nodes={savedNodes}
+        onMinimize={() => { setSpeedDialogOpen(false); setSpeedDialogMin(true) }}
+        onClose={() => { setSpeedDialogOpen(false); setSpeedDialogMin(false) }}
+      />
+      {/* 收起态:屏幕右侧垂直居中悬浮按钮,点击重新打开测速工作台 */}
+      {hasSpeedTest && speedDialogMin && !speedDialogOpen && (
+        <button
+          type='button'
+          onClick={() => { setSpeedDialogOpen(true); setSpeedDialogMin(false) }}
+          title={t('speedtest.dialogTitle')}
+          className='fixed right-0 top-1/2 z-50 -translate-y-1/2 rounded-l-lg bg-[#d97757] px-2 py-3 text-white shadow-lg hover:bg-[#c66647]'
+        >
+          <Gauge className='h-5 w-5' />
+        </button>
+      )}
     </div>
   )
 }

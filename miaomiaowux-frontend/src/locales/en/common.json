@@ -1,4 +1,10 @@
 {
+  "time": {
+    "justNow": "just now",
+    "minutesAgo": "{{n}}m ago",
+    "hoursAgo": "{{n}}h ago",
+    "daysAgo": "{{n}}d ago"
+  },
   "nav": {
     "trafficInfo": "Traffic",
     "nodeManagement": "Nodes",
