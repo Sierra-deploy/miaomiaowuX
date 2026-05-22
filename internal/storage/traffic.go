@@ -640,6 +640,42 @@ CREATE TABLE IF NOT EXISTS traffic_records (
 		return fmt.Errorf("migrate traffic_records: %w", err)
 	}
 
+	// 节点测速结果(PRO speed_test)。source: master_local(主控本机) / 预留 home_tester。
+	const speedTestResultsSchema = `
+CREATE TABLE IF NOT EXISTS speed_test_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id INTEGER NOT NULL,
+    node_name TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'master_local',
+    down_mbps REAL NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT -1,
+    test_bytes INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'ok',
+    error TEXT NOT NULL DEFAULT '',
+    tested_by TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_speed_test_node ON speed_test_results(node_id);
+`
+	if _, err := r.db.Exec(speedTestResultsSchema); err != nil {
+		return fmt.Errorf("migrate speed_test_results: %w", err)
+	}
+
+	// 家用测速端(PRO speed_test Phase 2):反向 WS 连入主控,凭 token_hash 认证。
+	const speedTestersSchema = `
+CREATE TABLE IF NOT EXISTS speed_testers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL DEFAULT '',
+    token_hash TEXT NOT NULL UNIQUE,
+    created_by TEXT NOT NULL DEFAULT '',
+    last_seen TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+`
+	if _, err := r.db.Exec(speedTestersSchema); err != nil {
+		return fmt.Errorf("migrate speed_testers: %w", err)
+	}
+
 	const userTrafficRecordsSchema = `
 CREATE TABLE IF NOT EXISTS user_traffic_records (
     username TEXT NOT NULL,

@@ -95,6 +95,30 @@
     "config": "配置",
     "copy": "复制"
   },
+  "speedtest": {
+    "running": "正在测速 {{name}} …",
+    "result": "测速完成:下行 {{mbps}} Mbps,延迟 {{ms}} ms",
+    "failed": "测速失败 {{err}}",
+    "proRequired": "节点测速是 PRO 功能,请升级许可证",
+    "fromMaster": "主控本机测速",
+    "fromTester": "经「{{name}}」测速",
+    "testerManage": "管理测速端",
+    "testerManageDesc": "家用测速端部署在你家里的服务器/电脑,反向连入主控,从家庭网络视角测节点速度。",
+    "testerName": "名称",
+    "testerCreate": "新建",
+    "testerCreated": "已创建,请复制令牌(仅显示一次)",
+    "testerCreateFailed": "创建失败",
+    "testerTokenOnce": "配对令牌(仅显示一次,请立即复制)",
+    "testerRunCmd": "在家用机器上运行",
+    "testerRunHint": "在你家里的服务器/电脑运行此命令(需可执行 mmwx-speedtester),即可反向连入主控。",
+    "testerList": "已配对测速端",
+    "testerNone": "暂无测速端。",
+    "testerRevoked": "已吊销",
+    "testerRevokeFailed": "吊销失败",
+    "online": "在线",
+    "offline": "离线",
+    "copied": "已复制"
+  },
   "toast": {
     "saveOrderFailed": "保存排序失败: {{error}}",
     "nodeNameUpdated": "节点名称已更新",
@@ -324,6 +348,7 @@
   },
   "tooltip": {
     "nodeRouting": "节点路由",
+    "speedtest": "测速",
     "tempSubscription": "生成临时订阅",
     "copyUri": "复制 URI",
     "resolveIp": "解析IP地址",

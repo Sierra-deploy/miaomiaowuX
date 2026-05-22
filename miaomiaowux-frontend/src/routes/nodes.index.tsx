@@ -37,6 +37,7 @@ import { Twemoji } from '@/components/twemoji'
 import { useMediaQuery } from '@/hooks/use-media-query'
 import { InboundWizard } from '@/components/xray/inbound-wizard'
 import { NodeRoutingDialog } from '@/components/node-routing-dialog'
+import { NodeSpeedTestButton } from '@/components/node-speedtest-button'
 import { clashConfigToOutbound } from '@/lib/xray-config-generator'
 import {
   DndContext,
@@ -2803,6 +2804,9 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                     <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                   </Tooltip>
                                 )}
+                                {node.isSaved && node.dbNode && (
+                                  <NodeSpeedTestButton nodeId={node.dbNode.id} nodeName={node.dbNode.node_name} />
+                                )}
                                 {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
                                   <Tooltip>
                                     <TooltipTrigger asChild>
@@ -3170,6 +3174,9 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                     </Tooltip>
                                   )}
+                                  {node.isSaved && node.dbNode && (
+                                    <NodeSpeedTestButton nodeId={node.dbNode.id} nodeName={node.dbNode.node_name} />
+                                  )}
                                   {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
                                     <Tooltip>
                                       <TooltipTrigger asChild>
@@ -3437,6 +3444,9 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       </TooltipTrigger>
                                       <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                     </Tooltip>
+                                  )}
+                                  {node.isSaved && node.dbNode && (
+                                    <NodeSpeedTestButton nodeId={node.dbNode.id} nodeName={node.dbNode.node_name} />
                                   )}
                                   {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
                                     <Tooltip>

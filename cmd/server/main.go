@@ -360,6 +360,11 @@ func main() {
 	mux.Handle("/api/admin/packages/", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageDeleteHandler(repo, remoteManageHandler, limiterPusher)))
 	// 服务器分享(PRO):拥有方生成/管理分享令牌
 	mux.Handle("/api/admin/server-share/", auth.RequireAdmin(tokenStore, userRepo, handler.NewServerShareHandler(repo, licenseManager)))
+	speedTesterWS := handler.NewSpeedTesterWSHandler(repo)
+	mux.Handle("/api/speedtest/tester/ws", speedTesterWS) // 家用测速端反向连入(token 认证,无 JWT)
+	speedTestHandler := handler.NewSpeedTestHandler(repo, licenseManager)
+	speedTestHandler.SetTesterWS(speedTesterWS)
+	mux.Handle("/api/admin/speedtest/", auth.RequireAdmin(tokenStore, userRepo, speedTestHandler))
 	// 联邦入口(分享令牌鉴权,供其他主控间接管理被分享服务器)
 	federationHandler := handler.NewFederationHandler(repo, remoteManageHandler, licenseManager)
 	mux.Handle("/api/federation/manage", federationHandler)

@@ -95,6 +95,30 @@
     "config": "Config",
     "copy": "Copy"
   },
+  "speedtest": {
+    "running": "Testing {{name}} …",
+    "result": "Done: down {{mbps}} Mbps, latency {{ms}} ms",
+    "failed": "Speed test failed {{err}}",
+    "proRequired": "Speed test is a PRO feature, please upgrade your license",
+    "fromMaster": "Test from master",
+    "fromTester": "Test via \"{{name}}\"",
+    "testerManage": "Manage testers",
+    "testerManageDesc": "A home tester runs on your home server/PC, connects back to the master, and tests node speed from your home network's perspective.",
+    "testerName": "Name",
+    "testerCreate": "Create",
+    "testerCreated": "Created, copy the token (shown once)",
+    "testerCreateFailed": "Create failed",
+    "testerTokenOnce": "Pairing token (shown once, copy now)",
+    "testerRunCmd": "Run on your home machine",
+    "testerRunHint": "Run this on your home server/PC (needs the mmwx-speedtester binary) to connect back to the master.",
+    "testerList": "Paired testers",
+    "testerNone": "No testers yet.",
+    "testerRevoked": "Revoked",
+    "testerRevokeFailed": "Revoke failed",
+    "online": "Online",
+    "offline": "Offline",
+    "copied": "Copied"
+  },
   "toast": {
     "saveOrderFailed": "Failed to save order: {{error}}",
     "nodeNameUpdated": "Node name updated",
@@ -324,6 +348,7 @@
   },
   "tooltip": {
     "nodeRouting": "Node Routing",
+    "speedtest": "Speed Test",
     "tempSubscription": "Generate Temp Subscription",
     "copyUri": "Copy URI",
     "resolveIp": "Resolve IP Address",
