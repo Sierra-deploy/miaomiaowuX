@@ -158,6 +158,8 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.1.0 (2026-05-22)
+- 🛠️ fix:测速代码丢失
 ### v0.0.10 (2026-05-22)
 - 🌈主控支持mihomo测速
 - 🌈优化tunnel的配置流程与管理
