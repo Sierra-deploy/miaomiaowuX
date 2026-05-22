@@ -158,6 +158,17 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.0.10 (2026-05-22)
+- 🌈主控支持mihomo测速
+- 🌈优化tunnel的配置流程与管理
+- 🌈增加xray负载均衡出站配置
+- 🌈增加节点测速
+- 🌈支持HY2协议
+- 🛠️ fix:Dokcer镜像打包失败
+- 🛠️ fix:上报间隔配置不生效
+- 🛠️ fix:服务器轮换密钥时短暂假离线
+- 🛠️ fix:流量信息页面流量始终为0
+- 🛠️ fix:系统配置异常丢失
 ### v0.0.9 (2026-05-21)
 - 🌈 同步妙妙屋订阅管理
 - 🌈 增加限速单位换算提示
