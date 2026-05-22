@@ -48,8 +48,14 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 		return
 	}
 
-	// 跳过 api 和 tunnel
-	if event.Tag == "api" || event.Protocol == "tunnel" {
+	if event.Tag == "api" {
+		return
+	}
+	// tunnel:默认跳过(不进节点表);但「转发已有节点」(ForwardNodeID>0)时,克隆源节点生成配套节点
+	if event.Protocol == "tunnel" {
+		if event.ForwardNodeID > 0 {
+			l.createForwardTunnelNode(ctx, event, server)
+		}
 		return
 	}
 
@@ -121,6 +127,59 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 		log.Printf("[NodeSync] Failed to create node: %v", err)
 	} else {
 		log.Printf("[NodeSync] Created node: %s", nodeName)
+	}
+}
+
+// createForwardTunnelNode 为「转发已有节点」生成的 tunnel 创建配套节点:
+// 配置克隆源节点,但 name 拼接 " | Tunnel"、server 改为 tunnel 服务器 IP、port 改为 tunnel 监听端口、
+// inbound_tag = tunnel tag、original_server = tunnel 服务器名(便于管理/删除时定位)。
+func (l *NodeSyncListener) createForwardTunnelNode(ctx context.Context, event InboundEvent, server *storage.RemoteServer) {
+	src, err := l.repo.GetNodeByID(ctx, event.ForwardNodeID)
+	if err != nil {
+		log.Printf("[NodeSync] forward-tunnel: 源节点 %d 不存在: %v", event.ForwardNodeID, err)
+		return
+	}
+	if server.IPAddress == "" {
+		log.Printf("[NodeSync] forward-tunnel: 服务器 %s 无 IP,跳过", server.Name)
+		return
+	}
+
+	nodeName := src.NodeName + " | Tunnel"
+	if exists, _ := l.repo.CheckNodeNameExists(ctx, nodeName, "admin", 0); exists {
+		log.Printf("[NodeSync] forward-tunnel: 节点已存在: %s", nodeName)
+		return
+	}
+
+	// 克隆源节点 clash 配置,改 name/server/port(端口取 tunnel 监听端口)
+	var clashMap map[string]any
+	if err := json.Unmarshal([]byte(src.ClashConfig), &clashMap); err != nil {
+		log.Printf("[NodeSync] forward-tunnel: 解析源节点 clash 配置失败: %v", err)
+		return
+	}
+	clashMap["name"] = nodeName
+	clashMap["server"] = server.IPAddress
+	clashMap["port"] = event.Port
+	clashJSON, err := json.Marshal(clashMap)
+	if err != nil {
+		log.Printf("[NodeSync] forward-tunnel: 序列化 clash 配置失败: %v", err)
+		return
+	}
+
+	node := storage.Node{
+		Username:       "admin",
+		NodeName:       nodeName,
+		Protocol:       src.Protocol,
+		ClashConfig:    string(clashJSON),
+		ParsedConfig:   string(clashJSON),
+		Enabled:        true,
+		Tag:            fmt.Sprintf("远程:%s", server.Name),
+		OriginalServer: server.Name,
+		InboundTag:     event.Tag,
+	}
+	if _, err := l.repo.CreateNode(ctx, node); err != nil {
+		log.Printf("[NodeSync] forward-tunnel: 创建配套节点失败: %v", err)
+	} else {
+		log.Printf("[NodeSync] forward-tunnel: 已创建配套节点: %s (-> %s:%d)", nodeName, server.IPAddress, event.Port)
 	}
 }
 

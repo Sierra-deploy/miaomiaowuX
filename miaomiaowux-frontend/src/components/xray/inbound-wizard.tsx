@@ -156,7 +156,7 @@ interface InboundWizardProps {
   servers: Server[]
   selectedServerIds: number[]
   onCancel: () => void
-  onSubmit: (serverIds: number[], inbound: any, tag: string, nodeName?: string) => Promise<void>
+  onSubmit: (serverIds: number[], inbound: any, tag: string, nodeName?: string, forwardNodeId?: number) => Promise<void>
   skipServerSelection?: boolean
   usedPorts?: number[]
 }
@@ -256,6 +256,31 @@ export function InboundWizard({
   const [customDomainInput, setCustomDomainInput] = useState('')
   const [customDomainProbing, setCustomDomainProbing] = useState(false)
   const simpleRealityAutoLoaded = useRef(false)
+
+  // Tunnel「转发已有节点」:拉取节点表,解析 clash_config 得到 server:port,供 dokodemo 自动配置
+  const { data: forwardNodes = [] } = useQuery({
+    queryKey: ['forward-nodes'],
+    queryFn: async () => {
+      const res = await api.get('/api/admin/nodes')
+      const nodes = res.data.nodes || []
+      return nodes
+        .map((n: any) => {
+          let server = ''
+          let port = 0
+          try {
+            const c = JSON.parse(n.clash_config || '{}')
+            server = c.server || ''
+            port = Number(c.port) || 0
+          } catch {
+            /* 忽略解析失败的节点 */
+          }
+          return { id: n.id, name: n.node_name, server, port }
+        })
+        .filter((n: any) => n.server && n.port)
+    },
+    enabled: selectedProtocol === 'Tunnel',
+  })
+  const [forwardNodeId, setForwardNodeId] = useState<number | null>(null)
 
   // Node name + flag picker
   const [nodeName, setNodeName] = useState('')
@@ -495,6 +520,8 @@ export function InboundWizard({
   }
 
   useEffect(() => {
+    // tunnel 转发已有节点时 tag 用节点名生成,不让默认 tag 覆盖
+    if (selectedProtocol === 'Tunnel' && forwardNodeId) return
     const defaultTag = buildDefaultTag(formData.port)
 
     // Only update when user hasn't manually modified the tag
@@ -626,6 +653,70 @@ export function InboundWizard({
     } while (used.has(port))
     return port
   }
+
+  // tunnel tag 清洗:节点名可能含 emoji/空格/中文,转成 xray 安全的 tag(tunnel-<slug>-<port>)
+  const sanitizeTunnelTag = (name: string, port: number) => {
+    const slug = (name || 'node')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 40)
+    return `tunnel-${slug || 'node'}-${port}`
+  }
+
+  // 选「转发已有节点」时自动配置 dokodemo:监听 0.0.0.0、监听端口=节点端口、转发到节点 server:port、tcp+udp、跟随重定向、嗅探
+  const applyForwardNode = (nodeIdStr: string) => {
+    const nid = Number(nodeIdStr)
+    setForwardNodeId(nid)
+    const node = forwardNodes.find((n: any) => n.id === nid)
+    if (!node) return
+    setFormData((prev: any) => ({
+      ...prev,
+      listen: '0.0.0.0',
+      port: node.port,
+      sniffing: true,
+      address: node.server,
+      forwardPort: node.port,
+      network: 'tcp,udp',
+      followRedirect: true,
+      tag: sanitizeTunnelTag(node.name, node.port),
+    }))
+    if (isSimpleMode) setNodeName(node.name)
+  }
+
+  // tunnel 转发节点时,监听端口 = 节点端口;若该端口已被本服务器其它入站占用则冲突
+  const forwardPortConflict =
+    selectedProtocol === 'Tunnel' &&
+    forwardNodeId != null &&
+    resolvedUsedPorts.includes(Number(formData.port))
+
+  const renderForwardNodeSelect = () => (
+    <div className='space-y-2'>
+      <Label>{t('wizard.forwardExistingNode')}</Label>
+      <Select
+        value={forwardNodeId ? String(forwardNodeId) : ''}
+        onValueChange={applyForwardNode}
+      >
+        <SelectTrigger>
+          <SelectValue placeholder={t('wizard.forwardNodePlaceholder')} />
+        </SelectTrigger>
+        <SelectContent>
+          {forwardNodes.map((n: any) => (
+            <SelectItem key={n.id} value={String(n.id)}>
+              {n.name} ({n.server}:{n.port})
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <p className='text-muted-foreground text-xs'>{t('wizard.forwardNodeDesc')}</p>
+      {forwardPortConflict && (
+        <p className='text-destructive text-xs'>
+          {t('wizard.forwardPortConflict', { port: formData.port })}
+        </p>
+      )}
+    </div>
+  )
 
   const isSelfDomain = (domain: string, serverMap?: Record<string, DomainServerInfo>) => {
     const servers = serverMap || domainServers
@@ -962,7 +1053,10 @@ export function InboundWizard({
       inbound.cert_id = formData.cert_id
     }
 
-    await onSubmit(effectiveServerIds, inbound, tag, customNodeName)
+    // tunnel「转发已有节点」时把源节点 ID 传给父级,用于创建配套节点
+    const fwdId =
+      selectedProtocol === 'Tunnel' && forwardNodeId ? forwardNodeId : undefined
+    await onSubmit(effectiveServerIds, inbound, tag, customNodeName, fwdId)
   }
 
   // Get current field sets based on selections
@@ -1133,7 +1227,8 @@ export function InboundWizard({
                     {/* Simple mode: left form, right JSON preview */}
                     <div className='flex gap-6'>
                       <div className='min-w-0 flex-1 space-y-6'>
-                        {/* Node Name */}
+                        {/* Node Name — tunnel 转发节点时隐藏(节点名自动取自所选节点) */}
+                        {selectedProtocol !== 'Tunnel' && (
                         <Card>
                           <CardHeader>
                             <CardTitle>{t('wizard.nodeName')}</CardTitle>
@@ -1176,6 +1271,20 @@ export function InboundWizard({
                             </div>
                           </CardContent>
                         </Card>
+                        )}
+
+                        {/* Tunnel 转发已有节点(简易模式)*/}
+                        {selectedProtocol === 'Tunnel' && (
+                          <Card>
+                            <CardHeader>
+                              <CardTitle>{t('wizard.forwardNodeTitle')}</CardTitle>
+                              <CardDescription>
+                                {t('wizard.forwardNodeCardDesc')}
+                              </CardDescription>
+                            </CardHeader>
+                            <CardContent>{renderForwardNodeSelect()}</CardContent>
+                          </Card>
+                        )}
 
                         {/* REALITY Domain Selection */}
                         {isRealitySecurity && (
@@ -1389,7 +1498,7 @@ export function InboundWizard({
                               />
                             </CardContent>
                           </Card>
-                        ) : (
+                        ) : selectedProtocol === 'Tunnel' ? null : (
                           <Card>
                             <CardHeader>
                               <CardTitle>{t('wizard.simpleModeTitle')}</CardTitle>
@@ -1712,6 +1821,9 @@ export function InboundWizard({
                             </CardDescription>
                           </CardHeader>
                           <CardContent className='space-y-4'>
+                            {/* Tunnel 转发已有节点(专家模式):自动填充下面字段,仍可手动修改 */}
+                            {selectedProtocol === 'Tunnel' &&
+                              renderForwardNodeSelect()}
                             {selectedProtocol === 'VLESS' ? (
                               <>
                                 <VlessDecryptionField

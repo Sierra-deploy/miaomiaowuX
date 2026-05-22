@@ -37,6 +37,7 @@ import { Twemoji } from '@/components/twemoji'
 import { useMediaQuery } from '@/hooks/use-media-query'
 import { InboundWizard } from '@/components/xray/inbound-wizard'
 import { NodeRoutingDialog } from '@/components/node-routing-dialog'
+import { TunnelManagerDialog } from '@/components/tunnel-manager-dialog'
 import { NodeSpeedTestButton } from '@/components/node-speedtest-button'
 import { clashConfigToOutbound } from '@/lib/xray-config-generator'
 import {
@@ -78,6 +79,7 @@ type ParsedNode = {
   enabled: boolean
   tag: string
   original_server: string
+  original_domain: string
   inbound_tag: string
   chain_proxy_node_id: number | null
   created_at: string
@@ -396,6 +398,7 @@ function NodesPage() {
 
   const [routingDialogOpen, setRoutingDialogOpen] = useState(false)
   const [routingSourceNode, setRoutingSourceNode] = useState<any>(null)
+  const [tunnelDialogOpen, setTunnelDialogOpen] = useState(false)
   const [routingServerId, setRoutingServerId] = useState<number | null>(null)
   const [routingServerName, setRoutingServerName] = useState<string>('')
 
@@ -582,6 +585,70 @@ function NodesPage() {
 
   const savedNodes = useMemo(() => nodesData?.nodes ?? [], [nodesData?.nodes])
 
+  // 所有 tunnel 入站(跨远程/分享服务器),用于节点行「被 tunnel 转发」标识
+  const { data: tunnelsData } = useQuery({
+    queryKey: ['tunnels'],
+    queryFn: async () => {
+      const res = await api.get('/api/admin/tunnels')
+      return (res.data.tunnels || []) as Array<{
+        server_id: number
+        server_name: string
+        is_federated: boolean
+        tag: string
+        listen_port: number
+        target_address: string
+        target_port: number
+        network: string
+      }>
+    },
+    enabled: isAdmin && Boolean(auth.accessToken),
+    staleTime: 30_000,
+  })
+  const tunnels = useMemo(() => tunnelsData || [], [tunnelsData])
+
+  // 节点 server:port → 转发它的 tunnel 列表(用于行内标签 hover 显示)
+  const tunnelsByTarget = useMemo(() => {
+    const map = new Map<string, typeof tunnels>()
+    for (const tn of tunnels) {
+      const key = `${tn.target_address}:${tn.target_port}`
+      const arr = map.get(key) || []
+      arr.push(tn)
+      map.set(key, arr)
+    }
+    return map
+  }, [tunnels])
+
+  // 节点行「被 tunnel 转发」标签:匹配 tunnel.target == node.server:port,hover 显示哪个 tunnel
+  const renderForwardedBadge = (node: any) => {
+    if (!node.parsed?.server || !node.parsed?.port) return null
+    const fwd = tunnelsByTarget.get(`${node.parsed.server}:${node.parsed.port}`)
+    if (!fwd || fwd.length === 0) return null
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge
+            variant='outline'
+            className='gap-1 text-[10px] border-orange-300 text-orange-600 dark:text-orange-400'
+            onClick={(e) => e.stopPropagation()}
+          >
+            <RouteIcon className='h-3 w-3' />
+            {t('nodeList.forwardedByTunnel')}
+          </Badge>
+        </TooltipTrigger>
+        <TooltipContent>
+          <div className='space-y-0.5 text-xs'>
+            <div className='font-medium'>{t('nodeList.forwardedByTunnelTip')}</div>
+            {fwd.map((tn) => (
+              <div key={`${tn.server_id}-${tn.tag}`} className='font-mono'>
+                {tn.server_name}:{tn.listen_port} · {tn.tag}
+              </div>
+            ))}
+          </div>
+        </TooltipContent>
+      </Tooltip>
+    )
+  }
+
   // 远程服务器列表（添加节点用）
   const { data: remoteServersData } = useQuery({
     queryKey: ['remote-servers'],
@@ -594,7 +661,7 @@ function NodesPage() {
   const remoteServers = useMemo(() => (remoteServersData?.servers || []).filter(s => s.status === 'connected'), [remoteServersData])
 
   // 添加节点：提交入站 → 创建 freedom 出站（单服务器）
-  const handleQuickCreateSubmit = async (serverIds: number[], inbound: any, tag: string, nodeName?: string) => {
+  const handleQuickCreateSubmit = async (serverIds: number[], inbound: any, tag: string, nodeName?: string, forwardNodeId?: number) => {
     if (serverIds.length === 0) {
       toast.error(t('toast.selectServer'))
       return
@@ -624,6 +691,10 @@ function NodesPage() {
         }
         if (nodeName) {
           inboundPayload.node_name = nodeName
+        }
+        // tunnel「转发已有节点」:携带源节点 ID,后端据此创建「<源节点名> | Tunnel」配套节点
+        if (forwardNodeId) {
+          inboundPayload.forward_node_id = forwardNodeId
         }
         const inboundRes = await api.post(`/api/admin/remote/inbounds?server_id=${serverId}`, inboundPayload)
         if (!inboundRes.data.success) {
@@ -2383,6 +2454,14 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                     <Button
                       variant='outline'
                       size='sm'
+                      onClick={() => setTunnelDialogOpen(true)}
+                    >
+                      <RouteIcon className='h-4 w-4 mr-1' />
+                      {t('actions.tunnelManager')}
+                    </Button>
+                    <Button
+                      variant='outline'
+                      size='sm'
                       onClick={() => {
                         toast.promise(
                           api.post('/api/admin/sync-external-subscriptions'),
@@ -2733,6 +2812,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                               ) : (
                                 <div className='font-medium text-sm break-all line-clamp-2'><Twemoji>{node.name || t('nodeList.unknown')}</Twemoji></div>
                               )}
+                              {renderForwardedBadge(node)}
                             </div>
                             {/* 编辑、交换按钮 */}
                             {editingNode?.id !== node.id && (
@@ -3089,6 +3169,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       {node.isSaved && (
                                         <Check className='size-4 text-green-600 shrink-0' />
                                       )}
+                                      {renderForwardedBadge(node)}
                                     </div>
                                     {/* 服务器地址显示在节点名称下方 */}
                                     {node.parsed && (
@@ -3388,6 +3469,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   {node.isSaved && (
                                     <Check className='size-4 text-green-600 shrink-0' />
                                   )}
+                                  {renderForwardedBadge(node)}
                                   {(isAdmin || !node.isSaved) && (
                                   <Button
                                     variant='ghost'
@@ -3596,7 +3678,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                         )
                                       })()
                                     )}
-                                    {isAdmin && node.isSaved && node.dbNode?.original_server && (
+                                    {isAdmin && node.isSaved && node.dbNode?.original_domain && (
                                       <Button
                                         variant='ghost'
                                         size='sm'
@@ -4738,6 +4820,10 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
           allNodes={savedNodes}
         />
       )}
+      <TunnelManagerDialog
+        open={tunnelDialogOpen}
+        onOpenChange={setTunnelDialogOpen}
+      />
     </div>
   )
 }

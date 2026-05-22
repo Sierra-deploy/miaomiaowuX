@@ -1389,6 +1389,7 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 						protocol, _ := inbound["protocol"].(string)
 						port, _ := inbound["port"].(float64)
 						customNodeName, _ := inboundReq["node_name"].(string)
+						forwardNodeID, _ := inboundReq["forward_node_id"].(float64) // tunnel「转发已有节点」时携带源节点 ID
 
 						h.cleanupTunnelRouteForReality(r.Context(), id, inbound)
 
@@ -1398,13 +1399,14 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 							inboundAny[k] = v
 						}
 						event.GetBus().PublishAsync(event.InboundEvent{
-							Type:     event.EventInboundAdded,
-							ServerID: id,
-							Tag:      tag,
-							Protocol: protocol,
-							Port:     int(port),
-							Inbound:  inboundAny,
-							NodeName: customNodeName,
+							Type:          event.EventInboundAdded,
+							ServerID:      id,
+							Tag:           tag,
+							Protocol:      protocol,
+							Port:          int(port),
+							Inbound:       inboundAny,
+							NodeName:      customNodeName,
+							ForwardNodeID: int64(forwardNodeID),
 						})
 					}
 				} else if actionLower == "remove" {

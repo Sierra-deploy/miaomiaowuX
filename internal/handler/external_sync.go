@@ -572,9 +572,9 @@ func syncSingleExternalSubscription(ctx context.Context, client *http.Client, re
 			// 更新现有节点
 			oldNodeName := existingNode.NodeName
 
-			// 如果节点做过 IP 解析（OriginalServer 非空），保留解析后的 IP
+			// 如果节点做过 IP 解析（OriginalDomain 非空），保留解析后的 IP
 			var preservedIP string
-			if existingNode.OriginalServer != "" {
+			if existingNode.OriginalDomain != "" {
 				var currentClash map[string]any
 				if err := json.Unmarshal([]byte(existingNode.ClashConfig), &currentClash); err == nil {
 					if s, ok := currentClash["server"].(string); ok {
@@ -591,23 +591,23 @@ func syncSingleExternalSubscription(ctx context.Context, client *http.Client, re
 			existingNode.Enabled = node.Enabled
 			existingNode.Tag = node.Tag
 
-			// 恢复 IP 解析：把解析后的 IP 写回新配置，更新 OriginalServer 为新订阅的域名
+			// 恢复 IP 解析：把解析后的 IP 写回新配置，更新 OriginalDomain 为新订阅的域名
 			if preservedIP != "" {
 				var newClash map[string]any
 				if err := json.Unmarshal([]byte(existingNode.ClashConfig), &newClash); err == nil {
 					if newDomain, ok := newClash["server"].(string); ok && newDomain != preservedIP {
-						existingNode.OriginalServer = newDomain
+						existingNode.OriginalDomain = newDomain
 						newClash["server"] = preservedIP
 						if updated, err := json.Marshal(newClash); err == nil {
 							existingNode.ClashConfig = string(updated)
 						}
 					} else {
-						existingNode.OriginalServer = ""
+						existingNode.OriginalDomain = ""
 					}
 				}
 				var newParsed map[string]any
 				if err := json.Unmarshal([]byte(existingNode.ParsedConfig), &newParsed); err == nil {
-					if _, ok := newParsed["server"]; ok && existingNode.OriginalServer != "" {
+					if _, ok := newParsed["server"]; ok && existingNode.OriginalDomain != "" {
 						newParsed["server"] = preservedIP
 						if updated, err := json.Marshal(newParsed); err == nil {
 							existingNode.ParsedConfig = string(updated)

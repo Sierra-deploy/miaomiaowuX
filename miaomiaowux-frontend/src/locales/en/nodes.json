@@ -37,6 +37,8 @@
   "nodeList": {
     "title": "Node List",
     "titleWithCount": "Node List ({{count}})",
+    "forwardedByTunnel": "Forwarded by tunnel",
+    "forwardedByTunnelTip": "Forwarded to this node by these tunnel inbounds:",
     "warning": "WARNING! Changes and deletions to nodes will be synced to all subscriptions",
     "iconHints": "is a draggable element, switch proxy group type, double-click proxy group title to edit name, dragging available node title represents dragging all nodes",
     "editNodeName": "Edit node name, ",
@@ -70,6 +72,7 @@
   },
   "actions": {
     "addNode": "Add Node",
+    "tunnelManager": "Tunnel Manager",
     "syncExternalSub": "Sync External Subs",
     "syncingExternalSub": "Syncing external subscriptions...",
     "syncExternalSubSuccess": "External subscriptions synced",

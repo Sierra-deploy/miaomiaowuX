@@ -37,6 +37,8 @@
   "nodeList": {
     "title": "节点列表",
     "titleWithCount": "节点列表 ({{count}})",
+    "forwardedByTunnel": "被 tunnel 转发",
+    "forwardedByTunnelTip": "以下 tunnel 入站转发到此节点:",
     "warning": "注意!!! 节点的修改与删除均会同步更新所有订阅 ",
     "iconHints": "为可拖动元素，切换代理组类型、双击代理组标题编辑代理组名称，拖动可用节点标题时，代表拖动可用节点内的所有节点",
     "editNodeName": "编辑节点名称，",
@@ -70,6 +72,7 @@
   },
   "actions": {
     "addNode": "添加节点",
+    "tunnelManager": "Tunnel 管理",
     "syncExternalSub": "同步外部订阅",
     "syncingExternalSub": "正在同步外部订阅...",
     "syncExternalSubSuccess": "外部订阅同步成功",

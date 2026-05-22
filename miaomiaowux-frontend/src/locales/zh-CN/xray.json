@@ -255,6 +255,12 @@
     "userAlreadyAdded": "该用户已添加",
     "simpleModeTitle": "简易模式",
     "simpleModeDesc": "当前协议无需用户配置，使用默认参数即可提交",
+    "forwardNodeTitle": "转发已有节点",
+    "forwardNodeCardDesc": "选择一个已有节点，自动配置 Tunnel 转发到该节点",
+    "forwardExistingNode": "转发已有节点",
+    "forwardNodePlaceholder": "选择要转发的节点（可选）",
+    "forwardNodeDesc": "选中后将自动填充监听端口、转发地址/端口、网络类型等，可手动修改",
+    "forwardPortConflict": "监听端口 {{port}} 已被本服务器其它入站占用，请修改监听端口",
     "jsonPreview": "JSON 预览",
     "realtimeInboundConfig": "实时生成的入站配置",
     "commonConfig": "通用配置",
@@ -295,6 +301,19 @@
     "securityNone": "无",
     "postQuantum": "后量子加密",
     "probeFailed": "探测失败"
+  },
+  "tunnelManager": {
+    "title": "Tunnel 管理",
+    "desc": "管理所有服务器上的 tunnel(任意门转发)入站。tunnel 不进节点列表,在这里删除。",
+    "loading": "加载中...",
+    "empty": "没有找到 tunnel 入站",
+    "federated": "分享",
+    "deleteTitle": "删除 Tunnel",
+    "deleteConfirm": "确定删除 tunnel「{{tag}}」吗?此操作不可恢复。",
+    "cancel": "取消",
+    "delete": "删除",
+    "deleteSuccess": "Tunnel 已删除",
+    "deleteFailed": "删除失败"
   },
   "nodeSelect": {
     "importFromNode": "从节点导入",

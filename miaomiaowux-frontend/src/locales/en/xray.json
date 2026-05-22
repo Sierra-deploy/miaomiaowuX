@@ -255,6 +255,12 @@
     "userAlreadyAdded": "User already added",
     "simpleModeTitle": "Simple Mode",
     "simpleModeDesc": "Current protocol requires no user configuration, submit with default parameters",
+    "forwardNodeTitle": "Forward Existing Node",
+    "forwardNodeCardDesc": "Pick an existing node to auto-configure a Tunnel forwarding to it",
+    "forwardExistingNode": "Forward Existing Node",
+    "forwardNodePlaceholder": "Select a node to forward (optional)",
+    "forwardNodeDesc": "Auto-fills listen port, forward address/port, network type, etc. You can still edit them.",
+    "forwardPortConflict": "Listen port {{port}} is already used by another inbound on this server, please change it",
     "jsonPreview": "JSON Preview",
     "realtimeInboundConfig": "Real-time generated inbound configuration",
     "commonConfig": "Common Configuration",
@@ -295,6 +301,19 @@
     "securityNone": "None",
     "postQuantum": "Post-Quantum",
     "probeFailed": "Probe failed"
+  },
+  "tunnelManager": {
+    "title": "Tunnel Manager",
+    "desc": "Manage tunnel (dokodemo) inbounds across all servers. Tunnels are not listed as nodes; delete them here.",
+    "loading": "Loading...",
+    "empty": "No tunnel inbounds found",
+    "federated": "Shared",
+    "deleteTitle": "Delete Tunnel",
+    "deleteConfirm": "Delete tunnel \"{{tag}}\"? This cannot be undone.",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "deleteSuccess": "Tunnel deleted",
+    "deleteFailed": "Delete failed"
   },
   "nodeSelect": {
     "importFromNode": "Import from Node",

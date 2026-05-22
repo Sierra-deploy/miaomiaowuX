@@ -607,11 +607,11 @@ func (h *nodesHandler) handleUpdateServer(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// 更新前保存原始域名（从 ClashConfig 的 server 字段获取）
+	// 更新前保存原始域名到 OriginalDomain（专用字段，不能用 OriginalServer——那是服务器名/路由键）
 	var currentClashConfig map[string]any
 	if err := json.Unmarshal([]byte(existing.ClashConfig), &currentClashConfig); err == nil {
 		if currentServer, ok := currentClashConfig["server"].(string); ok && currentServer != "" {
-			existing.OriginalServer = currentServer
+			existing.OriginalDomain = currentServer
 		}
 	}
 
@@ -679,14 +679,14 @@ func (h *nodesHandler) handleRestoreServer(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// 检查原服务器是否存在
-	if existing.OriginalServer == "" {
+	// 检查原始域名是否存在
+	if existing.OriginalDomain == "" {
 		writeBadRequest(w, "节点没有保存原始域名")
 		return
 	}
 
-	// 从original_server恢复服务器地址
-	originalServer := existing.OriginalServer
+	// 从 original_domain 恢复服务器地址
+	originalServer := existing.OriginalDomain
 
 	// 更新 ParsedConfig 中的 server 字段
 	var parsedConfig map[string]any
@@ -706,8 +706,8 @@ func (h *nodesHandler) handleRestoreServer(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	// 恢复后清除original_server
-	existing.OriginalServer = ""
+	// 恢复后清除 original_domain（OriginalServer 路由键保持不变）
+	existing.OriginalDomain = ""
 
 	updated, err := h.repo.UpdateNode(r.Context(), existing)
 	if err != nil {
@@ -1192,6 +1192,7 @@ type nodeDTO struct {
 	Enabled          bool      `json:"enabled"`
 	Tag              string    `json:"tag"`
 	OriginalServer   string    `json:"original_server"`
+	OriginalDomain   string    `json:"original_domain"`
 	InboundTag       string    `json:"inbound_tag"`
 	ChainProxyNodeID *int64    `json:"chain_proxy_node_id"`
 	CreatedAt        time.Time `json:"created_at"`
@@ -1209,6 +1210,7 @@ func convertNode(node storage.Node) nodeDTO {
 		Enabled:          node.Enabled,
 		Tag:              node.Tag,
 		OriginalServer:   node.OriginalServer,
+		OriginalDomain:   node.OriginalDomain,
 		InboundTag:       node.InboundTag,
 		ChainProxyNodeID: node.ChainProxyNodeID,
 		CreatedAt:        node.CreatedAt,

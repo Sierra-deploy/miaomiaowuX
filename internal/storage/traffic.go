@@ -234,6 +234,7 @@ type Node struct {
 	Tag            string
 	Tags           []string // 多标签支持（兼容旧版单Tag）
 	OriginalServer string
+	OriginalDomain   string // IP 解析功能专用：解析为 IP 前的原始域名（用于"恢复域名"）。与 OriginalServer（服务器名/路由键）严格区分
 	InboundTag       string // 关联入站标签（用于将节点链接到入站）
 	ChainProxyNodeID *int64 // 链式代理目标节点 ID
 	CreatedAt        time.Time
@@ -865,6 +866,11 @@ CREATE INDEX IF NOT EXISTS idx_nodes_enabled ON nodes(enabled);
 
 	// 如果不存在，则将original_server列添加到现有节点表中
 	if err := r.ensureNodeColumn("original_server", "TEXT"); err != nil {
+		return err
+	}
+
+	// IP 解析功能专用列：记录解析为 IP 前的原始域名（与 original_server 区分，后者是服务器名/路由键）
+	if err := r.ensureNodeColumn("original_domain", "TEXT"); err != nil {
 		return err
 	}
 
