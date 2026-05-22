@@ -1245,11 +1245,9 @@ CREATE INDEX IF NOT EXISTS idx_custom_rules_enabled ON custom_rules(enabled);
 		return fmt.Errorf("migrate subscribe_files type CHECK: %w", err)
 	}
 
-	// 用户权限功能:templates / custom_rules 加 created_by 列,用于"普通用户只看自己创建的"数据隔离。
+	// 用户权限功能:custom_rules 加 created_by 列(custom_rules 表已在前面创建)。
+	// templates 的 created_by 迁移下移到 templates 建表之后(见下方),否则全新库会因表未建而报错。
 	// (override_scripts 已有 username, subscribe_files 已有 created_by。)历史行 created_by='' 视为 admin 创建。
-	if err := r.ensureTableColumn("templates", "created_by", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return fmt.Errorf("migrate templates.created_by: %w", err)
-	}
 	if err := r.ensureTableColumn("custom_rules", "created_by", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return fmt.Errorf("migrate custom_rules.created_by: %w", err)
 	}
@@ -1717,6 +1715,11 @@ CREATE INDEX IF NOT EXISTS idx_templates_category ON templates(category);
 
 	if _, err := r.db.Exec(templatesSchema); err != nil {
 		return fmt.Errorf("migrate templates: %w", err)
+	}
+
+	// 用户权限功能:templates 加 created_by 列(必须在 templates 建表之后,否则全新库会"no such table")。
+	if err := r.ensureTableColumn("templates", "created_by", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate templates.created_by: %w", err)
 	}
 
 	// 代理提供商配置表
