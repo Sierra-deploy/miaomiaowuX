@@ -710,7 +710,9 @@ function SubscribeFilesPage() {
     queryKey: ['template-v3-list'],
     queryFn: async () => {
       const { data } = await api.get('/api/admin/template-v3')
-      return data.templates as { filename: string; name?: string }[]
+      // 兜底:若 API 偶发返回非数组 / 缺字段(或老缓存),也保证消费侧拿到数组,避免 `.map is not a function`
+      const list = data?.templates
+      return Array.isArray(list) ? (list as { filename: string; name?: string }[]) : []
     },
   })
 
@@ -728,7 +730,8 @@ function SubscribeFilesPage() {
     queryKey: ['remote-servers'],
     queryFn: async () => {
       const { data } = await api.get('/api/admin/remote-servers')
-      return data.servers as { id: number; name: string }[]
+      const list = data?.servers
+      return Array.isArray(list) ? (list as { id: number; name: string }[]) : []
     },
   })
 
@@ -4948,7 +4951,7 @@ function SubscribeFilesPage() {
                 <SelectTrigger><SelectValue placeholder="不使用模板" /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__none__">不使用模板</SelectItem>
-                  {templatesData?.map(t => (
+                  {(templatesData ?? []).map(t => (
                     <SelectItem key={t.filename} value={t.filename}>{t.name || t.filename}</SelectItem>
                   ))}
                 </SelectContent>
@@ -5029,7 +5032,7 @@ function SubscribeFilesPage() {
             <div className='space-y-2'>
               <Label>流量统计服务器</Label>
               <div className='flex flex-wrap gap-2'>
-                {remoteServersData?.map(server => {
+                {(remoteServersData ?? []).map(server => {
                   const selected = metadataForm.stats_server_ids.split(',').filter(Boolean).includes(String(server.id))
                   return (
                     <label key={server.id} className='flex items-center gap-1.5 text-sm'>
