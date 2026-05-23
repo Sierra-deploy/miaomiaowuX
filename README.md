@@ -158,6 +158,9 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.1.2 (2026-05-23)
+- 🌈测速结果支持出口IP显示
+- 🛠️ fix:订阅管理报错
 ### v0.1.1 (2026-05-23)
 - 🌈增加MCP服务，可以接入openclaw或hermes
 - 🛠️ fix:数据库增量更新顺序错误
