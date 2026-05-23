@@ -62,6 +62,11 @@ func (h *AddSharedServerHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	ip, _ := info["ip_address"].(string)
+	// 拥有方 xray 模式透传,避免消费方按默认 'external' 显示与拥有方不一致(联邦轮询里也会持续同步)
+	xrayMode, _ := info["xray_mode"].(string)
+	if xrayMode != "embedded" && xrayMode != "external" {
+		xrayMode = ""
+	}
 
 	token, err := generateSecureToken()
 	if err != nil {
@@ -73,6 +78,7 @@ func (h *AddSharedServerHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		Token:     token, // 占位:联邦服务器不直连 agent,不使用此 token
 		Status:    "connected",
 		IPAddress: ip,
+		XrayMode:  xrayMode,
 	}
 	if err := h.repo.CreateRemoteServer(r.Context(), server); err != nil {
 		writeError(w, http.StatusInternalServerError, err)

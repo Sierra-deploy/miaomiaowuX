@@ -7653,6 +7653,25 @@ func (r *TrafficRepository) UpdateRemoteServerXrayStatus(ctx context.Context, id
 	return nil
 }
 
+// UpdateRemoteServerXrayMode 仅更新 xray_mode 字段(联邦同步用,不动 name/domain 等)。mode 非 embedded/external 视为空,跳过。
+func (r *TrafficRepository) UpdateRemoteServerXrayMode(ctx context.Context, id int64, mode string) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if id <= 0 {
+		return errors.New("remote server id is required")
+	}
+	if mode != "embedded" && mode != "external" {
+		return nil
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE remote_servers SET xray_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, mode, id)
+	if err != nil {
+		return fmt.Errorf("update remote server xray_mode: %w", err)
+	}
+	return nil
+}
+
 // IncrementRemoteServerPushFailCount 增加推送失败计数并记录时间。
 // 如果失败计数超过阈值，它将触发回退到拉模式。
 func (r *TrafficRepository) IncrementRemoteServerPushFailCount(ctx context.Context, id int64, failThreshold int) (bool, error) {

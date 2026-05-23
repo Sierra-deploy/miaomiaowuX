@@ -90,6 +90,11 @@ func applyFederationInfo(ctx context.Context, repo *storage.TrafficRepository, s
 		_ = repo.UpdateRemoteServerXrayStatus(ctx, serverID, running, ver)
 	}
 
+	// 透传拥有方的 xray 模式(embedded/external),否则消费方一直显示默认的"外置"
+	if mode, _ := info["xray_mode"].(string); mode != "" {
+		_ = repo.UpdateRemoteServerXrayMode(ctx, serverID, mode)
+	}
+
 	// 拥有方报告 connected 时刷新心跳/状态
 	if st, _ := info["status"].(string); st == "connected" {
 		_ = repo.UpdateRemoteServerLastActivity(ctx, serverID)
