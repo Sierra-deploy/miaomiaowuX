@@ -39,7 +39,8 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
   const [freedomDomainStrategy, setFreedomDomainStrategy] = useState<string>('AsIs')
   const [viewingOutbound, setViewingOutbound] = useState<XrayOutbound | null>(null)
   const [isWizardDialogOpen, setIsWizardDialogOpen] = useState(false)
-  const [hideDefaultOutbounds, setHideDefaultOutbounds] = useState(true)
+  // 初始展示默认出站(direct/block 等),按钮文字提示"隐藏默认",点一下才隐藏
+  const [hideDefaultOutbounds, setHideDefaultOutbounds] = useState(false)
 
   const { data: outboundsData, isLoading } = useQuery({
     queryKey: ['remote-outbounds', serverId, serverName],

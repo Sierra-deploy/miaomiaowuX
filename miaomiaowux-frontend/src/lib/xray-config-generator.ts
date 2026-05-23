@@ -525,3 +525,36 @@ export function clashConfigToOutbound(clashConfig: any, tag: string): any {
 
   return generateOutboundConfig(formData, protocol, transport, security)
 }
+
+/**
+ * 在 outbounds 列表里找一条"等价于这个节点"的出站(协议+server+port+凭据 全匹配),命中返回其 tag。
+ * 用于"选了节点做出站时,若服务器已有等价出站则复用,不重复创建"。
+ */
+export function matchNodeToExistingOutbound(clash: any, outbounds: any[]): string | null {
+  if (!clash || !Array.isArray(outbounds)) return null
+  const type = String(clash.type || '').toLowerCase()
+  const proto = type === 'ss' ? 'shadowsocks' : type === 'hy2' ? 'hysteria2' : type
+  const server = String(clash.server || '')
+  const port = Number(clash.port)
+
+  for (const ob of outbounds) {
+    if (!ob || ob.protocol !== proto) continue
+    const ep = (ob.settings?.vnext || ob.settings?.servers || [])[0]
+    if (!ep || String(ep.address || '') !== server || Number(ep.port) !== port) continue
+
+    if (type === 'vless' || type === 'vmess') {
+      const id = ep.users?.[0]?.id
+      if (id && clash.uuid && id === clash.uuid) return ob.tag
+    } else if (type === 'trojan') {
+      if (ep.password && clash.password && ep.password === clash.password) return ob.tag
+    } else if (type === 'ss' || type === 'shadowsocks') {
+      const cm = clash.cipher || clash.method
+      if (ep.method && cm && ep.method === cm && ep.password === clash.password) return ob.tag
+    } else if (type === 'hysteria2' || type === 'hy2') {
+      const pw = ep.password || ep.auth
+      const cpw = clash.password || clash.auth
+      if (pw && cpw && pw === cpw) return ob.tag
+    }
+  }
+  return null
+}

@@ -33,6 +33,8 @@ import { Textarea } from '@/components/ui/textarea'
 import { api } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
 import { type Balancer, normalizeBalancers } from '@/lib/xray-balancer'
+import { clashConfigToOutbound, matchNodeToExistingOutbound } from '@/lib/xray-config-generator'
+import { X as XIcon } from 'lucide-react'
 import { BalancerManagerDialog } from './balancer-manager-dialog'
 
 interface RoutingRule {
@@ -128,7 +130,9 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
   const [customNetwork, setCustomNetwork] = useState('')
   const [customSource, setCustomSource] = useState('')
   const [customUser, setCustomUser] = useState('')
-  const [customInboundTag, setCustomInboundTag] = useState('')
+  // 入站现已支持多选(从服务器入站列表选)+ 自定义 tag(兼容老用法);存储为字符串数组
+  const [customInboundTag, setCustomInboundTag] = useState<string[]>([])
+  const [customInboundTagInput, setCustomInboundTagInput] = useState('') // 自定义 tag 输入框临时态
   const [customAttrs, setCustomAttrs] = useState('')
   const [customOutbound, setCustomOutbound] = useState('')
   const [customMarktag, setCustomMarktag] = useState('')
@@ -171,6 +175,43 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
     },
     enabled: isRemote || localServerId !== null,
   })
+
+  // 服务器现有入站(自定义规则的 inboundTag 多选项来源)
+  const { data: inboundsData } = useQuery({
+    queryKey: isRemote ? ['remote-inbounds', serverId] : ['xray-inbounds', localServerId],
+    queryFn: async () => {
+      if (isRemote) {
+        const res = await api.get(`/api/admin/remote/inbounds?server_id=${serverId}`)
+        return res.data as { inbounds: any[] }
+      }
+      if (!localServerId) return { inbounds: [] }
+      return (await api.get(`/api/admin/xray-servers/inbounds?server_id=${localServerId}`)).data
+    },
+    enabled: isRemote || localServerId !== null,
+  })
+  const inboundsList = useMemo(() => {
+    const list = inboundsData?.inbounds || []
+    // 过滤掉 api / 内部入站
+    return list.filter((i: any) => i?.tag && i.tag !== 'api')
+  }, [inboundsData])
+
+  // 全部节点(自定义规则的出站可选"节点列表中的节点")
+  const { data: nodesData } = useQuery({
+    queryKey: ['nodes'],
+    queryFn: async () => (await api.get('/api/admin/nodes')).data as { nodes: any[] },
+  })
+  const nodes = useMemo(() => {
+    const out: { id: number; name: string; protocol: string; clash: any }[] = []
+    for (const n of nodesData?.nodes || []) {
+      try {
+        const c = JSON.parse(n.clash_config || '{}')
+        if (c && c.server && c.port) {
+          out.push({ id: n.id, name: n.node_name, protocol: n.protocol || c.type || '', clash: c })
+        }
+      } catch { /* 跳过解析失败的节点 */ }
+    }
+    return out
+  }, [nodesData])
 
   const rawRules: RoutingRule[] = useMemo(() => {
     if (isRemote) return routingData?.routing?.rules || []
@@ -274,15 +315,63 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
   const resetCustomForm = () => {
     setCustomDomain(''); setCustomIp(''); setCustomProtocol(''); setCustomPort('')
     setCustomSourcePort(''); setCustomNetwork(''); setCustomSource(''); setCustomUser('')
-    setCustomInboundTag(''); setCustomAttrs(''); setCustomOutbound(''); setCustomMarktag('')
+    setCustomInboundTag([]); setCustomInboundTagInput(''); setCustomAttrs(''); setCustomOutbound(''); setCustomMarktag('')
   }
 
-  const handleAddCustomRule = () => {
+  // customOutbound 三种取值:
+  //   'foo'           ->  outboundTag = foo
+  //   'balancer:foo'  ->  balancerTag = foo
+  //   'node:<id>'     ->  按 id 找节点;若服务器已有等价出站直接复用,否则先建出站再加规则
+  const handleAddCustomRule = async () => {
     if (!customOutbound) { toast.error(t('routing.selectOutboundRequired')); return }
-    // customOutbound 形如 "balancer:<tag>" 表示走负载均衡器(balancerTag),否则是普通出站(outboundTag)。二者互斥。
+
+    let resolvedOutboundTag: string | null = null
+    let resolvedBalancerTag: string | null = null
+
+    if (customOutbound.startsWith('balancer:')) {
+      resolvedBalancerTag = customOutbound.slice('balancer:'.length)
+    } else if (customOutbound.startsWith('node:')) {
+      // 节点出站:先尝试在现有出站里找等价的;没有就根据节点 clash 配置建一个,然后用其 tag
+      if (!isRemote) {
+        toast.error(t('routing.nodeOutboundRemoteOnly'))
+        return
+      }
+      const nodeId = parseInt(customOutbound.slice('node:'.length), 10)
+      const node = nodes.find(n => n.id === nodeId)
+      if (!node) { toast.error(t('routing.nodeNotFound')); return }
+
+      const matched = matchNodeToExistingOutbound(node.clash, outbounds)
+      if (matched) {
+        resolvedOutboundTag = matched
+      } else {
+        // 自动建出站(tag 用 node-<id>-<protocol>),失败直接返回
+        try {
+          const tag = `node-${nodeId}-${(node.clash.type || node.protocol || 'proxy').toLowerCase()}`
+          const ob = clashConfigToOutbound(node.clash, tag)
+          const res = await api.post(
+            `/api/admin/remote/outbounds?server_id=${serverId}`,
+            { action: 'add', outbound: ob },
+          )
+          if (!res.data?.success) {
+            toast.error(res.data?.message || t('routing.addOutboundFailed'))
+            return
+          }
+          resolvedOutboundTag = tag
+          toast.success(t('routing.outboundAutoAdded', { tag }))
+          queryClient.invalidateQueries({ queryKey: outboundsQueryKey })
+        } catch (e: any) {
+          handleServerError(e, t('routing.addOutboundFailed'))
+          return
+        }
+      }
+    } else {
+      resolvedOutboundTag = customOutbound
+    }
+
     const rule: any = { type: 'field' }
-    if (customOutbound.startsWith('balancer:')) rule.balancerTag = customOutbound.slice('balancer:'.length)
-    else rule.outboundTag = customOutbound
+    if (resolvedBalancerTag) rule.balancerTag = resolvedBalancerTag
+    else if (resolvedOutboundTag) rule.outboundTag = resolvedOutboundTag
+
     const split = (v: string) => v.split(',').map(s => s.trim()).filter(Boolean)
     if (customDomain.trim()) rule.domain = split(customDomain)
     if (customIp.trim()) rule.ip = split(customIp)
@@ -292,7 +381,10 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
     if (customNetwork.trim()) rule.network = customNetwork.trim()
     if (customSource.trim()) rule.source = split(customSource)
     if (customUser.trim()) rule.user = split(customUser)
-    if (customInboundTag.trim()) rule.inboundTag = split(customInboundTag)
+    // 入站:多选数组 + 临时输入框里的自定义 tag 合并
+    const inboundTags: string[] = [...customInboundTag]
+    if (customInboundTagInput.trim()) inboundTags.push(...split(customInboundTagInput))
+    if (inboundTags.length) rule.inboundTag = inboundTags
     if (customAttrs.trim()) rule.attrs = customAttrs.trim()
     if (customMarktag.trim()) rule.marktag = customMarktag.trim()
     if (!rule.domain && !rule.ip && !rule.protocol && !rule.port && !rule.sourcePort && !rule.network && !rule.source && !rule.user && !rule.inboundTag && !rule.attrs) {
@@ -464,31 +556,85 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
                 <Input placeholder='user' value={customUser} onChange={e => setCustomUser(e.target.value)} className='text-xs' />
               </div>
             </div>
-            <div className='grid grid-cols-2 gap-3'>
-              <div className='space-y-1'>
-                <Label className='text-xs'>{t('routing.inboundTag')}</Label>
-                <Input placeholder={t('routing.inboundTag')} value={customInboundTag} onChange={e => setCustomInboundTag(e.target.value)} className='text-xs' />
+            {/* 入站标签:独占一行,Select + 自定义 tag 各占半宽,够呼吸 */}
+            <div className='space-y-1'>
+              <Label className='text-xs'>{t('routing.inboundTag')}</Label>
+              <div className='space-y-1.5'>
+                {customInboundTag.length > 0 && (
+                  <div className='flex flex-wrap gap-1'>
+                    {customInboundTag.map(tag => (
+                      <Badge key={tag} variant='secondary' className='text-[10px] gap-1'>
+                        {tag}
+                        <button
+                          type='button'
+                          className='hover:text-destructive'
+                          onClick={() => setCustomInboundTag(prev => prev.filter(t => t !== tag))}
+                        >
+                          <XIcon className='size-3' />
+                        </button>
+                      </Badge>
+                    ))}
+                  </div>
+                )}
+                <div className='grid grid-cols-2 gap-2'>
+                  <Select value='' onValueChange={(v) => {
+                    if (v && !customInboundTag.includes(v)) setCustomInboundTag(prev => [...prev, v])
+                  }}>
+                    <SelectTrigger className='text-xs'>
+                      <SelectValue placeholder={inboundsList.length ? t('routing.selectInbound') : t('routing.noInbounds')} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {inboundsList.filter((i: any) => !customInboundTag.includes(i.tag)).map((i: any) => (
+                        <SelectItem key={i.tag} value={i.tag}>{i.tag} ({i.protocol}:{i.port})</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <Input
+                    placeholder={t('routing.customInboundTagPlaceholder')}
+                    value={customInboundTagInput}
+                    onChange={e => setCustomInboundTagInput(e.target.value)}
+                    className='text-xs'
+                  />
+                </div>
               </div>
+            </div>
+            {/* 属性匹配 | 标记 并排,出站独占一行(选项多,需要宽度) */}
+            <div className='grid grid-cols-2 gap-3'>
               <div className='space-y-1'>
                 <Label className='text-xs'>{t('routing.attrMatch')}</Label>
                 <Input placeholder={t('routing.attrMatch')} value={customAttrs} onChange={e => setCustomAttrs(e.target.value)} className='text-xs' />
-              </div>
-            </div>
-            <div className='grid grid-cols-2 gap-3'>
-              <div className='space-y-1'>
-                <Label className='text-xs'>{t('routing.outbound')} *</Label>
-                <Select value={customOutbound} onValueChange={setCustomOutbound}>
-                  <SelectTrigger className='text-xs'><SelectValue placeholder={t('routing.selectOutboundPlaceholder')} /></SelectTrigger>
-                  <SelectContent>
-                    {outbounds.map((o: any) => <SelectItem key={o.tag} value={o.tag}>{o.tag} ({o.protocol})</SelectItem>)}
-                    {balancers.map((b) => <SelectItem key={`bal-${b.tag}`} value={`balancer:${b.tag}`}>⚖ {b.tag} ({t('routing.balancer')})</SelectItem>)}
-                  </SelectContent>
-                </Select>
               </div>
               <div className='space-y-1'>
                 <Label className='text-xs'>{t('routing.mark')}</Label>
                 <Input placeholder='marktag' value={customMarktag} onChange={e => setCustomMarktag(e.target.value)} className='text-xs' />
               </div>
+            </div>
+            <div className='space-y-1'>
+              <Label className='text-xs'>{t('routing.outbound')} *</Label>
+              <Select value={customOutbound} onValueChange={setCustomOutbound}>
+                <SelectTrigger className='text-xs'><SelectValue placeholder={t('routing.selectOutboundPlaceholder')} /></SelectTrigger>
+                <SelectContent>
+                  {/* 服务器现有出站 */}
+                  {outbounds.length > 0 && (
+                    <div className='px-2 py-1 text-[10px] uppercase text-muted-foreground'>{t('routing.groupServerOutbounds')}</div>
+                  )}
+                  {outbounds.map((o: any) => <SelectItem key={o.tag} value={o.tag}>{o.tag} ({o.protocol})</SelectItem>)}
+                  {/* 负载均衡器 */}
+                  {balancers.length > 0 && (
+                    <div className='px-2 py-1 text-[10px] uppercase text-muted-foreground'>{t('routing.groupBalancers')}</div>
+                  )}
+                  {balancers.map((b) => <SelectItem key={`bal-${b.tag}`} value={`balancer:${b.tag}`}>⚖ {b.tag} ({t('routing.balancer')})</SelectItem>)}
+                  {/* 节点列表(选中后若服务器没有等价出站会自动创建) */}
+                  {isRemote && nodes.length > 0 && (
+                    <div className='px-2 py-1 text-[10px] uppercase text-muted-foreground'>{t('routing.groupNodes')}</div>
+                  )}
+                  {isRemote && nodes.map(n => (
+                    <SelectItem key={`node:${n.id}`} value={`node:${n.id}`}>
+                      🔗 {n.name} ({n.protocol}:{n.clash.port})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
             </div>
           </div>
           <DialogFooter>
