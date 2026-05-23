@@ -113,6 +113,7 @@
     "noNodes": "暂无可测速的节点",
     "colProtocol": "协议",
     "colServer": "服务器地址",
+    "colEgressIP": "出口 IP",
     "colActions": "操作",
     "srcMaster": "主控",
     "srcTester": "家用",

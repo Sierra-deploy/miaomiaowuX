@@ -113,6 +113,7 @@
     "noNodes": "No nodes to test",
     "colProtocol": "Protocol",
     "colServer": "Server",
+    "colEgressIP": "Egress IP",
     "colActions": "Actions",
     "srcMaster": "Master",
     "srcTester": "Home",

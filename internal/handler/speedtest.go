@@ -141,7 +141,7 @@ func (h *SpeedTestHandler) runSpeedTestAsync(recID, testerID int64, clashConfig 
 	if terr != nil {
 		status, errMsg = "failed", terr.Error()
 	}
-	_ = h.repo.UpdateSpeedTestResult(ctx, recID, res.DownMbps, res.LatencyMs, res.Bytes, status, errMsg)
+	_ = h.repo.UpdateSpeedTestResult(ctx, recID, res.DownMbps, res.LatencyMs, res.Bytes, status, errMsg, res.EgressIP)
 }
 
 func (h *SpeedTestHandler) handleTesterCreate(w http.ResponseWriter, r *http.Request) {

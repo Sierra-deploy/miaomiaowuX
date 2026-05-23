@@ -4085,7 +4085,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
           setLandingServerId(null)
         }
       }}>
-        <DialogContent className={landingStep === 'create-inbound' ? 'max-w-[95vw] max-h-[90vh] overflow-y-auto' : 'max-w-2xl max-h-[80vh] overflow-y-auto'}>
+        <DialogContent className={landingStep === 'create-inbound' ? 'max-w-[95vw] sm:max-w-[95vw] max-h-[90vh] overflow-y-auto' : 'max-w-2xl sm:max-w-2xl max-h-[80vh] overflow-y-auto'}>
           <DialogHeader>
             <DialogTitle>{landingStep === 'create-inbound' ? t('dialog.landing.createInboundTitle') : t('dialog.landing.addLandingTitle')}</DialogTitle>
             <DialogDescription>

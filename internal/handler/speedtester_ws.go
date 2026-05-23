@@ -29,6 +29,7 @@ type stWSMsg struct {
 	URL         string  `json:"url,omitempty"`
 	DownMbps    float64 `json:"down_mbps,omitempty"`
 	LatencyMs   int64   `json:"latency_ms,omitempty"`
+	EgressIP    string  `json:"egress_ip,omitempty"`
 	Status      string  `json:"status,omitempty"`
 	Error       string  `json:"error,omitempty"`
 	Name        string  `json:"name,omitempty"`
@@ -145,9 +146,9 @@ func (h *SpeedTesterWSHandler) Dispatch(ctx context.Context, testerID int64, cla
 	select {
 	case res := <-ch:
 		if res.Status != "ok" {
-			return speedtest.Result{LatencyMs: res.LatencyMs}, errors.New(res.Error)
+			return speedtest.Result{LatencyMs: res.LatencyMs, EgressIP: res.EgressIP}, errors.New(res.Error)
 		}
-		return speedtest.Result{DownMbps: res.DownMbps, LatencyMs: res.LatencyMs, Bytes: bytes}, nil
+		return speedtest.Result{DownMbps: res.DownMbps, LatencyMs: res.LatencyMs, Bytes: bytes, EgressIP: res.EgressIP}, nil
 	case <-time.After(120 * time.Second):
 		return speedtest.Result{}, errors.New("测速端响应超时")
 	case <-ctx.Done():

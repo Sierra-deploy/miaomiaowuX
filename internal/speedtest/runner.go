@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -23,7 +24,8 @@ const (
 	defaultTestURL      = "https://dl.google.com/dl/android/studio/install/3.4.1.0/android-studio-ide-183.5522156-windows.exe"
 	defaultTestDuration = 10 * time.Second // 默认测速时长:下满 10s,按真实字节/真实耗时算速率
 	latencyProbeURL     = "https://www.gstatic.com/generate_204"
-	mixedPort           = 17900 // 串行测速,固定端口即可
+	egressIPProbeURL    = "https://api.ipify.org" // 经代理回显出口 IP,用于核对出站链路是否符合预期
+	mixedPort           = 17900                   // 串行测速,固定端口即可
 )
 
 // runMu 串行化测速:一次只跑一个节点,避免并发抢带宽导致结果失真。
@@ -35,6 +37,7 @@ type Result struct {
 	LatencyMs int64
 	Bytes     int64
 	Duration  time.Duration
+	EgressIP  string // 经代理观察到的出口 IP(可为空,失败不影响测速主流程)
 }
 
 // Options 测速参数(留空用默认)。
@@ -98,16 +101,17 @@ func RunNodeTest(ctx context.Context, mihomoBin, clashConfigJSON string, opts Op
 	defer func() { stop(); os.RemoveAll(workdir) }()
 
 	latency := measureLatency(ctx)
+	egressIP := measureEgressIP(ctx)
 
 	n, dur, err := downloadTimed(ctx, testURL, opts.TestDuration, opts.TestBytes)
 	if err != nil {
-		return Result{LatencyMs: latency}, fmt.Errorf("下载测速失败: %w", err)
+		return Result{LatencyMs: latency, EgressIP: egressIP}, fmt.Errorf("下载测速失败: %w", err)
 	}
 	mbps := 0.0
 	if dur > 0 {
 		mbps = float64(n) * 8 / dur.Seconds() / 1e6
 	}
-	return Result{DownMbps: mbps, LatencyMs: latency, Bytes: n, Duration: dur}, nil
+	return Result{DownMbps: mbps, LatencyMs: latency, Bytes: n, Duration: dur, EgressIP: egressIP}, nil
 }
 
 func startMihomo(bin, workdir string, cfg []byte) (func(), error) {
@@ -175,6 +179,34 @@ func measureLatency(ctx context.Context) int64 {
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	return time.Since(start).Milliseconds()
+}
+
+// measureEgressIP 经代理请求一个 IP 回显端点,拿到出口 IP;失败返回空(不影响主测速流程)。
+func measureEgressIP(ctx context.Context) string {
+	client := proxyClient()
+	client.Timeout = 8 * time.Second
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, egressIPProbeURL, nil)
+	if err != nil {
+		return ""
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return ""
+	}
+	buf, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+	if err != nil {
+		return ""
+	}
+	ip := strings.TrimSpace(string(buf))
+	// 简单校验:含 . 或 :,长度合理(IPv4 / IPv6)。
+	if len(ip) < 3 || len(ip) > 45 || (!strings.Contains(ip, ".") && !strings.Contains(ip, ":")) {
+		return ""
+	}
+	return ip
 }
 
 // downloadTimed 经代理下载,最多下载 dur 时长(到时即停),可选 maxBytes 上限(0=不限)。

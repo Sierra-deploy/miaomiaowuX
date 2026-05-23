@@ -661,6 +661,10 @@ CREATE INDEX IF NOT EXISTS idx_speed_test_node ON speed_test_results(node_id);
 	if _, err := r.db.Exec(speedTestResultsSchema); err != nil {
 		return fmt.Errorf("migrate speed_test_results: %w", err)
 	}
+	// 出口 IP 列(老库幂等加列):测速时经代理回显的对端 IP,用于核对出站链路是否符合预期。
+	if err := r.ensureTableColumn("speed_test_results", "egress_ip", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate speed_test_results.egress_ip: %w", err)
+	}
 
 	// 家用测速端(PRO speed_test Phase 2):反向 WS 连入主控,凭 token_hash 认证。
 	const speedTestersSchema = `

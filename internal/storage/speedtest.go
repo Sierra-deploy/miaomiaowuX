@@ -88,6 +88,7 @@ type SpeedTestResult struct {
 	TestBytes int64     `json:"test_bytes"`
 	Status    string    `json:"status"` // ok / failed
 	Error     string    `json:"error,omitempty"`
+	EgressIP  string    `json:"egress_ip,omitempty"` // 经代理观察到的出口 IP,核对出站链路是否符合预期
 	TestedBy  string    `json:"tested_by"`
 	CreatedAt time.Time `json:"created_at"`
 }
@@ -95,9 +96,9 @@ type SpeedTestResult struct {
 // InsertSpeedTestResult 写入一条测速结果,返回 id。
 func (r *TrafficRepository) InsertSpeedTestResult(ctx context.Context, res SpeedTestResult) (int64, error) {
 	result, err := r.db.ExecContext(ctx,
-		`INSERT INTO speed_test_results (node_id, node_name, source, down_mbps, latency_ms, test_bytes, status, error, tested_by)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		res.NodeID, res.NodeName, res.Source, res.DownMbps, res.LatencyMs, res.TestBytes, res.Status, res.Error, res.TestedBy)
+		`INSERT INTO speed_test_results (node_id, node_name, source, down_mbps, latency_ms, test_bytes, status, error, egress_ip, tested_by)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		res.NodeID, res.NodeName, res.Source, res.DownMbps, res.LatencyMs, res.TestBytes, res.Status, res.Error, res.EgressIP, res.TestedBy)
 	if err != nil {
 		return 0, err
 	}
@@ -105,17 +106,17 @@ func (r *TrafficRepository) InsertSpeedTestResult(ctx context.Context, res Speed
 }
 
 // UpdateSpeedTestResult 异步测速完成后回填一条 running 记录的结果。
-func (r *TrafficRepository) UpdateSpeedTestResult(ctx context.Context, id int64, downMbps float64, latencyMs, testBytes int64, status, errMsg string) error {
+func (r *TrafficRepository) UpdateSpeedTestResult(ctx context.Context, id int64, downMbps float64, latencyMs, testBytes int64, status, errMsg, egressIP string) error {
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE speed_test_results SET down_mbps = ?, latency_ms = ?, test_bytes = ?, status = ?, error = ? WHERE id = ?`,
-		downMbps, latencyMs, testBytes, status, errMsg, id)
+		`UPDATE speed_test_results SET down_mbps = ?, latency_ms = ?, test_bytes = ?, status = ?, error = ?, egress_ip = ? WHERE id = ?`,
+		downMbps, latencyMs, testBytes, status, errMsg, egressIP, id)
 	return err
 }
 
 // ListLatestSpeedTestResults 返回每个节点最近一次测速结果(每节点一行,用于节点行内徽章)。
 func (r *TrafficRepository) ListLatestSpeedTestResults(ctx context.Context) ([]SpeedTestResult, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, node_id, node_name, source, down_mbps, latency_ms, test_bytes, status, error, tested_by, created_at
+		`SELECT id, node_id, node_name, source, down_mbps, latency_ms, test_bytes, status, error, COALESCE(egress_ip, '') AS egress_ip, tested_by, created_at
 		 FROM speed_test_results
 		 WHERE id IN (SELECT MAX(id) FROM speed_test_results GROUP BY node_id)`)
 	if err != nil {
@@ -126,7 +127,7 @@ func (r *TrafficRepository) ListLatestSpeedTestResults(ctx context.Context) ([]S
 	for rows.Next() {
 		var s SpeedTestResult
 		if err := rows.Scan(&s.ID, &s.NodeID, &s.NodeName, &s.Source, &s.DownMbps, &s.LatencyMs,
-			&s.TestBytes, &s.Status, &s.Error, &s.TestedBy, &s.CreatedAt); err != nil {
+			&s.TestBytes, &s.Status, &s.Error, &s.EgressIP, &s.TestedBy, &s.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, s)
@@ -139,7 +140,7 @@ func (r *TrafficRepository) ListSpeedTestResults(ctx context.Context, nodeID int
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	q := `SELECT id, node_id, node_name, source, down_mbps, latency_ms, test_bytes, status, error, tested_by, created_at
+	q := `SELECT id, node_id, node_name, source, down_mbps, latency_ms, test_bytes, status, error, COALESCE(egress_ip, '') AS egress_ip, tested_by, created_at
 	      FROM speed_test_results`
 	args := []any{}
 	if nodeID > 0 {
@@ -159,7 +160,7 @@ func (r *TrafficRepository) ListSpeedTestResults(ctx context.Context, nodeID int
 	for rows.Next() {
 		var s SpeedTestResult
 		if err := rows.Scan(&s.ID, &s.NodeID, &s.NodeName, &s.Source, &s.DownMbps, &s.LatencyMs,
-			&s.TestBytes, &s.Status, &s.Error, &s.TestedBy, &s.CreatedAt); err != nil {
+			&s.TestBytes, &s.Status, &s.Error, &s.EgressIP, &s.TestedBy, &s.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, s)

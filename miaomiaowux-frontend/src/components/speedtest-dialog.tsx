@@ -76,6 +76,12 @@ function LatencyCell({ r }: { r: any }) {
   return <span className='font-mono whitespace-nowrap text-xs'>{r.latency_ms} ms</span>
 }
 
+// 出口 IP 单元格(经代理观察到的对端 IP,用于核对落地/出站是否符合预期)
+function EgressIPCell({ r }: { r: any }) {
+  if (!r || !r.egress_ip) return <span className='text-muted-foreground text-xs'>—</span>
+  return <span className='font-mono whitespace-nowrap text-xs'>{r.egress_ip}</span>
+}
+
 export function SpeedTestDialog({
   open, onMinimize, onClose, nodes,
 }: {
@@ -211,6 +217,7 @@ export function SpeedTestDialog({
                         <th className='p-2 text-left font-normal'>{t('speedtest.colServer')}</th>
                         <th className='p-2 text-left font-normal'>{t('speedtest.colSpeed')}</th>
                         <th className='p-2 text-left font-normal'>{t('speedtest.colLatency')}</th>
+                        <th className='p-2 text-left font-normal'>{t('speedtest.colEgressIP')}</th>
                         <th className='p-2 text-center font-normal'>{t('speedtest.colActions')}</th>
                       </tr>
                     </thead>
@@ -232,6 +239,7 @@ export function SpeedTestDialog({
                             <td className='text-muted-foreground p-2 font-mono text-xs whitespace-nowrap'>{r.server}:{r.port}</td>
                             <td className='p-2'><SpeedCell r={res} t={t} /></td>
                             <td className='p-2'><LatencyCell r={res} /></td>
+                            <td className='p-2'><EgressIPCell r={res} /></td>
                             <td className='p-2'>
                               <div className='flex items-center justify-center gap-1'>
                                 <Button variant='ghost' size='icon' className='size-7 text-muted-foreground hover:text-foreground' title={t('speedtest.history')} onClick={() => setHistoryNode({ id: r.id, name: r.name })}>
@@ -266,11 +274,13 @@ export function SpeedTestDialog({
                               <span className='truncate font-medium' title={r.name}>{r.name}</span>
                             </div>
                             <div className='text-muted-foreground mt-1 font-mono text-xs break-all'>{r.server}:{r.port}</div>
-                            <div className='mt-2 flex items-center gap-4'>
+                            <div className='mt-2 flex flex-wrap items-center gap-x-4 gap-y-1'>
                               <span className='text-muted-foreground text-[10px]'>{t('speedtest.colSpeed')}</span>
                               <SpeedCell r={res} t={t} />
                               <span className='text-muted-foreground text-[10px]'>{t('speedtest.colLatency')}</span>
                               <LatencyCell r={res} />
+                              <span className='text-muted-foreground text-[10px]'>{t('speedtest.colEgressIP')}</span>
+                              <EgressIPCell r={res} />
                             </div>
                           </div>
                           <div className='flex shrink-0 flex-col gap-1'>
@@ -326,6 +336,7 @@ function HistoryView({ node, onBack, t, tc }: { node: { id: number; name: string
               <tr className='border-b'>
                 <th className='py-2 text-right font-normal'>{t('speedtest.colSpeed')}</th>
                 <th className='py-2 text-right font-normal'>{t('speedtest.colLatency')}</th>
+                <th className='py-2 text-left font-normal pl-3'>{t('speedtest.colEgressIP')}</th>
                 <th className='py-2 text-center font-normal'>{t('speedtest.colSource')}</th>
                 <th className='py-2 text-right font-normal'>{t('speedtest.colTime')}</th>
               </tr>
@@ -343,6 +354,7 @@ function HistoryView({ node, onBack, t, tc }: { node: { id: number; name: string
                     )}
                   </td>
                   <td className='py-2 text-right font-mono'>{r.status === 'ok' ? `${r.latency_ms}ms` : '-'}</td>
+                  <td className='py-2 pl-3 font-mono text-xs whitespace-nowrap'>{r.egress_ip || <span className='text-muted-foreground'>—</span>}</td>
                   <td className='py-2 text-center'>
                     <Badge variant='outline' className='text-[10px]'>{r.source === 'home_tester' ? t('speedtest.srcTester') : t('speedtest.srcMaster')}</Badge>
                   </td>
