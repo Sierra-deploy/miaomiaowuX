@@ -203,7 +203,7 @@ show_completion() {
     echo ""
     print_warning "注意：编译依赖包未被删除"
     echo -e "如需删除编译依赖，请手动运行："
-    echo -e "${YELLOW}sudo apt remove build-essential libpcre3 libpcre3-dev zlib1g-dev openssl libssl-dev${NC}"
+    echo -e "${YELLOW}sudo apt remove build-essential libpcre2-dev zlib1g-dev openssl libssl-dev${NC}"
     echo -e "${YELLOW}sudo apt autoremove${NC}"
     echo ""
     echo -e "${GREEN}================================================${NC}"

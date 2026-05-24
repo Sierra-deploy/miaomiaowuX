@@ -82,12 +82,15 @@ check_system() {
 install_dependencies() {
     print_info "步骤 1/8: 安装编译环境和依赖..."
     $USE_SUDO apt update
-    $USE_SUDO apt install -y build-essential libpcre3 libpcre3-dev zlib1g-dev openssl libssl-dev wget curl
+    # PCRE2 替代 PCRE1:Debian 13 (trixie) 已移除 libpcre3 / libpcre3-dev,
+    # 只保留 libpcre2-dev;Debian 12 / Ubuntu 20.04+ 也都有 libpcre2-dev。
+    # Nginx 1.22+ 原生支持 PCRE2(./configure 自动检测),所以同时兼容 Debian 12/13。
+    $USE_SUDO apt install -y build-essential libpcre2-dev zlib1g-dev openssl libssl-dev wget curl
 
-    # 如果启用 ACME 模块，安装额外依赖
+    # 如果启用 ACME 模块，安装额外依赖(libpcre2-dev 已在上面装过)
     if [ "$ENABLE_ACME" = "1" ]; then
         print_info "安装 nginx-acme 模块所需的额外依赖..."
-        $USE_SUDO apt install -y libclang-dev libpcre2-dev pkg-config git
+        $USE_SUDO apt install -y libclang-dev pkg-config git
     fi
 
     print_info "编译环境安装完成"
