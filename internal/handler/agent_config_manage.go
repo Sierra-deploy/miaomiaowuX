@@ -70,6 +70,7 @@ type RemoteServerCreateRequest struct {
 	TrafficResetDay   int    `json:"traffic_reset_day"`   // 要重置的月份日期 (1-31)
 	IPAddress         string `json:"ip_address"`          // 子服务器 IP 地址
 	ConnectionMode    string `json:"connection_mode"`     // push | pull | websocket
+	ListenPort        int    `json:"listen_port"`         // Agent HTTP 监听端口(0 = 用默认 23889);通过 install 脚本注入 MMWX_LISTEN_PORT
 	PullAddress       string `json:"pull_address"`        // 对于pull模式
 	PullPort          int    `json:"pull_port"`           // 对于pull模式
 	PullToken         string `json:"pull_token"`          // 对于pull模式
@@ -131,6 +132,7 @@ type RemoteServerUpdateRequest struct {
 	TrafficResetDay int    `json:"traffic_reset_day"`
 	TrafficUsed     *int64 `json:"traffic_used"`
 	ConnectionMode  string `json:"connection_mode"`
+	ListenPort      int    `json:"listen_port"`     // Agent HTTP 监听端口;变更时主控会通知 agent 改配置+重启
 	PullAddress     string `json:"pull_address"`
 	PullPort        int    `json:"pull_port"`
 	PullToken       string `json:"pull_token"`
@@ -335,12 +337,19 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		xrayMode = "external"
 	}
 
+	// Agent 监听端口:有效范围 1024-65535;0 表示用 agent 内置默认 23889
+	listenPort := req.ListenPort
+	if listenPort < 0 || listenPort > 65535 {
+		listenPort = 0
+	}
+
 	server := &storage.RemoteServer{
 		Name:           req.Name,
 		Token:          token,
 		Status:         storage.RemoteServerStatusPending,
 		IPAddress:      req.IPAddress,
 		ConnectionMode: connectionMode,
+		ListenPort:     listenPort,
 		PullAddress:    req.PullAddress,
 		PullPort:       req.PullPort,
 		PullToken:      agentToken,
@@ -398,6 +407,10 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 	}
 	if xrayMode == "embedded" {
 		installQuery.Set("xray_mode", "embedded")
+	}
+	// 自定义 Agent 端口透传到安装脚本(脚本会写进 /etc/mmw-agent/config.yaml 的 listen_port 字段)
+	if listenPort > 0 {
+		installQuery.Set("listen_port", fmt.Sprintf("%d", listenPort))
 	}
 	installScriptURL := fmt.Sprintf("%s/api/remote/install.sh?%s", serverURL, installQuery.Encode())
 
@@ -599,10 +612,26 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		go h.switchRemoteXrayMode(req.ID, newXrayMode)
 	}
 
+	// listen_port 变更:**必须先用旧端口通知 agent**(此刻 DB 仍是旧值,ForwardToServer 能连上 agent),
+	// 等 agent 收到并自重启后,**它会用新端口上报心跳给主控,主控收到心跳时会更新 listen_port**。
+	// 这里若立刻落库,会导致 ForwardToServer 读到新端口去连旧 agent 实例,connection refused。
+	// 同步调用是因为 agent 端会先 net.Listen 预检新端口能否 bind,
+	// 失败(被 xray 等占用)会立刻回 409,主控把错误透传给前端,避免重启后死锁。
+	respMsg := "服务器信息已更新"
+	newListenPort := req.ListenPort
+	if newListenPort < 0 || newListenPort > 65535 {
+		newListenPort = oldServer.ListenPort
+	}
+	if newListenPort != oldServer.ListenPort && h.remoteManager != nil {
+		if err := h.switchRemoteListenPort(req.ID, newListenPort); err != nil {
+			respMsg = fmt.Sprintf("服务器信息已更新,但端口切换失败: %v", err)
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(RemoteServerResponse{
 		Success: true,
-		Message: "服务器信息已更新",
+		Message: respMsg,
 	})
 }
 
@@ -618,6 +647,24 @@ func (h *XrayServerHandler) switchRemoteXrayMode(serverID int64, newMode string)
 		return
 	}
 	log.Printf("[Remote Server] Xray mode switch to %s for server %d: %s", newMode, serverID, string(result))
+}
+
+// switchRemoteListenPort 通知远程 Agent 改自身监听端口并重启。Agent 重启会短暂断连(~5–15s),
+// 重启后用新端口监听,主控下次重连读 server.ListenPort 自动用新端口。
+// agent 端会先 net.Listen 预检新端口能否 bind,失败立刻回 409 — 这里 error 不为 nil 即代表
+// 切换被 agent 拒绝(端口被占用),DB 不需要回滚因为 agent 也没改 config 也没重启。
+func (h *XrayServerHandler) switchRemoteListenPort(serverID int64, newPort int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	body, _ := json.Marshal(map[string]int{"listen_port": newPort})
+	result, err := h.remoteManager.ForwardToServer(ctx, serverID, "POST", "/api/child/agent/switch-listen-port", body)
+	if err != nil {
+		log.Printf("[Remote Server] Failed to switch listen_port to %d for server %d: %v", newPort, serverID, err)
+		return err
+	}
+	log.Printf("[Remote Server] Listen port switch to %d for server %d: %s", newPort, serverID, string(result))
+	return nil
 }
 
 func resolveIPs(address string) []string {

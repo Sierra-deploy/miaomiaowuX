@@ -70,6 +70,7 @@ interface RemoteServer {
   connection_mode: 'push' | 'pull' | 'websocket' | 'http' | 'auto'
   pull_address?: string
   pull_port?: number
+  listen_port?: number    // Agent HTTP 监听端口(0 = 用默认 23889)
   pull_token?: string
   last_pull_at?: string
   push_fail_count?: number
@@ -260,7 +261,7 @@ function XrayServersPage() {
   })
 
   const createRemoteServerMutation = useMutation({
-    mutationFn: async (data: { name: string; traffic_limit?: number; traffic_used_offset?: number; traffic_reset_day?: number; connection_mode?: string; pull_address?: string; pull_port?: number; pull_token?: string; steal_self?: boolean; front_service?: 'xray' | 'nginx'; domain?: string; use_443?: boolean }) => {
+    mutationFn: async (data: { name: string; traffic_limit?: number; traffic_used_offset?: number; traffic_reset_day?: number; connection_mode?: string; pull_address?: string; pull_port?: number; listen_port?: number; pull_token?: string; steal_self?: boolean; front_service?: 'xray' | 'nginx'; domain?: string; use_443?: boolean }) => {
       const response = await api.post('/api/admin/remote-servers/create', data)
       return response.data
     },
@@ -288,7 +289,7 @@ function XrayServersPage() {
   })
 
   const updateRemoteServerMutation = useMutation({
-    mutationFn: async (data: { id: number; name: string; domain?: string; traffic_limit: number; traffic_used?: number; traffic_reset_day: number; connection_mode?: string }) => {
+    mutationFn: async (data: { id: number; name: string; domain?: string; traffic_limit: number; traffic_used?: number; traffic_reset_day: number; connection_mode?: string; xray_mode?: string; listen_port?: number }) => {
       const response = await api.put('/api/admin/remote-servers/update', data)
       return response.data
     },
@@ -590,7 +591,7 @@ function XrayServersPage() {
 
   const handleEditRemoteServer = (server: RemoteServer) => {
     setEditingRemoteServer(server)
-    setRemoteFormData({ name: server.name, domain: server.domain || '', traffic_limit_gb: server.traffic_limit ? (server.traffic_limit / 1024 / 1024 / 1024).toFixed(2) : '', traffic_used_gb: server.traffic_used ? (server.traffic_used / 1024 / 1024 / 1024).toFixed(2) : '', traffic_reset_day: server.traffic_reset_day?.toString() || '', steal_mode: server.steal_mode || 'tunnel', xray_mode: server.xray_mode || 'external' })
+    setRemoteFormData({ name: server.name, domain: server.domain || '', traffic_limit_gb: server.traffic_limit ? (server.traffic_limit / 1024 / 1024 / 1024).toFixed(2) : '', traffic_used_gb: server.traffic_used ? (server.traffic_used / 1024 / 1024 / 1024).toFixed(2) : '', traffic_reset_day: server.traffic_reset_day?.toString() || '', steal_mode: server.steal_mode || 'tunnel', xray_mode: server.xray_mode || 'external', listen_port: server.listen_port ? String(server.listen_port) : '' })
     setIsEditRemoteServerDialogOpen(true)
   }
 
@@ -604,7 +605,16 @@ function XrayServersPage() {
     const trafficLimitGb = parseFloat(remoteFormData.traffic_limit_gb) || 0
     const trafficUsedGb = parseFloat(remoteFormData.traffic_used_gb)
     const trafficUsedBytes = !isNaN(trafficUsedGb) ? Math.round(trafficUsedGb * 1024 * 1024 * 1024) : undefined
-    updateRemoteServerMutation.mutate({ id: editingRemoteServer.id, name: remoteFormData.name, domain: remoteFormData.domain, traffic_limit: trafficLimitGb > 0 ? Math.floor(trafficLimitGb * 1024 * 1024 * 1024) : 0, traffic_used: trafficUsedBytes, traffic_reset_day: parseInt(remoteFormData.traffic_reset_day) || 0, xray_mode: remoteFormData.xray_mode })
+    const lpRaw = (remoteFormData as any).listen_port
+    const newListenPort = lpRaw ? parseInt(lpRaw) : 0
+    const oldListenPort = editingRemoteServer.listen_port || 0
+    if (newListenPort !== oldListenPort) {
+      const confirmMsg = newListenPort === 0
+        ? t('servers.listenPortRestoreConfirm', { defaultValue: '将清空 Agent 端口设置(恢复默认 23889),Agent 会重启并短暂掉线,确定继续吗?' })
+        : t('servers.listenPortChangeConfirm', { port: newListenPort, defaultValue: '将把 Agent 监听端口改为 {{port}},Agent 会重启并短暂掉线,确定继续吗?' })
+      if (!confirm(confirmMsg)) return
+    }
+    updateRemoteServerMutation.mutate({ id: editingRemoteServer.id, name: remoteFormData.name, domain: remoteFormData.domain, traffic_limit: trafficLimitGb > 0 ? Math.floor(trafficLimitGb * 1024 * 1024 * 1024) : 0, traffic_used: trafficUsedBytes, traffic_reset_day: parseInt(remoteFormData.traffic_reset_day) || 0, xray_mode: remoteFormData.xray_mode, listen_port: newListenPort } as any)
   }
 
   const loadRemoteServerStatusToCache = async (serverId: number, forceReload = false) => {
@@ -630,7 +640,7 @@ function XrayServersPage() {
     const trafficUsedOffsetBytes = formData.traffic_used_gb ? Math.round(parseFloat(formData.traffic_used_gb) * 1024 * 1024 * 1024) : 0
     const trafficResetDay = formData.traffic_reset_day ? parseInt(formData.traffic_reset_day) : 0
     setIsGeneratingToken(true)
-    createRemoteServerMutation.mutate({ name: remoteServerName, traffic_limit: trafficLimitBytes, traffic_used_offset: trafficUsedOffsetBytes, traffic_reset_day: trafficResetDay, connection_mode: 'auto', pull_address: pullAddress || undefined, pull_port: pullPort ? parseInt(pullPort) : undefined, pull_token: pullToken || undefined, steal_self: createStealSelf, front_service: createFrontService, domain: createDomain.trim() || undefined, use_443: createUse443 || undefined, steal_mode: createStealSelf ? createStealMode : undefined, site_type: createStealSelf ? createSiteType : undefined, site_value: createStealSelf ? createSiteValue : undefined, xray_mode: createXrayMode })
+    createRemoteServerMutation.mutate({ name: remoteServerName, traffic_limit: trafficLimitBytes, traffic_used_offset: trafficUsedOffsetBytes, traffic_reset_day: trafficResetDay, connection_mode: 'auto', pull_address: pullAddress || undefined, pull_port: pullPort ? parseInt(pullPort) : undefined, listen_port: pullPort ? parseInt(pullPort) : undefined /* "Agent 端口"既是 pull 模式的 pull_port,也是 websocket 模式下主控连接 agent 的端口,语义一致,两个字段同时填 */, pull_token: pullToken || undefined, steal_self: createStealSelf, front_service: createFrontService, domain: createDomain.trim() || undefined, use_443: createUse443 || undefined, steal_mode: createStealSelf ? createStealMode : undefined, site_type: createStealSelf ? createSiteType : undefined, site_value: createStealSelf ? createSiteValue : undefined, xray_mode: createXrayMode })
   }
 
   const copyToClipboard = (text: string, label: string) => { navigator.clipboard.writeText(text).then(() => toast.success(t('servers.copied', { label }))).catch(() => toast.error(t('servers.copyFailed'))) }
@@ -1283,6 +1293,13 @@ function XrayServersPage() {
           <div className="grid gap-4 py-4">
             <div className="grid gap-2"><Label htmlFor="edit-remote-name">{t('servers.serverName')}</Label><Input id="edit-remote-name" value={remoteFormData.name} onChange={(e) => setRemoteFormData({ ...remoteFormData, name: e.target.value })} placeholder={t('servers.serverNamePlaceholder')} /></div>
             <div className="grid gap-2"><Label htmlFor="edit-remote-domain">{t('servers.domainOptional')}</Label><Input id="edit-remote-domain" value={remoteFormData.domain} onChange={(e) => setRemoteFormData({ ...remoteFormData, domain: e.target.value })} placeholder="example.com" /><p className="text-xs text-muted-foreground">{t('servers.domainHint')}</p></div>
+            <div className="grid gap-2">
+              <Label htmlFor="edit-remote-listen-port">{t('servers.agentPort')}</Label>
+              <Input id="edit-remote-listen-port" type="number" min={1024} max={65535} placeholder="23889"
+                value={(remoteFormData as any).listen_port || ''}
+                onChange={(e) => setRemoteFormData({ ...remoteFormData, listen_port: e.target.value } as any)} />
+              <p className="text-xs text-muted-foreground">{t('servers.agentPortEditHint', { defaultValue: '修改后会通知 Agent 改配置并重启,短暂掉线属于正常现象;留空恢复默认 23889。' })}</p>
+            </div>
             <div className="grid grid-cols-3 gap-4">
               <div className="grid gap-2"><Label htmlFor="edit-remote-traffic-limit">{t('servers.trafficLimit')}</Label><Input id="edit-remote-traffic-limit" type="number" step="0.01" placeholder={t('servers.trafficLimitPlaceholder')} value={remoteFormData.traffic_limit_gb} onChange={(e) => setRemoteFormData({ ...remoteFormData, traffic_limit_gb: e.target.value })} /></div>
               <div className="grid gap-2"><Label htmlFor="edit-remote-traffic-used">{t('servers.usedTraffic')}</Label><Input id="edit-remote-traffic-used" type="number" step="0.01" placeholder={t('servers.usedTrafficPlaceholder')} value={remoteFormData.traffic_used_gb} onChange={(e) => setRemoteFormData({ ...remoteFormData, traffic_used_gb: e.target.value })} /></div>

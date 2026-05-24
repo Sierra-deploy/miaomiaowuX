@@ -7653,6 +7653,25 @@ func (r *TrafficRepository) UpdateRemoteServerXrayStatus(ctx context.Context, id
 	return nil
 }
 
+// UpdateRemoteServerListenPort 仅更新 Agent 监听端口字段(编辑服务器场景)。0 表示沿用 agent 默认 23889。
+func (r *TrafficRepository) UpdateRemoteServerListenPort(ctx context.Context, id int64, port int) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if id <= 0 {
+		return errors.New("remote server id is required")
+	}
+	if port < 0 || port > 65535 {
+		return errors.New("listen_port out of range")
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE remote_servers SET listen_port = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, port, id)
+	if err != nil {
+		return fmt.Errorf("update remote server listen_port: %w", err)
+	}
+	return nil
+}
+
 // UpdateRemoteServerXrayMode 仅更新 xray_mode 字段(联邦同步用,不动 name/domain 等)。mode 非 embedded/external 视为空,跳过。
 func (r *TrafficRepository) UpdateRemoteServerXrayMode(ctx context.Context, id int64, mode string) error {
 	if r == nil || r.db == nil {
