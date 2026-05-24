@@ -329,9 +329,18 @@ func (c *Collector) ProcessMetrics(ctx context.Context, serverID int64, metrics 
 	}
 
 	// 处理用户流量
-	for username, data := range stats.User {
+	// xray stats 的 key 是 email,可能是:
+	//   - 主账号 email(== mmwx username,历史约定),直接落库
+	//   - 子账号 email(<username>__<routed_label>),通过 user_subaccounts 反查归到 username
+	//   - _admin__ 前缀的占位 client,流量丢弃(管理员测试用,不属任何用户)
+	// 多个 email 归到同一 username 后,user_traffic 的 UNIQUE(server_id, username) UPSERT 自动累加。
+	for emailKey, data := range stats.User {
+		username := c.repo.ResolveUsernameByEmail(ctx, emailKey)
+		if username == "" {
+			continue
+		}
 		if err := c.repo.UpsertUserTraffic(ctx, serverID, username, data.Uplink, data.Downlink); err != nil {
-			log.Printf("[Traffic Collector] Failed to upsert user traffic for %s: %v", username, err)
+			log.Printf("[Traffic Collector] Failed to upsert user traffic for %s (email=%s): %v", username, emailKey, err)
 		}
 	}
 
@@ -361,10 +370,14 @@ func (c *Collector) ProcessRemoteMetrics(ctx context.Context, serverID int64, st
 		}
 	}
 
-	// 处理用户流量
-	for username, data := range stats.User {
+	// 处理用户流量(同上注释 — 远程上报路径)
+	for emailKey, data := range stats.User {
+		username := c.repo.ResolveUsernameByEmail(ctx, emailKey)
+		if username == "" {
+			continue
+		}
 		if err := c.repo.UpsertUserTraffic(ctx, serverID, username, data.Uplink, data.Downlink); err != nil {
-			log.Printf("[Traffic Collector] Failed to upsert remote user traffic for %s: %v", username, err)
+			log.Printf("[Traffic Collector] Failed to upsert remote user traffic for %s (email=%s): %v", username, emailKey, err)
 		}
 	}
 

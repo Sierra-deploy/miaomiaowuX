@@ -389,6 +389,9 @@ func main() {
 	mux.Handle("/api/admin/nodes", auth.RequireToken(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler, licenseManager)))
 	mux.Handle("/api/admin/nodes/", auth.RequireToken(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler, licenseManager)))
 
+	// 路由出站(routed node)管理:给物理节点挂多个虚拟出站节点
+	mux.Handle("/api/admin/routed-outbound", auth.RequireAdmin(tokenStore, userRepo, handler.NewRoutedOutboundHandler(repo, remoteManageHandler)))
+
 	// 初始化事件系统以进行入站同步
 	eventBus := event.GetBus()
 	nodeSyncListener := event.NewNodeSyncListener(repo, remoteManageHandler.InboundToClashProxyByServerID)

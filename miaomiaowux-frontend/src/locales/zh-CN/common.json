@@ -8,6 +8,7 @@
   "nav": {
     "trafficInfo": "流量信息",
     "nodeManagement": "节点管理",
+    "routedOutbounds": "路由出站",
     "serviceManagement": "服务管理",
     "userManagement": "用户管理",
     "packageManagement": "套餐管理",

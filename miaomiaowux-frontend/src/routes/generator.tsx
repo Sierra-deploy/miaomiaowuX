@@ -242,6 +242,8 @@ type SavedNode = {
   clash_config: string
   enabled: boolean
   tag: string
+  node_type?: string
+  routed_outbound_tag?: string
   created_at: string
   updated_at: string
 }
@@ -2541,14 +2543,24 @@ function SubscriptionGeneratorPage() {
                         {
                           header: t('generator.columns.protocol'),
                           cell: (node) => (
-                            <Badge
-                              variant='outline'
-                              className={getProtocolColor(node.protocol)}
-                            >
-                              {node.protocol.toUpperCase()}
-                            </Badge>
+                            <div className='flex flex-col items-start gap-0.5'>
+                              <Badge
+                                variant='outline'
+                                className={getProtocolColor(node.protocol)}
+                              >
+                                {node.protocol.toUpperCase()}
+                              </Badge>
+                              {node.node_type === 'routed' && node.routed_outbound_tag && (
+                                <span
+                                  className='text-[10px] text-indigo-600 dark:text-indigo-400 font-mono max-w-[110px] truncate'
+                                  title={node.routed_outbound_tag}
+                                >
+                                  ↳ {node.routed_outbound_tag.replace(/^routed:p\d+:/, '')}
+                                </span>
+                              )}
+                            </div>
                           ),
-                          width: '100px',
+                          width: '110px',
                         },
                         {
                           header: t('generator.columns.serverAddress'),

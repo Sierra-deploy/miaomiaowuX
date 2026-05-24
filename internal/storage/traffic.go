@@ -237,8 +237,22 @@ type Node struct {
 	OriginalDomain   string // IP 解析功能专用：解析为 IP 前的原始域名（用于"恢复域名"）。与 OriginalServer（服务器名/路由键）严格区分
 	InboundTag       string // 关联入站标签（用于将节点链接到入站）
 	ChainProxyNodeID *int64 // 链式代理目标节点 ID
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	NodeType          string // 'physical' (默认) 或 'routed' (路由出站虚拟节点)
+	ParentNodeID      *int64 // routed 节点指向其父物理节点
+	RoutedOutboundTag string // routed 节点专用:绑定的 outbound tag(空 = 非 routed 节点);常用查询展示
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+// RoutedNodeDetail 路由出站节点的完整元数据,通过专用 GetRoutedNodeDetail 读取。
+// 包含 Node 基本字段 + routed_* 字段。
+type RoutedNodeDetail struct {
+	Node
+	RoutedOutboundTag      string
+	RoutedOutboundJSON     string
+	RoutedRuleMarktag      string
+	RoutedAdminEmail       string
+	RoutedAdminCredential  string
 }
 
 // SubscribeFile 表示订阅文件配置。
@@ -904,9 +918,40 @@ CREATE INDEX IF NOT EXISTS idx_nodes_enabled ON nodes(enabled);
 		return err
 	}
 
+	// 路由出站(routed node)字段:把一条 routing rule + 一个 outbound 当作虚拟节点
+	// 挂在物理父节点下,被套餐绑定后自动给用户开子账号并加入 rule.user 数组。
+	// node_type = 'physical' (默认) | 'routed'
+	if err := r.ensureNodeColumn("node_type", "TEXT NOT NULL DEFAULT 'physical'"); err != nil {
+		return err
+	}
+	if err := r.ensureNodeColumn("parent_node_id", "INTEGER"); err != nil {
+		return err
+	}
+	if err := r.ensureNodeColumn("routed_outbound_tag", "TEXT"); err != nil {
+		return err
+	}
+	if err := r.ensureNodeColumn("routed_outbound_json", "TEXT"); err != nil {
+		return err
+	}
+	if err := r.ensureNodeColumn("routed_rule_marktag", "TEXT"); err != nil {
+		return err
+	}
+	if err := r.ensureNodeColumn("routed_admin_email", "TEXT"); err != nil {
+		return err
+	}
+	if err := r.ensureNodeColumn("routed_admin_credential", "TEXT"); err != nil {
+		return err
+	}
+
 	// 确保列存在后创建标签索引
 	if _, err := r.db.Exec(`CREATE INDEX IF NOT EXISTS idx_nodes_tag ON nodes(tag);`); err != nil {
 		return fmt.Errorf("create tag index: %w", err)
+	}
+	if _, err := r.db.Exec(`CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type);`); err != nil {
+		return fmt.Errorf("create node_type index: %w", err)
+	}
+	if _, err := r.db.Exec(`CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_node_id);`); err != nil {
+		return fmt.Errorf("create parent_node_id index: %w", err)
 	}
 
 	const subscribeFilesSchema = `
@@ -1868,6 +1913,30 @@ CREATE TABLE IF NOT EXISTS user_outbounds (
 `
 	if _, err := r.db.Exec(userOutboundsSchema); err != nil {
 		return fmt.Errorf("migrate user_outbounds: %w", err)
+	}
+
+	// 用户子账号:一个 mmwx 用户在某 routed 节点上的 xray client 凭据。
+	// is_active=0 表示已下线(从 inbound clients + routing rule.user 移除),但凭据保留供续费恢复用。
+	const userSubaccountsSchema = `
+CREATE TABLE IF NOT EXISTS user_subaccounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    routed_node_id INTEGER NOT NULL,
+    email TEXT NOT NULL,
+    credential_json TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(routed_node_id, username),
+    UNIQUE(routed_node_id, email),
+    FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_subacc_user ON user_subaccounts(username);
+CREATE INDEX IF NOT EXISTS idx_subacc_email ON user_subaccounts(email);
+CREATE INDEX IF NOT EXISTS idx_subacc_routed ON user_subaccounts(routed_node_id);
+`
+	if _, err := r.db.Exec(userSubaccountsSchema); err != nil {
+		return fmt.Errorf("migrate user_subaccounts: %w", err)
 	}
 
 	const trafficThresholdNotifiedSchema = `
@@ -6496,6 +6565,178 @@ func (r *TrafficRepository) DeleteUserOutbound(ctx context.Context, username str
 func (r *TrafficRepository) DeleteUserOutboundsByUsername(ctx context.Context, username string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM user_outbounds WHERE username = ?`, username)
 	return err
+}
+
+// UserSubaccount 记录一个 mmwx 用户在某 routed 节点上的 xray client 凭据。
+// is_active=0 表示已下线(凭据保留供续费恢复),=1 表示已下发到 inbound + routing rule.user。
+type UserSubaccount struct {
+	ID             int64
+	Username       string
+	RoutedNodeID   int64
+	Email          string
+	CredentialJSON string
+	IsActive       bool
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// UpsertUserSubaccount 新建或更新一个子账号。续费时若已存在,credential 不变(由调用方决定);
+// 这里只负责持久化传入字段。
+func (r *TrafficRepository) UpsertUserSubaccount(ctx context.Context, sa UserSubaccount) (int64, error) {
+	active := 0
+	if sa.IsActive {
+		active = 1
+	}
+	res, err := r.db.ExecContext(ctx, `
+		INSERT INTO user_subaccounts (username, routed_node_id, email, credential_json, is_active, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(routed_node_id, username) DO UPDATE SET
+			email = excluded.email,
+			credential_json = excluded.credential_json,
+			is_active = excluded.is_active,
+			updated_at = CURRENT_TIMESTAMP
+	`, sa.Username, sa.RoutedNodeID, sa.Email, sa.CredentialJSON, active)
+	if err != nil {
+		return 0, err
+	}
+	if sa.ID > 0 {
+		return sa.ID, nil
+	}
+	id, _ := res.LastInsertId()
+	return id, nil
+}
+
+func (r *TrafficRepository) GetUserSubaccount(ctx context.Context, routedNodeID int64, username string) (*UserSubaccount, error) {
+	var sa UserSubaccount
+	var active int
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id, username, routed_node_id, email, credential_json, is_active, created_at, updated_at
+		FROM user_subaccounts WHERE routed_node_id = ? AND username = ?
+	`, routedNodeID, username).Scan(&sa.ID, &sa.Username, &sa.RoutedNodeID, &sa.Email, &sa.CredentialJSON, &active, &sa.CreatedAt, &sa.UpdatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sa.IsActive = active == 1
+	return &sa, nil
+}
+
+func (r *TrafficRepository) ListUserSubaccounts(ctx context.Context, username string) ([]UserSubaccount, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, username, routed_node_id, email, credential_json, is_active, created_at, updated_at
+		FROM user_subaccounts WHERE username = ? ORDER BY routed_node_id
+	`, username)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UserSubaccount
+	for rows.Next() {
+		var sa UserSubaccount
+		var active int
+		if err := rows.Scan(&sa.ID, &sa.Username, &sa.RoutedNodeID, &sa.Email, &sa.CredentialJSON, &active, &sa.CreatedAt, &sa.UpdatedAt); err != nil {
+			return nil, err
+		}
+		sa.IsActive = active == 1
+		out = append(out, sa)
+	}
+	return out, rows.Err()
+}
+
+func (r *TrafficRepository) ListSubaccountsByRoutedNode(ctx context.Context, routedNodeID int64) ([]UserSubaccount, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, username, routed_node_id, email, credential_json, is_active, created_at, updated_at
+		FROM user_subaccounts WHERE routed_node_id = ? ORDER BY username
+	`, routedNodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UserSubaccount
+	for rows.Next() {
+		var sa UserSubaccount
+		var active int
+		if err := rows.Scan(&sa.ID, &sa.Username, &sa.RoutedNodeID, &sa.Email, &sa.CredentialJSON, &active, &sa.CreatedAt, &sa.UpdatedAt); err != nil {
+			return nil, err
+		}
+		sa.IsActive = active == 1
+		out = append(out, sa)
+	}
+	return out, rows.Err()
+}
+
+// ListActiveSubaccountsByServerName 用于 limiter 下发:列出某 server 上所有 active 子账号
+// 以及其挂的 inbound_tag(继承自父物理节点)。需要 JOIN nodes 表拿 inbound 信息。
+type ActiveSubaccountForLimiter struct {
+	Username   string
+	Email      string
+	InboundTag string
+}
+
+func (r *TrafficRepository) ListActiveSubaccountsByServerName(ctx context.Context, serverName string) ([]ActiveSubaccountForLimiter, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT sa.username, sa.email, COALESCE(n.inbound_tag, '')
+		FROM user_subaccounts sa
+		INNER JOIN nodes n ON sa.routed_node_id = n.id
+		WHERE sa.is_active = 1 AND n.original_server = ? AND n.node_type = 'routed'
+	`, serverName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ActiveSubaccountForLimiter
+	for rows.Next() {
+		var a ActiveSubaccountForLimiter
+		if err := rows.Scan(&a.Username, &a.Email, &a.InboundTag); err != nil {
+			return nil, err
+		}
+		if a.InboundTag == "" {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// SetSubaccountActive 切换 is_active(下线/恢复),不动 credential。
+func (r *TrafficRepository) SetSubaccountActive(ctx context.Context, id int64, active bool) error {
+	v := 0
+	if active {
+		v = 1
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE user_subaccounts SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, v, id)
+	return err
+}
+
+func (r *TrafficRepository) DeleteUserSubaccount(ctx context.Context, id int64) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM user_subaccounts WHERE id = ?`, id)
+	return err
+}
+
+// ResolveUsernameByEmail 把 xray 上报的 stats.User key (email) 反查到 mmwx 用户名。
+// 优先级:
+//  1. user_subaccounts.email → username (子账号路径)
+//  2. 以 "_admin__" 开头 → 返回空(占位 admin 流量丢弃)
+//  3. 否则原值返回(主账号路径,email == username 是 mmwx 历史约定)
+//
+// 该函数应在流量采集热路径上调用,后续可加内存 cache 优化。
+func (r *TrafficRepository) ResolveUsernameByEmail(ctx context.Context, email string) string {
+	if email == "" {
+		return ""
+	}
+	if strings.HasPrefix(email, "_admin__") {
+		return ""
+	}
+	var username string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT username FROM user_subaccounts WHERE email = ? LIMIT 1`, email).Scan(&username)
+	if err == nil && username != "" {
+		return username
+	}
+	return email
 }
 
 func (r *TrafficRepository) ListUsersWithPackage(ctx context.Context) ([]User, error) {

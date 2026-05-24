@@ -19,6 +19,7 @@ import { Route as SubscriptionRouteImport } from './routes/subscription'
 import { Route as SubscribeFilesRouteImport } from './routes/subscribe-files'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as RulesRouteImport } from './routes/rules'
+import { Route as RoutedOutboundsRouteImport } from './routes/routed-outbounds'
 import { Route as PackagesRouteImport } from './routes/packages'
 import { Route as NodesRouteImport } from './routes/nodes'
 import { Route as LoginRouteImport } from './routes/login'
@@ -33,6 +34,7 @@ import { Route as XrayInboundsIndexRouteImport } from './routes/xray-inbounds.in
 import { Route as TemplatesIndexRouteImport } from './routes/templates.index'
 import { Route as SubscriptionIndexRouteImport } from './routes/subscription.index'
 import { Route as SubscribeFilesIndexRouteImport } from './routes/subscribe-files.index'
+import { Route as RoutedOutboundsIndexRouteImport } from './routes/routed-outbounds.index'
 import { Route as PackagesIndexRouteImport } from './routes/packages.index'
 import { Route as NodesIndexRouteImport } from './routes/nodes.index'
 import { Route as CustomRulesIndexRouteImport } from './routes/custom-rules.index'
@@ -87,6 +89,11 @@ const SettingsRoute = SettingsRouteImport.update({
 const RulesRoute = RulesRouteImport.update({
   id: '/rules',
   path: '/rules',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RoutedOutboundsRoute = RoutedOutboundsRouteImport.update({
+  id: '/routed-outbounds',
+  path: '/routed-outbounds',
   getParentRoute: () => rootRouteImport,
 } as any)
 const PackagesRoute = PackagesRouteImport.update({
@@ -159,6 +166,11 @@ const SubscribeFilesIndexRoute = SubscribeFilesIndexRouteImport.update({
   path: '/',
   getParentRoute: () => SubscribeFilesRoute,
 } as any)
+const RoutedOutboundsIndexRoute = RoutedOutboundsIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => RoutedOutboundsRoute,
+} as any)
 const PackagesIndexRoute = PackagesIndexRouteImport.update({
   id: '/',
   path: '/',
@@ -194,6 +206,7 @@ export interface FileRoutesByFullPath {
   '/login': typeof LoginRoute
   '/nodes': typeof NodesRouteWithChildren
   '/packages': typeof PackagesRouteWithChildren
+  '/routed-outbounds': typeof RoutedOutboundsRouteWithChildren
   '/rules': typeof RulesRoute
   '/settings': typeof SettingsRoute
   '/subscribe-files': typeof SubscribeFilesRouteWithChildren
@@ -209,6 +222,7 @@ export interface FileRoutesByFullPath {
   '/custom-rules/': typeof CustomRulesIndexRoute
   '/nodes/': typeof NodesIndexRoute
   '/packages/': typeof PackagesIndexRoute
+  '/routed-outbounds/': typeof RoutedOutboundsIndexRoute
   '/subscribe-files/': typeof SubscribeFilesIndexRoute
   '/subscription/': typeof SubscriptionIndexRoute
   '/templates/': typeof TemplatesIndexRoute
@@ -230,6 +244,7 @@ export interface FileRoutesByTo {
   '/custom-rules': typeof CustomRulesIndexRoute
   '/nodes': typeof NodesIndexRoute
   '/packages': typeof PackagesIndexRoute
+  '/routed-outbounds': typeof RoutedOutboundsIndexRoute
   '/subscribe-files': typeof SubscribeFilesIndexRoute
   '/subscription': typeof SubscriptionIndexRoute
   '/templates': typeof TemplatesIndexRoute
@@ -247,6 +262,7 @@ export interface FileRoutesById {
   '/login': typeof LoginRoute
   '/nodes': typeof NodesRouteWithChildren
   '/packages': typeof PackagesRouteWithChildren
+  '/routed-outbounds': typeof RoutedOutboundsRouteWithChildren
   '/rules': typeof RulesRoute
   '/settings': typeof SettingsRoute
   '/subscribe-files': typeof SubscribeFilesRouteWithChildren
@@ -262,6 +278,7 @@ export interface FileRoutesById {
   '/custom-rules/': typeof CustomRulesIndexRoute
   '/nodes/': typeof NodesIndexRoute
   '/packages/': typeof PackagesIndexRoute
+  '/routed-outbounds/': typeof RoutedOutboundsIndexRoute
   '/subscribe-files/': typeof SubscribeFilesIndexRoute
   '/subscription/': typeof SubscriptionIndexRoute
   '/templates/': typeof TemplatesIndexRoute
@@ -280,6 +297,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/nodes'
     | '/packages'
+    | '/routed-outbounds'
     | '/rules'
     | '/settings'
     | '/subscribe-files'
@@ -295,6 +313,7 @@ export interface FileRouteTypes {
     | '/custom-rules/'
     | '/nodes/'
     | '/packages/'
+    | '/routed-outbounds/'
     | '/subscribe-files/'
     | '/subscription/'
     | '/templates/'
@@ -316,6 +335,7 @@ export interface FileRouteTypes {
     | '/custom-rules'
     | '/nodes'
     | '/packages'
+    | '/routed-outbounds'
     | '/subscribe-files'
     | '/subscription'
     | '/templates'
@@ -332,6 +352,7 @@ export interface FileRouteTypes {
     | '/login'
     | '/nodes'
     | '/packages'
+    | '/routed-outbounds'
     | '/rules'
     | '/settings'
     | '/subscribe-files'
@@ -347,6 +368,7 @@ export interface FileRouteTypes {
     | '/custom-rules/'
     | '/nodes/'
     | '/packages/'
+    | '/routed-outbounds/'
     | '/subscribe-files/'
     | '/subscription/'
     | '/templates/'
@@ -364,6 +386,7 @@ export interface RootRouteChildren {
   LoginRoute: typeof LoginRoute
   NodesRoute: typeof NodesRouteWithChildren
   PackagesRoute: typeof PackagesRouteWithChildren
+  RoutedOutboundsRoute: typeof RoutedOutboundsRouteWithChildren
   RulesRoute: typeof RulesRoute
   SettingsRoute: typeof SettingsRoute
   SubscribeFilesRoute: typeof SubscribeFilesRouteWithChildren
@@ -446,6 +469,13 @@ declare module '@tanstack/react-router' {
       path: '/rules'
       fullPath: '/rules'
       preLoaderRoute: typeof RulesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/routed-outbounds': {
+      id: '/routed-outbounds'
+      path: '/routed-outbounds'
+      fullPath: '/routed-outbounds'
+      preLoaderRoute: typeof RoutedOutboundsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/packages': {
@@ -546,6 +576,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SubscribeFilesIndexRouteImport
       parentRoute: typeof SubscribeFilesRoute
     }
+    '/routed-outbounds/': {
+      id: '/routed-outbounds/'
+      path: '/'
+      fullPath: '/routed-outbounds/'
+      preLoaderRoute: typeof RoutedOutboundsIndexRouteImport
+      parentRoute: typeof RoutedOutboundsRoute
+    }
     '/packages/': {
       id: '/packages/'
       path: '/'
@@ -628,6 +665,18 @@ const PackagesRouteChildren: PackagesRouteChildren = {
 
 const PackagesRouteWithChildren = PackagesRoute._addFileChildren(
   PackagesRouteChildren,
+)
+
+interface RoutedOutboundsRouteChildren {
+  RoutedOutboundsIndexRoute: typeof RoutedOutboundsIndexRoute
+}
+
+const RoutedOutboundsRouteChildren: RoutedOutboundsRouteChildren = {
+  RoutedOutboundsIndexRoute: RoutedOutboundsIndexRoute,
+}
+
+const RoutedOutboundsRouteWithChildren = RoutedOutboundsRoute._addFileChildren(
+  RoutedOutboundsRouteChildren,
 )
 
 interface SubscribeFilesRouteChildren {
@@ -713,6 +762,7 @@ const rootRouteChildren: RootRouteChildren = {
   LoginRoute: LoginRoute,
   NodesRoute: NodesRouteWithChildren,
   PackagesRoute: PackagesRouteWithChildren,
+  RoutedOutboundsRoute: RoutedOutboundsRouteWithChildren,
   RulesRoute: RulesRoute,
   SettingsRoute: SettingsRoute,
   SubscribeFilesRoute: SubscribeFilesRouteWithChildren,

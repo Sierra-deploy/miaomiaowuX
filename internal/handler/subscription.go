@@ -163,12 +163,10 @@ func (s *subscriptionEndpoint) authorizeRequest(w http.ResponseWriter, r *http.R
 		return r, true
 	}
 
-	// 检查用户名参数（来自复合短链接 - 已通过短链接处理程序进行身份验证）
-	queryUsername := strings.TrimSpace(r.URL.Query().Get("username"))
-	if queryUsername != "" {
-		ctx := auth.ContextWithUsername(r.Context(), queryUsername)
-		return r.WithContext(ctx), true
-	}
+	// 严重安全:之前这里信任 ?username=XXX query 参数注入 username 到 context,
+	// 任何人都可以构造 `?filename=X&username=admin` 直接绕过 token 拿别人订阅(IDOR/未授权)。
+	// 实际短链接处理是用 r.Clone(ContextWithUsername(ctx, x)) 写入 **context**,
+	// 不需要也不应该信任 URL query。**移除此分支**,所有未携带有效 token/session 的访问都走 invalid 响应。
 
 	// 检查令牌参数（旧版/直接访问）
 	queryToken := strings.TrimSpace(r.URL.Query().Get("token"))
@@ -232,6 +230,28 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			}
 			writeError(w, http.StatusInternalServerError, err)
 			return
+		}
+		// 越权防护:token 认证路径下,用户只能访问"自己创建的"或"管理员分配给自己的"订阅文件。
+		// 短链接路径(/x/{code})不会走到这里 — 它由 short_link.go 解析后直接转发 + 注入 created_by,
+		// 链接本身就是身份证明(谁拿到 code 谁访问),所以那条路径无需此校验。
+		// 此校验仅针对 token 认证 + filename 参数的入口,堵住 IDOR(改 filename 拿别人订阅)。
+		if username != "" {
+			user, uerr := h.repo.GetUser(r.Context(), username)
+			if uerr == nil && user.Role != storage.RoleAdmin && subscribeFile.CreatedBy != username {
+				allowed := false
+				if ids, ierr := h.repo.GetUserSubscriptionIDs(r.Context(), username); ierr == nil {
+					for _, id := range ids {
+						if id == subscribeFile.ID {
+							allowed = true
+							break
+						}
+					}
+				}
+				if !allowed {
+					writeError(w, http.StatusForbidden, errors.New("forbidden: subscription not assigned to user"))
+					return
+				}
+			}
 		}
 		displayName = subscribeFile.Name
 		hasSubscribeFile = true

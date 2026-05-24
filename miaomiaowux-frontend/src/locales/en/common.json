@@ -8,6 +8,7 @@
   "nav": {
     "trafficInfo": "Traffic",
     "nodeManagement": "Nodes",
+    "routedOutbounds": "Routed Outbounds",
     "serviceManagement": "Services",
     "userManagement": "Users",
     "packageManagement": "Packages",

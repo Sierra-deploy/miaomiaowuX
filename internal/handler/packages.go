@@ -318,6 +318,13 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 				log.Printf("[PackageUpdate] Failed to get node %d: %v", nodeID, err)
 				continue
 			}
+			// routed 节点:走子账号路径,跳过物理 inbound 那套
+			if node.NodeType == "routed" {
+				if err := addUserToRoutedNode(ctx, h.remoteManage, h.repo, user, node.ID); err != nil {
+					log.Printf("[PackageUpdate] add user %s to routed node %d failed: %v", user.Username, node.ID, err)
+				}
+				continue
+			}
 			if node.InboundTag == "" || node.OriginalServer == "" {
 				continue
 			}
@@ -335,6 +342,13 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 		for _, nodeID := range removedNodes {
 			node, err := h.repo.GetNodeByID(ctx, nodeID)
 			if err != nil {
+				continue
+			}
+			// routed 节点:走子账号反向路径
+			if node.NodeType == "routed" {
+				if err := removeUserFromRoutedNode(ctx, h.remoteManage, h.repo, user.Username, node.ID); err != nil {
+					log.Printf("[PackageUpdate] remove user %s from routed node %d failed: %v", user.Username, node.ID, err)
+				}
 				continue
 			}
 			if node.InboundTag == "" || node.OriginalServer == "" {
@@ -386,6 +400,16 @@ func unbindUserPackage(ctx context.Context, repo *storage.TrafficRepository, rem
 	}
 	if err := repo.DeleteUserInboundConfigs(ctx, username); err != nil {
 		log.Printf("[PackageUnbind] 删除用户 %s 入站配置记录失败: %v", username, err)
+	}
+	// 子账号路径:从所有 active routed 节点下线(凭据保留,续费可恢复)
+	subaccs, _ := repo.ListUserSubaccounts(ctx, username)
+	for _, sa := range subaccs {
+		if !sa.IsActive {
+			continue
+		}
+		if err := removeUserFromRoutedNode(ctx, remoteManage, repo, username, sa.RoutedNodeID); err != nil {
+			log.Printf("[PackageUnbind] routed node %d 下线用户 %s 失败: %v", sa.RoutedNodeID, username, err)
+		}
 	}
 	if pusher != nil {
 		go pusher.PushToAllServersForUser(context.Background(), username)
@@ -520,6 +544,17 @@ func (h *PackageUnassignHandler) ServeHTTP(w http.ResponseWriter, r *http.Reques
 		log.Printf("[PackageUnassign] Failed to delete user inbound config records: %v", err)
 	}
 
+	// 路由出站子账号:从 active 状态下线,凭据保留供续费恢复。
+	subaccs, _ := h.repo.ListUserSubaccounts(ctx, req.Username)
+	for _, sa := range subaccs {
+		if !sa.IsActive {
+			continue
+		}
+		if err := removeUserFromRoutedNode(ctx, h.remoteManage, h.repo, req.Username, sa.RoutedNodeID); err != nil {
+			log.Printf("[PackageUnassign] routed node %d 下线用户 %s 失败: %v", sa.RoutedNodeID, req.Username, err)
+		}
+	}
+
 	if h.pusher != nil {
 		go h.pusher.PushToAllServersForUser(context.Background(), req.Username)
 	}
@@ -638,6 +673,14 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				node, err := h.repo.GetNodeByID(ctx, nodeID)
 				if err != nil {
 					log.Printf("[PackageAssign] Failed to get node %d: %v", nodeID, err)
+					continue
+				}
+				// routed 节点:开子账号(自动复用 saved credential 续费场景)
+				if node.NodeType == "routed" {
+					if err := addUserToRoutedNode(ctx, h.remoteManage, h.repo, user, node.ID); err != nil {
+						log.Printf("[PackageAssign] routed node %d failed for user %s: %v", node.ID, req.Username, err)
+						warnings = append(warnings, fmt.Sprintf("路由出站 %s 添加用户失败", node.NodeName))
+					}
 					continue
 				}
 				if node.InboundTag == "" || node.OriginalServer == "" {

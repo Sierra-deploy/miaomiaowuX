@@ -91,7 +91,7 @@ func (r *TrafficRepository) ListNodes(ctx context.Context, username string) ([]N
 		return nil, errors.New("username is required")
 	}
 
-	rows, err := r.db.QueryContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, created_at, updated_at FROM nodes WHERE username = ? ORDER BY created_at DESC`, username)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), created_at, updated_at FROM nodes WHERE username = ? ORDER BY created_at DESC`, username)
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
 	}
@@ -101,7 +101,7 @@ func (r *TrafficRepository) ListNodes(ctx context.Context, username string) ([]N
 	for rows.Next() {
 		var node Node
 		var enabled int
-		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.CreatedAt, &node.UpdatedAt); err != nil {
+		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.CreatedAt, &node.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		node.Enabled = enabled != 0
@@ -132,7 +132,7 @@ func (r *TrafficRepository) ListAllNodes(ctx context.Context) ([]Node, error) {
 		return nil, errors.New("traffic repository not initialized")
 	}
 
-	rows, err := r.db.QueryContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, created_at, updated_at FROM nodes ORDER BY created_at DESC`)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), created_at, updated_at FROM nodes ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list all nodes: %w", err)
 	}
@@ -142,7 +142,7 @@ func (r *TrafficRepository) ListAllNodes(ctx context.Context) ([]Node, error) {
 	for rows.Next() {
 		var node Node
 		var enabled int
-		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.CreatedAt, &node.UpdatedAt); err != nil {
+		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.CreatedAt, &node.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		node.Enabled = enabled != 0
@@ -173,8 +173,8 @@ func (r *TrafficRepository) GetNode(ctx context.Context, id int64, username stri
 	}
 
 	var enabled int
-	row := r.db.QueryRowContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, created_at, updated_at FROM nodes WHERE id = ? AND username = ? LIMIT 1`, id, username)
-	if err := row.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.CreatedAt, &node.UpdatedAt); err != nil {
+	row := r.db.QueryRowContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), created_at, updated_at FROM nodes WHERE id = ? AND username = ? LIMIT 1`, id, username)
+	if err := row.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.CreatedAt, &node.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return node, ErrNodeNotFound
 		}
@@ -198,8 +198,8 @@ func (r *TrafficRepository) GetNodeByID(ctx context.Context, id int64) (Node, er
 	}
 
 	var enabled int
-	row := r.db.QueryRowContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, created_at, updated_at FROM nodes WHERE id = ? LIMIT 1`, id)
-	if err := row.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.CreatedAt, &node.UpdatedAt); err != nil {
+	row := r.db.QueryRowContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), created_at, updated_at FROM nodes WHERE id = ? LIMIT 1`, id)
+	if err := row.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.CreatedAt, &node.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return node, ErrNodeNotFound
 		}
@@ -665,4 +665,146 @@ func (r *TrafficRepository) UpdateNodeByInboundTag(ctx context.Context, serverNa
 	}
 
 	return nil
+}
+
+// ===== 路由出站(routed node)专用 CRUD =====
+// routed 节点是一个虚拟节点:挂在某物理父节点下,代表"该 inbound 上一条 marktag-rule + 一个 outbound"。
+// 套餐绑用户时自动给用户开子账号(user_subaccounts)并加进 rule.user 数组。
+
+// 插入一条 routed 节点。基本字段(username/raw_url/node_name/protocol 等)由调用方传入,
+// 路由出站元数据(outbound/rule/admin)单独写入 routed_* 列。
+func (r *TrafficRepository) CreateRoutedNode(ctx context.Context, detail RoutedNodeDetail) (RoutedNodeDetail, error) {
+	if r == nil || r.db == nil {
+		return RoutedNodeDetail{}, errors.New("traffic repository not initialized")
+	}
+	n := detail.Node
+	n.NodeName = strings.TrimSpace(n.NodeName)
+	if n.NodeName == "" {
+		return RoutedNodeDetail{}, errors.New("node name is required")
+	}
+	if n.ParentNodeID == nil || *n.ParentNodeID <= 0 {
+		return RoutedNodeDetail{}, errors.New("parent_node_id is required for routed node")
+	}
+	if detail.RoutedOutboundTag == "" || detail.RoutedRuleMarktag == "" || detail.RoutedAdminEmail == "" {
+		return RoutedNodeDetail{}, errors.New("routed_outbound_tag, routed_rule_marktag, routed_admin_email are required")
+	}
+	enabled := 0
+	if n.Enabled {
+		enabled = 1
+	}
+	if n.Tag == "" {
+		n.Tag = "路由出站"
+	}
+	if n.Protocol == "" {
+		n.Protocol = "routed"
+	}
+	res, err := r.db.ExecContext(ctx, `
+		INSERT INTO nodes (
+			username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, tag,
+			original_server, original_domain, inbound_tag, chain_proxy_node_id,
+			node_type, parent_node_id,
+			routed_outbound_tag, routed_outbound_json, routed_rule_marktag,
+			routed_admin_email, routed_admin_credential
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'routed', ?, ?, ?, ?, ?, ?)`,
+		n.Username, n.RawURL, n.NodeName, n.Protocol, n.ParsedConfig, n.ClashConfig, enabled, n.Tag,
+		n.OriginalServer, n.OriginalDomain, n.InboundTag, n.ChainProxyNodeID,
+		*n.ParentNodeID,
+		detail.RoutedOutboundTag, detail.RoutedOutboundJSON, detail.RoutedRuleMarktag,
+		detail.RoutedAdminEmail, detail.RoutedAdminCredential,
+	)
+	if err != nil {
+		return RoutedNodeDetail{}, fmt.Errorf("create routed node: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return RoutedNodeDetail{}, fmt.Errorf("fetch routed node id: %w", err)
+	}
+	return r.GetRoutedNodeDetail(ctx, id)
+}
+
+// 按 id 读取 routed 节点完整元数据(含 routed_* 字段)。
+func (r *TrafficRepository) GetRoutedNodeDetail(ctx context.Context, id int64) (RoutedNodeDetail, error) {
+	if r == nil || r.db == nil {
+		return RoutedNodeDetail{}, errors.New("traffic repository not initialized")
+	}
+	var d RoutedNodeDetail
+	var enabled int
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled,
+		       COALESCE(tag, ''), COALESCE(original_server, ''), COALESCE(original_domain, ''),
+		       COALESCE(inbound_tag, ''), chain_proxy_node_id,
+		       COALESCE(node_type, 'physical'), parent_node_id,
+		       COALESCE(routed_outbound_tag, ''), COALESCE(routed_outbound_json, ''),
+		       COALESCE(routed_rule_marktag, ''),
+		       COALESCE(routed_admin_email, ''), COALESCE(routed_admin_credential, ''),
+		       created_at, updated_at
+		FROM nodes WHERE id = ? LIMIT 1`, id).Scan(
+		&d.ID, &d.Username, &d.RawURL, &d.NodeName, &d.Protocol, &d.ParsedConfig, &d.ClashConfig, &enabled,
+		&d.Tag, &d.OriginalServer, &d.OriginalDomain,
+		&d.InboundTag, &d.ChainProxyNodeID,
+		&d.NodeType, &d.ParentNodeID,
+		&d.RoutedOutboundTag, &d.RoutedOutboundJSON,
+		&d.RoutedRuleMarktag,
+		&d.RoutedAdminEmail, &d.RoutedAdminCredential,
+		&d.CreatedAt, &d.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return RoutedNodeDetail{}, ErrNodeNotFound
+		}
+		return RoutedNodeDetail{}, fmt.Errorf("get routed node detail: %w", err)
+	}
+	d.Enabled = enabled != 0
+	return d, nil
+}
+
+// 列出某物理父节点下所有 routed 子节点(管理员视角)。
+func (r *TrafficRepository) ListRoutedNodesByParent(ctx context.Context, parentNodeID int64) ([]RoutedNodeDetail, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled,
+		       COALESCE(tag, ''), COALESCE(original_server, ''), COALESCE(original_domain, ''),
+		       COALESCE(inbound_tag, ''), chain_proxy_node_id,
+		       COALESCE(node_type, 'physical'), parent_node_id,
+		       COALESCE(routed_outbound_tag, ''), COALESCE(routed_outbound_json, ''),
+		       COALESCE(routed_rule_marktag, ''),
+		       COALESCE(routed_admin_email, ''), COALESCE(routed_admin_credential, ''),
+		       created_at, updated_at
+		FROM nodes WHERE node_type = 'routed' AND parent_node_id = ? ORDER BY created_at DESC`, parentNodeID)
+	if err != nil {
+		return nil, fmt.Errorf("list routed nodes by parent: %w", err)
+	}
+	defer rows.Close()
+	var out []RoutedNodeDetail
+	for rows.Next() {
+		var d RoutedNodeDetail
+		var enabled int
+		if err := rows.Scan(
+			&d.ID, &d.Username, &d.RawURL, &d.NodeName, &d.Protocol, &d.ParsedConfig, &d.ClashConfig, &enabled,
+			&d.Tag, &d.OriginalServer, &d.OriginalDomain,
+			&d.InboundTag, &d.ChainProxyNodeID,
+			&d.NodeType, &d.ParentNodeID,
+			&d.RoutedOutboundTag, &d.RoutedOutboundJSON,
+			&d.RoutedRuleMarktag,
+			&d.RoutedAdminEmail, &d.RoutedAdminCredential,
+			&d.CreatedAt, &d.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan routed node: %w", err)
+		}
+		d.Enabled = enabled != 0
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// 删除一个 routed 节点(级联会自动清 user_subaccounts via FK)。
+// agent 侧的 inbound client / outbound / rule 清理由调用方负责。
+func (r *TrafficRepository) DeleteRoutedNode(ctx context.Context, id int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	_, err := r.db.ExecContext(ctx, `DELETE FROM nodes WHERE id = ? AND node_type = 'routed'`, id)
+	return err
 }

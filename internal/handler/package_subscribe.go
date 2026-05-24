@@ -69,7 +69,17 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	var proxies []map[string]any
 	for _, nodeID := range pkg.Nodes {
 		node, err := h.repo.GetNodeByID(r.Context(), nodeID)
-		if err != nil || !node.Enabled || node.ClashConfig == "" {
+		if err != nil || !node.Enabled {
+			continue
+		}
+		// routed 节点:克隆父 inbound 的 clash 模板,替换 uuid 为该用户子账号 uuid + 节点名
+		if node.NodeType == "routed" {
+			if proxyConfig, ok := buildRoutedProxyForUser(r.Context(), h.repo, node, username); ok {
+				proxies = append(proxies, proxyConfig)
+			}
+			continue
+		}
+		if node.ClashConfig == "" {
 			continue
 		}
 		var proxyConfig map[string]any
@@ -346,4 +356,38 @@ func applyUserCredentials(proxy map[string]any, node storage.Node, credMap map[c
 			proxy["password"] = auth
 		}
 	}
+}
+
+// buildRoutedProxyForUser 为某用户 + 某 routed 节点生成订阅条目:
+//   - 取父物理节点的 ClashConfig 作为协议/streamSettings 模板
+//   - 用 user_subaccounts.credential_json 里的 uuid 覆盖
+//   - 节点名换成 routed 节点的 NodeName
+//
+// 返回 (proxy_map, true) 或 (nil, false)(用户未绑定子账号 / 未 active / 父节点不可用 → 跳过)。
+func buildRoutedProxyForUser(ctx context.Context, repo *storage.TrafficRepository, routedNode storage.Node, username string) (map[string]any, bool) {
+	if routedNode.ParentNodeID == nil || *routedNode.ParentNodeID <= 0 {
+		return nil, false
+	}
+	// 子账号必须 is_active=1,否则该用户当前没有访问权(下线 / 未绑套餐 / 暂停)
+	sa, err := repo.GetUserSubaccount(ctx, routedNode.ID, username)
+	if err != nil || sa == nil || !sa.IsActive {
+		return nil, false
+	}
+	parent, err := repo.GetNodeByID(ctx, *routedNode.ParentNodeID)
+	if err != nil || !parent.Enabled || parent.ClashConfig == "" {
+		return nil, false
+	}
+	var proxy map[string]any
+	if err := json.Unmarshal([]byte(parent.ClashConfig), &proxy); err != nil {
+		return nil, false
+	}
+	// 覆盖 uuid(VLESS/VMess 主键)、节点名
+	var cred map[string]any
+	if err := json.Unmarshal([]byte(sa.CredentialJSON), &cred); err == nil {
+		if id, ok := cred["id"].(string); ok && id != "" {
+			proxy["uuid"] = id
+		}
+	}
+	proxy["name"] = routedNode.NodeName
+	return proxy, true
 }

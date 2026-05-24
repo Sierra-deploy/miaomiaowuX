@@ -1195,26 +1195,32 @@ type nodeDTO struct {
 	OriginalDomain   string    `json:"original_domain"`
 	InboundTag       string    `json:"inbound_tag"`
 	ChainProxyNodeID *int64    `json:"chain_proxy_node_id"`
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	NodeType           string    `json:"node_type"`             // 'physical' | 'routed'
+	ParentNodeID       *int64    `json:"parent_node_id"`        // routed 节点指向其父物理节点
+	RoutedOutboundTag  string    `json:"routed_outbound_tag"`   // routed 节点专用:绑定的出站 tag(便于 UI 直接展示)
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 func convertNode(node storage.Node) nodeDTO {
 	return nodeDTO{
-		ID:               node.ID,
-		RawURL:           node.RawURL,
-		NodeName:         node.NodeName,
-		Protocol:         node.Protocol,
-		ParsedConfig:     node.ParsedConfig,
-		ClashConfig:      node.ClashConfig,
-		Enabled:          node.Enabled,
-		Tag:              node.Tag,
-		OriginalServer:   node.OriginalServer,
-		OriginalDomain:   node.OriginalDomain,
-		InboundTag:       node.InboundTag,
-		ChainProxyNodeID: node.ChainProxyNodeID,
-		CreatedAt:        node.CreatedAt,
-		UpdatedAt:        node.UpdatedAt,
+		ID:                node.ID,
+		RawURL:            node.RawURL,
+		NodeName:          node.NodeName,
+		Protocol:          node.Protocol,
+		ParsedConfig:      node.ParsedConfig,
+		ClashConfig:       node.ClashConfig,
+		Enabled:           node.Enabled,
+		Tag:               node.Tag,
+		OriginalServer:    node.OriginalServer,
+		OriginalDomain:    node.OriginalDomain,
+		InboundTag:        node.InboundTag,
+		ChainProxyNodeID:  node.ChainProxyNodeID,
+		NodeType:          node.NodeType,
+		ParentNodeID:      node.ParentNodeID,
+		RoutedOutboundTag: node.RoutedOutboundTag,
+		CreatedAt:         node.CreatedAt,
+		UpdatedAt:         node.UpdatedAt,
 	}
 }
 

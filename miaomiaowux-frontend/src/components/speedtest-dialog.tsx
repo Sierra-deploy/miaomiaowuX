@@ -118,7 +118,15 @@ export function SpeedTestDialog({
         server = c.server || ''
         port = Number(c.port) || 0
       } catch { /* ignore */ }
-      return { id: n.id, name: n.node_name, protocol: (n.protocol || '').toLowerCase(), server, port }
+      return {
+        id: n.id,
+        name: n.node_name,
+        protocol: (n.protocol || '').toLowerCase(),
+        server,
+        port,
+        node_type: n.node_type as string | undefined,
+        routed_outbound_tag: n.routed_outbound_tag as string | undefined,
+      }
     })
   }, [nodes])
 
@@ -231,9 +239,16 @@ export function SpeedTestDialog({
                               <Checkbox checked={selected.has(r.id)} onCheckedChange={() => toggleOne(r.id)} />
                             </td>
                             <td className='p-2'>
-                              <Badge variant='secondary' className={`text-[10px] ${PROTOCOL_COLORS[r.protocol] || ''}`}>
-                                {r.protocol.toUpperCase() || '?'}
-                              </Badge>
+                              <div className='flex flex-col items-start gap-0.5'>
+                                <Badge variant='secondary' className={`text-[10px] ${PROTOCOL_COLORS[r.protocol] || ''}`}>
+                                  {r.protocol.toUpperCase() || '?'}
+                                </Badge>
+                                {r.node_type === 'routed' && r.routed_outbound_tag && (
+                                  <span className='text-[10px] text-indigo-600 dark:text-indigo-400 font-mono max-w-[110px] truncate' title={r.routed_outbound_tag}>
+                                    ↳ {r.routed_outbound_tag.replace(/^routed:p\d+:/, '')}
+                                  </span>
+                                )}
+                              </div>
                             </td>
                             <td className='p-2'><div className='max-w-[280px] truncate' title={r.name}>{r.name}</div></td>
                             <td className='text-muted-foreground p-2 font-mono text-xs whitespace-nowrap'>{r.server}:{r.port}</td>
@@ -268,9 +283,16 @@ export function SpeedTestDialog({
                           <Checkbox className='mt-0.5' checked={selected.has(r.id)} onCheckedChange={() => toggleOne(r.id)} />
                           <div className='min-w-0 flex-1'>
                             <div className='flex items-center gap-2'>
-                              <Badge variant='secondary' className={`text-[10px] ${PROTOCOL_COLORS[r.protocol] || ''}`}>
-                                {r.protocol.toUpperCase() || '?'}
-                              </Badge>
+                              <div className='flex flex-col items-start gap-0.5 shrink-0'>
+                                <Badge variant='secondary' className={`text-[10px] ${PROTOCOL_COLORS[r.protocol] || ''}`}>
+                                  {r.protocol.toUpperCase() || '?'}
+                                </Badge>
+                                {r.node_type === 'routed' && r.routed_outbound_tag && (
+                                  <span className='text-[10px] text-indigo-600 dark:text-indigo-400 font-mono max-w-[110px] truncate' title={r.routed_outbound_tag}>
+                                    ↳ {r.routed_outbound_tag.replace(/^routed:p\d+:/, '')}
+                                  </span>
+                                )}
+                              </div>
                               <span className='truncate font-medium' title={r.name}>{r.name}</span>
                             </div>
                             <div className='text-muted-foreground mt-1 font-mono text-xs break-all'>{r.server}:{r.port}</div>
