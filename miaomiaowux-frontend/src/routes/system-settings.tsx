@@ -141,6 +141,9 @@ function SystemSettingsPage() {
   const [enableOverrideScripts, setEnableOverrideScripts] = useState(false)
   const [useNewTemplateSystem, setUseNewTemplateSystem] = useState(true)
   const [enableMmwFeatures, setEnableMmwFeatures] = useState(true)
+  const [enableUserRoutedOutbound, setEnableUserRoutedOutbound] = useState(false)
+  const [userRoutedOutboundQuota, setUserRoutedOutboundQuota] = useState(2)
+  const [userRoutedOutboundDailyLimit, setUserRoutedOutboundDailyLimit] = useState(5)
 
   const { data: overrideScriptsData } = useQuery({
     queryKey: ['override-scripts-enabled'],
@@ -195,6 +198,51 @@ function SystemSettingsPage() {
       setEnableMmwFeatures(mmwFeaturesData.enable_miaomiaowu_features)
     }
   }, [mmwFeaturesData])
+
+  // 用户路由出站开关 + 配额(与 UserPermissionsDialog 共享同一 config,通过同 queryKey 缓存复用)
+  const { data: userPermConfigData } = useQuery({
+    queryKey: ['user-permissions-config'],
+    queryFn: async () => {
+      const res = await api.get('/api/admin/system-settings/user-permissions')
+      return res.data as { success: boolean; config: any }
+    },
+    enabled: Boolean(auth.accessToken),
+    staleTime: 5 * 60 * 1000,
+  })
+  useEffect(() => {
+    const c = userPermConfigData?.config
+    if (c) {
+      setEnableUserRoutedOutbound(Boolean(c.routed_outbound_enabled))
+      const q = Number(c.quota_routed_outbound)
+      setUserRoutedOutboundQuota(q > 0 ? q : 2)
+      const d = Number(c.daily_limit_routed_outbound)
+      setUserRoutedOutboundDailyLimit(d > 0 ? d : 5)
+    }
+  }, [userPermConfigData])
+
+  const saveUserRoutedOutboundMutation = useMutation({
+    mutationFn: async (payload: { enabled: boolean; quota: number; daily: number }) => {
+      const base = userPermConfigData?.config ?? {}
+      // PUT 整个配置(其他字段保持原值,仅改本卡片管理的 3 个字段)
+      await api.put('/api/admin/system-settings/user-permissions', {
+        pages: base.pages ?? [],
+        quota_template: Number(base.quota_template ?? 0),
+        quota_override: Number(base.quota_override ?? 0),
+        quota_subscribe: Number(base.quota_subscribe ?? 0),
+        routed_outbound_enabled: payload.enabled,
+        quota_routed_outbound: payload.enabled ? payload.quota : 0,
+        daily_limit_routed_outbound: payload.enabled ? payload.daily : 0,
+      })
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['user-permissions-config'] })
+      queryClient.invalidateQueries({ queryKey: ['user-permissions'] })
+      toast.success('已保存')
+    },
+    onError: (e: any) => {
+      toast.error(e?.response?.data?.message || '保存失败')
+    },
+  })
 
   // 静默模式
   const [silentMode, setSilentMode] = useState(false)
@@ -801,6 +849,74 @@ function SystemSettingsPage() {
                     }}
                     disabled={toggleMmwFeaturesMutation.isPending}
                   />
+                </div>
+
+                {/* 允许用户创建路由出站 */}
+                <div className='flex items-center justify-between rounded-lg border p-3'>
+                  <div className='flex items-center gap-2'>
+                    <Label htmlFor='user-routed-outbound-toggle' className='cursor-pointer'>
+                      允许用户创建路由出站
+                    </Label>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <CircleHelp className='h-4 w-4 text-muted-foreground cursor-help' />
+                      </TooltipTrigger>
+                      <TooltipContent side='top' className='max-w-xs'>
+                        <p>开启后,普通用户可在自己可见的节点上创建路由出站(routed_owner=user),不依赖套餐分配。</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <div className='flex items-center gap-2'>
+                    <div className='flex flex-col items-end gap-0.5'>
+                      <span className='text-[10px] text-muted-foreground'>数量</span>
+                      <Input
+                        type='number'
+                        min={1}
+                        className='w-16 h-7 text-xs'
+                        value={userRoutedOutboundQuota}
+                        onChange={(e) => {
+                          const n = Math.max(1, parseInt(e.target.value, 10) || 0)
+                          setUserRoutedOutboundQuota(n)
+                        }}
+                        onBlur={() => {
+                          if (enableUserRoutedOutbound) {
+                            saveUserRoutedOutboundMutation.mutate({ enabled: true, quota: userRoutedOutboundQuota, daily: userRoutedOutboundDailyLimit })
+                          }
+                        }}
+                        disabled={!enableUserRoutedOutbound}
+                        placeholder='2'
+                      />
+                    </div>
+                    <div className='flex flex-col items-end gap-0.5'>
+                      <span className='text-[10px] text-muted-foreground'>每日次数</span>
+                      <Input
+                        type='number'
+                        min={1}
+                        className='w-16 h-7 text-xs'
+                        value={userRoutedOutboundDailyLimit}
+                        onChange={(e) => {
+                          const n = Math.max(1, parseInt(e.target.value, 10) || 0)
+                          setUserRoutedOutboundDailyLimit(n)
+                        }}
+                        onBlur={() => {
+                          if (enableUserRoutedOutbound) {
+                            saveUserRoutedOutboundMutation.mutate({ enabled: true, quota: userRoutedOutboundQuota, daily: userRoutedOutboundDailyLimit })
+                          }
+                        }}
+                        disabled={!enableUserRoutedOutbound}
+                        placeholder='5'
+                      />
+                    </div>
+                    <Switch
+                      id='user-routed-outbound-toggle'
+                      checked={enableUserRoutedOutbound}
+                      onCheckedChange={(checked) => {
+                        setEnableUserRoutedOutbound(checked)
+                        saveUserRoutedOutboundMutation.mutate({ enabled: checked, quota: userRoutedOutboundQuota, daily: userRoutedOutboundDailyLimit })
+                      }}
+                      disabled={saveUserRoutedOutboundMutation.isPending}
+                    />
+                  </div>
                 </div>
 
                 {/* 通知推送 */}

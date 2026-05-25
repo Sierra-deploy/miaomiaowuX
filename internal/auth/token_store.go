@@ -268,6 +268,12 @@ type UserRepository interface {
 	ResolveAPIToken(ctx context.Context, token string) (username string, ok bool)
 }
 
+// 角色常量。与 storage 包的 RoleAdmin / RoleUser 保持同步,但放在 auth 包内避免循环依赖。
+const (
+	RoleAdmin = "admin"
+	RoleUser  = "user"
+)
+
 // User表示授权所需的基本用户信息。
 type User struct {
 	Username string
@@ -293,7 +299,7 @@ func RequireAdmin(store *TokenStore, repo UserRepository, next http.Handler) htt
 		}
 
 		user, err := repo.GetUser(r.Context(), username)
-		if err != nil || user.Role != "admin" {
+		if err != nil || user.Role != RoleAdmin {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = w.Write([]byte(`{"error":"forbidden"}`))

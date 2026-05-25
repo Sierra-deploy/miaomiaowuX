@@ -25,6 +25,16 @@ const (
 	settingUserQuotaTemplate = "user_quota_template"    // int 字符串, 0=不限
 	settingUserQuotaOverride = "user_quota_override"    // int
 	settingUserQuotaSubscribe = "user_quota_subscribe"  // int
+	// 路由出站(用户私有,routed_owner='user')开关 + 配额。
+	// settingUserRoutedOutboundEnabled: "1" = 开启,其它/未设置 = 关闭(默认关闭)
+	// settingUserQuotaRoutedOutbound: 未设置/0 = 默认 2;>0 = 具体上限。不支持"不限"。
+	// settingUserRoutedOutboundDailyLimit: 每日操作次数限制(create + delete 之和),
+	//   未设置/0 = 默认 5。每次操作都会触发 agent 重启 xray,频次受限避免滥用。
+	settingUserRoutedOutboundEnabled    = "user_routed_outbound_enabled"
+	settingUserQuotaRoutedOutbound      = "user_quota_routed_outbound"
+	settingUserRoutedOutboundDailyLimit = "user_routed_outbound_daily_limit"
+	defaultUserQuotaRoutedOutbound      = 2
+	defaultUserRoutedOutboundDailyLimit = 5
 )
 
 // 合法的可见页面 key(白名单,防止前端传入任意路由)。
@@ -39,10 +49,14 @@ var validUserPages = map[string]bool{
 
 // UserPermissionsConfig 是全局用户权限策略。
 type UserPermissionsConfig struct {
-	Pages         []string `json:"pages"`          // 普通用户可见页面
-	QuotaTemplate int      `json:"quota_template"` // 0 = 不限
-	QuotaOverride int      `json:"quota_override"`
-	QuotaSubscribe int     `json:"quota_subscribe"`
+	Pages          []string `json:"pages"`           // 普通用户可见页面
+	QuotaTemplate  int      `json:"quota_template"`  // 0 = 不限
+	QuotaOverride  int      `json:"quota_override"`
+	QuotaSubscribe int      `json:"quota_subscribe"`
+	// 路由出站(用户私有):必须先开启才能创建;未开启时 quota 字段无意义。
+	RoutedOutboundEnabled    bool `json:"routed_outbound_enabled"`
+	QuotaRoutedOutbound      int  `json:"quota_routed_outbound"`       // 未设置/0 默认 2;>0 具体上限
+	DailyLimitRoutedOutbound int  `json:"daily_limit_routed_outbound"` // 每日操作次数(create+delete);未设置/0 默认 5
 }
 
 type UserPermissionsHandler struct {
@@ -77,6 +91,20 @@ func loadUserPermConfig(ctx context.Context, repo *storage.TrafficRepository) Us
 	cfg.QuotaTemplate = atoi(settingUserQuotaTemplate)
 	cfg.QuotaOverride = atoi(settingUserQuotaOverride)
 	cfg.QuotaSubscribe = atoi(settingUserQuotaSubscribe)
+	// 路由出站开关 + 配额
+	if raw, _ := repo.GetSystemSetting(ctx, settingUserRoutedOutboundEnabled); raw == "1" {
+		cfg.RoutedOutboundEnabled = true
+	}
+	if v := atoi(settingUserQuotaRoutedOutbound); v > 0 {
+		cfg.QuotaRoutedOutbound = v
+	} else {
+		cfg.QuotaRoutedOutbound = defaultUserQuotaRoutedOutbound
+	}
+	if v := atoi(settingUserRoutedOutboundDailyLimit); v > 0 {
+		cfg.DailyLimitRoutedOutbound = v
+	} else {
+		cfg.DailyLimitRoutedOutbound = defaultUserRoutedOutboundDailyLimit
+	}
 	return cfg
 }
 
@@ -109,6 +137,12 @@ func checkUserQuota(ctx context.Context, repo *storage.TrafficRepository, userna
 	case "subscribe":
 		used, _ = repo.CountUserSubscribeFiles(ctx, username)
 		max = cfg.QuotaSubscribe
+	case "routed_outbound":
+		if !cfg.RoutedOutboundEnabled {
+			return fmt.Errorf("路由出站功能未开放,请联系管理员开启")
+		}
+		used, _ = repo.CountUserRoutedOutbounds(ctx, username)
+		max = cfg.QuotaRoutedOutbound
 	default:
 		return nil
 	}
@@ -161,6 +195,13 @@ func (h *UserPermissionsHandler) AdminSet(w http.ResponseWriter, r *http.Request
 	_ = h.repo.SetSystemSetting(ctx, settingUserQuotaTemplate, strconv.Itoa(clamp(req.QuotaTemplate)))
 	_ = h.repo.SetSystemSetting(ctx, settingUserQuotaOverride, strconv.Itoa(clamp(req.QuotaOverride)))
 	_ = h.repo.SetSystemSetting(ctx, settingUserQuotaSubscribe, strconv.Itoa(clamp(req.QuotaSubscribe)))
+	enabledVal := "0"
+	if req.RoutedOutboundEnabled {
+		enabledVal = "1"
+	}
+	_ = h.repo.SetSystemSetting(ctx, settingUserRoutedOutboundEnabled, enabledVal)
+	_ = h.repo.SetSystemSetting(ctx, settingUserQuotaRoutedOutbound, strconv.Itoa(clamp(req.QuotaRoutedOutbound)))
+	_ = h.repo.SetSystemSetting(ctx, settingUserRoutedOutboundDailyLimit, strconv.Itoa(clamp(req.DailyLimitRoutedOutbound)))
 	writeJSONResp(w, http.StatusOK, map[string]any{"success": true})
 }
 
@@ -182,15 +223,18 @@ func (h *UserPermissionsHandler) UserGet(w http.ResponseWriter, r *http.Request)
 	ovrRules, _ := h.repo.CountUserCustomRules(ctx, username)
 	usedOvr := ovrScripts + ovrRules // 覆写 = 脚本 + 规则
 	usedSub, _ := h.repo.CountUserSubscribeFiles(ctx, username)
+	usedRouted, _ := h.repo.CountUserRoutedOutbounds(ctx, username)
 
 	writeJSONResp(w, http.StatusOK, map[string]any{
 		"success":  true,
 		"is_admin": isAdmin,
 		"pages":    cfg.Pages,
+		"routed_outbound_enabled": cfg.RoutedOutboundEnabled,
 		"quota": map[string]any{
-			"template":  map[string]int{"used": usedTpl, "max": cfg.QuotaTemplate},
-			"override":  map[string]int{"used": usedOvr, "max": cfg.QuotaOverride},
-			"subscribe": map[string]int{"used": usedSub, "max": cfg.QuotaSubscribe},
+			"template":        map[string]int{"used": usedTpl, "max": cfg.QuotaTemplate},
+			"override":        map[string]int{"used": usedOvr, "max": cfg.QuotaOverride},
+			"subscribe":       map[string]int{"used": usedSub, "max": cfg.QuotaSubscribe},
+			"routed_outbound": map[string]int{"used": usedRouted, "max": cfg.QuotaRoutedOutbound},
 		},
 	})
 }
@@ -209,6 +253,8 @@ func quotaLabel(resource string) string {
 		return "覆写规则"
 	case "subscribe":
 		return "订阅"
+	case "routed_outbound":
+		return "路由出站"
 	}
 	return resource
 }

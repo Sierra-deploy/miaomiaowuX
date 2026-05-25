@@ -1177,8 +1177,12 @@ func (h *subscribeFilesHandler) handleUpdateContent(w http.ResponseWriter, r *ht
 		return
 	}
 
-	// 保存版本记录
-	version, err := h.repo.SaveRuleVersion(r.Context(), filename, contentToSave, "admin")
+	// 保存版本记录(author = 当前调用者,而非硬编码 "admin")
+	author := auth.UsernameFromContext(r.Context())
+	if author == "" {
+		author = "admin"
+	}
+	version, err := h.repo.SaveRuleVersion(r.Context(), filename, contentToSave, author)
 	if err != nil {
 		// 版本保存失败不影响文件保存，只记录错误
 		writeError(w, http.StatusInternalServerError, errors.New("保存版本记录失败"))

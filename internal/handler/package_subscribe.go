@@ -90,6 +90,20 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		proxies = append(proxies, proxyConfig)
 	}
 
+	// 追加用户私有路由出站(routed_owner='user' && username=<creator>):不依赖套餐分配,
+	// 创建者一人独享。其 routed 子账号 email 已通过 user_subaccounts 维护,buildRoutedProxyForUser
+	// 复用同一套替换 uuid 逻辑。
+	if userRouted, err := h.repo.ListUserRoutedOutbounds(r.Context(), username); err == nil {
+		for _, n := range userRouted {
+			if !n.Enabled {
+				continue
+			}
+			if proxyConfig, ok := buildRoutedProxyForUser(r.Context(), h.repo, n.Node, username); ok {
+				proxies = append(proxies, proxyConfig)
+			}
+		}
+	}
+
 	if len(proxies) == 0 {
 		writeError(w, http.StatusNotFound, errors.New("套餐内无可用节点"))
 		return

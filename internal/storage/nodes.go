@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // scanNodeTags deserializes JSON tags and syncs Tag field.
@@ -91,7 +92,7 @@ func (r *TrafficRepository) ListNodes(ctx context.Context, username string) ([]N
 		return nil, errors.New("username is required")
 	}
 
-	rows, err := r.db.QueryContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), created_at, updated_at FROM nodes WHERE username = ? ORDER BY created_at DESC`, username)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), created_at, updated_at FROM nodes WHERE username = ? ORDER BY created_at DESC`, username)
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
 	}
@@ -101,7 +102,7 @@ func (r *TrafficRepository) ListNodes(ctx context.Context, username string) ([]N
 	for rows.Next() {
 		var node Node
 		var enabled int
-		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.CreatedAt, &node.UpdatedAt); err != nil {
+		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.CreatedAt, &node.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		node.Enabled = enabled != 0
@@ -132,7 +133,7 @@ func (r *TrafficRepository) ListAllNodes(ctx context.Context) ([]Node, error) {
 		return nil, errors.New("traffic repository not initialized")
 	}
 
-	rows, err := r.db.QueryContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), created_at, updated_at FROM nodes ORDER BY created_at DESC`)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), created_at, updated_at FROM nodes ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list all nodes: %w", err)
 	}
@@ -142,7 +143,7 @@ func (r *TrafficRepository) ListAllNodes(ctx context.Context) ([]Node, error) {
 	for rows.Next() {
 		var node Node
 		var enabled int
-		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.CreatedAt, &node.UpdatedAt); err != nil {
+		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.CreatedAt, &node.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		node.Enabled = enabled != 0
@@ -173,8 +174,8 @@ func (r *TrafficRepository) GetNode(ctx context.Context, id int64, username stri
 	}
 
 	var enabled int
-	row := r.db.QueryRowContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), created_at, updated_at FROM nodes WHERE id = ? AND username = ? LIMIT 1`, id, username)
-	if err := row.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.CreatedAt, &node.UpdatedAt); err != nil {
+	row := r.db.QueryRowContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), created_at, updated_at FROM nodes WHERE id = ? AND username = ? LIMIT 1`, id, username)
+	if err := row.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.CreatedAt, &node.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return node, ErrNodeNotFound
 		}
@@ -198,8 +199,8 @@ func (r *TrafficRepository) GetNodeByID(ctx context.Context, id int64) (Node, er
 	}
 
 	var enabled int
-	row := r.db.QueryRowContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), created_at, updated_at FROM nodes WHERE id = ? LIMIT 1`, id)
-	if err := row.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.CreatedAt, &node.UpdatedAt); err != nil {
+	row := r.db.QueryRowContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), created_at, updated_at FROM nodes WHERE id = ? LIMIT 1`, id)
+	if err := row.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.CreatedAt, &node.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return node, ErrNodeNotFound
 		}
@@ -685,9 +686,10 @@ func (r *TrafficRepository) CreateRoutedNode(ctx context.Context, detail RoutedN
 	if n.ParentNodeID == nil || *n.ParentNodeID <= 0 {
 		return RoutedNodeDetail{}, errors.New("parent_node_id is required for routed node")
 	}
-	if detail.RoutedOutboundTag == "" || detail.RoutedRuleMarktag == "" || detail.RoutedAdminEmail == "" {
-		return RoutedNodeDetail{}, errors.New("routed_outbound_tag, routed_rule_marktag, routed_admin_email are required")
+	if detail.RoutedOutboundTag == "" || detail.RoutedRuleMarktag == "" {
+		return RoutedNodeDetail{}, errors.New("routed_outbound_tag, routed_rule_marktag are required")
 	}
+	// 注:RoutedAdminEmail 允许为空 — 用户私有路由出站(routed_owner='user')无 admin 占位 client。
 	enabled := 0
 	if n.Enabled {
 		enabled = 1
@@ -698,19 +700,23 @@ func (r *TrafficRepository) CreateRoutedNode(ctx context.Context, detail RoutedN
 	if n.Protocol == "" {
 		n.Protocol = "routed"
 	}
+	owner := strings.TrimSpace(n.RoutedOwner)
+	if owner == "" {
+		owner = "shared"
+	}
 	res, err := r.db.ExecContext(ctx, `
 		INSERT INTO nodes (
 			username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, tag,
 			original_server, original_domain, inbound_tag, chain_proxy_node_id,
 			node_type, parent_node_id,
 			routed_outbound_tag, routed_outbound_json, routed_rule_marktag,
-			routed_admin_email, routed_admin_credential
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'routed', ?, ?, ?, ?, ?, ?)`,
+			routed_admin_email, routed_admin_credential, routed_owner
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'routed', ?, ?, ?, ?, ?, ?, ?)`,
 		n.Username, n.RawURL, n.NodeName, n.Protocol, n.ParsedConfig, n.ClashConfig, enabled, n.Tag,
 		n.OriginalServer, n.OriginalDomain, n.InboundTag, n.ChainProxyNodeID,
 		*n.ParentNodeID,
 		detail.RoutedOutboundTag, detail.RoutedOutboundJSON, detail.RoutedRuleMarktag,
-		detail.RoutedAdminEmail, detail.RoutedAdminCredential,
+		detail.RoutedAdminEmail, detail.RoutedAdminCredential, owner,
 	)
 	if err != nil {
 		return RoutedNodeDetail{}, fmt.Errorf("create routed node: %w", err)
@@ -737,6 +743,7 @@ func (r *TrafficRepository) GetRoutedNodeDetail(ctx context.Context, id int64) (
 		       COALESCE(routed_outbound_tag, ''), COALESCE(routed_outbound_json, ''),
 		       COALESCE(routed_rule_marktag, ''),
 		       COALESCE(routed_admin_email, ''), COALESCE(routed_admin_credential, ''),
+		       COALESCE(routed_owner, 'shared'),
 		       created_at, updated_at
 		FROM nodes WHERE id = ? LIMIT 1`, id).Scan(
 		&d.ID, &d.Username, &d.RawURL, &d.NodeName, &d.Protocol, &d.ParsedConfig, &d.ClashConfig, &enabled,
@@ -746,6 +753,7 @@ func (r *TrafficRepository) GetRoutedNodeDetail(ctx context.Context, id int64) (
 		&d.RoutedOutboundTag, &d.RoutedOutboundJSON,
 		&d.RoutedRuleMarktag,
 		&d.RoutedAdminEmail, &d.RoutedAdminCredential,
+		&d.RoutedOwner,
 		&d.CreatedAt, &d.UpdatedAt,
 	)
 	if err != nil {
@@ -771,6 +779,7 @@ func (r *TrafficRepository) ListRoutedNodesByParent(ctx context.Context, parentN
 		       COALESCE(routed_outbound_tag, ''), COALESCE(routed_outbound_json, ''),
 		       COALESCE(routed_rule_marktag, ''),
 		       COALESCE(routed_admin_email, ''), COALESCE(routed_admin_credential, ''),
+		       COALESCE(routed_owner, 'shared'),
 		       created_at, updated_at
 		FROM nodes WHERE node_type = 'routed' AND parent_node_id = ? ORDER BY created_at DESC`, parentNodeID)
 	if err != nil {
@@ -789,9 +798,136 @@ func (r *TrafficRepository) ListRoutedNodesByParent(ctx context.Context, parentN
 			&d.RoutedOutboundTag, &d.RoutedOutboundJSON,
 			&d.RoutedRuleMarktag,
 			&d.RoutedAdminEmail, &d.RoutedAdminCredential,
+			&d.RoutedOwner,
 			&d.CreatedAt, &d.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scan routed node: %w", err)
+		}
+		d.Enabled = enabled != 0
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// GetSystemNodeOwner 返回"系统节点"应该归属的 username。
+// 用途:NodeSyncListener 自动同步、remote_manage 批量同步等"系统侧"创建节点时,需要一个
+// username 字段来归属节点。不能硬编码 "admin" 字面字符串(系统里 admin 用户名可能是注册时
+// 任意输入的)。本函数按 created_at 升序取第一个 role='admin' 的用户名;若系统中无 admin
+// (极端情况),回退到字面字符串 "admin" 以保持与旧行为兼容。
+func (r *TrafficRepository) GetSystemNodeOwner(ctx context.Context) string {
+	if r == nil || r.db == nil {
+		return "admin"
+	}
+	var u string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT username FROM users WHERE role = ? ORDER BY created_at ASC LIMIT 1`, RoleAdmin).Scan(&u)
+	if err != nil || strings.TrimSpace(u) == "" {
+		return "admin"
+	}
+	return u
+}
+
+// ListNonAdminUsernames 返回所有 role != 'admin' 的用户名集合(即"普通用户")。
+// 用途:admin 视角的节点过滤 — admin 看到所有非"普通用户私有"的节点。
+// 设计原因:NodeSyncListener 自动同步节点时硬编码 username="admin"(字面字符串,
+// 不一定对应真实 admin 账号),所以"反向过滤"比"白名单 admin"更安全。
+func (r *TrafficRepository) ListNonAdminUsernames(ctx context.Context) (map[string]bool, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT username FROM users WHERE role != ?`, RoleAdmin)
+	if err != nil {
+		return nil, fmt.Errorf("list non-admin usernames: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]bool)
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return nil, err
+		}
+		out[u] = true
+	}
+	return out, rows.Err()
+}
+
+// LogUserRoutedOutboundAction 记录一次用户路由出站操作(create/delete),用于"每日次数限制"。
+// 每次 routing 变更都会触发 agent 重启 xray,频次必须受控。
+func (r *TrafficRepository) LogUserRoutedOutboundAction(ctx context.Context, username, action string) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO user_routed_outbound_actions(username, action) VALUES(?, ?)`,
+		username, action,
+	)
+	return err
+}
+
+// CountUserRoutedOutboundActionsToday 统计某用户当日(本地时间起始)以来的操作次数。
+func (r *TrafficRepository) CountUserRoutedOutboundActionsToday(ctx context.Context, username string) (int, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	now := time.Now()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	var n int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM user_routed_outbound_actions WHERE username = ? AND created_at >= ?`,
+		username, dayStart.UTC().Format("2006-01-02 15:04:05"),
+	).Scan(&n)
+	return n, err
+}
+
+// CountUserRoutedOutbounds 统计某用户创建的"用户私有路由出站"数量(routed_owner='user'),用于配额校验。
+func (r *TrafficRepository) CountUserRoutedOutbounds(ctx context.Context, username string) (int, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	var n int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM nodes WHERE node_type='routed' AND routed_owner='user' AND username = ?`,
+		username,
+	).Scan(&n)
+	return n, err
+}
+
+// ListUserRoutedOutbounds 列出某用户创建的私有路由出站(routed_owner='user'),按创建时间倒序。
+func (r *TrafficRepository) ListUserRoutedOutbounds(ctx context.Context, username string) ([]RoutedNodeDetail, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled,
+		       COALESCE(tag, ''), COALESCE(original_server, ''), COALESCE(original_domain, ''),
+		       COALESCE(inbound_tag, ''), chain_proxy_node_id,
+		       COALESCE(node_type, 'physical'), parent_node_id,
+		       COALESCE(routed_outbound_tag, ''), COALESCE(routed_outbound_json, ''),
+		       COALESCE(routed_rule_marktag, ''),
+		       COALESCE(routed_admin_email, ''), COALESCE(routed_admin_credential, ''),
+		       COALESCE(routed_owner, 'shared'),
+		       created_at, updated_at
+		FROM nodes WHERE node_type='routed' AND routed_owner='user' AND username = ? ORDER BY created_at DESC`, username)
+	if err != nil {
+		return nil, fmt.Errorf("list user routed outbounds: %w", err)
+	}
+	defer rows.Close()
+	var out []RoutedNodeDetail
+	for rows.Next() {
+		var d RoutedNodeDetail
+		var enabled int
+		if err := rows.Scan(
+			&d.ID, &d.Username, &d.RawURL, &d.NodeName, &d.Protocol, &d.ParsedConfig, &d.ClashConfig, &enabled,
+			&d.Tag, &d.OriginalServer, &d.OriginalDomain,
+			&d.InboundTag, &d.ChainProxyNodeID,
+			&d.NodeType, &d.ParentNodeID,
+			&d.RoutedOutboundTag, &d.RoutedOutboundJSON,
+			&d.RoutedRuleMarktag,
+			&d.RoutedAdminEmail, &d.RoutedAdminCredential,
+			&d.RoutedOwner,
+			&d.CreatedAt, &d.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan user routed outbound: %w", err)
 		}
 		d.Enabled = enabled != 0
 		out = append(out, d)

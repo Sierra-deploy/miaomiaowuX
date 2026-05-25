@@ -67,7 +67,14 @@ export function UserPermissionsDialog() {
 
   const saveMutation = useMutation({
     mutationFn: async (cfg: UserPermConfig) => {
-      await api.put('/api/admin/system-settings/user-permissions', cfg)
+      // 路由出站的 enabled + quota 由"系统设置"页管理,这里 PUT 时要把当前值原样回传,
+      // 否则会被默认的 false/0 覆盖。
+      const base = data?.config ?? ({} as any)
+      await api.put('/api/admin/system-settings/user-permissions', {
+        ...cfg,
+        routed_outbound_enabled: Boolean(base.routed_outbound_enabled),
+        quota_routed_outbound: Number(base.quota_routed_outbound ?? 0),
+      })
     },
     onSuccess: () => {
       toast.success('用户权限已保存')

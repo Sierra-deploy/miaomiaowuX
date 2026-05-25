@@ -240,6 +240,7 @@ type Node struct {
 	NodeType          string // 'physical' (默认) 或 'routed' (路由出站虚拟节点)
 	ParentNodeID      *int64 // routed 节点指向其父物理节点
 	RoutedOutboundTag string // routed 节点专用:绑定的 outbound tag(空 = 非 routed 节点);常用查询展示
+	RoutedOwner       string // routed 节点专用:'shared'(默认,admin 创建,进入套餐池) | 'user'(用户私有路由出站)
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 }
@@ -941,6 +942,10 @@ CREATE INDEX IF NOT EXISTS idx_nodes_enabled ON nodes(enabled);
 		return err
 	}
 	if err := r.ensureNodeColumn("routed_admin_credential", "TEXT"); err != nil {
+		return err
+	}
+	// routed_owner: 'shared' (默认, 管理员创建, 进入套餐池) | 'user' (普通用户私有路由出站)
+	if err := r.ensureNodeColumn("routed_owner", "TEXT NOT NULL DEFAULT 'shared'"); err != nil {
 		return err
 	}
 
@@ -1943,6 +1948,21 @@ CREATE INDEX IF NOT EXISTS idx_subacc_routed ON user_subaccounts(routed_node_id)
 `
 	if _, err := r.db.Exec(userSubaccountsSchema); err != nil {
 		return fmt.Errorf("migrate user_subaccounts: %w", err)
+	}
+
+	// 用户路由出站操作日志:记录每条创建/删除,用于每日次数限制。
+	// 单条 routing 变更都会触发 agent 重启 xray,所以必须按"操作次数"限速而不仅按"当前持有数量"。
+	const userRoutedOutboundActionsSchema = `
+CREATE TABLE IF NOT EXISTS user_routed_outbound_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    action TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_uroa_user_time ON user_routed_outbound_actions(username, created_at);
+`
+	if _, err := r.db.Exec(userRoutedOutboundActionsSchema); err != nil {
+		return fmt.Errorf("migrate user_routed_outbound_actions: %w", err)
 	}
 
 	const trafficThresholdNotifiedSchema = `

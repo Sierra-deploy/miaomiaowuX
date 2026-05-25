@@ -237,14 +237,28 @@ func (h *nodesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 数据隔离:管理员看全部节点。
+	// 数据隔离:管理员看全部节点,但屏蔽"普通用户私有"节点。
+	// 反向过滤逻辑:只有当节点 username 属于现存普通用户时才屏蔽;
+	// admin 用户/legacy "admin" 字面字符串/已不存在的用户名 → 一律保留。
 	if userIsAdmin(r.Context(), h.repo, username) {
 		nodes, err := h.repo.ListAllNodes(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
-		respondJSON(w, http.StatusOK, map[string]any{"nodes": convertNodes(nodes)})
+		nonAdmins, err := h.repo.ListNonAdminUsernames(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		filtered := make([]storage.Node, 0, len(nodes))
+		for _, n := range nodes {
+			if nonAdmins[n.Username] {
+				continue
+			}
+			filtered = append(filtered, n)
+		}
+		respondJSON(w, http.StatusOK, map[string]any{"nodes": convertNodes(filtered)})
 		return
 	}
 
@@ -1198,6 +1212,8 @@ type nodeDTO struct {
 	NodeType           string    `json:"node_type"`             // 'physical' | 'routed'
 	ParentNodeID       *int64    `json:"parent_node_id"`        // routed 节点指向其父物理节点
 	RoutedOutboundTag  string    `json:"routed_outbound_tag"`   // routed 节点专用:绑定的出站 tag(便于 UI 直接展示)
+	RoutedOwner        string    `json:"routed_owner,omitempty"` // routed 节点专用:'shared'(admin 套餐分配) | 'user'(用户私有)
+	CreatedBy          string    `json:"created_by,omitempty"`   // routed 节点专用:创建者用户名(user 视角下用于鉴别"是不是我创建的")
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 }
@@ -1219,6 +1235,8 @@ func convertNode(node storage.Node) nodeDTO {
 		NodeType:          node.NodeType,
 		ParentNodeID:      node.ParentNodeID,
 		RoutedOutboundTag: node.RoutedOutboundTag,
+		RoutedOwner:       node.RoutedOwner,
+		CreatedBy:         node.Username, // nodes 表里 username = 创建/拥有者
 		CreatedAt:         node.CreatedAt,
 		UpdatedAt:         node.UpdatedAt,
 	}

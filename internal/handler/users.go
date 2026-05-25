@@ -222,6 +222,8 @@ func NewUserStatusHandler(repo *storage.TrafficRepository, remoteManage *RemoteM
 							username, cfg.InboundTag, cfg.ServerID, err)
 					}
 				}
+				// 用户私有路由出站(routed_owner='user'):拆 rule + client,outbound 保留
+				suspendUserPrivateRouted(ctx, remoteManage, repo, username)
 			} else {
 				// 启用 → 用 saved credential 调 addUserToInbound 把 client 加回。
 				// addUserToInbound 内部会发现 GetUserInboundConfig 已有记录,自动复用 credential_json。
@@ -232,6 +234,8 @@ func NewUserStatusHandler(repo *storage.TrafficRepository, remoteManage *RemoteM
 							username, cfg.InboundTag, cfg.ServerID, err)
 					}
 				}
+				// 用户私有路由出站:重建 rule + 加回 client
+				resumeUserPrivateRouted(ctx, remoteManage, repo, username)
 			}
 		}
 
@@ -468,6 +472,8 @@ func NewUserDeleteHandler(repo *storage.TrafficRepository, remoteManage *RemoteM
 			if err := repo.DeleteUserInboundConfigs(ctx, username); err != nil {
 				log.Printf("[UserDelete] delete inbound config records for %s failed: %v", username, err)
 			}
+			// 级联清理用户私有路由出站(routed_owner='user'):删 xray 配置 + 删节点行
+			deleteUserPrivateRoutedAll(ctx, remoteManage, repo, username)
 		}
 
 		if err := repo.DeleteUser(ctx, username); err != nil {

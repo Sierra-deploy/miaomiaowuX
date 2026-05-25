@@ -69,15 +69,18 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 		nodeName = fmt.Sprintf("[%s] %s:%d", server.Name, event.Protocol, event.Port)
 	}
 
+	// 系统节点归属的 username(真实 admin,不是字面值 "admin")
+	sysOwner := l.repo.GetSystemNodeOwner(ctx)
+
 	// 检查是否已存在（按名称）
-	exists, _ := l.repo.CheckNodeNameExists(ctx, nodeName, "admin", 0)
+	exists, _ := l.repo.CheckNodeNameExists(ctx, nodeName, sysOwner, 0)
 	if exists {
 		log.Printf("[NodeSync] Node already exists: %s", nodeName)
 		return
 	}
 
 	// 检查是否已存在（按 server + protocol + port）
-	existingNodes, _ := l.repo.ListNodes(ctx, "admin")
+	existingNodes, _ := l.repo.ListNodes(ctx, sysOwner)
 	for _, n := range existingNodes {
 		if n.OriginalServer == server.Name {
 			var config map[string]any
@@ -112,7 +115,7 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 
 	// 创建节点
 	node := storage.Node{
-		Username:       "admin",
+		Username:       sysOwner,
 		NodeName:       nodeName,
 		Protocol:       event.Protocol,
 		ClashConfig:    clashConfig,
@@ -144,8 +147,9 @@ func (l *NodeSyncListener) createForwardTunnelNode(ctx context.Context, event In
 		return
 	}
 
+	sysOwner := l.repo.GetSystemNodeOwner(ctx)
 	nodeName := src.NodeName + " | Tunnel"
-	if exists, _ := l.repo.CheckNodeNameExists(ctx, nodeName, "admin", 0); exists {
+	if exists, _ := l.repo.CheckNodeNameExists(ctx, nodeName, sysOwner, 0); exists {
 		log.Printf("[NodeSync] forward-tunnel: 节点已存在: %s", nodeName)
 		return
 	}
@@ -166,7 +170,7 @@ func (l *NodeSyncListener) createForwardTunnelNode(ctx context.Context, event In
 	}
 
 	node := storage.Node{
-		Username:       "admin",
+		Username:       sysOwner,
 		NodeName:       nodeName,
 		Protocol:       src.Protocol,
 		ClashConfig:    string(clashJSON),

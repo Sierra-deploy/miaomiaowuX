@@ -53,6 +53,9 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 			log.Printf("[TrafficLimitEnforcer] User %s package expired at %s, removing from inbounds and clearing package",
 				user.Username, user.PackageEndDate.Format("2006-01-02"))
 			e.removeUserFromAllInbounds(ctx, user.Username)
+			// 用户私有路由出站(routed_owner='user'):父 inbound 来自套餐分配的节点,
+			// 套餐到期后失去访问权,所以一并 suspend(凭据保留供续费恢复)。
+			suspendUserPrivateRouted(ctx, e.remoteManage, e.repo, user.Username)
 			if err := e.repo.DeleteUserInboundConfigs(ctx, user.Username); err != nil {
 				log.Printf("[TrafficLimitEnforcer] Failed to delete inbound configs for %s: %v", user.Username, err)
 			}
@@ -95,11 +98,13 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 			log.Printf("[TrafficLimitEnforcer] User %s exceeded limit (%d/%d bytes), removing from inbounds",
 				user.Username, totalTraffic, pkg.TrafficLimitBytes)
 			e.removeUserFromAllInbounds(ctx, user.Username)
+			suspendUserPrivateRouted(ctx, e.remoteManage, e.repo, user.Username)
 			e.repo.UpdateUserOverLimit(ctx, user.Username, true)
 		} else if !isOverLimit && wasOverLimit {
 			log.Printf("[TrafficLimitEnforcer] User %s back under limit (%d/%d bytes), restoring inbounds",
 				user.Username, totalTraffic, pkg.TrafficLimitBytes)
 			e.restoreUserToInbounds(ctx, user)
+			resumeUserPrivateRouted(ctx, e.remoteManage, e.repo, user.Username)
 			e.repo.UpdateUserOverLimit(ctx, user.Username, false)
 		}
 	}

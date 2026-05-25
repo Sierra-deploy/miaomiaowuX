@@ -1776,7 +1776,7 @@ func (h *RemoteManageHandler) syncInboundsToNodesInternal(ctx context.Context, s
 		}
 	}
 
-	username := "admin"
+	username := h.repo.GetSystemNodeOwner(ctx)
 
 	// 在循环之前获取现有节点一次
 	existingNodes, _ := h.repo.ListNodes(ctx, username)
