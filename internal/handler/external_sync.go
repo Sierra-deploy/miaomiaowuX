@@ -401,6 +401,13 @@ func syncSingleExternalSubscription(ctx context.Context, client *http.Client, re
 		}
 	}
 
+	// 节点名后缀:同步设置开启 append_sub_info 时,把"剩余流量 + 剩余天数"拼到节点名后
+	// (同步自 mmw v0.7.3 — user_settings.append_sub_info 字段以前在 mmwx 已存在但未接通)
+	subInfoSuffix := ""
+	if settings.AppendSubInfo && (sub.Total > 0 || sub.Expire != nil) {
+		subInfoSuffix = buildSubInfoSuffix(sub)
+	}
+
 	// 转换为storage.Node格式
 	nodesToUpdate := make([]storage.Node, 0, len(proxies))
 
@@ -413,6 +420,12 @@ func syncSingleExternalSubscription(ctx context.Context, client *http.Client, re
 		proxyName, ok := proxyMap["name"].(string)
 		if !ok || proxyName == "" {
 			continue
+		}
+
+		// 拼接订阅元信息到节点名
+		if subInfoSuffix != "" {
+			proxyName += subInfoSuffix
+			proxyMap["name"] = proxyName
 		}
 
 		// 将代理编组为 JSON 以进行存储
@@ -974,5 +987,44 @@ func (h *SyncExternalSubscriptionsHandler) ServeHTTP(w http.ResponseWriter, r *h
 	json.NewEncoder(w).Encode(map[string]string{
 		"message": "外部订阅同步成功",
 	})
+}
+
+// buildSubInfoSuffix 生成节点名后缀:剩余流量 + 剩余天数(同步自 mmw v0.7.3)。
+// 例:" 398.22GB📊 26Days⏳"。Total/Expire 都没有时返回空串。
+func buildSubInfoSuffix(sub storage.ExternalSubscription) string {
+	var parts []string
+
+	if sub.Total > 0 {
+		used := sub.Upload + sub.Download
+		remaining := sub.Total - used
+		if remaining < 0 {
+			remaining = 0
+		}
+		parts = append(parts, formatTrafficShort(remaining)+"📊")
+	}
+
+	if sub.Expire != nil {
+		days := int(time.Until(*sub.Expire).Hours() / 24)
+		if days < 0 {
+			days = 0
+		}
+		parts = append(parts, fmt.Sprintf("%dDays⏳", days))
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return " " + strings.Join(parts, " ")
+}
+
+func formatTrafficShort(bytes int64) string {
+	const (
+		gb = 1024 * 1024 * 1024
+		mb = 1024 * 1024
+	)
+	if bytes >= gb {
+		return fmt.Sprintf("%.2fGB", float64(bytes)/float64(gb))
+	}
+	return fmt.Sprintf("%.0fMB", float64(bytes)/float64(mb))
 }
 

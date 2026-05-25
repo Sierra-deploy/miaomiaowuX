@@ -93,6 +93,14 @@ export default function Loon_Producer(): Producer {
                 return wireguard(proxy);
             case 'hysteria2':
                 return hysteria2(proxy);
+            case 'anytls':
+                if (proxy.network && proxy.network !== 'tcp') {
+                    throw new Error(`Platform ${targetPlatform} does not support proxy type anytls with network ${proxy.network}`);
+                }
+                if (proxy['reality-opts']) {
+                    throw new Error(`Platform ${targetPlatform} does not support proxy type anytls with REALITY`);
+                }
+                return anytls(proxy);
         }
         throw new Error(
             `Platform ${targetPlatform} does not support proxy type: ${proxy.type}`,
@@ -757,6 +765,46 @@ function hysteria2(proxy: Proxy): string {
     result.appendIfPresent(`,ecn=${proxy.ecn}`, 'ecn');
     const ip_version = ipVersions[proxy['ip-version']!] || proxy['ip-version'];
     result.appendIfPresent(`,ip-mode=${ip_version}`, 'ip-version');
+
+    return result.toString();
+}
+
+// AnyTLS 节点转 Loon 格式(同步自 mmw v0.7.2 #85)
+function anytls(proxy: Proxy): string {
+    const result = new Result(proxy);
+    result.append(`${proxy.name}=anytls,${proxy.server},${proxy.port},"${proxy.password}"`);
+
+    for (const key of ['idle-session-timeout', 'max-stream-count']) {
+        if (isPresent(proxy, key) && Number.isInteger(proxy[key])) {
+            result.append(`,${key}=${proxy[key]}`);
+        }
+    }
+
+    // tls verification
+    result.appendIfPresent(`,skip-cert-verify=${proxy['skip-cert-verify']}`, 'skip-cert-verify');
+
+    // sni
+    result.appendIfPresent(`,tls-name=${proxy.sni}`, 'sni');
+    result.appendIfPresent(`,tls-cert-sha256=${proxy['tls-fingerprint']}`, 'tls-fingerprint');
+    result.appendIfPresent(`,tls-pubkey-sha256=${proxy['tls-pubkey-sha256']}`, 'tls-pubkey-sha256');
+
+    // tfo
+    result.appendIfPresent(`,fast-open=${proxy.tfo}`, 'tfo');
+
+    // block-quic
+    if (proxy['block-quic'] === 'on') {
+        result.append(',block-quic=true');
+    } else if (proxy['block-quic'] === 'off') {
+        result.append(',block-quic=false');
+    }
+
+    // udp
+    if (proxy.udp) {
+        result.append(`,udp=true`);
+    }
+
+    const ip_version2 = ipVersions[proxy['ip-version']!] || proxy['ip-version'];
+    result.appendIfPresent(`,ip-mode=${ip_version2}`, 'ip-version');
 
     return result.toString();
 }

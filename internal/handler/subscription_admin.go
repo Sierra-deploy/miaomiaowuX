@@ -443,15 +443,18 @@ func NewSubscriptionListHandler(repo *storage.TrafficRepository) http.Handler {
 		}
 
 		// 仅在启用短链接时获取用户短代码(优先用户自定义短码,否则系统自动短码)。
-		// 管理员不追加用户短码:管理员直接用文件短码 /x/{fileShortCode} 即可访问全部订阅。
+		// 管理员现在也能编辑自己的 user_short_code(订阅文件 popover 里),所以订阅链接也拼上,
+		// 与普通用户一致 = /x/{fileShortCode}{userShortCode}。short_link.go 会先按整 code 找文件,
+		// 找不到再按"文件短码+用户短码"分裂,所以拼上 admin 自己的短码不影响"全权访问"语义。
 		var userShortCode string
-		if enableShortLink && user.Role != storage.RoleAdmin {
+		if enableShortLink {
 			userShortCode, err = repo.GetEffectiveUserShortCode(r.Context(), username)
 			if err != nil {
 				// 如果用户短代码不存在，它将在下次令牌访问时生成
 				userShortCode = ""
 			}
 		}
+		_ = user // role 字段不再用于此处的短码逻辑(保留 user 变量供其他地方使用)
 
 		type item struct {
 			ID              int64     `json:"id"`

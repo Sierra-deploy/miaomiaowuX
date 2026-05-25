@@ -78,7 +78,10 @@ const CLIENT_TYPES = [
   { type: 'surfboard', name: 'Surfboard', icon: surfboardIcon },
   { type: 'surge', name: 'Surge', icon: surgeIcon },
   { type: 'surgemac', name: 'Surge Mac', icon: surgeMacIcon },
+  { type: 'clash-to-surge', name: 'Clash→Surge', icon: surgeIcon },
   { type: 'loon', name: 'Loon', icon: loonIcon },
+  { type: 'clash-to-loon', name: 'Clash→Loon', icon: loonIcon },
+  { type: 'clash-to-loon-kelee', name: 'Clash→Loon(kelee)', icon: loonIcon },
   { type: 'qx', name: 'QuantumultX', icon: quanxIcon },
   { type: 'egern', name: 'Egern', icon: egernIcon },
   { type: 'sing-box', name: 'sing-box', icon: singboxIcon },
@@ -127,7 +130,7 @@ function SubscriptionPage() {
   const buildSubscriptionURL = (filename: string, fileShortCode: string | undefined, clientType?: string, fileType?: string, customShortCode?: string) => {
     const shortCode = customShortCode || fileShortCode
     if (shortCode) {
-      // 普通用户:订阅短链接末尾追加用户短码(/x/{文件短码}{用户短码});管理员 userShortCode 为空,直接用文件短码。
+      // 订阅短链接 = /x/{文件短码}{用户短码};所有用户(含管理员)都拼上自己的 user_short_code
       const url = new URL(`/x/${shortCode + userShortCode}`, baseURL)
       if (clientType) url.searchParams.set('t', clientType)
       return url.toString()

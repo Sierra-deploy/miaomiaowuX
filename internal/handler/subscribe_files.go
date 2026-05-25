@@ -59,6 +59,10 @@ func (h *subscribeFilesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 		h.handleUpload(w, r)
 	case path == "create-from-config" && r.Method == http.MethodPost:
 		h.handleCreateFromConfig(w, r)
+	case strings.HasSuffix(path, "/users") && r.Method == http.MethodGet:
+		// GET /api/admin/subscribe-files/{id}/users — 列出该订阅分配给哪些用户(同步自 mmw v0.7.3)
+		idStr := strings.TrimSuffix(path, "/users")
+		h.handleGetSubscriptionUsers(w, r, idStr)
 	case strings.HasSuffix(path, "/content") && r.Method == http.MethodGet:
 		// GET /api/admin/subscribe-files/{文件名}/内容
 		filename := strings.TrimSuffix(path, "/content")
@@ -432,7 +436,9 @@ func (h *subscribeFilesHandler) handleUpdate(w http.ResponseWriter, r *http.Requ
 	}
 
 	// 所有权校验:普通用户只能改自己创建的订阅。
-	if uname := auth.UsernameFromContext(r.Context()); !userIsAdmin(r.Context(), h.repo, uname) && existing.CreatedBy != uname {
+	uname := auth.UsernameFromContext(r.Context())
+	isAdmin := userIsAdmin(r.Context(), h.repo, uname)
+	if !isAdmin && existing.CreatedBy != uname {
 		writeError(w, http.StatusNotFound, storage.ErrSubscribeFileNotFound)
 		return
 	}
@@ -440,6 +446,12 @@ func (h *subscribeFilesHandler) handleUpdate(w http.ResponseWriter, r *http.Requ
 	var req subscribeFileRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeBadRequest(w, "请求格式不正确")
+		return
+	}
+
+	// 短码编辑只允许管理员:普通用户即使是订阅创建者,也不能改 custom_short_code(短码归全局命名空间,必须管理)
+	if !isAdmin && req.CustomShortCode != existing.CustomShortCode {
+		writeError(w, http.StatusForbidden, errors.New("只有管理员可以编辑短码"))
 		return
 	}
 
@@ -1286,3 +1298,24 @@ func (h *subscribeFilesHandler) initializeCustomRuleApplications(ctx context.Con
 	logger.Info("[Subscribe] 记录自定义规则应用状态完成", "rule_count", len(rules), "file_id", fileID)
 }
 
+
+// handleGetSubscriptionUsers GET /api/admin/subscribe-files/{id}/users
+// 返回该订阅文件分配给哪些用户 + 各自的 user_short_code / custom_user_short_code(同步自 mmw v0.7.3)
+func (h *subscribeFilesHandler) handleGetSubscriptionUsers(w http.ResponseWriter, r *http.Request, idStr string) {
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeBadRequest(w, "invalid subscription file ID")
+		return
+	}
+
+	users, err := h.repo.GetUsersBySubscriptionID(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if users == nil {
+		users = []storage.UserShortCodeInfo{}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{"users": users})
+}

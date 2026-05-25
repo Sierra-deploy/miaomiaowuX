@@ -662,11 +662,29 @@ function SubscribeFilesPage() {
     queryKey: ['user-token'],
     queryFn: async () => {
       const response = await api.get('/api/user/token')
-      return response.data as { token: string }
+      return response.data as { token: string; user_short_code?: string; custom_user_short_code?: string }
     },
     enabled: Boolean(auth.accessToken),
   })
   const userToken = userTokenData?.token ?? ''
+  // 当前登录用户的有效短码(自定义优先);管理员在 popover 展示
+  const myUserShortCode = userTokenData?.user_short_code ?? ''
+  const myCustomUserShortCode = userTokenData?.custom_user_short_code ?? ''
+
+  // 修改自己的 custom_user_short_code(管理员在 popover 里编辑)
+  const updateMyShortCodeMutation = useMutation({
+    mutationFn: async (custom: string) => {
+      const res = await api.put('/api/user/token', { custom_user_short_code: custom })
+      return res.data as { user_short_code?: string; custom_user_short_code?: string }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['user-token'] })
+      toast.success('短码已更新')
+    },
+    onError: (e: any) => {
+      toast.error(e?.response?.data?.error || e?.message || '更新短码失败')
+    },
+  })
 
   // 获取用户设置（用于判断是否显示代理集合）
   const { data: userConfigData } = useQuery({
@@ -2965,6 +2983,24 @@ function SubscribeFilesPage() {
                                 <p className='text-[10px] text-muted-foreground'>
                                   回车保存，留空恢复自动短码{file.file_short_code ? ` (${file.file_short_code})` : ''}
                                 </p>
+                                {/* 用户短码(可编辑;留空恢复自动短码) */}
+                                <div className='pt-2 border-t space-y-1'>
+                                  <Label className='text-xs'>用户短码</Label>
+                                  <Input
+                                    className='h-8 text-xs font-mono'
+                                    defaultValue={myCustomUserShortCode}
+                                    placeholder={myUserShortCode ? `当前生效: ${myUserShortCode}(留空恢复自动)` : '留空使用自动短码'}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        const val = (e.target as HTMLInputElement).value.trim()
+                                        if (val !== myCustomUserShortCode) {
+                                          updateMyShortCodeMutation.mutate(val)
+                                        }
+                                      }
+                                    }}
+                                  />
+                                  <p className='text-[10px] text-muted-foreground'>回车保存。当前生效短码:{myUserShortCode || '—'}</p>
+                                </div>
                               </div>
                             </PopoverContent>
                           </Popover>
@@ -3124,7 +3160,7 @@ function SubscribeFilesPage() {
                       cellClassName: 'text-center',
                       width: '140px',
                     },
-                  ].filter((c: any) => isAdmin || (c.header !== '' && c.header !== t('management.fileList.descriptionCol'))) as DataTableColumn<SubscribeFile>[]
+                  ].filter((c: any) => isAdmin || (c.header !== '' && c.header !== t('management.fileList.descriptionCol') && c.header !== '自定义连接')) as DataTableColumn<SubscribeFile>[]
                 }
                 mobileCard={{
                   header: (file) => (
@@ -3209,9 +3245,9 @@ function SubscribeFilesPage() {
                         </div>
                       ),
                     },
-                    {
+                    ...(isAdmin ? [{
                       label: '自定义连接',
-                      value: (file) => {
+                      value: (file: SubscribeFile) => {
                         const code = file.custom_short_code || file.file_short_code
                         return (
                           <Popover>
@@ -3240,12 +3276,30 @@ function SubscribeFilesPage() {
                                 <p className='text-[10px] text-muted-foreground'>
                                   回车保存{file.file_short_code ? `，自动短码: ${file.file_short_code}` : ''}
                                 </p>
+                                {/* 用户短码(可编辑;留空恢复自动短码) */}
+                                <div className='pt-2 border-t space-y-1'>
+                                  <Label className='text-xs'>用户短码</Label>
+                                  <Input
+                                    className='h-8 text-xs font-mono'
+                                    defaultValue={myCustomUserShortCode}
+                                    placeholder={myUserShortCode ? `当前生效: ${myUserShortCode}(留空恢复自动)` : '留空使用自动短码'}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        const val = (e.target as HTMLInputElement).value.trim()
+                                        if (val !== myCustomUserShortCode) {
+                                          updateMyShortCodeMutation.mutate(val)
+                                        }
+                                      }
+                                    }}
+                                  />
+                                  <p className='text-[10px] text-muted-foreground'>回车保存。当前生效短码:{myUserShortCode || '—'}</p>
+                                </div>
                               </div>
                             </PopoverContent>
                           </Popover>
                         )
                       },
-                    },
+                    }] : []),
                     {
                       label: 'V3 模板',
                       value: (file) => (

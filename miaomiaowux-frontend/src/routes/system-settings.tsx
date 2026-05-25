@@ -46,6 +46,7 @@ function SystemSettingsPage() {
   const [cacheExpireMinutes, setCacheExpireMinutes] = useState(0)
   const [syncTraffic, setSyncTraffic] = useState(false)
   const [nodeNameFilter, setNodeNameFilter] = useState('剩余|流量|到期|订阅|时间|重置')
+  const [appendSubInfo, setAppendSubInfo] = useState(false)
   const [showApiToken, setShowApiToken] = useState(false)
   const [masterUrl, setMasterUrl] = useState('')
 
@@ -384,6 +385,7 @@ function SystemSettingsPage() {
         cache_expire_minutes: number
         sync_traffic: boolean
         node_name_filter: string
+        append_sub_info: boolean
         enable_short_link: boolean
         use_new_template_system: boolean
         enable_proxy_provider: boolean
@@ -404,6 +406,7 @@ function SystemSettingsPage() {
       setCacheExpireMinutes(userConfig.cache_expire_minutes)
       setSyncTraffic(userConfig.sync_traffic)
       setNodeNameFilter(userConfig.node_name_filter || '剩余|流量|到期|订阅|时间|重置')
+      setAppendSubInfo(Boolean(userConfig.append_sub_info))
       // 短链接是系统级开关,只由 shortLinkData(/short-link)驱动 + toggleShortLinkMutation 保存。
       // 这里不能再用 per-user 的 userConfig.enable_short_link 覆盖它,否则刷新后被(默认 false)覆盖掉。
       setUseNewTemplateSystem(userConfig.use_new_template_system !== false) // 默认为 true
@@ -422,6 +425,7 @@ function SystemSettingsPage() {
       cache_expire_minutes: number
       sync_traffic: boolean
       node_name_filter: string
+      append_sub_info: boolean
       enable_short_link: boolean
       use_new_template_system: boolean
       enable_proxy_provider: boolean
@@ -443,6 +447,7 @@ function SystemSettingsPage() {
       setCacheExpireMinutes(variables.cache_expire_minutes)
       setSyncTraffic(variables.sync_traffic)
       setNodeNameFilter(variables.node_name_filter)
+      setAppendSubInfo(variables.append_sub_info)
       setEnableShortLink(variables.enable_short_link)
       setUseNewTemplateSystem(variables.use_new_template_system)
       setEnableProxyProvider(variables.enable_proxy_provider)
@@ -464,6 +469,7 @@ function SystemSettingsPage() {
     cache_expire_minutes: number
     sync_traffic: boolean
     node_name_filter: string
+    append_sub_info: boolean
     enable_short_link: boolean
     use_new_template_system: boolean
     enable_proxy_provider: boolean
@@ -478,6 +484,7 @@ function SystemSettingsPage() {
       cache_expire_minutes: cacheExpireMinutes,
       sync_traffic: syncTraffic,
       node_name_filter: nodeNameFilter,
+      append_sub_info: appendSubInfo,
       enable_short_link: enableShortLink,
       use_new_template_system: useNewTemplateSystem,
       enable_proxy_provider: enableProxyProvider,
@@ -547,6 +554,29 @@ function SystemSettingsPage() {
                   placeholder='剩余|流量|到期|订阅|时间|重置'
                 />
                 <p className='text-xs text-muted-foreground'>{t('sync.nodeNameFilterDesc')}</p>
+              </div>
+
+              {/* 节点名追加订阅信息(剩余流量/天数)— 同步自 mmw v0.7.3 */}
+              <div className='flex items-center justify-between pt-3 border-t'>
+                <div className='flex items-center gap-2'>
+                  <Label htmlFor='append-sub-info' className='cursor-pointer'>
+                    节点名称追加订阅信息
+                  </Label>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <CircleHelp className='h-4 w-4 text-muted-foreground cursor-help' />
+                    </TooltipTrigger>
+                    <TooltipContent side='right' className='max-w-xs'>
+                      <p>开启后,同步外部订阅时在节点名称后追加剩余流量和剩余天数,例如:节点名 398.22GB📊 26Days⏳</p>
+                    </TooltipContent>
+                  </Tooltip>
+                </div>
+                <Switch
+                  id='append-sub-info'
+                  checked={appendSubInfo}
+                  onCheckedChange={(checked) => updateConfig({ append_sub_info: checked })}
+                  disabled={updateConfigMutation.isPending}
+                />
               </div>
 
               <div className='flex items-center justify-between pt-3 border-t'>

@@ -25,10 +25,11 @@ type BruteForceProtector struct {
 }
 
 func NewBruteForceProtector() *BruteForceProtector {
+	// 加严:24h 窗口内 5 次失败 → 封 24h(同步自 mmw v0.7.3 #89,防订阅 token 枚举)
 	p := &BruteForceProtector{
-		maxFailures:   20,
-		window:        10 * time.Minute,
-		blockDuration: time.Hour,
+		maxFailures:   5,
+		window:        24 * time.Hour,
+		blockDuration: 24 * time.Hour,
 	}
 	globalBruteForceProtector = p
 	return p

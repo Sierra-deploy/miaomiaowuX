@@ -289,6 +289,7 @@ type UserSettings struct {
 	CacheExpireMinutes   int        // 缓存过期时间（分钟）
 	SyncTraffic          bool       // 同步外部订阅的流量信息
 	NodeNameFilter       string     // 正则表达式过滤节点名称
+	AppendSubInfo        bool       // 同步外部订阅时把剩余流量/天数拼到节点名后(同步自 mmw v0.7.3)
 	CustomRulesEnabled   bool       // 启用自定义规则功能
 	EnableShortLink      bool       // 启用订阅短链接功能
 	UseNewTemplateSystem bool       // 使用新的模板系统（基于数据库），默认true
@@ -1100,6 +1101,11 @@ CREATE INDEX IF NOT EXISTS idx_external_subscriptions_url ON external_subscripti
 
 	// 将node_order添加到user_settings表（用于显示顺序的节点ID的JSON数组）
 	if err := r.ensureUserSettingsColumn("node_order", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+
+	// 同步外部订阅时拼接订阅元信息(剩余流量/天数)到节点名(同步自 mmw v0.7.3)
+	if err := r.ensureUserSettingsColumn("append_sub_info", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 
@@ -4238,6 +4244,44 @@ func (r *TrafficRepository) GetUserSubscriptionIDs(ctx context.Context, username
 }
 
 // 使用提供的列表替换用户的所有订阅。
+// UserShortCodeInfo 用户短码信息(同步自 mmw v0.7.3)
+type UserShortCodeInfo struct {
+	Username            string `json:"username"`
+	UserShortCode       string `json:"user_short_code"`
+	CustomUserShortCode string `json:"custom_user_short_code"`
+}
+
+// GetUsersBySubscriptionID 返回某订阅文件分配给哪些用户 + 每个用户的短码,
+// 用于管理 UI 集中编辑用户短码(同步自 mmw v0.7.3)。
+func (r *TrafficRepository) GetUsersBySubscriptionID(ctx context.Context, subscriptionID int64) ([]UserShortCodeInfo, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+
+	const stmt = `
+		SELECT ut.username, COALESCE(ut.user_short_code, ''), COALESCE(ut.custom_user_short_code, '')
+		FROM user_subscriptions us
+		INNER JOIN user_tokens ut ON us.username = ut.username
+		WHERE us.subscription_id = ?
+		ORDER BY ut.username ASC
+	`
+	rows, err := r.db.QueryContext(ctx, stmt, subscriptionID)
+	if err != nil {
+		return nil, fmt.Errorf("get users by subscription ID: %w", err)
+	}
+	defer rows.Close()
+
+	var users []UserShortCodeInfo
+	for rows.Next() {
+		var u UserShortCodeInfo
+		if err := rows.Scan(&u.Username, &u.UserShortCode, &u.CustomUserShortCode); err != nil {
+			return nil, fmt.Errorf("scan user short code: %w", err)
+		}
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
 func (r *TrafficRepository) SetUserSubscriptions(ctx context.Context, username string, subscriptionIDs []int64) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
@@ -4342,11 +4386,11 @@ func (r *TrafficRepository) GetUserSettings(ctx context.Context, username string
 		return settings, errors.New("username is required")
 	}
 
-	const stmt = `SELECT username, force_sync_external, COALESCE(match_rule, 'node_name'), COALESCE(sync_scope, 'saved_only'), COALESCE(keep_node_name, 1), COALESCE(cache_expire_minutes, 0), COALESCE(sync_traffic, 0), COALESCE(node_name_filter, '剩余|流量|到期|订阅|时间|重置'), COALESCE(custom_rules_enabled, 0), COALESCE(enable_short_link, 0), COALESCE(use_new_template_system, 1), COALESCE(enable_proxy_provider, 0), COALESCE(node_order, '[]'), COALESCE(debug_enabled, 0), COALESCE(debug_log_path, ''), debug_started_at, created_at, updated_at FROM user_settings WHERE username = ? LIMIT 1`
-	var forceSyncInt, keepNodeNameInt, syncTrafficInt, customRulesEnabledInt, enableShortLinkInt, useNewTemplateSystemInt, enableProxyProviderInt, debugEnabledInt int
+	const stmt = `SELECT username, force_sync_external, COALESCE(match_rule, 'node_name'), COALESCE(sync_scope, 'saved_only'), COALESCE(keep_node_name, 1), COALESCE(cache_expire_minutes, 0), COALESCE(sync_traffic, 0), COALESCE(node_name_filter, '剩余|流量|到期|订阅|时间|重置'), COALESCE(append_sub_info, 0), COALESCE(custom_rules_enabled, 0), COALESCE(enable_short_link, 0), COALESCE(use_new_template_system, 1), COALESCE(enable_proxy_provider, 0), COALESCE(node_order, '[]'), COALESCE(debug_enabled, 0), COALESCE(debug_log_path, ''), debug_started_at, created_at, updated_at FROM user_settings WHERE username = ? LIMIT 1`
+	var forceSyncInt, keepNodeNameInt, syncTrafficInt, appendSubInfoInt, customRulesEnabledInt, enableShortLinkInt, useNewTemplateSystemInt, enableProxyProviderInt, debugEnabledInt int
 	var nodeOrderJSON string
 	var debugStartedAt sql.NullTime
-	err := r.db.QueryRowContext(ctx, stmt, username).Scan(&settings.Username, &forceSyncInt, &settings.MatchRule, &settings.SyncScope, &keepNodeNameInt, &settings.CacheExpireMinutes, &syncTrafficInt, &settings.NodeNameFilter, &customRulesEnabledInt, &enableShortLinkInt, &useNewTemplateSystemInt, &enableProxyProviderInt, &nodeOrderJSON, &debugEnabledInt, &settings.DebugLogPath, &debugStartedAt, &settings.CreatedAt, &settings.UpdatedAt)
+	err := r.db.QueryRowContext(ctx, stmt, username).Scan(&settings.Username, &forceSyncInt, &settings.MatchRule, &settings.SyncScope, &keepNodeNameInt, &settings.CacheExpireMinutes, &syncTrafficInt, &settings.NodeNameFilter, &appendSubInfoInt, &customRulesEnabledInt, &enableShortLinkInt, &useNewTemplateSystemInt, &enableProxyProviderInt, &nodeOrderJSON, &debugEnabledInt, &settings.DebugLogPath, &debugStartedAt, &settings.CreatedAt, &settings.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return settings, ErrUserSettingsNotFound
@@ -4357,6 +4401,7 @@ func (r *TrafficRepository) GetUserSettings(ctx context.Context, username string
 	settings.ForceSyncExternal = forceSyncInt == 1
 	settings.KeepNodeName = keepNodeNameInt == 1
 	settings.SyncTraffic = syncTrafficInt == 1
+	settings.AppendSubInfo = appendSubInfoInt == 1
 	settings.CustomRulesEnabled = customRulesEnabledInt == 1
 	settings.EnableShortLink = enableShortLinkInt == 1
 	settings.UseNewTemplateSystem = useNewTemplateSystemInt == 1
@@ -4432,6 +4477,11 @@ func (r *TrafficRepository) UpsertUserSettings(ctx context.Context, settings Use
 		debugEnabledInt = 1
 	}
 
+	appendSubInfoInt := 0
+	if settings.AppendSubInfo {
+		appendSubInfoInt = 1
+	}
+
 	matchRule := strings.TrimSpace(settings.MatchRule)
 	if matchRule == "" {
 		matchRule = "node_name"
@@ -4459,8 +4509,8 @@ func (r *TrafficRepository) UpsertUserSettings(ctx context.Context, settings Use
 	nodeNameFilter := settings.NodeNameFilter
 
 	const stmt = `
-		INSERT INTO user_settings (username, force_sync_external, match_rule, sync_scope, keep_node_name, cache_expire_minutes, sync_traffic, node_name_filter, custom_rules_enabled, enable_short_link, use_new_template_system, enable_proxy_provider, node_order, debug_enabled, debug_log_path, debug_started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO user_settings (username, force_sync_external, match_rule, sync_scope, keep_node_name, cache_expire_minutes, sync_traffic, node_name_filter, append_sub_info, custom_rules_enabled, enable_short_link, use_new_template_system, enable_proxy_provider, node_order, debug_enabled, debug_log_path, debug_started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(username) DO UPDATE SET
 			force_sync_external = excluded.force_sync_external,
 			match_rule = excluded.match_rule,
@@ -4469,6 +4519,7 @@ func (r *TrafficRepository) UpsertUserSettings(ctx context.Context, settings Use
 			cache_expire_minutes = excluded.cache_expire_minutes,
 			sync_traffic = excluded.sync_traffic,
 			node_name_filter = excluded.node_name_filter,
+			append_sub_info = excluded.append_sub_info,
 			custom_rules_enabled = excluded.custom_rules_enabled,
 			enable_short_link = excluded.enable_short_link,
 			use_new_template_system = excluded.use_new_template_system,
@@ -4480,7 +4531,7 @@ func (r *TrafficRepository) UpsertUserSettings(ctx context.Context, settings Use
 			updated_at = CURRENT_TIMESTAMP
 	`
 
-	if _, err := r.db.ExecContext(ctx, stmt, username, forceSyncInt, matchRule, syncScope, keepNodeNameInt, cacheExpireMinutes, syncTrafficInt, nodeNameFilter, customRulesEnabledInt, enableShortLinkInt, useNewTemplateSystemInt, enableProxyProviderInt, nodeOrderJSON, debugEnabledInt, settings.DebugLogPath, settings.DebugStartedAt); err != nil {
+	if _, err := r.db.ExecContext(ctx, stmt, username, forceSyncInt, matchRule, syncScope, keepNodeNameInt, cacheExpireMinutes, syncTrafficInt, nodeNameFilter, appendSubInfoInt, customRulesEnabledInt, enableShortLinkInt, useNewTemplateSystemInt, enableProxyProviderInt, nodeOrderJSON, debugEnabledInt, settings.DebugLogPath, settings.DebugStartedAt); err != nil {
 		return fmt.Errorf("upsert user settings: %w", err)
 	}
 

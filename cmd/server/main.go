@@ -757,8 +757,9 @@ func main() {
 	// 所有其他路径都转到 Web 处理程序
 	shortLinkHandler := handler.NewShortLinkHandler(repo, subscriptionHandler, packageSubscribeHandler)
 	bruteForceProtector := handler.NewBruteForceProtector()
-	// 订阅获取频率限制(每 IP 每小时 30 次),覆盖 /x/ 短链接与 /t/ 临时订阅,防枚举/抓取滥用。
-	subRateLimiter := handler.NewSubscriptionRateLimiter(30, time.Hour)
+	// 订阅获取频率限制(每 IP 每 2 小时 30 次),覆盖 /x/ 短链接与 /t/ 临时订阅,防枚举/抓取滥用。
+	// 同步自 mmw v0.7.3 #89(收紧窗口降低被暴力枚举短码的速率)。
+	subRateLimiter := handler.NewSubscriptionRateLimiter(30, 2*time.Hour)
 	go subRateLimiter.StartCleanup(context.Background())
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.Trim(r.URL.Path, "/")
