@@ -158,6 +158,17 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.1.3 (2026-05-26)
+- 🌈合并妙妙屋更新补丁
+- 🌈增加妙妙屋迁移入口
+- 🌈增加路由出站功能
+- 🌈支持从妙妙屋迁移
+- 🌈支持节点真延迟测试
+- 🌈支持路由出站（入站复用）
+- 🛠️ fix:debian13nginx安装失败
+- 🛠️ fix:分享的服务器xray_mode没有解析
+- 🛠️ fix:自定义Agent端口无效
+- 🛠️ fix:自定义规则BUG修复
 ### v0.1.2 (2026-05-23)
 - 🌈测速结果支持出口IP显示
 - 🛠️ fix:订阅管理报错
