@@ -11,6 +11,7 @@ import {
   XCircle,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { getXrayProtocolColor } from '@/lib/protocol-colors'
 import { api } from '@/lib/api'
 import { generateInboundConfig } from '@/lib/xray-config-generator'
 import { CertSelectField } from '@/components/xray/cert-select-field'
@@ -69,17 +70,6 @@ import { ArrayField } from './array-field'
 import { FormField } from './form-field'
 import { VlessDecryptionField } from './vless-decryption-field'
 
-// Protocol colors matching node management
-const PROTOCOL_COLORS: Record<string, string> = {
-  VLESS: 'text-purple-700 dark:text-purple-400',
-  VMess: 'text-blue-700 dark:text-blue-400',
-  Trojan: 'text-red-700 dark:text-red-400',
-  Shadowsocks2022: 'text-green-700 dark:text-green-400',
-  Socks5: 'text-yellow-700 dark:text-yellow-400',
-  Hysteria2: 'text-teal-700 dark:text-teal-400',
-  HTTP: 'text-cyan-700 dark:text-cyan-400',
-  Tunnel: 'text-orange-700 dark:text-orange-400',
-}
 
 // Security protocol display labels - needs t() at call site
 const getSecurityLabel = (security: string, t: (key: string) => string): string => {
@@ -1128,7 +1118,7 @@ export function InboundWizard({
               className={
                 selectedProtocol === protocol
                   ? ''
-                  : PROTOCOL_COLORS[protocol] || ''
+                  : getXrayProtocolColor(protocol)
               }
               onClick={() => handleProtocolSelect(protocol)}
               type='button'

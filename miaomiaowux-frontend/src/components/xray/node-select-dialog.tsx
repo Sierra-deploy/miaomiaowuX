@@ -15,21 +15,9 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
 import { api } from '@/lib/api'
+import { getClashProtocolColor } from '@/lib/protocol-colors'
 import { toast } from 'sonner'
 
-// Protocol colors matching node management
-const PROTOCOL_COLORS: Record<string, string> = {
-  vmess: 'bg-blue-500/10 text-blue-700 dark:text-blue-400',
-  vless: 'bg-purple-500/10 text-purple-700 dark:text-purple-400',
-  trojan: 'bg-red-500/10 text-red-700 dark:text-red-400',
-  ss: 'bg-green-500/10 text-green-700 dark:text-green-400',
-  socks5: 'bg-yellow-500/10 text-yellow-700 dark:text-yellow-400',
-  hysteria: 'bg-pink-500/10 text-pink-700 dark:text-pink-400',
-  hysteria2: 'bg-indigo-500/10 text-indigo-700 dark:text-indigo-400',
-  tuic: 'bg-cyan-500/10 text-cyan-700 dark:text-cyan-400',
-  anytls: 'bg-teal-500/10 text-teal-700 dark:text-teal-400',
-  wireguard: 'bg-orange-500/10 text-orange-700 dark:text-orange-400',
-}
 
 interface ParsedNode {
   id: number
@@ -226,7 +214,7 @@ export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter 
                         <div className="flex items-center gap-2 flex-wrap">
                           <Badge
                             variant="outline"
-                            className={PROTOCOL_COLORS[node.protocol.toLowerCase()] || 'bg-gray-500/10'}
+                            className={getClashProtocolColor(node.protocol) || 'bg-gray-500/10'}
                           >
                             {node.protocol.toUpperCase()}
                           </Badge>

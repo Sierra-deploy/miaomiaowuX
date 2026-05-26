@@ -8,19 +8,7 @@ import { NodeSelectDialog } from './node-select-dialog'
 import { Import, Eye, X } from 'lucide-react'
 import { protocolFields } from '@/lib/xray-form-fields'
 import { generateOutboundConfig } from '@/lib/xray-config-generator'
-
-// Protocol colors matching node management
-const PROTOCOL_COLORS: Record<string, string> = {
-  VLESS: 'text-purple-700 dark:text-purple-400',
-  VMess: 'text-blue-700 dark:text-blue-400',
-  Trojan: 'text-red-700 dark:text-red-400',
-  Shadowsocks2022: 'text-green-700 dark:text-green-400',
-  Socks5: 'text-yellow-700 dark:text-yellow-400',
-  HTTP: 'text-cyan-700 dark:text-cyan-400',
-  Tunnel: 'text-orange-700 dark:text-orange-400',
-  Freedom: 'text-emerald-700 dark:text-emerald-400',
-  Blackhole: 'text-gray-700 dark:text-gray-400',
-}
+import { getXrayProtocolColor } from '@/lib/protocol-colors'
 
 interface Server {
   id: number
@@ -239,7 +227,7 @@ export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit 
         <div className="flex flex-wrap gap-2 md:gap-3">
           <Button
             variant={selectedProtocol === 'Freedom' ? 'default' : 'secondary'}
-            className={selectedProtocol === 'Freedom' ? '' : PROTOCOL_COLORS['Freedom'] || ''}
+            className={selectedProtocol === 'Freedom' ? '' : getXrayProtocolColor('Freedom')}
             onClick={() => handleProtocolSelect('Freedom')}
             type="button"
           >
@@ -247,7 +235,7 @@ export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit 
           </Button>
           <Button
             variant={selectedProtocol === 'Blackhole' ? 'default' : 'secondary'}
-            className={selectedProtocol === 'Blackhole' ? '' : PROTOCOL_COLORS['Blackhole'] || ''}
+            className={selectedProtocol === 'Blackhole' ? '' : getXrayProtocolColor('Blackhole')}
             onClick={() => handleProtocolSelect('Blackhole')}
             type="button"
           >
@@ -315,7 +303,7 @@ export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit 
                   <CardHeader>
                     <CardTitle>{t('outbounds.importedNodeConfig')}</CardTitle>
                     <CardDescription>
-                      {t('inbounds.protocolLabel')}: <span className={PROTOCOL_COLORS[selectedProtocol] || ''}>{selectedProtocol}</span>
+                      {t('inbounds.protocolLabel')}: <span className={getXrayProtocolColor(selectedProtocol)}>{selectedProtocol}</span>
                       {selectedTransport !== 'TCP' && ` | ${t('composer.transportProtocol')}: ${selectedTransport}`}
                       {selectedSecurity !== 'None' && ` | ${t('composer.securityProtocol')}: ${selectedSecurity}`}
                     </CardDescription>

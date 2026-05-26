@@ -8,6 +8,8 @@ import { Plus, RefreshCw, Search, Trash2, Download, Cog, ChevronDown, Terminal, 
 import { ViewToggle, type ViewMode } from '@/components/ui/view-toggle'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { useLicenseUsage } from '@/hooks/use-license'
+import { formatBytes as formatTraffic, formatSpeed } from '@/lib/format'
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 
 import { InboundPanel } from '@/components/xray/inbound-panel'
 import { OutboundPanel } from '@/components/xray/outbound-panel'
@@ -90,22 +92,6 @@ interface RemoteServer {
   encrypted?: boolean
   created_at: string
   updated_at: string
-}
-
-function formatTraffic(bytes: number): string {
-  if (bytes === 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  const k = 1024
-  const i = Math.floor(Math.log(bytes) / Math.log(k))
-  return `${(bytes / Math.pow(k, i)).toFixed(2)} ${units[i]}`
-}
-
-function formatSpeed(bytesPerSec: number): string {
-  if (bytesPerSec === 0 || bytesPerSec === undefined) return '0 B/s'
-  if (bytesPerSec < 1024) return `${bytesPerSec} B/s`
-  if (bytesPerSec < 1024 * 1024) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`
-  if (bytesPerSec < 1024 * 1024 * 1024) return `${(bytesPerSec / 1024 / 1024).toFixed(2)} MB/s`
-  return `${(bytesPerSec / 1024 / 1024 / 1024).toFixed(2)} GB/s`
 }
 
 function getTrafficPercent(used: number, limit: number): number {
@@ -646,7 +632,8 @@ function XrayServersPage() {
     createRemoteServerMutation.mutate({ name: remoteServerName, traffic_limit: trafficLimitBytes, traffic_used_offset: trafficUsedOffsetBytes, traffic_reset_day: trafficResetDay, connection_mode: 'auto', pull_address: pullAddress || undefined, pull_port: pullPort ? parseInt(pullPort) : undefined, listen_port: pullPort ? parseInt(pullPort) : undefined /* "Agent 端口"既是 pull 模式的 pull_port,也是 websocket 模式下主控连接 agent 的端口,语义一致,两个字段同时填 */, pull_token: pullToken || undefined, steal_self: createStealSelf, front_service: createFrontService, domain: createDomain.trim() || undefined, use_443: createUse443 || undefined, steal_mode: createStealSelf ? createStealMode : undefined, site_type: createStealSelf ? createSiteType : undefined, site_value: createStealSelf ? createSiteValue : undefined, xray_mode: createXrayMode })
   }
 
-  const copyToClipboard = (text: string, label: string) => { navigator.clipboard.writeText(text).then(() => toast.success(t('servers.copied', { label }))).catch(() => toast.error(t('servers.copyFailed'))) }
+  const clipboardCopy = useCopyToClipboard()
+  const copyToClipboard = (text: string, label: string) => clipboardCopy(text, { success: t('servers.copied', { label }), failure: t('servers.copyFailed') })
 
   const resetAddDialog = () => {
     setRemoteServerName(''); setGeneratedToken(''); setInstallCommand(''); setIsGeneratingToken(false)

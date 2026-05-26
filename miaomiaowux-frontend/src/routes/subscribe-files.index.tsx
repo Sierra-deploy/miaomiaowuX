@@ -5,6 +5,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute, redirect, useNavigate } from '@tanstack/react-router'
 import { load as parseYAML, dump as dumpYAML } from 'js-yaml'
 import { Copy } from 'lucide-react'
+import { formatBytes as formatTraffic, formatTrafficGB } from '@/lib/format'
 import {
   Upload,
   Download,
@@ -440,19 +441,6 @@ function jsonToOverrideForm(json: string): OverrideForm {
 }
 
 // 格式化流量
-function formatTraffic(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`
-  if (bytes < 1024 * 1024 * 1024)
-    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-}
-
-// 格式化流量为GB（用于外部订阅显示）
-function formatTrafficGB(bytes: number): string {
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-}
-
 function SubscribeFilesPage() {
   const { t } = useTranslation('subscribe')
   const { auth } = useAuthStore()

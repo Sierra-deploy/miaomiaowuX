@@ -8,22 +8,15 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Gauge, Loader2, History, ArrowLeft, RefreshCw, Settings2, Plus, Trash2, Copy, Zap, ExternalLink } from 'lucide-react'
 import { api } from '@/lib/api'
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
+import { useIdSelection } from '@/hooks/use-id-selection'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
-
-const PROTOCOL_COLORS: Record<string, string> = {
-  vmess: 'bg-blue-500/10 text-blue-700 dark:text-blue-400',
-  vless: 'bg-purple-500/10 text-purple-700 dark:text-purple-400',
-  trojan: 'bg-red-500/10 text-red-700 dark:text-red-400',
-  ss: 'bg-green-500/10 text-green-700 dark:text-green-400',
-  shadowsocks: 'bg-green-500/10 text-green-700 dark:text-green-400',
-  hysteria2: 'bg-indigo-500/10 text-indigo-700 dark:text-indigo-400',
-  tuic: 'bg-cyan-500/10 text-cyan-700 dark:text-cyan-400',
-}
+import { ProtocolBadge } from '@/components/common/protocol-badge'
 
 function relTime(t: string, tc: (k: string, o?: any) => string) {
   const ms = Date.now() - new Date(t).getTime()
@@ -180,7 +173,7 @@ export function SpeedTestDialog({
   const [threads, setThreads] = useState<1 | 8>(() => {
     return localStorage.getItem('mmwx-speedtest-threads') === '8' ? 8 : 1
   })
-  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const { selected, toggle: toggleOne, toggleAll: toggleAllIds } = useIdSelection<number>()
   const [historyNode, setHistoryNode] = useState<{ id: number; name: string } | null>(null)
   const [manageTesters, setManageTesters] = useState(false)
   // 点离线测速端时进入 TestersView 并自动重发安装命令的 tester id
@@ -248,13 +241,7 @@ export function SpeedTestDialog({
   }
 
   const allSelected = rows.length > 0 && selected.size === rows.length
-  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(rows.map((r) => r.id)))
-  const toggleOne = (id: number) =>
-    setSelected((prev) => {
-      const next = new Set(prev)
-      next.has(id) ? next.delete(id) : next.add(id)
-      return next
-    })
+  const toggleAll = () => toggleAllIds(rows.map((r) => r.id))
 
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) { setManageTesters(false); setHistoryNode(null); setAutoRotateTesterId(null); onClose() } }}>
@@ -366,9 +353,7 @@ export function SpeedTestDialog({
                             </td>
                             <td className='p-2'>
                               <div className='flex flex-col items-start gap-0.5'>
-                                <Badge variant='secondary' className={`text-[10px] ${PROTOCOL_COLORS[r.protocol] || ''}`}>
-                                  {r.protocol.toUpperCase() || '?'}
-                                </Badge>
+                                <ProtocolBadge protocol={r.protocol} />
                                 {r.node_type === 'routed' && r.routed_outbound_tag && (
                                   <span className='text-[10px] text-indigo-600 dark:text-indigo-400 font-mono max-w-[110px] truncate' title={r.routed_outbound_tag}>
                                     ↳ {r.routed_outbound_tag.replace(/^routed:p\d+:/, '')}
@@ -410,9 +395,7 @@ export function SpeedTestDialog({
                           <div className='min-w-0 flex-1'>
                             <div className='flex items-center gap-2'>
                               <div className='flex flex-col items-start gap-0.5 shrink-0'>
-                                <Badge variant='secondary' className={`text-[10px] ${PROTOCOL_COLORS[r.protocol] || ''}`}>
-                                  {r.protocol.toUpperCase() || '?'}
-                                </Badge>
+                                <ProtocolBadge protocol={r.protocol} />
                                 {r.node_type === 'routed' && r.routed_outbound_tag && (
                                   <span className='text-[10px] text-indigo-600 dark:text-indigo-400 font-mono max-w-[110px] truncate' title={r.routed_outbound_tag}>
                                     ↳ {r.routed_outbound_tag.replace(/^routed:p\d+:/, '')}
@@ -566,7 +549,8 @@ function TestersView({ onBack, t, autoRotateId }: { onBack: () => void; t: any; 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoRotateId, data?.testers])
 
-  const copy = (s: string) => navigator.clipboard?.writeText(s).then(() => toast.success(t('speedtest.copied')), () => {})
+  const copyToClipboard = useCopyToClipboard()
+  const copy = (s: string) => copyToClipboard(s, { success: t('speedtest.copied') })
   // mmwX-plugins 提供的一键安装脚本(自动下载对应平台二进制 + systemd / 任务计划)。
   // tester 名称在创建时就已确定并存到主控库,二进制不需要带 -name 参数。
   const scriptBaseURL = 'https://raw.githubusercontent.com/MMWOrg/mmwX-plugins/refs/heads/main/speedtest/scripts'

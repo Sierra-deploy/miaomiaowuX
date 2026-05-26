@@ -4,6 +4,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { Copy, Trash2, Plus } from 'lucide-react'
 import { api } from '@/lib/api'
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 import { ProFeatureGate } from '@/components/pro-feature-gate'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -62,12 +63,8 @@ export function ShareServerDialog({ server, onClose }: ShareServerDialogProps) {
     onError: () => toast.error('吊销失败'),
   })
 
-  const copy = (text: string, label: string) => {
-    navigator.clipboard?.writeText(text).then(
-      () => toast.success(`${label}已复制`),
-      () => toast.error('复制失败')
-    )
-  }
+  const copyToClipboard = useCopyToClipboard()
+  const copy = (text: string, label: string) => copyToClipboard(text, { success: `${label}已复制`, failure: '复制失败' })
 
   return (
     <Dialog open={!!server} onOpenChange={(open) => { if (!open) { setNewToken(''); onClose() } }}>

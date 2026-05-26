@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
 import { toast } from 'sonner'
 import { Plus, Trash2, Copy, Route as RouteIcon } from 'lucide-react'
+import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
 
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -164,12 +165,8 @@ export function RoutedOutboundsPanel({ showHeader = true }: { showHeader?: boole
     },
   })
 
-  const copyText = (s: string) => {
-    navigator.clipboard.writeText(s).then(
-      () => toast.success('已复制'),
-      () => toast.error('复制失败'),
-    )
-  }
+  const copyToClipboard = useCopyToClipboard()
+  const copyText = (s: string) => copyToClipboard(s, { success: '已复制', failure: '复制失败' })
 
   return (
     <div className='space-y-4'>

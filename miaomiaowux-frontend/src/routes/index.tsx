@@ -43,6 +43,7 @@ import uriIcon from '@/assets/icons/uri-color.svg'
 import v2rayIcon from '@/assets/icons/v2ray_color.png'
 import { Topbar } from '@/components/layout/topbar'
 import { api } from '@/lib/api'
+import { formatBytesShort as formatBytes, formatSpeedShort as formatSpeed } from '@/lib/format'
 import { useAuthStore } from '@/stores/auth-store'
 import { Button } from '@/components/ui/button'
 import {
@@ -1080,23 +1081,6 @@ function formatMetric(value: number | undefined, formatter: Intl.NumberFormat) {
 function formatPercentage(value: number | undefined, formatter: Intl.NumberFormat) {
   if (value === undefined || value === null) return '--'
   return `${formatter.format(value)} %`
-}
-
-function formatSpeed(bytesPerSec: number): string {
-  if (bytesPerSec === 0 || bytesPerSec === undefined) return '0 B/s'
-  if (bytesPerSec < 1024) return `${Math.round(bytesPerSec)} B/s`
-  if (bytesPerSec < 1024 * 1024) return `${Math.round(bytesPerSec / 1024)} K/s`
-  if (bytesPerSec < 1024 * 1024 * 1024) return `${Math.round(bytesPerSec / 1024 / 1024)} M/s`
-  return `${Math.round(bytesPerSec / 1024 / 1024 / 1024)} G/s`
-}
-
-function formatBytes(bytes: number): string {
-  if (!bytes) return '0 B'
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 / 1024).toFixed(2)} MB`
-  if (bytes < 1024 ** 4) return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
-  return `${(bytes / 1024 / 1024 / 1024 / 1024).toFixed(2)} TB`
 }
 
 // useDeltaSpeeds 在前端把"两次轮询之间 cycle 累计的真实差值 / 真实时间间隔"作为速度。
