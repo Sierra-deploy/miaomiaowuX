@@ -59,6 +59,8 @@ func (h *SpeedTestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleTesterCreate(w, r)
 	case r.URL.Path == "/api/admin/speedtest/testers/revoke" && r.Method == http.MethodPost:
 		h.handleTesterRevoke(w, r)
+	case r.URL.Path == "/api/admin/speedtest/testers/rotate-token" && r.Method == http.MethodPost:
+		h.handleTesterRotateToken(w, r)
 	default:
 		writeError(w, http.StatusNotFound, errors.New("not found"))
 	}
@@ -198,6 +200,30 @@ func (h *SpeedTestHandler) handleTesterRevoke(w http.ResponseWriter, r *http.Req
 		return
 	}
 	respondJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+// handleTesterRotateToken 为指定测速端轮换 token,返回新 token + tester 名称。
+// 用于「离线测速端重新展示安装命令」:库里只存 hash,原 token 不可恢复,只能轮换重发。
+// 旧 token 同时失效;在线测速端会因 token 不匹配下次重连失败(其实在线就不该用这接口)。
+func (h *SpeedTestHandler) handleTesterRotateToken(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID <= 0 {
+		writeBadRequest(w, "id 必填")
+		return
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	token := hex.EncodeToString(buf)
+	if err := h.repo.UpdateSpeedTesterToken(r.Context(), req.ID, hashShareToken(token)); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"success": true, "id": req.ID, "token": token})
 }
 
 func (h *SpeedTestHandler) handleResults(w http.ResponseWriter, r *http.Request) {

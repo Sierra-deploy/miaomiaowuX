@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { Gauge, Loader2, History, ArrowLeft, RefreshCw, Settings2, Plus, Trash2, Copy, Zap } from 'lucide-react'
+import { Gauge, Loader2, History, ArrowLeft, RefreshCw, Settings2, Plus, Trash2, Copy, Zap, ExternalLink } from 'lucide-react'
 import { api } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -36,6 +36,17 @@ function relTime(t: string, tc: (k: string, o?: any) => string) {
   return tc('time.daysAgo', { n: Math.floor(h / 24) })
 }
 
+// 前端 running → timeout 的阈值:超过这么久还在 running 视为后端卡住/丢失,UI 允许重测
+const RUNNING_TIMEOUT_MS = 15_000
+
+// isStaleRunning 判断 running 行是否超过 15s 没出结果(视为前端层面超时,可重测)
+function isStaleRunning(r: any): boolean {
+  if (r?.status !== 'running') return false
+  const started = r?.created_at ? new Date(r.created_at).getTime() : 0
+  if (!started) return false
+  return Date.now() - started > RUNNING_TIMEOUT_MS
+}
+
 // 每节点最新测速结果(有 running 时 1.5s 轮询,显著降低用户感知延迟)
 function useLatestSpeedResults(enabled: boolean) {
   return useQuery({
@@ -52,15 +63,19 @@ function useLatestSpeedResults(enabled: boolean) {
   })
 }
 
-// 速度单元格(running 转圈 / 失败 / ↓速度)
+// 速度单元格(running 转圈 / 超时 / 失败 / ↓速度)
 function SpeedCell({ r, t }: { r: any; t: any }) {
   if (!r) return <span className='text-muted-foreground text-xs'>—</span>
-  if (r.status === 'running')
+  if (r.status === 'running') {
+    if (isStaleRunning(r)) {
+      return <span className='text-orange-600 dark:text-orange-400 whitespace-nowrap text-xs' title={t('speedtest.timeoutHint')}>{t('speedtest.timeout')}</span>
+    }
     return (
       <span className='text-muted-foreground inline-flex items-center gap-1 whitespace-nowrap text-xs'>
         <Loader2 className='h-3 w-3 animate-spin' />{t('speedtest.testing')}
       </span>
     )
+  }
   if (r.status === 'failed')
     return <span className='text-red-600 dark:text-red-400 whitespace-nowrap text-xs' title={r.error}>{t('speedtest.failedShort')}</span>
   return (
@@ -71,13 +86,26 @@ function SpeedCell({ r, t }: { r: any; t: any }) {
 }
 
 // 延迟单元格:同时是一个按钮。无数据时显示 Zap 图标可点击,点完跑真延迟探测;
-// 已有数据时显示 ms,再次点击重测。运行中显示 spinner。
+// 已有数据时显示 ms,再次点击重测。运行中显示 spinner;超 15s 视为超时,变成可重测。
 function LatencyCell({ r, onProbe, busy, t }: { r: any; onProbe: () => void; busy: boolean; t: any }) {
-  const running = r?.status === 'running' || busy
+  const running = (r?.status === 'running' && !isStaleRunning(r)) || busy
   if (running) {
     return (
       <button className='inline-flex items-center gap-1 text-muted-foreground text-xs font-mono' disabled>
         <Loader2 className='h-3 w-3 animate-spin' />
+      </button>
+    )
+  }
+  // 超 15s 未返回 → 视为超时,展示橙色按钮可重测
+  if (r?.status === 'running' && isStaleRunning(r)) {
+    return (
+      <button
+        type='button'
+        onClick={onProbe}
+        title={t('speedtest.timeoutHint')}
+        className='inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-orange-600 dark:text-orange-400 hover:bg-orange-500/10'
+      >
+        <Zap className='h-3 w-3' />{t('speedtest.timeout')}
       </button>
     )
   }
@@ -155,6 +183,8 @@ export function SpeedTestDialog({
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [historyNode, setHistoryNode] = useState<{ id: number; name: string } | null>(null)
   const [manageTesters, setManageTesters] = useState(false)
+  // 点离线测速端时进入 TestersView 并自动重发安装命令的 tester id
+  const [autoRotateTesterId, setAutoRotateTesterId] = useState<number | null>(null)
 
   const { data: testersData } = useQuery({
     queryKey: ['speed-testers'],
@@ -227,16 +257,27 @@ export function SpeedTestDialog({
     })
 
   return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o) { setManageTesters(false); setHistoryNode(null); onClose() } }}>
+    <Dialog open={open} onOpenChange={(o) => { if (!o) { setManageTesters(false); setHistoryNode(null); setAutoRotateTesterId(null); onClose() } }}>
       <DialogContent
         className='w-[95vw] sm:w-auto sm:!max-w-[95vw] max-h-[88vh] flex flex-col'
-        onInteractOutside={(e) => { e.preventDefault(); setManageTesters(false); setHistoryNode(null); onMinimize() }}
-        onEscapeKeyDown={(e) => { e.preventDefault(); setManageTesters(false); setHistoryNode(null); onMinimize() }}
+        // 点外面 / 按 Esc:在子视图里只退回主视图,不要最小化整个 dialog;在主视图才最小化
+        onInteractOutside={(e) => {
+          e.preventDefault()
+          if (manageTesters) { setManageTesters(false); setAutoRotateTesterId(null); return }
+          if (historyNode) { setHistoryNode(null); return }
+          onMinimize()
+        }}
+        onEscapeKeyDown={(e) => {
+          e.preventDefault()
+          if (manageTesters) { setManageTesters(false); setAutoRotateTesterId(null); return }
+          if (historyNode) { setHistoryNode(null); return }
+          onMinimize()
+        }}
       >
         {historyNode ? (
           <HistoryView node={historyNode} onBack={() => setHistoryNode(null)} t={t} tc={tc} />
         ) : manageTesters ? (
-          <TestersView onBack={() => setManageTesters(false)} t={t} />
+          <TestersView onBack={() => { setManageTesters(false); setAutoRotateTesterId(null) }} t={t} autoRotateId={autoRotateTesterId} />
         ) : (
           <>
             <DialogHeader>
@@ -259,9 +300,17 @@ export function SpeedTestDialog({
                   key={x.id}
                   size='sm'
                   variant={source === x.id ? 'default' : 'outline'}
-                  disabled={!x.online}
-                  onClick={() => setSource(x.id)}
-                  title={x.online ? '' : t('speedtest.offline')}
+                  onClick={() => {
+                    if (x.online) {
+                      setSource(x.id)
+                    } else {
+                      // 离线测速端 → 进入管理视图并自动轮换 token、重发安装命令
+                      setAutoRotateTesterId(x.id)
+                      setManageTesters(true)
+                    }
+                  }}
+                  title={x.online ? '' : t('speedtest.offlineClickHint')}
+                  className={x.online ? '' : 'opacity-60'}
                 >
                   {x.name}{x.online ? '' : ` (${t('speedtest.offline')})`}
                 </Button>
@@ -309,7 +358,7 @@ export function SpeedTestDialog({
                     <tbody>
                       {rows.map((r) => {
                         const res = latestMap?.[r.id]
-                        const running = res?.status === 'running'
+                        const running = res?.status === 'running' && !isStaleRunning(res)
                         return (
                           <tr key={r.id} className='border-t'>
                             <td className='p-2 text-center'>
@@ -353,7 +402,7 @@ export function SpeedTestDialog({
                 <div className='max-h-[60vh] space-y-2 overflow-auto md:hidden'>
                   {rows.map((r) => {
                     const res = latestMap?.[r.id]
-                    const running = res?.status === 'running'
+                    const running = res?.status === 'running' && !isStaleRunning(res)
                     return (
                       <div key={r.id} className='rounded-lg border p-3'>
                         <div className='flex items-start gap-2'>
@@ -468,11 +517,13 @@ function HistoryView({ node, onBack, t, tc }: { node: { id: number; name: string
   )
 }
 
-// 测速点(家用测速端)管理视图:配对(生成令牌+运行命令)、列表(在线状态)、删除。dialog 内切换。
-function TestersView({ onBack, t }: { onBack: () => void; t: any }) {
+// 测速点(家用测速端)管理视图:配对(生成令牌+运行命令)、列表(在线状态)、删除、离线重发安装命令。
+// autoRotateId:打开时自动为该 tester 轮换 token 并展示安装命令(从 source selector 点离线测速端进入时用)
+function TestersView({ onBack, t, autoRotateId }: { onBack: () => void; t: any; autoRotateId?: number | null }) {
   const qc = useQueryClient()
   const [name, setName] = useState('')
-  const [newToken, setNewToken] = useState('')
+  // newCred:刚生成 / 刚轮换出来的凭据(token + tester 名称),用于显示安装命令
+  const [newCred, setNewCred] = useState<{ token: string; name: string } | null>(null)
   const masterURL = typeof window !== 'undefined' ? window.location.origin : ''
 
   const { data, isLoading } = useQuery({
@@ -481,8 +532,12 @@ function TestersView({ onBack, t }: { onBack: () => void; t: any }) {
     refetchInterval: 5000,
   })
   const createMut = useMutation({
-    mutationFn: async () => (await api.post('/api/admin/speedtest/testers/create', { name: name.trim() || 'home-tester' })).data,
-    onSuccess: (d) => { setNewToken(d.token); setName(''); qc.invalidateQueries({ queryKey: ['speed-testers'] }); toast.success(t('speedtest.testerCreated')) },
+    mutationFn: async () => {
+      const finalName = name.trim() || 'mmwx-speedtester'
+      const d = (await api.post('/api/admin/speedtest/testers/create', { name: finalName })).data
+      return { ...d, name: finalName }
+    },
+    onSuccess: (d: any) => { setNewCred({ token: d.token, name: d.name }); setName(''); qc.invalidateQueries({ queryKey: ['speed-testers'] }); toast.success(t('speedtest.testerCreated')) },
     onError: (e: any) => toast.error(e?.response?.data?.error || t('speedtest.testerCreateFailed')),
   })
   const revokeMut = useMutation({
@@ -490,8 +545,36 @@ function TestersView({ onBack, t }: { onBack: () => void; t: any }) {
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['speed-testers'] }); toast.success(t('speedtest.testerRevoked')) },
     onError: () => toast.error(t('speedtest.testerRevokeFailed')),
   })
+  // 离线测速端轮换 token:库里只存哈希,原 token 不可恢复 → 必须生成新的让用户重跑安装命令
+  const rotateMut = useMutation({
+    mutationFn: async (tester: { id: number; name: string }) => {
+      const d = (await api.post('/api/admin/speedtest/testers/rotate-token', { id: tester.id })).data
+      return { token: d.token, name: tester.name }
+    },
+    onSuccess: (d) => { setNewCred(d); qc.invalidateQueries({ queryKey: ['speed-testers'] }); toast.success(t('speedtest.tokenRotated')) },
+    onError: (e: any) => toast.error(e?.response?.data?.error || t('speedtest.tokenRotateFailed')),
+  })
+
+  // 从 source selector 点离线测速端进来时,自动跑一次 rotate-token,直接展示安装命令(不用用户再点一遍)
+  useEffect(() => {
+    if (!autoRotateId) return
+    const tester = (data?.testers || []).find((x: any) => x.id === autoRotateId)
+    if (tester && !tester.online) {
+      rotateMut.mutate({ id: tester.id, name: tester.name || `tester-${tester.id}` })
+    }
+    // 只在 testers 数据到位后跑一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoRotateId, data?.testers])
+
   const copy = (s: string) => navigator.clipboard?.writeText(s).then(() => toast.success(t('speedtest.copied')), () => {})
-  const runCmd = newToken ? `mmwx-speedtester -master ${masterURL} -token ${newToken} -name home-tester` : ''
+  // mmwX-plugins 提供的一键安装脚本(自动下载对应平台二进制 + systemd / 任务计划)。
+  // tester 名称在创建时就已确定并存到主控库,二进制不需要带 -name 参数。
+  const scriptBaseURL = 'https://raw.githubusercontent.com/MMWOrg/mmwX-plugins/refs/heads/main/speedtest/scripts'
+  const linuxCmd = newCred ? `curl -fsSL ${scriptBaseURL}/install.sh | bash -s -- -master ${masterURL} -token ${newCred.token}` : ''
+  const windowsCmd = newCred ? `irm ${scriptBaseURL}/install.ps1 -OutFile install.ps1; .\\install.ps1 -Master ${masterURL} -Token ${newCred.token}` : ''
+
+  // 从 source selector 点离线测速端进来:只展示该 tester 的安装命令/token,隐藏新建表单和测速端列表
+  const compactMode = autoRotateId != null
 
   return (
     <>
@@ -503,33 +586,54 @@ function TestersView({ onBack, t }: { onBack: () => void; t: any }) {
         <DialogDescription>{t('speedtest.testerManageDesc')}</DialogDescription>
       </DialogHeader>
       <div className='flex-1 space-y-4 overflow-y-auto py-2'>
-        <div className='flex items-end gap-2'>
-          <div className='flex-1 space-y-1'>
-            <Label className='text-xs'>{t('speedtest.testerName')}</Label>
-            <Input value={name} onChange={(e) => setName(e.target.value)} placeholder='home-tester' className='text-xs' />
-          </div>
-          <Button size='sm' onClick={() => createMut.mutate()} disabled={createMut.isPending}>
-            <Plus className='mr-1 size-4' />{t('speedtest.testerCreate')}
-          </Button>
-        </div>
-
-        {newToken && (
-          <div className='border-primary/40 bg-primary/5 space-y-1.5 rounded-md border p-3'>
-            <Label className='text-primary text-xs'>{t('speedtest.testerTokenOnce')}</Label>
-            <div className='flex gap-2'>
-              <Input readOnly value={newToken} className='font-mono text-xs' />
-              <Button variant='outline' size='icon' className='shrink-0' onClick={() => copy(newToken)}><Copy className='h-4 w-4' /></Button>
+        {!compactMode && (
+          <>
+            <a
+              href='https://github.com/MMWOrg/mmwX-plugins/releases/latest'
+              target='_blank'
+              rel='noopener noreferrer'
+              className='flex items-center gap-1.5 text-xs text-primary hover:underline'
+            >
+              <ExternalLink className='size-3.5' />
+              {t('speedtest.testerDownload')}
+            </a>
+            <div className='flex items-end gap-2'>
+              <div className='flex-1 space-y-1'>
+                <Label className='text-xs'>{t('speedtest.testerName')}</Label>
+                <Input value={name} onChange={(e) => setName(e.target.value)} placeholder='mmwx-speedtester' className='text-xs' />
+              </div>
+              <Button size='sm' onClick={() => createMut.mutate()} disabled={createMut.isPending}>
+                <Plus className='mr-1 size-4' />{t('speedtest.testerCreate')}
+              </Button>
             </div>
-            <Label className='mt-1 text-xs'>{t('speedtest.testerRunCmd')}</Label>
+          </>
+        )}
+
+        {newCred && (
+          <div className='border-primary/40 bg-primary/5 space-y-2 rounded-md border p-3'>
+            <Label className='text-primary text-xs flex items-center gap-2'>
+              {t('speedtest.testerTokenOnce')}
+              <span className='text-muted-foreground font-mono text-[10px]'>{newCred.name}</span>
+            </Label>
             <div className='flex gap-2'>
-              <Input readOnly value={runCmd} className='font-mono text-[11px]' />
-              <Button variant='outline' size='icon' className='shrink-0' onClick={() => copy(runCmd)}><Copy className='h-4 w-4' /></Button>
+              <Input readOnly value={newCred.token} className='font-mono text-xs' />
+              <Button variant='outline' size='icon' className='shrink-0' onClick={() => copy(newCred.token)}><Copy className='h-4 w-4' /></Button>
+            </div>
+            <Label className='mt-1.5 text-xs'>{t('speedtest.testerLinuxCmd')}</Label>
+            <div className='flex gap-2'>
+              <Input readOnly value={linuxCmd} className='font-mono text-[11px]' />
+              <Button variant='outline' size='icon' className='shrink-0' onClick={() => copy(linuxCmd)}><Copy className='h-4 w-4' /></Button>
+            </div>
+            <Label className='mt-1.5 text-xs'>{t('speedtest.testerWindowsCmd')}</Label>
+            <div className='flex gap-2'>
+              <Input readOnly value={windowsCmd} className='font-mono text-[11px]' />
+              <Button variant='outline' size='icon' className='shrink-0' onClick={() => copy(windowsCmd)}><Copy className='h-4 w-4' /></Button>
             </div>
             <p className='text-muted-foreground text-[11px]'>{t('speedtest.testerRunHint')}</p>
           </div>
         )}
 
-        <div className='space-y-1.5'>
+        {!compactMode && <div className='space-y-1.5'>
           <Label className='flex items-center gap-1 text-xs'>{t('speedtest.testerList')}{isLoading && <RefreshCw className='size-3 animate-spin' />}</Label>
           {(data?.testers || []).length === 0 ? (
             <p className='text-muted-foreground text-xs'>{t('speedtest.testerNone')}</p>
@@ -539,12 +643,26 @@ function TestersView({ onBack, t }: { onBack: () => void; t: any }) {
                 <span className='font-medium'>{x.name || `#${x.id}`}</span>
                 <Badge variant={x.online ? 'default' : 'secondary'} className='ml-2 text-[10px]'>{x.online ? t('speedtest.online') : t('speedtest.offline')}</Badge>
               </div>
-              <Button variant='ghost' size='sm' className='h-6 shrink-0 text-red-600 hover:text-red-700' onClick={() => revokeMut.mutate(x.id)} disabled={revokeMut.isPending}>
-                <Trash2 className='size-3.5' />
-              </Button>
+              <div className='flex items-center gap-1 shrink-0'>
+                {!x.online && (
+                  <Button
+                    variant='ghost'
+                    size='sm'
+                    className='h-6 text-primary hover:text-primary'
+                    onClick={() => rotateMut.mutate({ id: x.id, name: x.name || `tester-${x.id}` })}
+                    disabled={rotateMut.isPending}
+                    title={t('speedtest.rotateHint')}
+                  >
+                    <RefreshCw className='size-3.5 mr-1' />{t('speedtest.resendInstall')}
+                  </Button>
+                )}
+                <Button variant='ghost' size='sm' className='h-6 text-red-600 hover:text-red-700' onClick={() => revokeMut.mutate(x.id)} disabled={revokeMut.isPending}>
+                  <Trash2 className='size-3.5' />
+                </Button>
+              </div>
             </div>
           ))}
-        </div>
+        </div>}
       </div>
     </>
   )

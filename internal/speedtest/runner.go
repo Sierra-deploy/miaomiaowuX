@@ -2,6 +2,7 @@ package speedtest
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -173,9 +174,43 @@ func startMihomo(bin, workdir string, cfg []byte) (func(), error) {
 	return nil, fmt.Errorf("mihomo 启动超时(端口 %d 15s 内未就绪)", mixedPort)
 }
 
+// proxyClient 经 mihomo mixed-port 走代理的 HTTP 客户端。
+//
+// 性能调优(单流测速接近 iperf3 单线程):
+//   - ReadBufferSize 1MB:loopback 接 mihomo 时降低 read syscall 频率;默认 4KB 在 1Gbps 下要 ~30k 次/秒
+//   - DisableCompression:测试文件多为已压缩二进制,客户端再 gzip 一次纯浪费 CPU
+//   - ForceAttemptHTTP2=false + TLSNextProto={}:HTTP/2 单流会被流控限速,HTTP/1.1 直接吃满
+//   - DisableKeepAlives=false 默认:虽然单次只发一个请求,但 HTTPS 的 TLS 复用对多次探测有帮助
+//   - 单进程复用一个 Transport,避免反复建 TLS / 连接池
 func proxyClient() *http.Client {
-	proxyURL, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", mixedPort))
-	return &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+	return &http.Client{Transport: sharedProxyTransport()}
+}
+
+var (
+	sharedTransportOnce sync.Once
+	sharedTransport     *http.Transport
+)
+
+func sharedProxyTransport() *http.Transport {
+	sharedTransportOnce.Do(func() {
+		proxyURL, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", mixedPort))
+		sharedTransport = &http.Transport{
+			Proxy:              http.ProxyURL(proxyURL),
+			ReadBufferSize:     1 << 20, // 1MB
+			WriteBufferSize:    64 << 10,
+			DisableCompression: true,
+			ForceAttemptHTTP2:  false,
+			TLSNextProto:       map[string]func(string, *tls.Conn) http.RoundTripper{}, // 显式禁 HTTP/2
+			MaxIdleConns:       64,
+			IdleConnTimeout:    90 * time.Second,
+		}
+	})
+	return sharedTransport
+}
+
+// 测速吞吐用的 io.Copy 缓冲(1MB);default 32KB 在 >100Mbps 时 syscall 太密。
+var bigCopyBufPool = sync.Pool{
+	New: func() any { b := make([]byte, 1<<20); return &b },
 }
 
 // measureLatency 经代理 GET 一个 204 端点,返回毫秒;失败返回 -1。
@@ -317,6 +352,8 @@ func downloadTimed(ctx context.Context, dlURL string, dur time.Duration, maxByte
 }
 
 // downloadSingle 单连接下载,被 downloadTimed 复用。
+// 性能:用 1MB 缓冲的 io.CopyBuffer(默认 io.Copy 是 32KB,>100Mbps 时 syscall 太密);
+// Accept-Encoding identity 防中间盒强行 gzip 已压缩内容白费 CPU。
 func downloadSingle(ctx context.Context, dlURL string, maxBytes int64) (int64, time.Duration, error) {
 	client := proxyClient()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, dlURL, nil)
@@ -324,6 +361,7 @@ func downloadSingle(ctx context.Context, dlURL string, maxBytes int64) (int64, t
 		return 0, 0, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 mmwx-speedtest/1.0")
+	req.Header.Set("Accept-Encoding", "identity")
 	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
@@ -337,7 +375,9 @@ func downloadSingle(ctx context.Context, dlURL string, maxBytes int64) (int64, t
 	if maxBytes > 0 {
 		reader = io.LimitReader(resp.Body, maxBytes)
 	}
-	n, cerr := io.Copy(io.Discard, reader)
+	buf := bigCopyBufPool.Get().(*[]byte)
+	defer bigCopyBufPool.Put(buf)
+	n, cerr := io.CopyBuffer(io.Discard, reader, *buf)
 	elapsed := time.Since(start)
 	// 到时(deadline)是预期的正常结束;文件提前下完也正常。只有时长内提前出错才算失败。
 	if ctx.Err() == context.DeadlineExceeded || cerr == nil {

@@ -71,6 +71,13 @@ func (r *TrafficRepository) DeleteSpeedTester(ctx context.Context, id int64) err
 	return err
 }
 
+// UpdateSpeedTesterToken 轮换测速端 token(只存哈希,旧 token 立刻失效)。
+// 用于"离线测速端重新展示安装命令"场景:原 token 不可恢复,生成新的让用户重新跑安装命令。
+func (r *TrafficRepository) UpdateSpeedTesterToken(ctx context.Context, id int64, tokenHash string) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE speed_testers SET token_hash = ? WHERE id = ?`, tokenHash, id)
+	return err
+}
+
 // TouchSpeedTester 更新 last_seen。
 func (r *TrafficRepository) TouchSpeedTester(ctx context.Context, id int64) error {
 	_, err := r.db.ExecContext(ctx, `UPDATE speed_testers SET last_seen = CURRENT_TIMESTAMP WHERE id = ?`, id)
