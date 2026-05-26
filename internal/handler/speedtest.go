@@ -66,10 +66,12 @@ func (h *SpeedTestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *SpeedTestHandler) handleRun(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		NodeID   int64  `json:"node_id"`
-		Bytes    int64  `json:"bytes,omitempty"`
-		URL      string `json:"url,omitempty"`
-		TesterID int64  `json:"tester_id,omitempty"` // >0 = 经家用测速端测;否则主控本机
+		NodeID      int64  `json:"node_id"`
+		Bytes       int64  `json:"bytes,omitempty"`
+		URL         string `json:"url,omitempty"`
+		TesterID    int64  `json:"tester_id,omitempty"`    // >0 = 经家用测速端测;否则主控本机
+		Threads     int    `json:"threads,omitempty"`      // 并发下载线程数(默认 1)
+		LatencyOnly bool   `json:"latency_only,omitempty"` // true 仅测真连接延迟(Cloudflare 204)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.NodeID <= 0 {
 		writeBadRequest(w, "node_id 必填")
@@ -114,26 +116,28 @@ func (h *SpeedTestHandler) handleRun(w http.ResponseWriter, r *http.Request) {
 	rec.ID = id
 	rec.CreatedAt = time.Now()
 
-	go h.runSpeedTestAsync(id, req.TesterID, node.ClashConfig, req.Bytes, req.URL)
+	go h.runSpeedTestAsync(id, req.TesterID, node.ClashConfig, req.Bytes, req.URL, req.Threads, req.LatencyOnly)
 
 	respondJSON(w, http.StatusOK, map[string]any{"success": true, "result": rec})
 }
 
 // runSpeedTestAsync 后台执行测速并回填结果记录。用独立 context(带超时),不受触发请求生命周期影响。
-func (h *SpeedTestHandler) runSpeedTestAsync(recID, testerID int64, clashConfig string, bytes int64, url string) {
+func (h *SpeedTestHandler) runSpeedTestAsync(recID, testerID int64, clashConfig string, bytes int64, url string, threads int, latencyOnly bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
 	var res speedtest.Result
 	var terr error
 	if testerID > 0 {
-		res, terr = h.testerWS.Dispatch(ctx, testerID, clashConfig, bytes, url)
+		res, terr = h.testerWS.Dispatch(ctx, testerID, clashConfig, bytes, url, threads, latencyOnly)
 	} else {
 		bin, merr := speedtest.EnsureMihomo(ctx)
 		if merr != nil {
 			terr = merr
 		} else {
-			res, terr = speedtest.RunNodeTest(ctx, bin, clashConfig, speedtest.Options{TestBytes: bytes, TestURL: url})
+			res, terr = speedtest.RunNodeTest(ctx, bin, clashConfig, speedtest.Options{
+				TestBytes: bytes, TestURL: url, Threads: threads, LatencyOnly: latencyOnly,
+			})
 		}
 	}
 

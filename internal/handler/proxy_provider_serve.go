@@ -1022,6 +1022,11 @@ func parseHysteriaURI(uri string, proxyType string) (map[string]interface{}, err
 		proxy["client-fingerprint"] = fp
 	}
 
+	// 端口跳跃(hy2 mport)
+	if mport := params["mport"]; mport != "" {
+		proxy["ports"] = mport
+	}
+
 	return proxy, nil
 }
 

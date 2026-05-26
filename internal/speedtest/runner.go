@@ -22,10 +22,12 @@ import (
 
 const (
 	defaultTestURL      = "https://dl.google.com/dl/android/studio/install/3.4.1.0/android-studio-ide-183.5522156-windows.exe"
-	defaultTestDuration = 10 * time.Second // 默认测速时长:下满 10s,按真实字节/真实耗时算速率
+	defaultTestDuration = 8 * time.Second // 默认测速时长:下满 8s,按真实字节/真实耗时算速率
 	latencyProbeURL     = "https://www.gstatic.com/generate_204"
-	egressIPProbeURL    = "https://api.ipify.org" // 经代理回显出口 IP,用于核对出站链路是否符合预期
-	mixedPort           = 17900                   // 串行测速,固定端口即可
+	cfLatencyProbeURL   = "https://cp.cloudflare.com/generate_204" // 真连接延迟用 Cloudflare 204(全球边缘 + CDN 边)
+	egressIPProbeURL    = "https://api.ipify.org"                  // 经代理回显出口 IP,用于核对出站链路是否符合预期
+	mixedPort           = 17900                                    // 串行测速,固定端口即可
+	cfLatencySamples    = 3                                        // 真延迟探测样本数,取最快 2 个平均(去掉首包冷启动 + 抖动尾;3 次足够稳,5 次太慢)
 )
 
 // runMu 串行化测速:一次只跑一个节点,避免并发抢带宽导致结果失真。
@@ -43,9 +45,11 @@ type Result struct {
 // Options 测速参数(留空用默认)。
 type Options struct {
 	TestURL      string        // 测试下载 URL(默认大文件)
-	TestDuration time.Duration // 测速时长(默认 10s):下载这么久,按真实字节/耗时算速率
+	TestDuration time.Duration // 测速时长(默认 8s):下载这么久,按真实字节/耗时算速率
 	TestBytes    int64         // 可选下载上限(0=不限,纯按时长)
+	Threads      int           // 并发下载线程数(默认 1,>=2 时并行下载,带宽聚合)
 	Timeout      time.Duration
+	LatencyOnly  bool // true 仅测真连接延迟(Cloudflare 204 多采样)不跑大文件下载
 }
 
 // RunNodeTest 用 mihomo 起单节点代理,测延迟 + 下行吞吐。clashConfigJSON 是 node.ClashConfig。
@@ -100,10 +104,21 @@ func RunNodeTest(ctx context.Context, mihomoBin, clashConfigJSON string, opts Op
 	}
 	defer func() { stop(); os.RemoveAll(workdir) }()
 
-	latency := measureLatency(ctx)
 	egressIP := measureEgressIP(ctx)
 
-	n, dur, err := downloadTimed(ctx, testURL, opts.TestDuration, opts.TestBytes)
+	// LatencyOnly:只测真连接延迟(多采样 Cloudflare 204,取最快 3 个均值),不跑大文件下载
+	if opts.LatencyOnly {
+		latency := measureLatencyCloudflare(ctx, cfLatencySamples)
+		return Result{LatencyMs: latency, EgressIP: egressIP}, nil
+	}
+
+	latency := measureLatency(ctx)
+
+	threads := opts.Threads
+	if threads < 1 {
+		threads = 1
+	}
+	n, dur, err := downloadTimed(ctx, testURL, opts.TestDuration, opts.TestBytes, threads)
 	if err != nil {
 		return Result{LatencyMs: latency, EgressIP: egressIP}, fmt.Errorf("下载测速失败: %w", err)
 	}
@@ -181,6 +196,56 @@ func measureLatency(ctx context.Context) int64 {
 	return time.Since(start).Milliseconds()
 }
 
+// measureLatencyCloudflare 用 Cloudflare 204(全球边缘 + CDN 边)多次采样,取最快 3 个的均值;
+// 首包受 TLS 握手 / mihomo cold-start 影响,平均后更接近"真连接延迟"。全部失败返回 -1。
+func measureLatencyCloudflare(ctx context.Context, samples int) int64 {
+	if samples <= 0 {
+		samples = cfLatencySamples
+	}
+	client := proxyClient()
+	client.Timeout = 8 * time.Second
+	probes := make([]int64, 0, samples)
+	for i := 0; i < samples; i++ {
+		if ctx.Err() != nil {
+			break
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cfLatencyProbeURL, nil)
+		if err != nil {
+			continue
+		}
+		start := time.Now()
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		probes = append(probes, time.Since(start).Milliseconds())
+	}
+	if len(probes) == 0 {
+		return -1
+	}
+	// 取最快 2 个均值(去掉首包冷启动的最慢一个);不足 2 个全取
+	sortInt64Asc(probes)
+	keep := 2
+	if len(probes) < keep {
+		keep = len(probes)
+	}
+	var sum int64
+	for i := 0; i < keep; i++ {
+		sum += probes[i]
+	}
+	return sum / int64(keep)
+}
+
+func sortInt64Asc(a []int64) {
+	for i := 1; i < len(a); i++ {
+		for j := i; j > 0 && a[j] < a[j-1]; j-- {
+			a[j], a[j-1] = a[j-1], a[j]
+		}
+	}
+}
+
 // measureEgressIP 经代理请求一个 IP 回显端点,拿到出口 IP;失败返回空(不影响主测速流程)。
 func measureEgressIP(ctx context.Context) string {
 	client := proxyClient()
@@ -210,12 +275,51 @@ func measureEgressIP(ctx context.Context) string {
 }
 
 // downloadTimed 经代理下载,最多下载 dur 时长(到时即停),可选 maxBytes 上限(0=不限)。
-// 返回实际下载字节数与实际耗时。到时停止是正常结束(不算错误);时长内连接出错才算失败。
-func downloadTimed(ctx context.Context, dlURL string, dur time.Duration, maxBytes int64) (int64, time.Duration, error) {
+// threads >= 2 时并行起 N 路下载聚合带宽(单连接受拥塞控制 / 单核加密上限制约,多连接能更接近真实带宽)。
+// 返回实际下载字节数与实际墙钟耗时。到时停止是正常结束(不算错误);时长内连接全部出错才算失败。
+func downloadTimed(ctx context.Context, dlURL string, dur time.Duration, maxBytes int64, threads int) (int64, time.Duration, error) {
 	dlCtx, cancel := context.WithTimeout(ctx, dur)
 	defer cancel()
+
+	if threads <= 1 {
+		return downloadSingle(dlCtx, dlURL, maxBytes)
+	}
+
+	var wg sync.WaitGroup
+	results := make([]int64, threads)
+	errs := make([]error, threads)
+	start := time.Now()
+	for i := 0; i < threads; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			n, _, e := downloadSingle(dlCtx, dlURL, maxBytes)
+			results[idx] = n
+			errs[idx] = e
+		}(i)
+	}
+	wg.Wait()
+	elapsed := time.Since(start)
+
+	var total int64
+	var firstErr error
+	for i := 0; i < threads; i++ {
+		total += results[i]
+		if errs[i] != nil && firstErr == nil {
+			firstErr = errs[i]
+		}
+	}
+	if total > 0 {
+		// 至少有一路下到了字节就算成功 — 多线程聚合下,部分子流被掐不影响主流统计
+		return total, elapsed, nil
+	}
+	return 0, elapsed, firstErr
+}
+
+// downloadSingle 单连接下载,被 downloadTimed 复用。
+func downloadSingle(ctx context.Context, dlURL string, maxBytes int64) (int64, time.Duration, error) {
 	client := proxyClient()
-	req, err := http.NewRequestWithContext(dlCtx, http.MethodGet, dlURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, dlURL, nil)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -236,7 +340,7 @@ func downloadTimed(ctx context.Context, dlURL string, dur time.Duration, maxByte
 	n, cerr := io.Copy(io.Discard, reader)
 	elapsed := time.Since(start)
 	// 到时(deadline)是预期的正常结束;文件提前下完也正常。只有时长内提前出错才算失败。
-	if dlCtx.Err() == context.DeadlineExceeded || cerr == nil {
+	if ctx.Err() == context.DeadlineExceeded || cerr == nil {
 		return n, elapsed, nil
 	}
 	return n, elapsed, cerr

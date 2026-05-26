@@ -2,11 +2,11 @@
 // 节点测速工作台 dialog(PRO speed_test)。顶部选测速来源(主控/已安装测速端,默认主控);
 // 表格列:协议 / 名称 / 服务器地址 / 测速结果 / 历史 / 测速;支持多选一键测速。
 // 关闭语义由父级控制:点 X = 真正关闭;点外部/Esc = 收起到屏幕右侧悬浮按钮(防误关)。
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { Gauge, Loader2, History, ArrowLeft, RefreshCw, Settings2, Plus, Trash2, Copy } from 'lucide-react'
+import { Gauge, Loader2, History, ArrowLeft, RefreshCw, Settings2, Plus, Trash2, Copy, Zap } from 'lucide-react'
 import { api } from '@/lib/api'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -36,7 +36,7 @@ function relTime(t: string, tc: (k: string, o?: any) => string) {
   return tc('time.daysAgo', { n: Math.floor(h / 24) })
 }
 
-// 每节点最新测速结果(有 running 时 4s 轮询)
+// 每节点最新测速结果(有 running 时 1.5s 轮询,显著降低用户感知延迟)
 function useLatestSpeedResults(enabled: boolean) {
   return useQuery({
     queryKey: ['speedtest-latest'],
@@ -48,7 +48,7 @@ function useLatestSpeedResults(enabled: boolean) {
     },
     enabled,
     refetchInterval: (q) =>
-      Object.values(q.state.data || {}).some((r: any) => r?.status === 'running') ? 4000 : false,
+      Object.values(q.state.data || {}).some((r: any) => r?.status === 'running') ? 1500 : false,
   })
 }
 
@@ -70,10 +70,57 @@ function SpeedCell({ r, t }: { r: any; t: any }) {
   )
 }
 
-// 延迟单元格
-function LatencyCell({ r }: { r: any }) {
-  if (!r || r.status !== 'ok') return <span className='text-muted-foreground text-xs'>—</span>
-  return <span className='font-mono whitespace-nowrap text-xs'>{r.latency_ms} ms</span>
+// 延迟单元格:同时是一个按钮。无数据时显示 Zap 图标可点击,点完跑真延迟探测;
+// 已有数据时显示 ms,再次点击重测。运行中显示 spinner。
+function LatencyCell({ r, onProbe, busy, t }: { r: any; onProbe: () => void; busy: boolean; t: any }) {
+  const running = r?.status === 'running' || busy
+  if (running) {
+    return (
+      <button className='inline-flex items-center gap-1 text-muted-foreground text-xs font-mono' disabled>
+        <Loader2 className='h-3 w-3 animate-spin' />
+      </button>
+    )
+  }
+  // 失败:展示一个红色 Zap,点击重测
+  if (r?.status === 'failed') {
+    return (
+      <button
+        type='button'
+        onClick={onProbe}
+        title={t('speedtest.latencyRetry') + (r?.error ? `: ${r.error}` : '')}
+        className='inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-red-600 dark:text-red-400 hover:bg-red-500/10'
+      >
+        <Zap className='h-3 w-3' />
+        {t('speedtest.failedShort')}
+      </button>
+    )
+  }
+  // ok + 有 latency_ms:显示 ms,可重测
+  if (r?.status === 'ok' && typeof r?.latency_ms === 'number' && r.latency_ms >= 0) {
+    return (
+      <button
+        type='button'
+        onClick={onProbe}
+        title={t('speedtest.latencyRetry')}
+        className='inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-xs hover:bg-muted'
+      >
+        <Zap className='h-3 w-3 text-amber-500' />
+        {r.latency_ms} ms
+      </button>
+    )
+  }
+  // 无数据 / 没拿到 ms:显示一个 Zap 按钮提示用户点击
+  return (
+    <button
+      type='button'
+      onClick={onProbe}
+      title={t('speedtest.latencyOnlyTip')}
+      className='inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-amber-600 hover:bg-amber-500/10'
+    >
+      <Zap className='h-3 w-3' />
+      {t('speedtest.latencyProbe')}
+    </button>
+  )
 }
 
 // 出口 IP 单元格(经代理观察到的对端 IP,用于核对落地/出站是否符合预期)
@@ -94,7 +141,17 @@ export function SpeedTestDialog({
   const { t: tc } = useTranslation('common')
   const queryClient = useQueryClient()
 
-  const [source, setSource] = useState<number | 'master'>('master') // 'master' 或 tester id
+  const [source, setSource] = useState<number | 'master'>(() => {
+    const cached = localStorage.getItem('mmwx-speedtest-source')
+    if (cached && cached !== 'master') {
+      const num = Number(cached)
+      if (!isNaN(num)) return num
+    }
+    return 'master'
+  })
+  const [threads, setThreads] = useState<1 | 8>(() => {
+    return localStorage.getItem('mmwx-speedtest-threads') === '8' ? 8 : 1
+  })
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [historyNode, setHistoryNode] = useState<{ id: number; name: string } | null>(null)
   const [manageTesters, setManageTesters] = useState(false)
@@ -106,6 +163,15 @@ export function SpeedTestDialog({
     staleTime: 10000,
   })
   const testers = testersData?.testers || []
+
+  useEffect(() => { localStorage.setItem('mmwx-speedtest-source', String(source)) }, [source])
+  useEffect(() => { localStorage.setItem('mmwx-speedtest-threads', String(threads)) }, [threads])
+  useEffect(() => {
+    // 上次选的 tester 已被删除 → 自动回落到主控
+    if (source !== 'master' && testers.length > 0 && !testers.some((t: any) => t.id === source)) {
+      setSource('master')
+    }
+  }, [testers, source])
 
   const { data: latestMap } = useLatestSpeedResults(open)
 
@@ -130,17 +196,21 @@ export function SpeedTestDialog({
     })
   }, [nodes])
 
-  const runTest = async (nodeIds: number[]) => {
+  // 速度测试用当前选定的线程数。latencyOnly=true 时跳过下载,只跑 Cloudflare 204 真延迟探测
+  const runTest = async (nodeIds: number[], latencyOnly = false) => {
     if (nodeIds.length === 0) return
     try {
-      const body: any = {}
+      const body: any = { threads }
       if (source !== 'master') body.tester_id = source
+      if (latencyOnly) body.latency_only = true
       await Promise.all(nodeIds.map((id) => api.post('/api/admin/speedtest/run', { ...body, node_id: id })))
-      toast.success(
-        nodeIds.length === 1
-          ? t('speedtest.started', { name: rows.find((r) => r.id === nodeIds[0])?.name || '' })
-          : t('speedtest.batchStarted', { count: nodeIds.length })
-      )
+      if (!latencyOnly) {
+        toast.success(
+          nodeIds.length === 1
+            ? t('speedtest.started', { name: rows.find((r) => r.id === nodeIds[0])?.name || '' })
+            : t('speedtest.batchStarted', { count: nodeIds.length })
+        )
+      }
       queryClient.invalidateQueries({ queryKey: ['speedtest-latest'] })
     } catch (e: any) {
       toast.error(e?.response?.data?.error || t('speedtest.failed', { err: '' }))
@@ -157,11 +227,11 @@ export function SpeedTestDialog({
     })
 
   return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o) onClose() }}>
+    <Dialog open={open} onOpenChange={(o) => { if (!o) { setManageTesters(false); setHistoryNode(null); onClose() } }}>
       <DialogContent
         className='w-[95vw] sm:w-auto sm:!max-w-[95vw] max-h-[88vh] flex flex-col'
-        onInteractOutside={(e) => { e.preventDefault(); onMinimize() }}
-        onEscapeKeyDown={(e) => { e.preventDefault(); onMinimize() }}
+        onInteractOutside={(e) => { e.preventDefault(); setManageTesters(false); setHistoryNode(null); onMinimize() }}
+        onEscapeKeyDown={(e) => { e.preventDefault(); setManageTesters(false); setHistoryNode(null); onMinimize() }}
       >
         {historyNode ? (
           <HistoryView node={historyNode} onBack={() => setHistoryNode(null)} t={t} tc={tc} />
@@ -196,6 +266,13 @@ export function SpeedTestDialog({
                   {x.name}{x.online ? '' : ` (${t('speedtest.offline')})`}
                 </Button>
               ))}
+              <span className='text-muted-foreground ml-3 text-sm'>{t('speedtest.threads')}:</span>
+              <Button size='sm' variant={threads === 1 ? 'default' : 'outline'} onClick={() => setThreads(1)}>
+                {t('speedtest.threadsSingle')}
+              </Button>
+              <Button size='sm' variant={threads === 8 ? 'default' : 'outline'} onClick={() => setThreads(8)}>
+                {t('speedtest.threadsMulti')}
+              </Button>
               <div className='ml-auto flex items-center gap-2'>
                 {selected.size > 0 && (
                   <Button size='sm' onClick={() => runTest(Array.from(selected))}>
@@ -253,7 +330,7 @@ export function SpeedTestDialog({
                             <td className='p-2'><div className='max-w-[280px] truncate' title={r.name}>{r.name}</div></td>
                             <td className='text-muted-foreground p-2 font-mono text-xs whitespace-nowrap'>{r.server}:{r.port}</td>
                             <td className='p-2'><SpeedCell r={res} t={t} /></td>
-                            <td className='p-2'><LatencyCell r={res} /></td>
+                            <td className='p-2'><LatencyCell r={res} onProbe={() => runTest([r.id], true)} busy={running} t={t} /></td>
                             <td className='p-2'><EgressIPCell r={res} /></td>
                             <td className='p-2'>
                               <div className='flex items-center justify-center gap-1'>
@@ -300,7 +377,7 @@ export function SpeedTestDialog({
                               <span className='text-muted-foreground text-[10px]'>{t('speedtest.colSpeed')}</span>
                               <SpeedCell r={res} t={t} />
                               <span className='text-muted-foreground text-[10px]'>{t('speedtest.colLatency')}</span>
-                              <LatencyCell r={res} />
+                              <LatencyCell r={res} onProbe={() => runTest([r.id], true)} busy={running} t={t} />
                               <span className='text-muted-foreground text-[10px]'>{t('speedtest.colEgressIP')}</span>
                               <EgressIPCell r={res} />
                             </div>

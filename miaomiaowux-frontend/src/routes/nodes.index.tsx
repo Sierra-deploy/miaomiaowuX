@@ -431,6 +431,12 @@ function NodesPage() {
   const [manualTag, setManualTag] = useState<string>(() => t('filter.manualInput'))
   const [subscriptionTag, setSubscriptionTag] = useState<string>('')
 
+  // 导入节点时是否强制给 clash 配置加 skip-cert-verify:true。默认关,从 localStorage 恢复
+  const [skipCertVerify, setSkipCertVerify] = useState<boolean>(() => {
+    const cached = localStorage.getItem('mmwx-skip-cert-verify')
+    return cached !== null ? cached === 'true' : false
+  })
+
   // 导入节点卡片折叠状态 - 默认折叠
   const [isInputCardExpanded, setIsInputCardExpanded] = useState(false)
 
@@ -557,6 +563,12 @@ function NodesPage() {
       localStorage.setItem(STORAGE_KEY_PROTOCOL, selectedProtocol)
     } catch {}
   }, [selectedProtocol])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('mmwx-skip-cert-verify', String(skipCertVerify))
+    } catch {}
+  }, [skipCertVerify])
 
   useEffect(() => {
     try {
@@ -1920,6 +1932,7 @@ function NodesPage() {
 
       // 将Clash节点转换为TempNode格式
       const parsed: TempNode[] = data.proxies.map((clashNode) => {
+        if (skipCertVerify) clashNode['skip-cert-verify'] = true
         // Clash节点已经是标准格式，直接作为ProxyNode和ClashProxy使用
         const proxyNode: ProxyNode = {
           name: clashNode.name || t('nodeList.unknown'),
@@ -1984,6 +1997,7 @@ function NodesPage() {
       if (!trimmed || !trimmed.includes('://')) continue
       const parsedNode = parseProxyUrl(trimmed)
       const clashNode = parsedNode ? toClashProxy(parsedNode) : null
+      if (skipCertVerify && clashNode) clashNode['skip-cert-verify'] = true
       const name = parsedNode?.name || clashNode?.name || t('nodeList.unknown')
       const normalizedParsed = cloneProxyWithName(parsedNode, name)
       const normalizedClash = cloneProxyWithName(clashNode, name)
@@ -2481,13 +2495,25 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                         <Label htmlFor='manual-tag' className='text-sm font-medium'>
                           {t('importCard.manual.tagLabel')}
                         </Label>
-                        <Input
-                          id='manual-tag'
-                          placeholder={t('importCard.manual.tagPlaceholder')}
-                          value={manualTag}
-                          onChange={(e) => setManualTag(e.target.value)}
-                          className='font-mono text-sm'
-                        />
+                        <div className='flex items-center gap-4'>
+                          <Input
+                            id='manual-tag'
+                            placeholder={t('importCard.manual.tagPlaceholder')}
+                            value={manualTag}
+                            onChange={(e) => setManualTag(e.target.value)}
+                            className='font-mono text-sm flex-1'
+                          />
+                          <div className='flex items-center gap-2 shrink-0'>
+                            <Switch
+                              id='skip-cert-verify-manual'
+                              checked={skipCertVerify}
+                              onCheckedChange={setSkipCertVerify}
+                            />
+                            <Label htmlFor='skip-cert-verify-manual' className='text-sm whitespace-nowrap cursor-pointer'>
+                              {t('importCard.manual.skipCertVerify')}
+                            </Label>
+                          </div>
+                        </div>
                         <p className='text-xs text-muted-foreground'>
                           {t('importCard.manual.tagDescription')}
                         </p>
