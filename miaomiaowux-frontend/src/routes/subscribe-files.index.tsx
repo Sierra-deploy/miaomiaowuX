@@ -7,6 +7,20 @@ import { load as parseYAML, dump as dumpYAML } from 'js-yaml'
 import { Copy } from 'lucide-react'
 import { formatBytes as formatTraffic, formatTrafficGB } from '@/lib/format'
 import {
+  defaultOverrideForm,
+  overrideFormToJSON,
+  jsonToOverrideForm,
+  type OverrideForm,
+} from './subscribe-files/utils/override-form'
+import { PreviewDialog } from './subscribe-files/dialogs/preview-dialog'
+import { EditConfigDialog } from './subscribe-files/dialogs/edit-config-dialog'
+import { EditExternalSubDialog } from './subscribe-files/dialogs/edit-external-sub-dialog'
+import { EditFileDialog } from './subscribe-files/dialogs/edit-file-dialog'
+import { EditMetadataDialog } from './subscribe-files/dialogs/edit-metadata-dialog'
+import { EditNodesHostDialog } from './subscribe-files/dialogs/edit-nodes-host-dialog'
+import { BatchDeleteProviderDialog } from './subscribe-files/dialogs/batch-delete-provider-dialog'
+import { ProxyProviderProDialog } from './subscribe-files/dialogs/proxy-provider-pro-dialog'
+import {
   Upload,
   Download,
   Edit,
@@ -98,9 +112,7 @@ import {
 } from '@/components/ui/tooltip'
 import { DataTable } from '@/components/data-table'
 import type { DataTableColumn } from '@/components/data-table'
-import { EditNodesDialog } from '@/components/edit-nodes-dialog'
 import { MissingNodesReplaceDialog } from '@/components/missing-nodes-replace-dialog'
-import { MobileEditNodesDialog } from '@/components/mobile-edit-nodes-dialog'
 import { Twemoji } from '@/components/twemoji'
 
 export const Route = createFileRoute('/subscribe-files/')({
@@ -366,79 +378,8 @@ const IP_VERSION_OPTIONS = [
   { value: 'ipv6-prefer', labelKey: 'ipv6-prefer' },
 ]
 
-// Override 表单类型
-type OverrideForm = {
-  tfo: boolean
-  mptcp: boolean
-  udp: boolean
-  udp_over_tcp: boolean
-  skip_cert_verify: boolean
-  dialer_proxy: string
-  interface_name: string
-  routing_mark: string
-  ip_version: '' | 'dual' | 'ipv4' | 'ipv6' | 'ipv4-prefer' | 'ipv6-prefer'
-  additional_prefix: string
-  additional_suffix: string
-}
-
-// 默认 Override 表单值
-const defaultOverrideForm: OverrideForm = {
-  tfo: false,
-  mptcp: false,
-  udp: true,
-  udp_over_tcp: false,
-  skip_cert_verify: false,
-  dialer_proxy: '',
-  interface_name: '',
-  routing_mark: '',
-  ip_version: '',
-  additional_prefix: '',
-  additional_suffix: '',
-}
-
-// Override 表单转 JSON (保存时)
-function overrideFormToJSON(form: OverrideForm): string {
-  const obj: Record<string, any> = {}
-
-  // 只添加非默认值的字段
-  if (form.tfo) obj['tfo'] = true
-  if (form.mptcp) obj['mptcp'] = true
-  if (!form.udp) obj['udp'] = false // 默认 true，只有 false 时添加
-  if (form.udp_over_tcp) obj['udp-over-tcp'] = true
-  if (form.skip_cert_verify) obj['skip-cert-verify'] = true
-  if (form.dialer_proxy) obj['dialer-proxy'] = form.dialer_proxy
-  if (form.interface_name) obj['interface-name'] = form.interface_name
-  if (form.routing_mark) obj['routing-mark'] = parseInt(form.routing_mark)
-  if (form.ip_version) obj['ip-version'] = form.ip_version
-  if (form.additional_prefix) obj['additional-prefix'] = form.additional_prefix
-  if (form.additional_suffix) obj['additional-suffix'] = form.additional_suffix
-
-  return Object.keys(obj).length > 0 ? JSON.stringify(obj) : ''
-}
-
-// JSON 转 Override 表单 (编辑时)
-function jsonToOverrideForm(json: string): OverrideForm {
-  if (!json) return { ...defaultOverrideForm }
-
-  try {
-    const obj = JSON.parse(json)
-    return {
-      tfo: obj['tfo'] ?? false,
-      mptcp: obj['mptcp'] ?? false,
-      udp: obj['udp'] ?? true,
-      udp_over_tcp: obj['udp-over-tcp'] ?? false,
-      skip_cert_verify: obj['skip-cert-verify'] ?? false,
-      dialer_proxy: obj['dialer-proxy'] ?? '',
-      interface_name: obj['interface-name'] ?? '',
-      routing_mark: obj['routing-mark']?.toString() ?? '',
-      ip_version: obj['ip-version'] ?? '',
-      additional_prefix: obj['additional-prefix'] ?? '',
-      additional_suffix: obj['additional-suffix'] ?? '',
-    }
-  } catch {
-    return { ...defaultOverrideForm }
-  }
-}
+// OverrideForm 类型、默认值、↔JSON 互转都搬到了 ./subscribe-files/utils/override-form.ts
+// 见 B1 拆分计划:零行为变更,只是模块化
 
 // 格式化流量
 function SubscribeFilesPage() {
@@ -4821,103 +4762,36 @@ function SubscribeFilesPage() {
         )}
       </section>
 
-      {/* 编辑文件 Dialog */}
-      <Dialog
+      {/* 编辑文件 Dialog — 拆到 ./subscribe-files/dialogs/edit-file-dialog */}
+      <EditFileDialog
         open={editDialogOpen}
         onOpenChange={(open) => {
           setEditDialogOpen(open)
           if (!open) {
-            // 关闭对话框时清理状态
             setEditingFile(null)
             setEditorValue('')
             setIsDirty(false)
             setValidationError(null)
           }
         }}
-      >
-        <DialogContent className='flex h-[90vh] max-w-4xl flex-col p-0'>
-          <DialogHeader className='px-6 pt-6'>
-            <DialogTitle>{editingFile?.name || t('editFile.title')}</DialogTitle>
-            <DialogDescription>
-              {t('editFile.editFilename', { filename: editingFile?.filename })}
-            </DialogDescription>
-          </DialogHeader>
+        file={editingFile}
+        value={editorValue}
+        onValueChange={(next) => {
+          setEditorValue(next)
+          setIsDirty(next !== (fileContentQuery.data?.content ?? ''))
+          if (validationError) setValidationError(null)
+        }}
+        isDirty={isDirty}
+        validationError={validationError}
+        latestVersion={fileContentQuery.data?.latest_version}
+        loading={fileContentQuery.isLoading}
+        saving={saveMutation.isPending}
+        onSave={handleSave}
+        onReset={handleReset}
+      />
 
-          <div className='flex flex-1 flex-col overflow-hidden px-6'>
-            <div className='flex items-center gap-3 py-4'>
-              <Button
-                size='sm'
-                onClick={handleSave}
-                disabled={
-                  !editingFile ||
-                  !isDirty ||
-                  saveMutation.isPending ||
-                  fileContentQuery.isLoading
-                }
-              >
-                {saveMutation.isPending ? t('editFile.saving') : t('editFile.saveChanges')}
-              </Button>
-              <Button
-                size='sm'
-                variant='outline'
-                disabled={
-                  !isDirty ||
-                  fileContentQuery.isLoading ||
-                  saveMutation.isPending
-                }
-                onClick={handleReset}
-              >
-                {t('editFile.revertChanges')}
-              </Button>
-              {fileContentQuery.data?.latest_version ? (
-                <Badge variant='secondary'>
-                  {t('editFile.version', { version: fileContentQuery.data.latest_version })}
-                </Badge>
-              ) : null}
-            </div>
-
-            {validationError ? (
-              <div className='border-destructive/60 bg-destructive/10 text-destructive mb-4 rounded-md border p-3 text-sm'>
-                {validationError}
-              </div>
-            ) : null}
-
-            <div className='bg-muted/20 mb-4 flex-1 overflow-hidden rounded-lg border'>
-              {fileContentQuery.isLoading ? (
-                <div className='text-muted-foreground p-4 text-center'>
-                  {t('actions.loading', { ns: 'common' })}
-                </div>
-              ) : (
-                <Textarea
-                  value={editorValue}
-                  onChange={(event) => {
-                    const nextValue = event.target.value
-                    setEditorValue(nextValue)
-                    setIsDirty(
-                      nextValue !== (fileContentQuery.data?.content ?? '')
-                    )
-                    if (validationError) {
-                      setValidationError(null)
-                    }
-                  }}
-                  className='h-full w-full resize-none border-0 bg-transparent font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0'
-                  disabled={!editingFile || saveMutation.isPending}
-                  spellCheck={false}
-                />
-              )}
-            </div>
-          </div>
-
-          <DialogFooter className='px-6 pb-6'>
-            <Button variant='outline' onClick={() => setEditDialogOpen(false)}>
-              {t('actions.close', { ns: 'common' })}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* 编辑订阅信息 Dialog */}
-      <Dialog
+      {/* 编辑订阅信息 Dialog — 拆到 ./subscribe-files/dialogs/edit-metadata-dialog */}
+      <EditMetadataDialog
         open={editMetadataDialogOpen}
         onOpenChange={(open) => {
           setEditMetadataDialogOpen(open)
@@ -4938,213 +4812,19 @@ function SubscribeFilesPage() {
             })
           }
         }}
-      >
-        <DialogContent className='sm:max-w-lg'>
-          <DialogHeader>
-            <DialogTitle>{t('editMetadata.title')}</DialogTitle>
-            <DialogDescription>{t('editMetadata.description')}</DialogDescription>
-          </DialogHeader>
-          <ScrollArea className='max-h-[70vh]'>
-          <div className='space-y-4 py-4 pr-4'>
-            <div className='space-y-2'>
-              <Label htmlFor='metadata-name'>{t('form.subscriptionName')} *</Label>
-              <Input
-                id='metadata-name'
-                value={metadataForm.name}
-                onChange={(e) =>
-                  setMetadataForm({ ...metadataForm, name: e.target.value })
-                }
-                placeholder={t('editMetadata.namePlaceholder')}
-              />
-            </div>
-            <div className='space-y-2'>
-              <Label htmlFor='metadata-description'>{t('form.description')} ({t('actions.optional', { ns: 'common' })})</Label>
-              <Textarea
-                id='metadata-description'
-                value={metadataForm.description}
-                onChange={(e) =>
-                  setMetadataForm({
-                    ...metadataForm,
-                    description: e.target.value,
-                  })
-                }
-                placeholder={t('editMetadata.descriptionPlaceholder')}
-                rows={3}
-              />
-            </div>
-            <div className='space-y-2'>
-              <Label htmlFor='metadata-filename'>{t('form.filename')} *</Label>
-              <Input
-                id='metadata-filename'
-                value={metadataForm.filename}
-                onChange={(e) =>
-                  setMetadataForm({ ...metadataForm, filename: e.target.value })
-                }
-                placeholder={t('editMetadata.filenamePlaceholder')}
-              />
-              <p className='text-muted-foreground text-xs'>
-                {t('editMetadata.filenameHint')}
-              </p>
-            </div>
-            <div className='space-y-2'>
-              <Label>V3 模板</Label>
-              <Select
-                value={metadataForm.template_filename}
-                onValueChange={(v) => setMetadataForm(prev => ({ ...prev, template_filename: v === '__none__' ? '' : v }))}
-              >
-                <SelectTrigger><SelectValue placeholder="不使用模板" /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="__none__">不使用模板</SelectItem>
-                  {(templatesData ?? []).map(t => (
-                    <SelectItem key={t.filename} value={t.filename}>{t.name || t.filename}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            {customRulesList && customRulesList.length > 0 && (
-              <div className='space-y-2'>
-                <Label>生效的覆写规则</Label>
-                <p className='text-muted-foreground text-xs'>不勾选则该订阅应用你全部启用的覆写规则；勾选后仅应用所选规则。</p>
-                <div className='flex flex-col gap-1.5 rounded-md border p-2 max-h-40 overflow-y-auto'>
-                  {customRulesList.map(rule => (
-                    <label key={rule.id} className='flex items-center gap-2 text-sm'>
-                      <Checkbox
-                        checked={metadataForm.selected_custom_rule_ids.includes(rule.id)}
-                        onCheckedChange={(checked) => {
-                          setMetadataForm(prev => ({
-                            ...prev,
-                            selected_custom_rule_ids: checked === true
-                              ? [...prev.selected_custom_rule_ids, rule.id]
-                              : prev.selected_custom_rule_ids.filter(id => id !== rule.id),
-                          }))
-                        }}
-                      />
-                      <span>{rule.name} <span className='text-muted-foreground'>({rule.type})</span></span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-            )}
-            {overrideScriptsList && overrideScriptsList.length > 0 && (
-              <div className='space-y-2'>
-                <Label>生效的覆写脚本</Label>
-                <p className='text-muted-foreground text-xs'>不勾选则该订阅应用你全部启用的覆写脚本；勾选后仅应用所选脚本。</p>
-                <div className='flex flex-col gap-1.5 rounded-md border p-2 max-h-40 overflow-y-auto'>
-                  {overrideScriptsList.map(script => (
-                    <label key={script.id} className='flex items-center gap-2 text-sm'>
-                      <Checkbox
-                        checked={metadataForm.selected_override_script_ids.includes(script.id)}
-                        onCheckedChange={(checked) => {
-                          setMetadataForm(prev => ({
-                            ...prev,
-                            selected_override_script_ids: checked === true
-                              ? [...prev.selected_override_script_ids, script.id]
-                              : prev.selected_override_script_ids.filter(id => id !== script.id),
-                          }))
-                        }}
-                      />
-                      <span>{script.name} <span className='text-muted-foreground'>({script.hook})</span></span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-            )}
-            {metadataForm.template_filename && nodeTagsData && nodeTagsData.length > 0 && (
-              <div className='space-y-2'>
-                <Label>节点标签筛选</Label>
-                <div className='flex flex-wrap gap-2'>
-                  {nodeTagsData.map(tag => (
-                    <label key={tag} className='flex items-center gap-1.5 text-sm'>
-                      <Checkbox
-                        checked={metadataForm.selected_tags.includes(tag)}
-                        onCheckedChange={(checked) => {
-                          setMetadataForm(prev => ({
-                            ...prev,
-                            selected_tags: checked
-                              ? [...prev.selected_tags, tag]
-                              : prev.selected_tags.filter(t => t !== tag)
-                          }))
-                        }}
-                      />
-                      {tag}
-                    </label>
-                  ))}
-                </div>
-                <p className='text-xs text-muted-foreground'>不选则包含所有节点</p>
-              </div>
-            )}
-            <div className='space-y-2'>
-              <Label>流量统计服务器</Label>
-              <div className='flex flex-wrap gap-2'>
-                {(remoteServersData?.servers ?? []).map(server => {
-                  const selected = metadataForm.stats_server_ids.split(',').filter(Boolean).includes(String(server.id))
-                  return (
-                    <label key={server.id} className='flex items-center gap-1.5 text-sm'>
-                      <Checkbox
-                        checked={selected}
-                        onCheckedChange={(checked) => {
-                          setMetadataForm(prev => {
-                            const ids = prev.stats_server_ids.split(',').filter(Boolean)
-                            const newIds = checked
-                              ? [...ids, String(server.id)]
-                              : ids.filter(id => id !== String(server.id))
-                            return { ...prev, stats_server_ids: newIds.join(',') }
-                          })
-                        }}
-                      />
-                      {server.name}
-                    </label>
-                  )
-                })}
-              </div>
-              <p className='text-xs text-muted-foreground'>不选则汇总所有服务器流量</p>
-            </div>
-            <div className='space-y-2'>
-              <Label>流量上限 (GB)</Label>
-              <Input
-                type='number'
-                placeholder='留空则跟随服务器'
-                value={metadataForm.traffic_limit}
-                onChange={(e) => setMetadataForm(prev => ({ ...prev, traffic_limit: e.target.value }))}
-              />
-            </div>
-            <div className='space-y-2'>
-              <Label>自定义短码</Label>
-              <Input
-                placeholder='留空使用自动生成'
-                value={metadataForm.custom_short_code}
-                onChange={(e) => setMetadataForm(prev => ({ ...prev, custom_short_code: e.target.value }))}
-              />
-            </div>
-            <div className='flex items-center justify-between'>
-              <Label>原始输出</Label>
-              <Switch
-                checked={metadataForm.raw_output}
-                onCheckedChange={(v) => setMetadataForm(prev => ({ ...prev, raw_output: v }))}
-              />
-            </div>
-          </div>
-          </ScrollArea>
-          <DialogFooter>
-            <Button
-              variant='outline'
-              onClick={() => setEditMetadataDialogOpen(false)}
-              disabled={updateMetadataMutation.isPending}
-            >
-              {t('actions.cancel', { ns: 'common' })}
-            </Button>
-            <Button
-              onClick={handleUpdateMetadata}
-              disabled={updateMetadataMutation.isPending}
-            >
-              {updateMetadataMutation.isPending ? t('actions.saving', { ns: 'common' }) : t('actions.save', { ns: 'common' })}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        form={metadataForm}
+        onFormChange={setMetadataForm}
+        templates={templatesData ?? []}
+        customRules={customRulesList ?? []}
+        overrideScripts={overrideScriptsList ?? []}
+        nodeTags={nodeTagsData ?? []}
+        remoteServers={remoteServersData?.servers ?? []}
+        onSubmit={handleUpdateMetadata}
+        saving={updateMetadataMutation.isPending}
+      />
 
-      {/* 编辑配置对话框 */}
-      <Dialog
+      {/* 编辑配置对话框 — 拆到 ./subscribe-files/dialogs/edit-config-dialog */}
+      <EditConfigDialog
         open={editConfigDialogOpen}
         onOpenChange={(open) => {
           setEditConfigDialogOpen(open)
@@ -5153,130 +4833,42 @@ function SubscribeFilesPage() {
             setConfigContent('')
           }
         }}
-      >
-        <DialogContent className='flex max-h-[90vh] w-[95vw] flex-col sm:w-[80vw] sm:!max-w-[80vw]'>
-          <DialogHeader>
-            <DialogTitle>{t('editConfig.title', { name: editingConfigFile?.name })}</DialogTitle>
-            <DialogDescription>{editingConfigFile?.filename}</DialogDescription>
-            <div className='flex justify-center gap-2 md:justify-end'>
-              <Button
-                variant='outline'
-                size='sm'
-                className='flex-1 md:flex-none'
-                onClick={() => handleEditNodes(editingConfigFile!)}
-              >
-                <Edit className='mr-2 h-4 w-4' />
-                {t('editConfig.editNodes')}
-              </Button>
-              <Button
-                size='sm'
-                className='flex-1 md:flex-none'
-                onClick={handleSaveConfig}
-                disabled={saveConfigMutation.isPending}
-              >
-                <Save className='mr-2 h-4 w-4' />
-                {saveConfigMutation.isPending ? t('editFile.saving') : t('actions.save', { ns: 'common' })}
-              </Button>
-            </div>
-          </DialogHeader>
-          <div className='flex-1 space-y-4 overflow-y-auto'>
-            <div className='bg-muted/30 rounded-lg border'>
-              <Textarea
-                value={configContent}
-                onChange={(e) => setConfigContent(e.target.value)}
-                className='min-h-[400px] resize-none border-0 bg-transparent font-mono text-xs'
-                placeholder={t('editConfig.loadingConfig')}
-              />
-            </div>
-            <div className='flex justify-end gap-2'>
-              <Button
-                onClick={handleSaveConfig}
-                disabled={saveConfigMutation.isPending}
-              >
-                <Save className='mr-2 h-4 max-w-md' />
-                {saveConfigMutation.isPending ? t('editFile.saving') : t('actions.save', { ns: 'common' })}
-              </Button>
-            </div>
-            <div className='bg-muted/50 rounded-lg border p-4'>
-              <h3 className='mb-2 font-semibold'>{t('editConfig.usageTitle')}</h3>
-              <ul className='text-muted-foreground space-y-1 text-sm'>
-                <li>• {t('editConfig.usageStep1')}</li>
-                <li>• {t('editConfig.usageStep2')}</li>
-                <li>• {t('editConfig.usageStep3')}</li>
-                <li>• {t('editConfig.usageStep4')}</li>
-              </ul>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
+        file={editingConfigFile}
+        content={configContent}
+        onContentChange={setConfigContent}
+        onSave={handleSaveConfig}
+        saving={saveConfigMutation.isPending}
+        onEditNodes={handleEditNodes}
+      />
 
-      {/* 编辑节点对话框 */}
-      {!isMobile ? (
-        <EditNodesDialog
-          open={editNodesDialogOpen}
-          onOpenChange={handleEditNodesDialogOpenChange}
-          title={t('editConfig.editNodesTitle', { name: editingNodesFile?.name })}
-          proxyGroups={proxyGroups}
-          availableNodes={availableNodes}
-          allNodes={nodesQuery.data?.nodes || []}
-          onProxyGroupsChange={setProxyGroups}
-          onSave={handleSaveNodes}
-          isSaving={saveConfigMutation.isPending}
-          showAllNodes={showAllNodes}
-          onShowAllNodesChange={setShowAllNodes}
-          onRemoveNodeFromGroup={handleRemoveNodeFromGroup}
-          onRemoveGroup={handleRemoveGroup}
-          onRenameGroup={handleRenameGroup}
-          saveButtonText={t('editConfig.applyAndSave')}
-          showSpecialNodesAtBottom={true}
-          proxyProviderConfigs={enableProxyProvider ? proxyProviderConfigs : []}
-        />
-      ) : (
-        <MobileEditNodesDialog
-          open={editNodesDialogOpen}
-          onOpenChange={handleEditNodesDialogOpenChange}
-          proxyGroups={proxyGroups}
-          availableNodes={availableNodes}
-          allNodes={nodesQuery.data?.nodes || []}
-          onProxyGroupsChange={setProxyGroups}
-          onSave={handleSaveNodes}
-          onRemoveNodeFromGroup={handleRemoveNodeFromGroup}
-          onRemoveGroup={handleRemoveGroup}
-          onRenameGroup={handleRenameGroup}
-          showSpecialNodesAtBottom={true}
-          proxyProviderConfigs={enableProxyProvider ? proxyProviderConfigs : []}
-        />
-      )}
+      {/* 编辑节点对话框 — 拆到 ./subscribe-files/dialogs/edit-nodes-host-dialog(适配桌面/移动两套) */}
+      <EditNodesHostDialog
+        open={editNodesDialogOpen}
+        onOpenChange={handleEditNodesDialogOpenChange}
+        isMobile={isMobile}
+        fileName={editingNodesFile?.name}
+        proxyGroups={proxyGroups}
+        availableNodes={availableNodes}
+        allNodes={nodesQuery.data?.nodes || []}
+        onProxyGroupsChange={setProxyGroups}
+        onSave={handleSaveNodes}
+        saving={saveConfigMutation.isPending}
+        showAllNodes={showAllNodes}
+        onShowAllNodesChange={setShowAllNodes}
+        onRemoveNodeFromGroup={handleRemoveNodeFromGroup}
+        onRemoveGroup={handleRemoveGroup}
+        onRenameGroup={handleRenameGroup}
+        proxyProviderConfigs={enableProxyProvider ? proxyProviderConfigs : []}
+      />
 
-      {/* 批量删除代理集合确认对话框 */}
-      <AlertDialog
+      {/* 批量删除代理集合确认对话框 — 拆到 ./subscribe-files/dialogs/batch-delete-provider-dialog */}
+      <BatchDeleteProviderDialog
         open={batchDeleteDialogOpen}
         onOpenChange={setBatchDeleteDialogOpen}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t('proxyProvider.batchDeleteConfirmTitle')}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {t('proxyProvider.batchDeleteConfirmDesc', { count: selectedProxyProviderIds.size })}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>{t('actions.cancel', { ns: 'common' })}</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() =>
-                batchDeleteProxyProviderMutation.mutate(
-                  Array.from(selectedProxyProviderIds)
-                )
-              }
-              disabled={batchDeleteProxyProviderMutation.isPending}
-            >
-              {batchDeleteProxyProviderMutation.isPending
-                ? t('proxyProvider.deleting')
-                : t('proxyProvider.confirmDelete')}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+        count={selectedProxyProviderIds.size}
+        onConfirm={() => batchDeleteProxyProviderMutation.mutate(Array.from(selectedProxyProviderIds))}
+        deleting={batchDeleteProxyProviderMutation.isPending}
+      />
 
       {/* 代理集合配置对话框 */}
       <Dialog
@@ -6085,285 +5677,60 @@ function SubscribeFilesPage() {
         confirmText={t('editConfig.applyReplace')}
       />
 
-      {/* 代理集合Pro对话框 */}
-      <Dialog
+      {/* 代理集合Pro对话框 — 拆到 ./subscribe-files/dialogs/proxy-provider-pro-dialog */}
+      <ProxyProviderProDialog
         open={proxyProviderProDialogOpen}
         onOpenChange={setProxyProviderProDialogOpen}
-      >
-        <DialogContent className='max-w-md'>
-          <DialogHeader>
-            <DialogTitle>{t('proxyProvider.basicDialog.title')}</DialogTitle>
-            <DialogDescription>
-              {t('proxyProvider.basicDialog.description')}
-            </DialogDescription>
-          </DialogHeader>
+        externalSubs={externalSubs}
+        selectedExternalSub={proSelectedExternalSub}
+        onSelectedExternalSubChange={(sub) => {
+          setProSelectedExternalSub(sub)
+          // 切换外部订阅时清空上次的创建结果(原 onValueChange 内联行为)
+          setProCreationResults([])
+        }}
+        namePrefix={proNamePrefix}
+        onNamePrefixChange={setProNamePrefix}
+        enableGeoIPMatching={enableGeoIPMatching}
+        onEnableGeoIPMatchingChange={setEnableGeoIPMatching}
+        onBatchCreateByRegion={handleBatchCreateByRegion}
+        onBatchCreateByProtocol={handleBatchCreateByProtocol}
+        creatingRegion={proCreatingRegion}
+        creatingProtocol={proCreatingProtocol}
+        creationResults={proCreationResults}
+      />
 
-          <div className='space-y-4'>
-            {/* 选择外部订阅 */}
-            <div className='space-y-2'>
-              <Label>{t('proxyProvider.basicDialog.selectExternalSub')}</Label>
-              <Select
-                value={proSelectedExternalSub?.id?.toString() || ''}
-                onValueChange={(v) => {
-                  const sub = externalSubs.find((s) => s.id === parseInt(v))
-                  setProSelectedExternalSub(sub || null)
-                  setProNamePrefix(sub?.name || '')
-                  setProCreationResults([])
-                }}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder={t('proxyProvider.basicDialog.selectExternalSubPlaceholder')} />
-                </SelectTrigger>
-                <SelectContent>
-                  {externalSubs.map((sub) => (
-                    <SelectItem key={sub.id} value={sub.id.toString()}>
-                      {sub.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+      {/* 代理集合预览对话框（MMW 模式） — 拆到 ./subscribe-files/dialogs/preview-dialog */}
+      <PreviewDialog
+        open={previewDialogOpen}
+        onOpenChange={setPreviewDialogOpen}
+        configName={previewConfigName}
+        content={previewContent}
+        loading={previewLoading}
+      />
 
-            {/* 名称前缀输入框 */}
-            <div className='space-y-2'>
-              <Label>{t('proxyProvider.basicDialog.namePrefix')}</Label>
-              <Input
-                placeholder={t('proxyProvider.basicDialog.namePrefixPlaceholder')}
-                value={proNamePrefix}
-                onChange={(e) => setProNamePrefix(e.target.value)}
-              />
-              <p className='text-muted-foreground text-xs'>
-                {t('proxyProvider.basicDialog.namePrefixHint')}
-              </p>
-            </div>
-
-            {/* 根据IP位置分组开关 */}
-            <div className='flex items-center justify-between'>
-              <div className='space-y-0.5'>
-                <Label>{t('proxyProvider.basicDialog.groupByIp')}</Label>
-                <p className='text-muted-foreground text-xs'>
-                  {t('proxyProvider.basicDialog.groupByIpHint')}
-                </p>
-              </div>
-              <Switch
-                checked={enableGeoIPMatching}
-                onCheckedChange={setEnableGeoIPMatching}
-              />
-            </div>
-
-            {/* 分裂按钮 */}
-            <div className='flex gap-2'>
-              <Button
-                className='flex-1'
-                disabled={
-                  !proSelectedExternalSub ||
-                  !proNamePrefix.trim() ||
-                  proCreatingRegion ||
-                  proCreatingProtocol
-                }
-                onClick={handleBatchCreateByRegion}
-              >
-                {proCreatingRegion && (
-                  <RefreshCw className='mr-2 h-4 w-4 animate-spin' />
-                )}
-                {t('proxyProvider.basicDialog.splitByRegion')}
-              </Button>
-              <Button
-                className='flex-1'
-                variant='outline'
-                disabled={
-                  !proSelectedExternalSub ||
-                  !proNamePrefix.trim() ||
-                  proCreatingRegion ||
-                  proCreatingProtocol
-                }
-                onClick={handleBatchCreateByProtocol}
-              >
-                {proCreatingProtocol && (
-                  <RefreshCw className='mr-2 h-4 w-4 animate-spin' />
-                )}
-                {t('proxyProvider.basicDialog.splitByProtocol')}
-              </Button>
-            </div>
-
-            {/* 创建结果 */}
-            {proCreationResults.length > 0 && (
-              <div className='space-y-2'>
-                <Label>
-                  {t('proxyProvider.basicDialog.creationResults')} ({proCreationResults.filter((r) => r.success).length}
-                  /{proCreationResults.length})
-                </Label>
-                <ScrollArea className='h-[200px] rounded-md border p-2'>
-                  {proCreationResults.map((result, idx) => (
-                    <div
-                      key={idx}
-                      className='flex items-center gap-2 py-1 text-sm'
-                    >
-                      {result.success ? (
-                        <Badge variant='default' className='bg-green-500'>
-                          {t('proxyProvider.basicDialog.success')}
-                        </Badge>
-                      ) : (
-                        <Badge variant='destructive'>{t('proxyProvider.basicDialog.failed')}</Badge>
-                      )}
-                      <span className='flex-1 truncate'>{result.name}</span>
-                      {result.error && (
-                        <span className='text-destructive text-xs'>
-                          ({result.error})
-                        </span>
-                      )}
-                    </div>
-                  ))}
-                </ScrollArea>
-              </div>
-            )}
-          </div>
-
-          <DialogFooter>
-            <Button
-              variant='outline'
-              onClick={() => setProxyProviderProDialogOpen(false)}
-            >
-              {t('actions.close', { ns: 'common' })}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* 代理集合预览对话框（MMW 模式） */}
-      <Dialog open={previewDialogOpen} onOpenChange={setPreviewDialogOpen}>
-        <DialogContent className='max-h-[80vh] max-w-3xl'>
-          <DialogHeader>
-            <DialogTitle>{t('proxyProvider.previewTitle', { name: previewConfigName })}</DialogTitle>
-            <DialogDescription>{t('proxyProvider.previewDesc')}</DialogDescription>
-          </DialogHeader>
-
-          <div className='relative'>
-            {previewLoading ? (
-              <div className='flex items-center justify-center py-8'>
-                <RefreshCw className='text-muted-foreground h-6 w-6 animate-spin' />
-                <span className='text-muted-foreground ml-2'>{t('actions.loading', { ns: 'common' })}</span>
-              </div>
-            ) : (
-              <ScrollArea className='h-[50vh] rounded-md border'>
-                <pre className='p-4 font-mono text-xs break-all whitespace-pre-wrap'>
-                  {previewContent}
-                </pre>
-              </ScrollArea>
-            )}
-          </div>
-
-          <DialogFooter className='flex-row gap-2 sm:justify-between'>
-            <Button
-              variant='outline'
-              size='sm'
-              onClick={() => {
-                navigator.clipboard.writeText(previewContent)
-                toast.success(t('proxyProvider.copiedToClipboard'))
-              }}
-              disabled={previewLoading || !previewContent}
-            >
-              <Copy className='mr-2 h-4 w-4' />
-              {t('actions.copy', { ns: 'common' })}
-            </Button>
-            <Button
-              variant='outline'
-              onClick={() => setPreviewDialogOpen(false)}
-            >
-              {t('actions.close', { ns: 'common' })}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* 编辑外部订阅对话框 */}
-      <Dialog
+      {/* 编辑外部订阅对话框 — 拆到 ./subscribe-files/dialogs/edit-external-sub-dialog */}
+      <EditExternalSubDialog
         open={editExternalSubDialogOpen}
         onOpenChange={(open) => {
           setEditExternalSubDialogOpen(open)
-          if (!open) {
-            setEditingExternalSub(null)
-          }
+          if (!open) setEditingExternalSub(null)
         }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t('externalSub.editTitle')}</DialogTitle>
-            <DialogDescription>
-              {t('externalSub.editDescription')}
-            </DialogDescription>
-          </DialogHeader>
-          <div className='space-y-4'>
-            <div className='space-y-2'>
-              <Label>{t('externalSub.addressLabel')}</Label>
-              <Input
-                value={editExternalSubForm.url}
-                onChange={(e) =>
-                  setEditExternalSubForm((prev) => ({
-                    ...prev,
-                    url: e.target.value,
-                  }))
-                }
-                placeholder='https://example.com/subscribe'
-              />
-            </div>
-            <div className='space-y-2'>
-              <Label>{t('externalSub.trafficStatsMode')}</Label>
-              <Select
-                value={editExternalSubForm.traffic_mode}
-                onValueChange={(value: 'download' | 'upload' | 'both') =>
-                  setEditExternalSubForm((prev) => ({
-                    ...prev,
-                    traffic_mode: value,
-                  }))
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value='both'>
-                    {t('externalSub.trafficStatsModeDownloadUpload')}
-                  </SelectItem>
-                  <SelectItem value='download'>{t('externalSub.trafficStatsModeDownload')}</SelectItem>
-                  <SelectItem value='upload'>{t('externalSub.trafficStatsModeUpload')}</SelectItem>
-                </SelectContent>
-              </Select>
-              <p className='text-muted-foreground text-xs'>
-                {t('externalSub.trafficStatsModeHint')}
-              </p>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              variant='outline'
-              onClick={() => setEditExternalSubDialogOpen(false)}
-            >
-              {t('actions.cancel', { ns: 'common' })}
-            </Button>
-            <Button
-              onClick={() => {
-                if (editingExternalSub) {
-                  updateExternalSubMutation.mutate({
-                    id: editingExternalSub.id,
-                    name: editingExternalSub.name,
-                    url: editExternalSubForm.url,
-                    user_agent: editingExternalSub.user_agent,
-                    traffic_mode: editExternalSubForm.traffic_mode,
-                  })
-                  setEditExternalSubDialogOpen(false)
-                  setEditingExternalSub(null)
-                }
-              }}
-              disabled={
-                updateExternalSubMutation.isPending || !editExternalSubForm.url
-              }
-            >
-              {t('actions.save', { ns: 'common' })}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        editing={editingExternalSub}
+        form={editExternalSubForm}
+        onFormChange={setEditExternalSubForm}
+        onSubmit={(editing, form) => {
+          updateExternalSubMutation.mutate({
+            id: editing.id,
+            name: editing.name,
+            url: form.url,
+            user_agent: editing.user_agent,
+            traffic_mode: form.traffic_mode,
+          })
+          setEditExternalSubDialogOpen(false)
+          setEditingExternalSub(null)
+        }}
+        saving={updateExternalSubMutation.isPending}
+      />
     </main>
   )
 }
