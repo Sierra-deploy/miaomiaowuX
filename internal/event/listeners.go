@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 
 	"miaomiaowux/internal/storage"
 )
@@ -72,6 +73,21 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 	// 系统节点归属的 username(真实 admin,不是字面值 "admin")
 	sysOwner := l.repo.GetSystemNodeOwner(ctx)
 
+	// 转换为 Clash 配置
+	clashConfig, err := l.inboundToClash(event.ServerID, event.Inbound)
+	if err != nil {
+		log.Printf("[NodeSync] Failed to convert inbound to clash: %v", err)
+		return
+	}
+
+	// 先扫所有"外部节点"(从 mmw 迁移过来的、original_server='' 的节点),
+	// 按 server 地址(可能是 IP / Domain / PullAddress 之一)+ port + protocol 匹配,
+	// 命中即把外部节点"升级"为受管节点(填上 original_server + inbound_tag),
+	// 而不是新建一条重复节点。
+	if matched := l.tryClaimExternalNode(ctx, server, event, clashConfig); matched {
+		return
+	}
+
 	// 检查是否已存在（按名称）
 	exists, _ := l.repo.CheckNodeNameExists(ctx, nodeName, sysOwner, 0)
 	if exists {
@@ -79,7 +95,7 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 		return
 	}
 
-	// 检查是否已存在（按 server + protocol + port）
+	// 检查是否已存在（按 server + protocol + port）— admin 自己之前同步过的同 server 节点
 	existingNodes, _ := l.repo.ListNodes(ctx, sysOwner)
 	for _, n := range existingNodes {
 		if n.OriginalServer == server.Name {
@@ -95,13 +111,6 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 				}
 			}
 		}
-	}
-
-	// 转换为 Clash 配置
-	clashConfig, err := l.inboundToClash(event.ServerID, event.Inbound)
-	if err != nil {
-		log.Printf("[NodeSync] Failed to convert inbound to clash: %v", err)
-		return
 	}
 
 	// 用实际节点名称覆盖 Clash 配置中的 name 字段
@@ -185,6 +194,96 @@ func (l *NodeSyncListener) createForwardTunnelNode(ctx context.Context, event In
 	} else {
 		log.Printf("[NodeSync] forward-tunnel: 已创建配套节点: %s (-> %s:%d)", nodeName, server.IPAddress, event.Port)
 	}
+}
+
+// protocolEquivalent 判断 clash type 与 xray protocol 是否同一种协议。
+// clash 用 `type: ss`,xray 用 `protocol: shadowsocks`,其他名字一致。
+func protocolEquivalent(clashType, xrayProtocol string) bool {
+	a := strings.ToLower(strings.TrimSpace(clashType))
+	b := strings.ToLower(strings.TrimSpace(xrayProtocol))
+	if a == b {
+		return true
+	}
+	norm := func(s string) string {
+		if s == "ss" {
+			return "shadowsocks"
+		}
+		return s
+	}
+	return norm(a) == norm(b)
+}
+
+// tryClaimExternalNode 扫所有"外部节点"(original_server='' 且 inbound_tag=''),
+// 看是否有节点的 clash_config 指向 (server 的 IP/Domain/PullAddress 之一) + 同 port + 同 protocol,
+// 命中即把该节点 UPDATE 为受管节点(填上 original_server + inbound_tag),返回 true。
+// 这避免迁移场景下:mmw 原有节点 + agent 扫描新创建节点 → 重复 2 条节点的问题。
+func (l *NodeSyncListener) tryClaimExternalNode(ctx context.Context, server *storage.RemoteServer, event InboundEvent, agentClashConfig string) bool {
+	// 候选地址:能让外部节点 server 字段命中该 remote_server 的所有可能形式
+	candidates := map[string]bool{}
+	for _, a := range []string{server.IPAddress, server.Domain, server.PullAddress} {
+		if strings.TrimSpace(a) != "" {
+			candidates[a] = true
+		}
+	}
+	if len(candidates) == 0 {
+		return false
+	}
+
+	allNodes, err := l.repo.ListAllNodes(ctx)
+	if err != nil {
+		log.Printf("[NodeSync] tryClaimExternalNode: list all nodes failed: %v", err)
+		return false
+	}
+	for _, n := range allNodes {
+		// 只看"外部节点":没关联 server / inbound,且不是 routed 子节点
+		if strings.TrimSpace(n.OriginalServer) != "" || strings.TrimSpace(n.InboundTag) != "" {
+			continue
+		}
+		if n.NodeType == "routed" {
+			continue
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal([]byte(n.ClashConfig), &cfg); err != nil {
+			continue
+		}
+		srv, _ := cfg["server"].(string)
+		if !candidates[srv] {
+			continue
+		}
+		var port int
+		switch p := cfg["port"].(type) {
+		case float64:
+			port = int(p)
+		case int:
+			port = p
+		}
+		if port != event.Port {
+			continue
+		}
+		proto, _ := cfg["type"].(string)
+		if !protocolEquivalent(proto, event.Protocol) {
+			continue
+		}
+
+		// 命中:更新该节点
+		log.Printf("[NodeSync] Claim external node id=%d name=%q for %s/%s:%d", n.ID, n.NodeName, server.Name, event.Protocol, event.Port)
+		// 用 agent 转出来的 clash_config 替换,但保留原节点名(用户可能改过中文名)
+		var newCfg map[string]any
+		if err := json.Unmarshal([]byte(agentClashConfig), &newCfg); err == nil {
+			if name, _ := cfg["name"].(string); name != "" {
+				newCfg["name"] = name
+			}
+			if updated, err := json.Marshal(newCfg); err == nil {
+				agentClashConfig = string(updated)
+			}
+		}
+		if err := l.repo.ClaimExternalNode(ctx, n.ID, server.Name, event.Tag, fmt.Sprintf("远程:%s", server.Name), agentClashConfig); err != nil {
+			log.Printf("[NodeSync] ClaimExternalNode failed: %v", err)
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 func (l *NodeSyncListener) handleRemoved(ctx context.Context, event InboundEvent) {

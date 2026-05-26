@@ -97,8 +97,8 @@ func (h *RemoteManageHandler) HandleScanResult(serverID int64, payload WSScanRes
 
 	if payload.XrayRunning {
 		result := h.syncInboundsToNodesInternal(ctx, serverID)
-		log.Printf("[Remote Manage] Auto-sync from scan_result for server %d: synced=%d, skipped=%d",
-			serverID, result.SyncedCount, result.SkippedCount)
+		log.Printf("[Remote Manage] Auto-sync from scan_result for server %d: synced=%d (claimed=%d, created=%d), skipped=%d",
+			serverID, result.SyncedCount, result.ClaimedCount, result.CreatedCount, result.SkippedCount)
 	} else {
 		// xray 未运行，自动下发配置
 		server, err := h.repo.GetRemoteServer(ctx, serverID)
@@ -1691,13 +1691,15 @@ func (h *RemoteManageHandler) HandleScan(w http.ResponseWriter, r *http.Request)
 		// 如果 Xray 正在运行，则将入站同步到节点表
 		if scanResult.XrayRunning {
 			syncResult := h.syncInboundsToNodesInternal(r.Context(), id)
-			log.Printf("[Remote Manage] Sync inbounds result for server %d: synced=%d, skipped=%d, tags=%v",
-				id, syncResult.SyncedCount, syncResult.SkippedCount, syncResult.SyncedTags)
+			log.Printf("[Remote Manage] Sync inbounds result for server %d: synced=%d (claimed=%d, created=%d), skipped=%d, tags=%v",
+				id, syncResult.SyncedCount, syncResult.ClaimedCount, syncResult.CreatedCount, syncResult.SkippedCount, syncResult.SyncedTags)
 
 			// 将同步结果合并到响应中
 			var response map[string]interface{}
 			if err := json.Unmarshal(result, &response); err == nil {
 				response["synced_count"] = syncResult.SyncedCount
+				response["claimed_count"] = syncResult.ClaimedCount
+				response["created_count"] = syncResult.CreatedCount
 				response["skipped_count"] = syncResult.SkippedCount
 				response["synced_tags"] = syncResult.SyncedTags
 				if len(syncResult.Errors) > 0 {
@@ -1866,6 +1868,21 @@ func (h *RemoteManageHandler) syncInboundsToNodesInternal(ctx context.Context, s
 			continue
 		}
 
+		// 先尝试 claim 现有外部节点(从 mmw 迁移过来、original_server='' 的)。
+		// 命中即把该节点升级为受管节点,不新建。
+		if claimed := h.tryClaimExternalNodeForSync(ctx, server, protocol, int(port), string(clashConfigJSON), tag); claimed {
+			response.SyncedCount++
+			response.ClaimedCount++
+			if tag != "" {
+				response.SyncedTags = append(response.SyncedTags, fmt.Sprintf("%s (port:%d) [claimed]", tag, int(port)))
+			}
+			existingNodeKeys[dedupeKey] = true
+			if tag != "" {
+				existingInboundTags[server.Name+":"+tag] = true
+			}
+			continue
+		}
+
 		// 创建节点
 		node := storage.Node{
 			Username:       username,
@@ -1885,6 +1902,7 @@ func (h *RemoteManageHandler) syncInboundsToNodesInternal(ctx context.Context, s
 		}
 
 		response.SyncedCount++
+		response.CreatedCount++
 		if tag != "" {
 			response.SyncedTags = append(response.SyncedTags, fmt.Sprintf("%s (port:%d)", tag, int(port)))
 		} else {
@@ -1899,8 +1917,98 @@ func (h *RemoteManageHandler) syncInboundsToNodesInternal(ctx context.Context, s
 		existingNodeNames[nodeName] = true
 	}
 
-	response.Message = fmt.Sprintf("已同步 %d 个节点，跳过 %d 个", response.SyncedCount, response.SkippedCount)
+	response.Message = fmt.Sprintf("已同步 %d 个节点(绑定 %d 个，新增 %d 个)，跳过 %d 个",
+		response.SyncedCount, response.ClaimedCount, response.CreatedCount, response.SkippedCount)
 	return response
+}
+
+// protocolEquivalent 判断 clash type 和 xray protocol 是否等价。
+// clash 用 `type: ss/vless/vmess/trojan`,xray 用 `protocol: shadowsocks/vless/vmess/trojan`,
+// 这里把 ss <-> shadowsocks 同等化(其他名字一致)。
+func protocolEquivalent(clashType, xrayProtocol string) bool {
+	a := strings.ToLower(strings.TrimSpace(clashType))
+	b := strings.ToLower(strings.TrimSpace(xrayProtocol))
+	if a == b {
+		return true
+	}
+	norm := func(s string) string {
+		if s == "ss" {
+			return "shadowsocks"
+		}
+		return s
+	}
+	return norm(a) == norm(b)
+}
+
+// 同样的等价判断,也给 NodeSyncListener / 别处用。在 event 包里也有 tryClaim,
+// 那边自己也保留一份语义一致的判断;此处不导出避免跨包耦合。
+
+// tryClaimExternalNodeForSync 在 sync inbounds → nodes 流程里,先扫"外部节点"
+// (original_server='' AND inbound_tag=''),按 server 地址(IP/Domain/PullAddress 任一)+ port + protocol
+// 匹配,命中即把该节点升级为受管节点(填上 original_server + inbound_tag),返回 true。
+func (h *RemoteManageHandler) tryClaimExternalNodeForSync(ctx context.Context, server *storage.RemoteServer, protocol string, port int, clashConfigJSON, inboundTag string) bool {
+	candidates := map[string]bool{}
+	for _, a := range []string{server.IPAddress, server.Domain, server.PullAddress} {
+		a = strings.TrimSpace(a)
+		if a != "" {
+			candidates[a] = true
+		}
+	}
+	if len(candidates) == 0 {
+		return false
+	}
+	allNodes, err := h.repo.ListAllNodes(ctx)
+	if err != nil {
+		return false
+	}
+	for _, n := range allNodes {
+		if strings.TrimSpace(n.OriginalServer) != "" || strings.TrimSpace(n.InboundTag) != "" {
+			continue
+		}
+		if n.NodeType == "routed" {
+			continue
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal([]byte(n.ClashConfig), &cfg); err != nil {
+			continue
+		}
+		srv, _ := cfg["server"].(string)
+		if !candidates[srv] {
+			continue
+		}
+		var cfgPort int
+		switch p := cfg["port"].(type) {
+		case float64:
+			cfgPort = int(p)
+		case int:
+			cfgPort = p
+		}
+		if cfgPort != port {
+			continue
+		}
+		proto, _ := cfg["type"].(string)
+		if !protocolEquivalent(proto, protocol) {
+			continue
+		}
+		// 命中:用 agent 转出来的 clash_config 替换,但保留原节点名(用户改过的中文名)
+		mergedConfig := clashConfigJSON
+		var newCfg map[string]any
+		if err := json.Unmarshal([]byte(clashConfigJSON), &newCfg); err == nil {
+			if name, _ := cfg["name"].(string); name != "" {
+				newCfg["name"] = name
+			}
+			if updated, err := json.Marshal(newCfg); err == nil {
+				mergedConfig = string(updated)
+			}
+		}
+		if err := h.repo.ClaimExternalNode(ctx, n.ID, server.Name, inboundTag, fmt.Sprintf("远程:%s", server.Name), mergedConfig); err != nil {
+			log.Printf("[Remote Manage] tryClaim node %d failed: %v", n.ID, err)
+			return false
+		}
+		log.Printf("[Remote Manage] Claimed external node id=%d name=%q for %s/%s:%d", n.ID, n.NodeName, server.Name, protocol, port)
+		return true
+	}
+	return false
 }
 
 // ================== X射线系统配置==================
@@ -1952,6 +2060,8 @@ type SyncInboundsToNodesResponse struct {
 	Success      bool     `json:"success"`
 	Message      string   `json:"message"`
 	SyncedCount  int      `json:"synced_count"`
+	ClaimedCount int      `json:"claimed_count"` // 自动绑定已有外部节点的数量
+	CreatedCount int      `json:"created_count"` // 新建节点的数量
 	SkippedCount int      `json:"skipped_count"`
 	SyncedTags   []string `json:"synced_tags,omitempty"`
 	Errors       []string `json:"errors,omitempty"`
@@ -2149,10 +2259,12 @@ func (h *RemoteManageHandler) HandleSyncInboundsToNodes(w http.ResponseWriter, r
 		}
 
 		response.SyncedCount++
+		response.CreatedCount++
 		response.SyncedTags = append(response.SyncedTags, fmt.Sprintf("%s (port:%d)", tag, int(port)))
 	}
 
-	response.Message = fmt.Sprintf("已同步 %d 个节点，跳过 %d 个", response.SyncedCount, response.SkippedCount)
+	response.Message = fmt.Sprintf("已同步 %d 个节点(绑定 %d 个，新增 %d 个)，跳过 %d 个",
+		response.SyncedCount, response.ClaimedCount, response.CreatedCount, response.SkippedCount)
 	if len(response.Errors) > 0 {
 		response.Success = response.SyncedCount > 0
 	}

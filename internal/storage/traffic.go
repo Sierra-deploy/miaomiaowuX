@@ -6569,6 +6569,41 @@ func (r *TrafficRepository) DeleteUserInboundConfig(ctx context.Context, usernam
 	return err
 }
 
+// EnsureAdminInboundClient 把一个 xray inbound client 凭据登记给 admin。
+// 按 (username, server_id, inbound_tag, credential_json) 四元组去重 — 已存在则跳过,
+// 不存在才插入。返回 wasNew=true 表示本次新插入。
+//
+// 用途:迁移时把 server 上已存在 email 的 xray client(mmw 时代手工配的)绑定到系统 admin,
+// 让 mmwx 主控能识别这些 client 的归属、做流量统计 / routing 限定。
+//
+// 一个 inbound 上多个 client 各算一行(不强 UNIQUE);credential_json 是去重 key,
+// 同 client 反复扫描不会重复入库。
+func (r *TrafficRepository) EnsureAdminInboundClient(ctx context.Context, username string, serverID int64, inboundTag, protocol, credentialJSON string) (bool, error) {
+	if r == nil || r.db == nil {
+		return false, errors.New("traffic repository not initialized")
+	}
+	var existsID int64
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id FROM user_inbound_configs
+		 WHERE username = ? AND server_id = ? AND inbound_tag = ? AND credential_json = ?
+		 LIMIT 1`,
+		username, serverID, inboundTag, credentialJSON,
+	).Scan(&existsID)
+	if err == nil && existsID > 0 {
+		return false, nil
+	}
+	if err != nil && err != sql.ErrNoRows {
+		return false, err
+	}
+	if _, err := r.db.ExecContext(ctx,
+		`INSERT INTO user_inbound_configs (username, server_id, inbound_tag, protocol, credential_json) VALUES (?, ?, ?, ?, ?)`,
+		username, serverID, inboundTag, protocol, credentialJSON,
+	); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
 func (r *TrafficRepository) GetUserInboundConfig(ctx context.Context, username string, serverID int64, inboundTag string) (*UserInboundConfig, error) {
 	var c UserInboundConfig
 	err := r.db.QueryRowContext(ctx,

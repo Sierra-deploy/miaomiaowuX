@@ -596,6 +596,7 @@
     "configLoadFailed": "加载配置失败",
     "scanComplete": "扫描完成",
     "scanSynced": "扫描完成，同步了 {{count}} 个入站: {{tags}}",
+    "scanSyncedWithClaim": "扫描完成，自动绑定 {{claimed}} 个已有节点，新增 {{created}} 个节点",
     "scanSkipped": "扫描完成，跳过 {{count}} 个已存在的入站",
     "noSyncableInbound": "没有找到可同步的入站配置",
     "modeSwitch": "模式切换成功",

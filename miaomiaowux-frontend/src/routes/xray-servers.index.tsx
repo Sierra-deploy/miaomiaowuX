@@ -393,7 +393,10 @@ function XrayServersPage() {
       loadRemoteServerStatusToCache(data.serverId, true)
       if (data.xray_running) {
         let message = data.message || t('servers.scanComplete')
-        if (data.synced_count > 0 && data.synced_tags?.length > 0) message = t('servers.scanSynced', { count: data.synced_count, tags: data.synced_tags.join(', ') })
+        if (data.synced_count > 0 && (data.claimed_count > 0 || data.created_count > 0)) {
+          message = t('servers.scanSyncedWithClaim', { claimed: data.claimed_count ?? 0, created: data.created_count ?? 0 })
+        }
+        else if (data.synced_count > 0 && data.synced_tags?.length > 0) message = t('servers.scanSynced', { count: data.synced_count, tags: data.synced_tags.join(', ') })
         else if (data.synced_count === 0 && data.skipped_count > 0) message = t('servers.scanSkipped', { count: data.skipped_count })
         toast.success(message)
       } else { toast.info(data.message || t('servers.scanComplete')) }

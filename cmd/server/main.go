@@ -394,6 +394,15 @@ func main() {
 	// 用户私有路由出站(routed_owner='user'):普通用户为自己创建/删除/查询专属出站
 	mux.Handle("/api/user/routed-outbound", auth.RequireToken(tokenStore, userRepo, handler.NewUserRoutedOutboundHandler(repo, remoteManageHandler)))
 
+	// 从妙妙屋(mmw)迁移工具
+	migrateHandler := handler.NewMigrateHandler(repo, remoteManageHandler)
+	mux.Handle("/api/admin/migrate/fetch-mmw-backup", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(migrateHandler.FetchMmwBackup)))
+	mux.Handle("/api/admin/migrate/upload-mmw-backup", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(migrateHandler.UploadMmwBackup)))
+	mux.Handle("/api/admin/migrate/import-mmw", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(migrateHandler.ImportMmw)))
+	mux.Handle("/api/admin/migrate/distinct-node-servers", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(migrateHandler.DistinctNodeServers)))
+	mux.Handle("/api/admin/migrate/patch-client-emails", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(migrateHandler.PatchClientEmails)))
+	mux.Handle("/api/admin/migrate/takeover-external-xray", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(migrateHandler.TakeoverExternalXray)))
+
 	// 初始化事件系统以进行入站同步
 	eventBus := event.GetBus()
 	nodeSyncListener := event.NewNodeSyncListener(repo, remoteManageHandler.InboundToClashProxyByServerID)

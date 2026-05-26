@@ -596,6 +596,7 @@
     "configLoadFailed": "Failed to load config",
     "scanComplete": "Scan complete",
     "scanSynced": "Scan complete, synced {{count}} inbound(s): {{tags}}",
+    "scanSyncedWithClaim": "Scan complete, auto-linked {{claimed}} existing node(s), created {{created}} new node(s)",
     "scanSkipped": "Scan complete, skipped {{count}} existing inbound(s)",
     "noSyncableInbound": "No syncable inbound configurations found",
     "modeSwitch": "Mode switch successful",

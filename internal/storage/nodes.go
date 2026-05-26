@@ -879,6 +879,22 @@ func (r *TrafficRepository) CountUserRoutedOutboundActionsToday(ctx context.Cont
 	return n, err
 }
 
+// ClaimExternalNode 把一个"外部节点"(original_server='' AND inbound_tag='')升级为受管节点:
+// 填上 original_server / inbound_tag / tag / clash_config(用 agent 转出来的新 config 覆盖)。
+// 用于迁移场景下,把 mmw 时代手工录入的节点跟 agent 扫描出来的同 server:port 入站绑定。
+func (r *TrafficRepository) ClaimExternalNode(ctx context.Context, nodeID int64, originalServer, inboundTag, tag, clashConfig string) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE nodes SET original_server = ?, inbound_tag = ?, tag = ?, clash_config = ?, parsed_config = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND (original_server IS NULL OR original_server = '')
+		   AND (inbound_tag IS NULL OR inbound_tag = '')`,
+		originalServer, inboundTag, tag, clashConfig, clashConfig, nodeID,
+	)
+	return err
+}
+
 // CountUserRoutedOutbounds 统计某用户创建的"用户私有路由出站"数量(routed_owner='user'),用于配额校验。
 func (r *TrafficRepository) CountUserRoutedOutbounds(ctx context.Context, username string) (int, error) {
 	if r == nil || r.db == nil {

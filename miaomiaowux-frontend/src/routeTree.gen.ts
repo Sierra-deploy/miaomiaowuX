@@ -22,6 +22,7 @@ import { Route as RulesRouteImport } from './routes/rules'
 import { Route as RoutedOutboundsRouteImport } from './routes/routed-outbounds'
 import { Route as PackagesRouteImport } from './routes/packages'
 import { Route as NodesRouteImport } from './routes/nodes'
+import { Route as MigrateFromMmwRouteImport } from './routes/migrate-from-mmw'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as GeneratorRouteImport } from './routes/generator'
 import { Route as CustomRulesRouteImport } from './routes/custom-rules'
@@ -37,6 +38,7 @@ import { Route as SubscribeFilesIndexRouteImport } from './routes/subscribe-file
 import { Route as RoutedOutboundsIndexRouteImport } from './routes/routed-outbounds.index'
 import { Route as PackagesIndexRouteImport } from './routes/packages.index'
 import { Route as NodesIndexRouteImport } from './routes/nodes.index'
+import { Route as MigrateFromMmwIndexRouteImport } from './routes/migrate-from-mmw.index'
 import { Route as CustomRulesIndexRouteImport } from './routes/custom-rules.index'
 import { Route as CertificatesIndexRouteImport } from './routes/certificates.index'
 import { Route as SubscribeFilesCustomRouteImport } from './routes/subscribe-files.custom'
@@ -104,6 +106,11 @@ const PackagesRoute = PackagesRouteImport.update({
 const NodesRoute = NodesRouteImport.update({
   id: '/nodes',
   path: '/nodes',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MigrateFromMmwRoute = MigrateFromMmwRouteImport.update({
+  id: '/migrate-from-mmw',
+  path: '/migrate-from-mmw',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -181,6 +188,11 @@ const NodesIndexRoute = NodesIndexRouteImport.update({
   path: '/',
   getParentRoute: () => NodesRoute,
 } as any)
+const MigrateFromMmwIndexRoute = MigrateFromMmwIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => MigrateFromMmwRoute,
+} as any)
 const CustomRulesIndexRoute = CustomRulesIndexRouteImport.update({
   id: '/',
   path: '/',
@@ -204,6 +216,7 @@ export interface FileRoutesByFullPath {
   '/custom-rules': typeof CustomRulesRouteWithChildren
   '/generator': typeof GeneratorRoute
   '/login': typeof LoginRoute
+  '/migrate-from-mmw': typeof MigrateFromMmwRouteWithChildren
   '/nodes': typeof NodesRouteWithChildren
   '/packages': typeof PackagesRouteWithChildren
   '/routed-outbounds': typeof RoutedOutboundsRouteWithChildren
@@ -220,6 +233,7 @@ export interface FileRoutesByFullPath {
   '/subscribe-files/custom': typeof SubscribeFilesCustomRoute
   '/certificates/': typeof CertificatesIndexRoute
   '/custom-rules/': typeof CustomRulesIndexRoute
+  '/migrate-from-mmw/': typeof MigrateFromMmwIndexRoute
   '/nodes/': typeof NodesIndexRoute
   '/packages/': typeof PackagesIndexRoute
   '/routed-outbounds/': typeof RoutedOutboundsIndexRoute
@@ -242,6 +256,7 @@ export interface FileRoutesByTo {
   '/subscribe-files/custom': typeof SubscribeFilesCustomRoute
   '/certificates': typeof CertificatesIndexRoute
   '/custom-rules': typeof CustomRulesIndexRoute
+  '/migrate-from-mmw': typeof MigrateFromMmwIndexRoute
   '/nodes': typeof NodesIndexRoute
   '/packages': typeof PackagesIndexRoute
   '/routed-outbounds': typeof RoutedOutboundsIndexRoute
@@ -260,6 +275,7 @@ export interface FileRoutesById {
   '/custom-rules': typeof CustomRulesRouteWithChildren
   '/generator': typeof GeneratorRoute
   '/login': typeof LoginRoute
+  '/migrate-from-mmw': typeof MigrateFromMmwRouteWithChildren
   '/nodes': typeof NodesRouteWithChildren
   '/packages': typeof PackagesRouteWithChildren
   '/routed-outbounds': typeof RoutedOutboundsRouteWithChildren
@@ -276,6 +292,7 @@ export interface FileRoutesById {
   '/subscribe-files/custom': typeof SubscribeFilesCustomRoute
   '/certificates/': typeof CertificatesIndexRoute
   '/custom-rules/': typeof CustomRulesIndexRoute
+  '/migrate-from-mmw/': typeof MigrateFromMmwIndexRoute
   '/nodes/': typeof NodesIndexRoute
   '/packages/': typeof PackagesIndexRoute
   '/routed-outbounds/': typeof RoutedOutboundsIndexRoute
@@ -295,6 +312,7 @@ export interface FileRouteTypes {
     | '/custom-rules'
     | '/generator'
     | '/login'
+    | '/migrate-from-mmw'
     | '/nodes'
     | '/packages'
     | '/routed-outbounds'
@@ -311,6 +329,7 @@ export interface FileRouteTypes {
     | '/subscribe-files/custom'
     | '/certificates/'
     | '/custom-rules/'
+    | '/migrate-from-mmw/'
     | '/nodes/'
     | '/packages/'
     | '/routed-outbounds/'
@@ -333,6 +352,7 @@ export interface FileRouteTypes {
     | '/subscribe-files/custom'
     | '/certificates'
     | '/custom-rules'
+    | '/migrate-from-mmw'
     | '/nodes'
     | '/packages'
     | '/routed-outbounds'
@@ -350,6 +370,7 @@ export interface FileRouteTypes {
     | '/custom-rules'
     | '/generator'
     | '/login'
+    | '/migrate-from-mmw'
     | '/nodes'
     | '/packages'
     | '/routed-outbounds'
@@ -366,6 +387,7 @@ export interface FileRouteTypes {
     | '/subscribe-files/custom'
     | '/certificates/'
     | '/custom-rules/'
+    | '/migrate-from-mmw/'
     | '/nodes/'
     | '/packages/'
     | '/routed-outbounds/'
@@ -384,6 +406,7 @@ export interface RootRouteChildren {
   CustomRulesRoute: typeof CustomRulesRouteWithChildren
   GeneratorRoute: typeof GeneratorRoute
   LoginRoute: typeof LoginRoute
+  MigrateFromMmwRoute: typeof MigrateFromMmwRouteWithChildren
   NodesRoute: typeof NodesRouteWithChildren
   PackagesRoute: typeof PackagesRouteWithChildren
   RoutedOutboundsRoute: typeof RoutedOutboundsRouteWithChildren
@@ -492,6 +515,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof NodesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/migrate-from-mmw': {
+      id: '/migrate-from-mmw'
+      path: '/migrate-from-mmw'
+      fullPath: '/migrate-from-mmw'
+      preLoaderRoute: typeof MigrateFromMmwRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/login': {
       id: '/login'
       path: '/login'
@@ -597,6 +627,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof NodesIndexRouteImport
       parentRoute: typeof NodesRoute
     }
+    '/migrate-from-mmw/': {
+      id: '/migrate-from-mmw/'
+      path: '/'
+      fullPath: '/migrate-from-mmw/'
+      preLoaderRoute: typeof MigrateFromMmwIndexRouteImport
+      parentRoute: typeof MigrateFromMmwRoute
+    }
     '/custom-rules/': {
       id: '/custom-rules/'
       path: '/'
@@ -643,6 +680,18 @@ const CustomRulesRouteChildren: CustomRulesRouteChildren = {
 
 const CustomRulesRouteWithChildren = CustomRulesRoute._addFileChildren(
   CustomRulesRouteChildren,
+)
+
+interface MigrateFromMmwRouteChildren {
+  MigrateFromMmwIndexRoute: typeof MigrateFromMmwIndexRoute
+}
+
+const MigrateFromMmwRouteChildren: MigrateFromMmwRouteChildren = {
+  MigrateFromMmwIndexRoute: MigrateFromMmwIndexRoute,
+}
+
+const MigrateFromMmwRouteWithChildren = MigrateFromMmwRoute._addFileChildren(
+  MigrateFromMmwRouteChildren,
 )
 
 interface NodesRouteChildren {
@@ -760,6 +809,7 @@ const rootRouteChildren: RootRouteChildren = {
   CustomRulesRoute: CustomRulesRouteWithChildren,
   GeneratorRoute: GeneratorRoute,
   LoginRoute: LoginRoute,
+  MigrateFromMmwRoute: MigrateFromMmwRouteWithChildren,
   NodesRoute: NodesRouteWithChildren,
   PackagesRoute: PackagesRouteWithChildren,
   RoutedOutboundsRoute: RoutedOutboundsRouteWithChildren,

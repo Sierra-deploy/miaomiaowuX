@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { createFileRoute, redirect } from '@tanstack/react-router'
+import { createFileRoute, Link, redirect } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { CircleHelp, Copy, Eye, EyeOff, KeyRound, RefreshCw, Settings, Timer } from 'lucide-react'
@@ -849,6 +849,17 @@ function SystemSettingsPage() {
                     }}
                     disabled={toggleMmwFeaturesMutation.isPending}
                   />
+                </div>
+
+                {/* 从妙妙屋迁移 — 跳到独立向导 */}
+                <div className='flex items-center justify-between rounded-lg border p-3'>
+                  <div className='flex items-center gap-2'>
+                    <Label className='cursor-default'>从妙妙屋迁移</Label>
+                    <span className='text-xs text-muted-foreground'>一次性把妙妙屋数据导入到当前实例</span>
+                  </div>
+                  <Button variant='outline' size='sm' asChild>
+                    <Link to='/migrate-from-mmw'>打开迁移向导</Link>
+                  </Button>
                 </div>
 
                 {/* 允许用户创建路由出站 */}
