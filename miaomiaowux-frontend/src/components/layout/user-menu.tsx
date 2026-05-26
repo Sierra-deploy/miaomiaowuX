@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { LogOut, Settings2, ExternalLink, BookOpen, HardDrive, RefreshCw, Bug, Palette, Languages, Info } from 'lucide-react'
+import { LogOut, Settings2, ExternalLink, BookOpen, HardDrive, RefreshCw, Bug, Palette, Languages, Info, ArrowRightLeft } from 'lucide-react'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
 import useDialogState from '@/hooks/use-dialog-state'
@@ -312,6 +312,13 @@ export function UserMenu() {
           {profile?.is_admin && (
             <DropdownMenuItem onClick={() => setBackupDialogOpen(true)} className='cursor-pointer justify-center'>
               <HardDrive className='size-4' /> {t('userMenu.backup')}
+            </DropdownMenuItem>
+          )}
+          {profile?.is_admin && (
+            <DropdownMenuItem asChild className='cursor-pointer justify-center'>
+              <Link to='/migrate-from-mmw' className='flex items-center gap-2'>
+                <ArrowRightLeft className='size-4' /> {t('userMenu.migrateFromMmw')}
+              </Link>
             </DropdownMenuItem>
           )}
           {profile?.is_admin && (

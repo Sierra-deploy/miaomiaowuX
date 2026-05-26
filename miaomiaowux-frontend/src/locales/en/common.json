@@ -137,6 +137,7 @@
     "debugLog": "Debug Log",
     "help": "Help",
     "backup": "Backup Data",
+    "migrateFromMmw": "Migrate from MMW",
     "checkUpdate": "Check Update",
     "version": "Version",
     "signOut": "Sign Out",
