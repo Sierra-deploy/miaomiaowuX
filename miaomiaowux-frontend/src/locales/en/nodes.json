@@ -419,6 +419,7 @@
     "dragHint": "is a draggable element, ",
     "switchGroupType": "switch proxy group type, double-click proxy group title to edit name, dragging available node title represents dragging all nodes",
     "addToAllGroups": "Add to All Groups",
+    "columns": "Columns",
     "removeFromAllGroups": "Remove from All Groups",
     "dragNodeHere": "Drag nodes here",
     "addProxyGroup": "Add Proxy Group",

@@ -419,6 +419,7 @@
     "dragHint": "为可拖动元素，",
     "switchGroupType": "切换代理组类型、双击代理组标题编辑代理组名称，拖动可用节点标题时，代表拖动可用节点内的所有节点",
     "addToAllGroups": "添加到所有代理组",
+    "columns": "列数",
     "removeFromAllGroups": "从所有代理组移除",
     "dragNodeHere": "将节点拖拽到这里",
     "addProxyGroup": "添加代理组",

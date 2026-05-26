@@ -743,13 +743,15 @@ function SubscribeFilesPage() {
     },
   })
 
-  // 获取远程服务器列表
+  // 获取远程服务器列表。
+  // 注意:queryKey `['remote-servers']` 在多处复用(xray-servers / nodes / index 等),它们的 queryFn 都返回
+  // 原始 `{ servers: [...] }`。React Query 按 queryKey 命中缓存,所以这里也必须返回相同形状,
+  // 否则先到者的形状会污染后到者(曾经出过 `.map is not a function` 的 bug)。
   const { data: remoteServersData } = useQuery({
     queryKey: ['remote-servers'],
     queryFn: async () => {
       const { data } = await api.get('/api/admin/remote-servers')
-      const list = data?.servers
-      return Array.isArray(list) ? (list as { id: number; name: string }[]) : []
+      return data as { servers?: { id: number; name: string }[] }
     },
   })
 
@@ -5086,7 +5088,7 @@ function SubscribeFilesPage() {
             <div className='space-y-2'>
               <Label>流量统计服务器</Label>
               <div className='flex flex-wrap gap-2'>
-                {(remoteServersData ?? []).map(server => {
+                {(remoteServersData?.servers ?? []).map(server => {
                   const selected = metadataForm.stats_server_ids.split(',').filter(Boolean).includes(String(server.id))
                   return (
                     <label key={server.id} className='flex items-center gap-1.5 text-sm'>
