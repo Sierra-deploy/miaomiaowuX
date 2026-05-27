@@ -330,6 +330,10 @@ type SystemConfig struct {
 	SilentModeTimeout           int    // 获取订阅后恢复访问的分钟数，默认15
 	EnableMiaomiaowuFeatures    bool   // 启用妙妙屋功能（模板、订阅管理等菜单）
 	DefaultTemplateFilename     string // 默认模板文件名（rule_templates/目录下）
+	// 兼容妙妙屋短链接:旧版 mmw 用 /<code> 形式,新版 mmwx 用 /x/<code>。
+	// 开启后,直接 GET /<code>(无 /x/ 前缀)会尝试匹配同 code 的 /x/ 短链;命中则放行,
+	// 未命中按安全规则计入暴力枚举失败计数。
+	EnableMmwShortLinkCompat bool
 }
 
 // ExternalSubscription表示用户导入的外部订阅URL。
@@ -515,6 +519,10 @@ type RemoteServer struct {
 	XrayMode              string     `json:"xray_mode"`            // "external" (默认) 或 "embedded"
 	TimeOffsetSeconds     *int64     `json:"time_offset_seconds,omitempty"` // agent 与主控的时钟偏差（秒）
 	TrafficUsedOffset     int64      `json:"traffic_used_offset"`
+	// 流量统计规则: "both"(默认,上行+下行) / "upload"(仅上行) / "download"(仅下行)
+	// 影响:主控聚合该服务器节点流量时按规则累加。**用户流量不受此字段影响**,
+	// 用户已用流量按套餐 traffic_mode(oneway/twoway)单独算。
+	TrafficStatsMode string `json:"traffic_stats_mode"`
 	IsFederated           bool       `json:"is_federated"`       // 是否为接入的"分享服务器"(联邦)，非持久化字段
 	FederationPrefix      string     `json:"federation_prefix"`  // 分享服务器上新增入站的 tag 前缀，非持久化字段
 	CreatedAt             time.Time  `json:"created_at"`
@@ -1366,6 +1374,9 @@ CREATE INDEX IF NOT EXISTS idx_override_scripts_hook ON override_scripts(hook);
 	if err := r.ensureSystemConfigColumn("enable_miaomiaowu_features", "INTEGER NOT NULL DEFAULT 1"); err != nil {
 		return err
 	}
+	if err := r.ensureSystemConfigColumn("enable_mmw_short_link_compat", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if err := r.ensureSystemConfigColumn("default_template_filename", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
@@ -1598,6 +1609,11 @@ CREATE INDEX IF NOT EXISTS idx_remote_servers_status ON remote_servers(status);
 		return err
 	}
 	if err := r.ensureRemoteServerColumn("traffic_used_offset", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// 服务器层流量统计规则: both / upload / download
+	// 影响节点流量聚合该服务器贡献的方向,用户流量仍按套餐 traffic_mode 算,二者独立。
+	if err := r.ensureRemoteServerColumn("traffic_stats_mode", "TEXT NOT NULL DEFAULT 'both'"); err != nil {
 		return err
 	}
 
@@ -5557,7 +5573,8 @@ SELECT proxy_groups_source_url, client_compatibility_mode, COALESCE(enable_short
        COALESCE(notify_daily_traffic_time, '08:00'), COALESCE(notify_traffic_threshold_percent, 80),
        COALESCE(enable_override_scripts, 0),
        COALESCE(silent_mode, 0), COALESCE(silent_mode_timeout, 15),
-       COALESCE(enable_miaomiaowu_features, 1), COALESCE(default_template_filename, '')
+       COALESCE(enable_miaomiaowu_features, 1), COALESCE(default_template_filename, ''),
+       COALESCE(enable_mmw_short_link_compat, 0)
 FROM system_config
 WHERE id = 1
 `
@@ -5567,7 +5584,7 @@ WHERE id = 1
 	var notifyEnabled, notifyLogin, notifySubFetch, notifyDailyTraffic int
 	var notifyServerOffline, notifyServerOnline, notifyTrafficThreshold int
 	var enableOverrideScripts, silentMode, silentModeTimeout int
-	var enableMiaomiaowuFeatures int
+	var enableMiaomiaowuFeatures, enableMmwShortLinkCompat int
 	err := r.db.QueryRowContext(ctx, query).Scan(
 		&cfg.ProxyGroupsSourceURL, &compatibilityMode, &enableShortLink,
 		&cfg.SpeedCollectInterval, &cfg.TrafficCollectInterval,
@@ -5580,6 +5597,7 @@ WHERE id = 1
 		&enableOverrideScripts,
 		&silentMode, &silentModeTimeout,
 		&enableMiaomiaowuFeatures, &cfg.DefaultTemplateFilename,
+		&enableMmwShortLinkCompat,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -5605,6 +5623,7 @@ WHERE id = 1
 		cfg.SilentModeTimeout = 15
 	}
 	cfg.EnableMiaomiaowuFeatures = enableMiaomiaowuFeatures != 0
+	cfg.EnableMmwShortLinkCompat = enableMmwShortLinkCompat != 0
 	return cfg, nil
 }
 
@@ -5637,6 +5656,7 @@ SET proxy_groups_source_url = ?,
     silent_mode_timeout = ?,
     enable_miaomiaowu_features = ?,
     default_template_filename = ?,
+    enable_mmw_short_link_compat = ?,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = 1
 `
@@ -5675,7 +5695,8 @@ WHERE id = 1
 		cfg.NotifyDailyTrafficTime, cfg.NotifyTrafficThresholdPercent,
 		boolToInt(cfg.EnableOverrideScripts),
 		boolToInt(cfg.SilentMode), silentModeTimeout,
-		boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename)
+		boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename,
+		boolToInt(cfg.EnableMmwShortLinkCompat))
 	if err != nil {
 		return fmt.Errorf("update system config: %w", err)
 	}
@@ -5692,8 +5713,8 @@ INSERT INTO system_config (id, proxy_groups_source_url, client_compatibility_mod
     notify_enabled, telegram_bot_token, telegram_chat_id, notify_login, notify_subscribe_fetch,
     notify_daily_traffic, notify_server_offline, notify_server_online, notify_traffic_threshold,
     notify_daily_traffic_time, notify_traffic_threshold_percent, enable_override_scripts,
-    silent_mode, silent_mode_timeout, enable_miaomiaowu_features, default_template_filename)
-VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    silent_mode, silent_mode_timeout, enable_miaomiaowu_features, default_template_filename, enable_mmw_short_link_compat)
+VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 		if _, err := r.db.ExecContext(ctx, insertStmt, cfg.ProxyGroupsSourceURL, compatibilityMode, enableShortLink,
 			cfg.SpeedCollectInterval, cfg.TrafficCollectInterval, cfg.TrafficCheckInterval, cfg.HeartbeatInterval, agentLogEnabled,
@@ -5703,7 +5724,8 @@ VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
 			cfg.NotifyDailyTrafficTime, cfg.NotifyTrafficThresholdPercent,
 			boolToInt(cfg.EnableOverrideScripts),
 			boolToInt(cfg.SilentMode), silentModeTimeout,
-			boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename); err != nil {
+			boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename,
+			boolToInt(cfg.EnableMmwShortLinkCompat)); err != nil {
 			return fmt.Errorf("insert system config: %w", err)
 		}
 	}
@@ -5758,9 +5780,21 @@ func (r *TrafficRepository) GetServerTrafficUsed(ctx context.Context, serverID i
 		return 0, errors.New("traffic repository not initialized")
 	}
 
-	// 总结该服务器的nod​​e_traffic的所有上行链路+下行链路
-	const query = `SELECT COALESCE(SUM(uplink + downlink), 0) FROM node_traffic WHERE server_id = ?`
+	// 应用服务器层 traffic_stats_mode:
+	//   both(默认) → uplink+downlink;upload → 仅 uplink;download → 仅 downlink。
+	// 用户流量按套餐 traffic_mode 走,不在此处处理。
+	mode := "both"
+	_ = r.db.QueryRowContext(ctx, `SELECT COALESCE(traffic_stats_mode, 'both') FROM remote_servers WHERE id = ?`, serverID).Scan(&mode)
+	expr := "uplink + downlink"
+	switch mode {
+	case "upload":
+		expr = "uplink"
+	case "download":
+		expr = "downlink"
+	}
+
 	var total int64
+	query := fmt.Sprintf(`SELECT COALESCE(SUM(%s), 0) FROM node_traffic WHERE server_id = ?`, expr)
 	err := r.db.QueryRowContext(ctx, query, serverID).Scan(&total)
 	if err != nil {
 		return 0, fmt.Errorf("get server traffic used: %w", err)
@@ -7142,6 +7176,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		COALESCE(xray_mode, 'external'),
 		COALESCE(time_offset_seconds, 0),
 		COALESCE(traffic_used_offset, 0),
+		COALESCE(traffic_stats_mode, 'both'),
 		EXISTS(SELECT 1 FROM federated_servers fs WHERE fs.server_id = remote_servers.id),
 		COALESCE((SELECT prefix FROM federated_servers fs WHERE fs.server_id = remote_servers.id), ''),
 		created_at, updated_at
@@ -7174,6 +7209,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 			&server.XrayMode,
 			&timeOffsetSeconds,
 			&server.TrafficUsedOffset,
+			&server.TrafficStatsMode,
 			&server.IsFederated,
 			&server.FederationPrefix,
 			&server.CreatedAt, &server.UpdatedAt); err != nil {
@@ -7249,6 +7285,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		COALESCE(current_upload_speed, 0), COALESCE(current_download_speed, 0),
 		COALESCE(xray_running, 0), COALESCE(xray_version, ''),
 		COALESCE(traffic_used_offset, 0),
+		COALESCE(traffic_stats_mode, 'both'),
 		created_at, updated_at
 		FROM remote_servers WHERE id = ?`
 
@@ -7270,6 +7307,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		&server.CurrentUploadSpeed, &server.CurrentDownloadSpeed,
 		&xrayRunningInt, &server.XrayVersion,
 		&server.TrafficUsedOffset,
+		&server.TrafficStatsMode,
 		&server.CreatedAt, &server.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -7466,17 +7504,23 @@ func (r *TrafficRepository) CreateRemoteServer(ctx context.Context, server *Remo
 	// 将令牌有效期设置为从现在起 7 天
 	tokenExpiresAt := time.Now().Add(7 * 24 * time.Hour)
 
-	const stmt = `INSERT INTO remote_servers (name, token, status, ip_address, domain, token_expires_at, last_token_refresh, connection_mode, listen_port, pull_address, pull_port, pull_token, use_443, steal_mode, site_type, site_value, xray_mode, traffic_limit, traffic_used_offset, traffic_reset_day, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+	const stmt = `INSERT INTO remote_servers (name, token, status, ip_address, domain, token_expires_at, last_token_refresh, connection_mode, listen_port, pull_address, pull_port, pull_token, use_443, steal_mode, site_type, site_value, xray_mode, traffic_limit, traffic_used_offset, traffic_reset_day, traffic_stats_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
 
 	stealMode := server.StealMode
 	if stealMode == "" {
-		stealMode = "tunnel"
+		// 历史默认 "tunnel" 改为 "default" — 没显式选 tunnel/fallback 的就是"默认部署模式",
+		// 跟 handler 那里的默认保持一致
+		stealMode = "default"
 	}
 	xrayMode := server.XrayMode
 	if xrayMode == "" {
 		xrayMode = "external"
 	}
-	result, err := r.db.ExecContext(ctx, stmt, server.Name, server.Token, server.Status, server.IPAddress, server.Domain, tokenExpiresAt, server.ConnectionMode, server.ListenPort, server.PullAddress, server.PullPort, server.PullToken, server.Use443, stealMode, server.SiteType, server.SiteValue, xrayMode, server.TrafficLimit, server.TrafficUsedOffset, server.TrafficResetDay)
+	statsMode := strings.TrimSpace(server.TrafficStatsMode)
+	if statsMode != "upload" && statsMode != "download" {
+		statsMode = "both"
+	}
+	result, err := r.db.ExecContext(ctx, stmt, server.Name, server.Token, server.Status, server.IPAddress, server.Domain, tokenExpiresAt, server.ConnectionMode, server.ListenPort, server.PullAddress, server.PullPort, server.PullToken, server.Use443, stealMode, server.SiteType, server.SiteValue, xrayMode, server.TrafficLimit, server.TrafficUsedOffset, server.TrafficResetDay, statsMode)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return ErrRemoteServerExists
@@ -7965,13 +8009,24 @@ func (r *TrafficRepository) UpdateRemoteServerSpeedByToken(ctx context.Context, 
 }
 
 // 在扫描后更新 X 射线状态。
-func (r *TrafficRepository) UpdateRemoteServerXrayStatus(ctx context.Context, id int64, running bool, version string) error {
+// UpdateRemoteServerXrayStatus 更新 xray 运行状态,并返回更新前的 xray_running 值,
+// 供调用方比对变化(主控会在状态翻转时发 TG 通知)。
+func (r *TrafficRepository) UpdateRemoteServerXrayStatus(ctx context.Context, id int64, running bool, version string) (prevRunning bool, err error) {
 	if r == nil || r.db == nil {
-		return errors.New("traffic repository not initialized")
+		return false, errors.New("traffic repository not initialized")
 	}
 
 	if id <= 0 {
-		return errors.New("remote server id is required")
+		return false, errors.New("remote server id is required")
+	}
+
+	// 先读旧值用于判断状态翻转
+	var prev int
+	if scanErr := r.db.QueryRowContext(ctx, `SELECT COALESCE(xray_running, 0) FROM remote_servers WHERE id = ?`, id).Scan(&prev); scanErr != nil {
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			return false, ErrRemoteServerNotFound
+		}
+		return false, fmt.Errorf("read prev xray status: %w", scanErr)
 	}
 
 	runningVal := 0
@@ -7981,23 +8036,21 @@ func (r *TrafficRepository) UpdateRemoteServerXrayStatus(ctx context.Context, id
 
 	const stmt = `UPDATE remote_servers SET xray_running = ?, xray_version = ?, xray_scanned_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
 
-	result, err := r.db.ExecContext(ctx, stmt, runningVal, version, id)
-	if err != nil {
-		return fmt.Errorf("update remote server xray status: %w", err)
+	result, execErr := r.db.ExecContext(ctx, stmt, runningVal, version, id)
+	if execErr != nil {
+		return false, fmt.Errorf("update remote server xray status: %w", execErr)
 	}
 
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("get rows affected: %w", err)
+	affected, rErr := result.RowsAffected()
+	if rErr != nil {
+		return false, fmt.Errorf("get rows affected: %w", rErr)
 	}
 
 	if affected == 0 {
-		return ErrRemoteServerNotFound
+		return false, ErrRemoteServerNotFound
 	}
-
 	log.Printf("[Remote Server] Updated Xray status for server ID=%d: running=%v, version=%s", id, running, version)
-
-	return nil
+	return prev != 0, nil
 }
 
 // UpdateRemoteServerListenPort 仅更新 Agent 监听端口字段(编辑服务器场景)。0 表示沿用 agent 默认 23889。
@@ -8132,7 +8185,7 @@ func (r *TrafficRepository) ShouldUsePullMode(server RemoteServer) bool {
 }
 
 // 更新远程服务器的基本信息（名称、域、流量设置、连接模式、Xray模式）。
-func (r *TrafficRepository) UpdateRemoteServer(ctx context.Context, id int64, name, domain string, trafficLimit int64, trafficResetDay int, connectionMode, xrayMode string) error {
+func (r *TrafficRepository) UpdateRemoteServer(ctx context.Context, id int64, name, domain string, trafficLimit int64, trafficResetDay int, connectionMode, xrayMode, trafficStatsMode string) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
 	}
@@ -8152,6 +8205,10 @@ func (r *TrafficRepository) UpdateRemoteServer(ctx context.Context, id int64, na
 	if xrayMode != "" {
 		setClauses = append(setClauses, "xray_mode = ?")
 		args = append(args, xrayMode)
+	}
+	if mode := strings.TrimSpace(trafficStatsMode); mode == "both" || mode == "upload" || mode == "download" {
+		setClauses = append(setClauses, "traffic_stats_mode = ?")
+		args = append(args, mode)
 	}
 	setClauses = append(setClauses, "updated_at = CURRENT_TIMESTAMP")
 	args = append(args, id)

@@ -43,7 +43,7 @@
     "warning": "注意!!! 节点的修改与删除均会同步更新所有订阅 ",
     "iconHints": "为可拖动元素，切换代理组类型、双击代理组标题编辑代理组名称，拖动可用节点标题时，代表拖动可用节点内的所有节点",
     "editNodeName": "编辑节点名称，",
-    "chainProxy": "创建链式代理，",
+    "chainProxy": "创建链式出站",
     "addRegionEmoji": "添加地区emoji，",
     "resolveIp": "解析IP地址，",
     "restoreDomain": "恢复原始域名，",

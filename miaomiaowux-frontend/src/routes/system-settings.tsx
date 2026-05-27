@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute, Link, redirect } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { CircleHelp, Copy, Eye, EyeOff, KeyRound, RefreshCw, Settings, Timer } from 'lucide-react'
+import { BookOpen, CircleHelp, Copy, Eye, EyeOff, KeyRound, Lock, RefreshCw, Settings, Timer } from 'lucide-react'
 import { Topbar } from '@/components/layout/topbar'
 import {
   Card,
@@ -198,6 +198,33 @@ function SystemSettingsPage() {
       setEnableMmwFeatures(mmwFeaturesData.enable_miaomiaowu_features)
     }
   }, [mmwFeaturesData])
+
+  // 兼容妙妙屋短链接 — 旧版 mmw 用 /<code>,新版 mmwx 用 /x/<code>;开启后兼容旧链接
+  const { data: mmwShortLinkCompatData } = useQuery({
+    queryKey: ['mmw-short-link-compat'],
+    queryFn: async () => {
+      const response = await api.get('/api/admin/system-settings/mmw-short-link-compat')
+      return response.data as { success: boolean; enable_mmw_short_link_compat: boolean }
+    },
+    enabled: Boolean(auth.accessToken),
+    staleTime: 5 * 60 * 1000,
+  })
+  const [enableMmwShortLinkCompat, setEnableMmwShortLinkCompat] = useState(false)
+  useEffect(() => {
+    if (mmwShortLinkCompatData?.enable_mmw_short_link_compat !== undefined) {
+      setEnableMmwShortLinkCompat(mmwShortLinkCompatData.enable_mmw_short_link_compat)
+    }
+  }, [mmwShortLinkCompatData])
+  const toggleMmwShortLinkCompatMutation = useMutation({
+    mutationFn: async (enabled: boolean) => {
+      await api.put('/api/admin/system-settings/mmw-short-link-compat', { enable_mmw_short_link_compat: enabled })
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['mmw-short-link-compat'] })
+      toast.success('设置已更新')
+    },
+    onError: handleServerError,
+  })
 
   // 用户路由出站开关 + 配额(与 UserPermissionsDialog 共享同一 config,通过同 queryKey 缓存复用)
   const { data: userPermConfigData } = useQuery({
@@ -851,6 +878,32 @@ function SystemSettingsPage() {
                   />
                 </div>
 
+                {/* 兼容妙妙屋短链接 */}
+                <div className='flex items-center justify-between rounded-lg border p-3'>
+                  <div className='flex items-center gap-2'>
+                    <Label htmlFor='mmw-short-link-compat-toggle' className='cursor-pointer'>
+                      兼容妙妙屋短链接
+                    </Label>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <CircleHelp className='h-4 w-4 text-muted-foreground cursor-help' />
+                      </TooltipTrigger>
+                      <TooltipContent side='top' className='max-w-xs'>
+                        <p>开启后,旧版妙妙屋短链 <code>/短链接</code> 访问会自动尝试匹配新版 <code>/x/短链接</code>,命中则放行;未命中按安全规则计数(防暴力枚举)。默认关闭。</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <Switch
+                    id='mmw-short-link-compat-toggle'
+                    checked={enableMmwShortLinkCompat}
+                    onCheckedChange={(checked) => {
+                      setEnableMmwShortLinkCompat(checked)
+                      toggleMmwShortLinkCompatMutation.mutate(checked)
+                    }}
+                    disabled={toggleMmwShortLinkCompatMutation.isPending}
+                  />
+                </div>
+
                 {/* 从妙妙屋迁移 — 跳到独立向导 */}
                 <div className='flex items-center justify-between rounded-lg border p-3'>
                   <div className='flex items-center gap-2'>
@@ -1440,6 +1493,10 @@ function LicenseSettingsCard() {
           </div>
         )}
 
+        {/* PRO 功能清单 — 激活的可点击跳文档,未激活的灰色不可点 hover 显示"需要升级许可证" */}
+        <ProFeaturesPanel features={lic?.plan?.features || []} />
+
+
         <div className='space-y-2'>
           <Label>{t('license.licenseKey')}</Label>
           <div className='flex items-center gap-2'>
@@ -1459,5 +1516,62 @@ function LicenseSettingsCard() {
         </div>
       </CardContent>
     </Card>
+  )
+}
+
+// PRO 功能清单
+// 数据源:license.plan.features 字符串数组(后端按 feature key 下发)。
+// 这里硬编码 4 个已上线的 PRO 能力 + 各自的文档 URL,匹配 license.features 决定按钮可点性。
+const PRO_FEATURES: { key: string; label: string; doc: string }[] = [
+  { key: 'speed_test', label: '节点测速', doc: 'https://miaomiaowu.net/x/docs/node-speedtest' },
+  { key: 'rate_limit', label: '节点限速', doc: 'https://miaomiaowu.net/x/docs/node-ratelimit' },
+  { key: 'server_share', label: '分享服务器', doc: 'https://miaomiaowu.net/x/docs/share-server' },
+  { key: 'embedded_xray', label: '内嵌 Xray', doc: 'https://miaomiaowu.net/x/docs/embedded-xray' },
+]
+
+function ProFeaturesPanel({ features }: { features: string[] }) {
+  const activeSet = new Set(features || [])
+  return (
+    <div className='space-y-2'>
+      <Label className='text-sm'>PRO 功能</Label>
+      <div className='grid grid-cols-2 gap-2 sm:grid-cols-4'>
+        {PRO_FEATURES.map((f) => {
+          const active = activeSet.has(f.key)
+          if (active) {
+            return (
+              <Tooltip key={f.key}>
+                <TooltipTrigger asChild>
+                  <a
+                    href={f.doc}
+                    target='_blank'
+                    rel='noopener noreferrer'
+                    className='inline-flex items-center justify-center gap-1.5 rounded-md border border-green-300 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 transition-colors hover:bg-green-100 dark:border-green-900 dark:bg-green-950 dark:text-green-300 dark:hover:bg-green-900/60'
+                  >
+                    <BookOpen className='h-3.5 w-3.5' />
+                    {f.label}
+                  </a>
+                </TooltipTrigger>
+                <TooltipContent className='font-mono text-[11px]'>{f.doc}</TooltipContent>
+              </Tooltip>
+            )
+          }
+          return (
+            <Tooltip key={f.key}>
+              <TooltipTrigger asChild>
+                <button
+                  type='button'
+                  disabled
+                  className='inline-flex cursor-not-allowed items-center justify-center gap-1.5 rounded-md border bg-muted px-3 py-2 text-sm text-muted-foreground opacity-70'
+                >
+                  <Lock className='h-3.5 w-3.5' />
+                  {f.label}
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>需要升级许可证</TooltipContent>
+            </Tooltip>
+          )
+        })}
+      </div>
+    </div>
   )
 }

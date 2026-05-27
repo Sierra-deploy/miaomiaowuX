@@ -707,7 +707,10 @@ function AdminDashboard() {
         if (snap) { uplink = Math.max(0, uplink - snap.uplink); downlink = Math.max(0, downlink - snap.downlink) }
       }
       return { tag: n.inbound_tag, server_id: 0, server_name: '', server_names: t?.server_names ?? [], display_name: n.node_name, uplink, downlink, total_uplink: 0, total_downlink: 0, last_uplink: t?.last_uplink ?? 0, last_downlink: t?.last_downlink ?? 0, updated_at: '' }
-    }).sort((a, b) => (b.uplink + b.downlink) - (a.uplink + a.downlink))
+    })
+      // 上下行都为 0 的节点不展示(没流量的占位会把卡片刷满,信息密度低)
+      .filter(item => item.uplink > 0 || item.downlink > 0)
+      .sort((a, b) => (b.uplink + b.downlink) - (a.uplink + a.downlink))
   }, [nodesData, trafficData, timeRange, snapshotData])
 
   const userTrafficList = useMemo<UserTrafficItem[]>(() => {

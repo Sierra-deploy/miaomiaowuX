@@ -23,6 +23,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
@@ -1159,6 +1160,7 @@ function AddServerDialog({
   const [trafficLimitGB, setTrafficLimitGB] = useState('')
   const [trafficUsedGB, setTrafficUsedGB] = useState('')
   const [resetDay, setResetDay] = useState('1')
+  const [trafficStatsMode, setTrafficStatsMode] = useState<'both' | 'upload' | 'download'>('both')
   const [creating, setCreating] = useState(false)
   const [result, setResult] = useState<CreateRemoteResp | null>(null)
 
@@ -1170,6 +1172,7 @@ function AddServerDialog({
       setTrafficLimitGB('')
       setTrafficUsedGB('')
       setResetDay('1')
+      setTrafficStatsMode('both')
       setResult(null)
       setCreating(false)
     }
@@ -1196,6 +1199,7 @@ function AddServerDialog({
         // 把 /etc/xray/config.json + confdir/* 合并写到 mmwx 标准路径 /usr/local/etc/xray/config.json,
         // 再用 embedded xray 启动。无需后续手工"接管"操作。
         xray_mode: 'embedded',
+        traffic_stats_mode: trafficStatsMode,
       })
       const data = resp.data as CreateRemoteResp
       if (!data.success) {
@@ -1268,6 +1272,15 @@ function AddServerDialog({
                   placeholder='1'
                 />
               </div>
+            </div>
+            <div className='space-y-1'>
+              <Label className='text-xs'>流量统计规则</Label>
+              <RadioGroup value={trafficStatsMode} onValueChange={(v) => setTrafficStatsMode(v as 'both' | 'upload' | 'download')} className='flex gap-4'>
+                <div className='flex items-center gap-2'><RadioGroupItem value='both' id='migrate-stats-both' /><Label htmlFor='migrate-stats-both' className='text-sm cursor-pointer'>上行 + 下行</Label></div>
+                <div className='flex items-center gap-2'><RadioGroupItem value='upload' id='migrate-stats-upload' /><Label htmlFor='migrate-stats-upload' className='text-sm cursor-pointer'>仅上行</Label></div>
+                <div className='flex items-center gap-2'><RadioGroupItem value='download' id='migrate-stats-download' /><Label htmlFor='migrate-stats-download' className='text-sm cursor-pointer'>仅下行</Label></div>
+              </RadioGroup>
+              <p className='text-[11px] text-muted-foreground'>影响该服务器节点流量的统计方向。用户流量按套餐配置算,不受影响。</p>
             </div>
           </div>
         ) : (

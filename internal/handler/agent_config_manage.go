@@ -82,6 +82,7 @@ type RemoteServerCreateRequest struct {
 	SiteType          string `json:"site_type"`           // "static" | "proxy"
 	SiteValue         string `json:"site_value"`          // 静态路径或反向代理地址
 	XrayMode          string `json:"xray_mode"`           // "external" 或 "embedded"，默认 "external"
+	TrafficStatsMode  string `json:"traffic_stats_mode"`  // "both"(默认) | "upload" | "download" — 节点流量统计方向
 }
 
 // RemoteServerResponse 表示带有远程服务器数据的响应
@@ -136,7 +137,8 @@ type RemoteServerUpdateRequest struct {
 	PullAddress     string `json:"pull_address"`
 	PullPort        int    `json:"pull_port"`
 	PullToken       string `json:"pull_token"`
-	XrayMode        string `json:"xray_mode"`
+	XrayMode         string `json:"xray_mode"`
+	TrafficStatsMode string `json:"traffic_stats_mode"` // both | upload | download
 }
 
 // 生成加密安全令牌
@@ -327,9 +329,22 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		connectionMode = storage.ConnectionModePush
 	}
 
+	// steal_mode 三种值:tunnel / fallback / default。
+	// 历史 BUG:这里曾"非 fallback 就强制 tunnel",导致没勾偷自己的服务器实际也存 tunnel,
+	// 用户在编辑 dialog 看到默认选中 tunnel,语义混淆。
+	// 现在:
+	//   - 显式 fallback / tunnel / default → 原样保留
+	//   - 其它值(包括空)→ 偷自己时默认 tunnel,否则默认 default
 	stealMode := req.StealMode
-	if stealMode != "fallback" {
-		stealMode = "tunnel"
+	switch stealMode {
+	case "tunnel", "fallback", "default":
+		// ok
+	default:
+		if req.StealSelf {
+			stealMode = "tunnel"
+		} else {
+			stealMode = "default"
+		}
 	}
 
 	xrayMode := req.XrayMode
@@ -355,6 +370,10 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 	if trafficLimit < 0 {
 		trafficLimit = 0
 	}
+	trafficStatsMode := strings.TrimSpace(req.TrafficStatsMode)
+	if trafficStatsMode != "upload" && trafficStatsMode != "download" {
+		trafficStatsMode = "both"
+	}
 
 	server := &storage.RemoteServer{
 		Name:              req.Name,
@@ -375,6 +394,7 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		TrafficLimit:      trafficLimit,
 		TrafficUsedOffset: trafficUsedOffset,
 		TrafficResetDay:   resetDay,
+		TrafficStatsMode:  trafficStatsMode,
 	}
 
 	if err := h.repo.CreateRemoteServer(ctx, server); err != nil {
@@ -581,7 +601,7 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		return
 	}
 
-	if err := h.repo.UpdateRemoteServer(ctx, req.ID, req.Name, req.Domain, req.TrafficLimit, req.TrafficResetDay, req.ConnectionMode, req.XrayMode); err != nil {
+	if err := h.repo.UpdateRemoteServer(ctx, req.ID, req.Name, req.Domain, req.TrafficLimit, req.TrafficResetDay, req.ConnectionMode, req.XrayMode, req.TrafficStatsMode); err != nil {
 		msg := "更新服务器失败"
 		if err == storage.ErrRemoteServerNotFound {
 			msg = "服务器不存在"

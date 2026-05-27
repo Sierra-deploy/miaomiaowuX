@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { Edit2, RefreshCw, Trash2, Plus, Package } from 'lucide-react'
@@ -104,7 +104,27 @@ function PackagesPage() {
     },
   })
 
-  const nodes = nodesData?.nodes || []
+  // 复用节点管理页的 user-config.node_order,保证此 dialog 里节点顺序与节点管理一致
+  const { data: userConfigData } = useQuery({
+    queryKey: ['user-config'],
+    queryFn: async () => {
+      const response = await api.get('/api/user/config')
+      return response.data as { node_order?: number[] }
+    },
+  })
+
+  const nodes = useMemo(() => {
+    const raw = nodesData?.nodes || []
+    const order = userConfigData?.node_order || []
+    if (order.length === 0) return raw
+    const idx = new Map<number, number>()
+    order.forEach((id, i) => idx.set(id, i))
+    return [...raw].sort((a: any, b: any) => {
+      const ai = idx.get(a.id) ?? Number.POSITIVE_INFINITY
+      const bi = idx.get(b.id) ?? Number.POSITIVE_INFINITY
+      return ai - bi
+    })
+  }, [nodesData, userConfigData])
 
   const createMutation = useMutation({
     mutationFn: async (data: PackageFormData) => {

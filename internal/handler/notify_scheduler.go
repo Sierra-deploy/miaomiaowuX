@@ -195,6 +195,31 @@ func SendServerOfflineNotification(ctx context.Context, serverName, ip string) {
 	})
 }
 
+// SendXrayStatusChangeNotification 在 xray 启停切换时发 TG 通知。
+// 复用 server_online / server_offline 两个开关:用户已勾选服务器上下线通知,xray 状态变化一起通知,
+// 不引入新开关、不增加配置面板复杂度。
+func SendXrayStatusChangeNotification(ctx context.Context, serverName, ip string, running bool) {
+	n := GetNotifier()
+	if n == nil {
+		return
+	}
+	var evt notify.Event
+	if running {
+		evt = notify.Event{
+			Type:    notify.EventServerOnline,
+			Title:   "Xray 已启动",
+			Message: fmt.Sprintf("服务器: `%s`\nIP: `%s`", serverName, ip),
+		}
+	} else {
+		evt = notify.Event{
+			Type:    notify.EventServerOffline,
+			Title:   "Xray 已停止",
+			Message: fmt.Sprintf("服务器: `%s`\nIP: `%s`", serverName, ip),
+		}
+	}
+	go n.Send(ctx, evt)
+}
+
 func SendLoginNotification(ctx context.Context, username, ip string) {
 	n := GetNotifier()
 	if n == nil {

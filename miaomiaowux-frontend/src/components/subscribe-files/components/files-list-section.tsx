@@ -9,6 +9,7 @@
 //
 // 设计:所有 state / mutation / 副作用都由父端持有,这里只接 props + 回调。
 //      `isAdmin` 决定隐藏某些只对管理员开放的列(自定义连接 / 描述 / 上下移)。
+import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { ChevronDown, ChevronUp, Edit, Settings, Trash2 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
@@ -33,6 +34,7 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog'
 import { DataTable, type DataTableColumn } from '@/components/data-table'
+import { TrafficScopePopover } from '../dialogs/traffic-scope-drawer'
 
 // 文件 / 模板的最小引用形(只声明本组件用到的字段)
 export interface SubscribeFileRef {
@@ -89,8 +91,10 @@ interface FilesListSectionProps {
   onMoveUp: (file: SubscribeFileRef) => void
   onMoveDown: (file: SubscribeFileRef) => void
   onToggleAutoSync: (id: number, checked: boolean) => void
-  // 管理员点击流量列时调用 — 弹"统计范围"抽屉
-  onConfigureTrafficScope?: (file: SubscribeFileRef) => void
+  // 管理员点击流量列触发 — 改为内嵌 Popover,父端只需提供服务器列表 + 保存回调
+  trafficScopeServers?: { id: number; name: string }[]
+  onSaveTrafficScope?: (file: SubscribeFileRef, statsServerIds: string) => void
+  savingTrafficScope?: boolean
   // mutation 状态 + 调用代理
   inlineUpdate: (payload: { id: number; data: Record<string, any> }) => void
   updateUserShortCode: (value: string) => void
@@ -114,7 +118,9 @@ export function FilesListSection({
   onMoveUp,
   onMoveDown,
   onToggleAutoSync,
-  onConfigureTrafficScope,
+  trafficScopeServers,
+  onSaveTrafficScope,
+  savingTrafficScope,
   inlineUpdate,
   updateUserShortCode,
   updateMetadataPending,
@@ -271,8 +277,7 @@ export function FilesListSection({
                 {
                   header: '流量',
                   cell: (file) => {
-                    const clickable = isAdmin && !!onConfigureTrafficScope
-                    const handleClick = clickable ? () => onConfigureTrafficScope!(file) : undefined
+                    const clickable = isAdmin && !!onSaveTrafficScope
                     if (isTrafficLoading || !trafficData) {
                       return <div className='h-2 w-16 animate-pulse rounded bg-muted' />
                     }
@@ -281,16 +286,23 @@ export function FilesListSection({
                       const gb = bytes / (1024 * 1024 * 1024)
                       return gb >= 1 ? `${gb.toFixed(1)}G` : `${(bytes / (1024 * 1024)).toFixed(0)}M`
                     }
+                    const wrapInPopover = (el: ReactNode) =>
+                      clickable ? (
+                        <TrafficScopePopover
+                          file={file as any}
+                          servers={trafficScopeServers || []}
+                          onSave={(_id, ids) => onSaveTrafficScope!(file, ids)}
+                          saving={!!savingTrafficScope}
+                        >
+                          {el}
+                        </TrafficScopePopover>
+                      ) : el
                     if (!tr || (tr.used === 0 && tr.limit === 0)) {
-                      const dash = <span className='text-xs text-muted-foreground'>-</span>
-                      return clickable ? (
-                        <Tooltip>
-                          <TooltipTrigger asChild>
-                            <button type='button' onClick={handleClick} className='hover:underline'>{dash}</button>
-                          </TooltipTrigger>
-                          <TooltipContent>点击配置统计范围</TooltipContent>
-                        </Tooltip>
-                      ) : dash
+                      const dash = <button type='button' className='text-xs text-muted-foreground hover:underline'>-</button>
+                      if (clickable) {
+                        return wrapInPopover(dash)
+                      }
+                      return <span className='text-xs text-muted-foreground'>-</span>
                     }
                     const pct = tr.limit > 0 ? Math.min(100, (tr.used / tr.limit) * 100) : 0
                     const inner = (
@@ -305,7 +317,7 @@ export function FilesListSection({
                       <Tooltip>
                         <TooltipTrigger asChild>
                           {clickable ? (
-                            <button type='button' onClick={handleClick} className='block w-20 text-left hover:opacity-80'>{inner}</button>
+                            wrapInPopover(<button type='button' className='block w-20 text-left hover:opacity-80'>{inner}</button>)
                           ) : inner}
                         </TooltipTrigger>
                         <TooltipContent>
@@ -513,8 +525,7 @@ export function FilesListSection({
                 {
                   label: '流量',
                   value: (file) => {
-                    const clickable = isAdmin && !!onConfigureTrafficScope
-                    const handleClick = clickable ? () => onConfigureTrafficScope!(file) : undefined
+                    const clickable = isAdmin && !!onSaveTrafficScope
                     if (isTrafficLoading || !trafficData) {
                       return <div className='h-2 w-20 animate-pulse rounded bg-muted' />
                     }
@@ -523,9 +534,20 @@ export function FilesListSection({
                       const gb = bytes / (1024 * 1024 * 1024)
                       return gb >= 1 ? `${gb.toFixed(1)}G` : `${(bytes / (1024 * 1024)).toFixed(0)}M`
                     }
+                    const wrap = (el: ReactNode) =>
+                      clickable ? (
+                        <TrafficScopePopover
+                          file={file as any}
+                          servers={trafficScopeServers || []}
+                          onSave={(_id, ids) => onSaveTrafficScope!(file, ids)}
+                          saving={!!savingTrafficScope}
+                        >
+                          {el}
+                        </TrafficScopePopover>
+                      ) : el
                     if (!tr || (tr.used === 0 && tr.limit === 0)) {
-                      const dash = <span className='text-xs text-muted-foreground'>-</span>
-                      return clickable ? (<button type='button' onClick={handleClick} className='hover:underline'>{dash}</button>) : dash
+                      if (clickable) return wrap(<button type='button' className='text-xs text-muted-foreground hover:underline'>-</button>)
+                      return <span className='text-xs text-muted-foreground'>-</span>
                     }
                     const pct = tr.limit > 0 ? Math.min(100, (tr.used / tr.limit) * 100) : 0
                     const inner = (
@@ -536,8 +558,8 @@ export function FilesListSection({
                         </span>
                       </div>
                     )
-                    return clickable ? (
-                      <button type='button' onClick={handleClick} className='block w-24 text-left hover:opacity-80'>{inner}</button>
+                    return clickable ? wrap(
+                      <button type='button' className='block w-24 text-left hover:opacity-80'>{inner}</button>
                     ) : inner
                   },
                 },

@@ -16,6 +16,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from '@/components/ui/dialog'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { ProtocolBadge } from '@/components/common/protocol-badge'
 
 function relTime(t: string, tc: (k: string, o?: any) => string) {
@@ -244,27 +245,25 @@ export function SpeedTestDialog({
   const toggleAll = () => toggleAllIds(rows.map((r) => r.id))
 
   return (
-    <Dialog open={open} onOpenChange={(o) => { if (!o) { setManageTesters(false); setHistoryNode(null); setAutoRotateTesterId(null); onClose() } }}>
+    <>
+    <Dialog open={open} onOpenChange={(o) => { if (!o) { setHistoryNode(null); onClose() } }}>
       <DialogContent
         className='w-[95vw] sm:w-auto sm:!max-w-[95vw] max-h-[88vh] flex flex-col'
-        // 点外面 / 按 Esc:在子视图里只退回主视图,不要最小化整个 dialog;在主视图才最小化
+        // 点外面 / 按 Esc:历史子视图退回主视图;主视图最小化。测速端管理用 Sheet 独立,
+        // 与本 dialog 解耦,关 Sheet 不会带着 dialog 一起关。
         onInteractOutside={(e) => {
           e.preventDefault()
-          if (manageTesters) { setManageTesters(false); setAutoRotateTesterId(null); return }
           if (historyNode) { setHistoryNode(null); return }
           onMinimize()
         }}
         onEscapeKeyDown={(e) => {
           e.preventDefault()
-          if (manageTesters) { setManageTesters(false); setAutoRotateTesterId(null); return }
           if (historyNode) { setHistoryNode(null); return }
           onMinimize()
         }}
       >
         {historyNode ? (
           <HistoryView node={historyNode} onBack={() => setHistoryNode(null)} t={t} tc={tc} />
-        ) : manageTesters ? (
-          <TestersView onBack={() => { setManageTesters(false); setAutoRotateTesterId(null) }} t={t} autoRotateId={autoRotateTesterId} />
         ) : (
           <>
             <DialogHeader>
@@ -316,10 +315,24 @@ export function SpeedTestDialog({
                     {t('speedtest.batchTest')} ({selected.size})
                   </Button>
                 )}
-                <Button size='sm' variant='outline' onClick={() => setManageTesters(true)}>
-                  <Settings2 className='mr-1 h-4 w-4' />
-                  {t('speedtest.testerManage')}
-                </Button>
+                <Popover
+                  open={manageTesters}
+                  onOpenChange={(o) => { setManageTesters(o); if (!o) setAutoRotateTesterId(null) }}
+                >
+                  <PopoverTrigger asChild>
+                    <Button size='sm' variant='outline'>
+                      <Settings2 className='mr-1 h-4 w-4' />
+                      {t('speedtest.testerManage')}
+                    </Button>
+                  </PopoverTrigger>
+                  <PopoverContent align='end' side='bottom' sideOffset={6} className='w-[min(560px,92vw)] p-4 max-h-[70vh] overflow-y-auto'>
+                    <TestersView
+                      onBack={() => { setManageTesters(false); setAutoRotateTesterId(null) }}
+                      t={t}
+                      autoRotateId={autoRotateTesterId}
+                    />
+                  </PopoverContent>
+                </Popover>
               </div>
             </div>
 
@@ -433,6 +446,7 @@ export function SpeedTestDialog({
         )}
       </DialogContent>
     </Dialog>
+    </>
   )
 }
 
@@ -562,14 +576,11 @@ function TestersView({ onBack, t, autoRotateId }: { onBack: () => void; t: any; 
 
   return (
     <>
-      <DialogHeader>
-        <DialogTitle className='flex items-center gap-2'>
-          <Button variant='ghost' size='icon' className='size-7' onClick={onBack}><ArrowLeft className='size-4' /></Button>
-          {t('speedtest.testerManage')}
-        </DialogTitle>
-        <DialogDescription>{t('speedtest.testerManageDesc')}</DialogDescription>
-      </DialogHeader>
-      <div className='flex-1 space-y-4 overflow-y-auto py-2'>
+      <div className='mb-3'>
+        <div className='font-medium text-sm'>{t('speedtest.testerManage')}</div>
+        <div className='text-muted-foreground text-xs mt-0.5'>{t('speedtest.testerManageDesc')}</div>
+      </div>
+      <div className='space-y-4'>
         {!compactMode && (
           <>
             <a

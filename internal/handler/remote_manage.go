@@ -90,9 +90,14 @@ func (h *RemoteManageHandler) HandleScanResult(serverID int64, payload WSScanRes
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// 更新数据库中的 X 射线状态
-	if err := h.repo.UpdateRemoteServerXrayStatus(ctx, serverID, payload.XrayRunning, payload.XrayVersion); err != nil {
+	// 更新数据库中的 X 射线状态;若状态翻转则发 TG 通知(复用服务器上下线开关)
+	prevRunning, err := h.repo.UpdateRemoteServerXrayStatus(ctx, serverID, payload.XrayRunning, payload.XrayVersion)
+	if err != nil {
 		log.Printf("[Remote Manage] Failed to update Xray status for server %d: %v", serverID, err)
+	} else if prevRunning != payload.XrayRunning {
+		if server, gErr := h.repo.GetRemoteServer(ctx, serverID); gErr == nil && server != nil {
+			SendXrayStatusChangeNotification(ctx, server.Name, server.IPAddress, payload.XrayRunning)
+		}
 	}
 
 	if payload.XrayRunning {
@@ -547,10 +552,16 @@ func (h *RemoteManageHandler) refreshXrayStatus(serverID int64) {
 	if status.Xray.Version != "" {
 		version = status.Xray.Version
 	}
-	if err := h.repo.UpdateRemoteServerXrayStatus(ctx, serverID, status.Xray.Running, version); err != nil {
+	prev, err := h.repo.UpdateRemoteServerXrayStatus(ctx, serverID, status.Xray.Running, version)
+	if err != nil {
 		log.Printf("[Remote Manage] refreshXrayStatus: failed to update DB for server %d: %v", serverID, err)
 	} else {
 		log.Printf("[Remote Manage] refreshXrayStatus: server %d xray_running=%v", serverID, status.Xray.Running)
+		if prev != status.Xray.Running {
+			if server, gErr := h.repo.GetRemoteServer(ctx, serverID); gErr == nil && server != nil {
+				SendXrayStatusChangeNotification(ctx, server.Name, server.IPAddress, status.Xray.Running)
+			}
+		}
 	}
 }
 
@@ -1683,9 +1694,14 @@ func (h *RemoteManageHandler) HandleScan(w http.ResponseWriter, r *http.Request)
 		XrayVersion string `json:"xray_version"`
 	}
 	if err := json.Unmarshal(result, &scanResult); err == nil && scanResult.Success {
-		// 更新数据库中的 X 射线状态
-		if updateErr := h.repo.UpdateRemoteServerXrayStatus(r.Context(), id, scanResult.XrayRunning, scanResult.XrayVersion); updateErr != nil {
+		// 更新数据库中的 X 射线状态;状态翻转时发 TG 通知
+		prev, updateErr := h.repo.UpdateRemoteServerXrayStatus(r.Context(), id, scanResult.XrayRunning, scanResult.XrayVersion)
+		if updateErr != nil {
 			log.Printf("[Remote Manage] Failed to update Xray status for server %d: %v", id, updateErr)
+		} else if prev != scanResult.XrayRunning {
+			if server, gErr := h.repo.GetRemoteServer(r.Context(), id); gErr == nil && server != nil {
+				SendXrayStatusChangeNotification(r.Context(), server.Name, server.IPAddress, scanResult.XrayRunning)
+			}
 		}
 
 		// 如果 Xray 正在运行，则将入站同步到节点表

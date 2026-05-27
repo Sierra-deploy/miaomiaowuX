@@ -87,7 +87,13 @@ func applyFederationInfo(ctx context.Context, repo *storage.TrafficRepository, s
 
 	if running, ok := info["xray_running"].(bool); ok {
 		ver, _ := info["xray_version"].(string)
-		_ = repo.UpdateRemoteServerXrayStatus(ctx, serverID, running, ver)
+		prev, uErr := repo.UpdateRemoteServerXrayStatus(ctx, serverID, running, ver)
+		// 联邦拉取的 xray 状态翻转同样发通知;联邦消费方角度也是"这台服务器的 xray 状态变了"
+		if uErr == nil && prev != running {
+			if server, gErr := repo.GetRemoteServer(ctx, serverID); gErr == nil && server != nil {
+				SendXrayStatusChangeNotification(ctx, server.Name, server.IPAddress, running)
+			}
+		}
 	}
 
 	// 透传拥有方的 xray 模式(embedded/external),否则消费方一直显示默认的"外置"

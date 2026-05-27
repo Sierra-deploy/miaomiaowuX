@@ -11,30 +11,30 @@ import {
   overrideFormToJSON,
   jsonToOverrideForm,
   type OverrideForm,
-} from './subscribe-files/utils/override-form'
-import { PreviewDialog } from './subscribe-files/dialogs/preview-dialog'
-import { EditConfigDialog } from './subscribe-files/dialogs/edit-config-dialog'
-import { EditExternalSubDialog } from './subscribe-files/dialogs/edit-external-sub-dialog'
-import { EditFileDialog } from './subscribe-files/dialogs/edit-file-dialog'
-import { EditMetadataDialog } from './subscribe-files/dialogs/edit-metadata-dialog'
-import { EditNodesHostDialog } from './subscribe-files/dialogs/edit-nodes-host-dialog'
-import { BatchDeleteProviderDialog } from './subscribe-files/dialogs/batch-delete-provider-dialog'
-import { ProxyProviderProDialog } from './subscribe-files/dialogs/proxy-provider-pro-dialog'
-import { ProxyProviderEditDialog } from './subscribe-files/dialogs/proxy-provider-edit-dialog'
-import { ExternalSubsSection } from './subscribe-files/components/external-subs-section'
-import { ProxyProvidersSection } from './subscribe-files/components/proxy-providers-section'
-import { FilesListSection } from './subscribe-files/components/files-list-section'
-import { useSupportData } from './subscribe-files/hooks/use-support-data'
-import { useExternalSubs } from './subscribe-files/hooks/use-external-subs'
-import { useProxyProviders } from './subscribe-files/hooks/use-proxy-providers'
-import { useUserMeta } from './subscribe-files/hooks/use-user-meta'
-import { useAllNodes } from './subscribe-files/hooks/use-all-nodes'
-import { useSubscribeFiles } from './subscribe-files/hooks/use-subscribe-files'
-import { useNodeEditWorkflow } from './subscribe-files/hooks/use-node-edit-workflow'
+} from '@/components/subscribe-files/utils/override-form'
+import { PreviewDialog } from '@/components/subscribe-files/dialogs/preview-dialog'
+import { EditConfigDialog } from '@/components/subscribe-files/dialogs/edit-config-dialog'
+import { EditExternalSubDialog } from '@/components/subscribe-files/dialogs/edit-external-sub-dialog'
+import { EditFileDialog } from '@/components/subscribe-files/dialogs/edit-file-dialog'
+import { EditMetadataDialog } from '@/components/subscribe-files/dialogs/edit-metadata-dialog'
+import { EditNodesHostDialog } from '@/components/subscribe-files/dialogs/edit-nodes-host-dialog'
+import { BatchDeleteProviderDialog } from '@/components/subscribe-files/dialogs/batch-delete-provider-dialog'
+import { ProxyProviderProDialog } from '@/components/subscribe-files/dialogs/proxy-provider-pro-dialog'
+import { ProxyProviderEditDialog } from '@/components/subscribe-files/dialogs/proxy-provider-edit-dialog'
+import { ExternalSubsSection } from '@/components/subscribe-files/components/external-subs-section'
+import { ProxyProvidersSection } from '@/components/subscribe-files/components/proxy-providers-section'
+import { FilesListSection } from '@/components/subscribe-files/components/files-list-section'
+import { useSupportData } from '@/components/subscribe-files/hooks/use-support-data'
+import { useExternalSubs } from '@/components/subscribe-files/hooks/use-external-subs'
+import { useProxyProviders } from '@/components/subscribe-files/hooks/use-proxy-providers'
+import { useUserMeta } from '@/components/subscribe-files/hooks/use-user-meta'
+import { useAllNodes } from '@/components/subscribe-files/hooks/use-all-nodes'
+import { useSubscribeFiles } from '@/components/subscribe-files/hooks/use-subscribe-files'
+import { useNodeEditWorkflow } from '@/components/subscribe-files/hooks/use-node-edit-workflow'
 import {
   batchCreateByRegion,
   batchCreateByProtocol,
-} from './subscribe-files/utils/batch-create-providers'
+} from '@/components/subscribe-files/utils/batch-create-providers'
 import {
   Upload,
   Download,
@@ -128,7 +128,7 @@ import {
 import { DataTable } from '@/components/data-table'
 import type { DataTableColumn } from '@/components/data-table'
 import { MissingNodesReplaceDialog } from '@/components/missing-nodes-replace-dialog'
-import { TrafficScopeDrawer } from './subscribe-files/dialogs/traffic-scope-drawer'
+// TrafficScopePopover 由 files-list-section 内联使用 — 这里只保留服务器列表 + 保存回调透传
 import { Twemoji } from '@/components/twemoji'
 
 export const Route = createFileRoute('/subscribe-files/')({
@@ -275,8 +275,6 @@ function SubscribeFilesPage() {
   const [configContent, setConfigContent] = useState('')
 
   // 流量统计范围抽屉(管理员点订阅"流量"列触发)
-  const [trafficScopeOpen, setTrafficScopeOpen] = useState(false)
-  const [trafficScopeFile, setTrafficScopeFile] = useState<SubscribeFile | null>(null)
 
   // 缺失节点替换对话框状态
   const [missingNodesDialogOpen, setMissingNodesDialogOpen] = useState(false)
@@ -1706,10 +1704,20 @@ function SubscribeFilesPage() {
   }
 
   // 计算可用节点
+  // 按 userConfig.node_order 排序,跟节点管理页保持一致(管理页里用户手动拖拽过的顺序);
+  // 没在 node_order 里的节点(新增的)排到后面,内部按 nodes 数组原顺序(后端默认 created_at DESC)。
   const availableNodes = useMemo(() => {
     if (!nodesQuery.data?.nodes) return []
 
-    const allNodeNames = nodesQuery.data.nodes.map((n) => n.node_name)
+    const nodeOrder = userConfigQuery.data?.node_order || []
+    const orderMap = new Map<number, number>()
+    nodeOrder.forEach((id, index) => orderMap.set(id, index))
+    const sortedNodes = [...nodesQuery.data.nodes].sort((a, b) => {
+      const ai = orderMap.get(a.id) ?? Number.POSITIVE_INFINITY
+      const bi = orderMap.get(b.id) ?? Number.POSITIVE_INFINITY
+      return ai - bi
+    })
+    const allNodeNames = sortedNodes.map((n) => n.node_name)
 
     if (showAllNodes) {
       return allNodeNames
@@ -1723,7 +1731,7 @@ function SubscribeFilesPage() {
 
     // 只返回未使用的节点
     return allNodeNames.filter((name) => !usedNodes.has(name))
-  }, [nodesQuery.data, proxyGroups, showAllNodes])
+  }, [nodesQuery.data, proxyGroups, showAllNodes, userConfigQuery.data?.node_order])
 
   // 处理编辑节点对话框关闭
   const handleEditNodesDialogOpenChange = (open: boolean) => {
@@ -1933,7 +1941,29 @@ function SubscribeFilesPage() {
           onMoveUp={handleMoveUp}
           onMoveDown={handleMoveDown}
           onToggleAutoSync={handleToggleAutoSync}
-          onConfigureTrafficScope={(file) => { setTrafficScopeFile(file); setTrafficScopeOpen(true) }}
+          trafficScopeServers={(remoteServersData?.servers ?? []).map((s: any) => ({ id: s.id, name: s.name }))}
+          savingTrafficScope={inlineUpdateMutation.isPending}
+          onSaveTrafficScope={(file, statsServerIds) => {
+            // 同原 drawer 逻辑:发完整 payload,只改 stats_server_ids,其它字段维持现状
+            inlineUpdateMutation.mutate({
+              id: file.id,
+              data: {
+                name: file.name,
+                description: (file as any).description || '',
+                filename: file.filename,
+                type: file.type,
+                url: (file as any).url || '',
+                template_filename: (file as any).template_filename || '',
+                selected_tags: (file as any).selected_tags || [],
+                selected_custom_rule_ids: (file as any).selected_custom_rule_ids || [],
+                selected_override_script_ids: (file as any).selected_override_script_ids || [],
+                stats_server_ids: statsServerIds,
+                traffic_limit: (file as any).traffic_limit ?? 0,
+                custom_short_code: (file as any).custom_short_code || '',
+                raw_output: (file as any).raw_output ?? false,
+              },
+            })
+          }}
           inlineUpdate={(payload) => inlineUpdateMutation.mutate(payload)}
           updateUserShortCode={(value) => updateMyShortCodeMutation.mutate(value)}
           updateMetadataPending={updateMetadataMutation.isPending}
@@ -2322,41 +2352,7 @@ function SubscribeFilesPage() {
         confirmText={t('editConfig.applyReplace')}
       />
 
-      {/* 流量统计范围抽屉(管理员点"流量"列触发) — 拆到 ./subscribe-files/dialogs/traffic-scope-drawer */}
-      <TrafficScopeDrawer
-        open={trafficScopeOpen}
-        onOpenChange={(open) => { setTrafficScopeOpen(open); if (!open) setTrafficScopeFile(null) }}
-        file={trafficScopeFile}
-        servers={(remoteServersData?.servers ?? []).map((s: any) => ({ id: s.id, name: s.name }))}
-        onSave={(id, statsServerIds) => {
-          // 后端 update 同时会回写 traffic_limit / custom_short_code(它们的零值会清空原数据),
-          // 所以这里发完整 payload,只改 stats_server_ids,其它字段维持现状。
-          const f = trafficScopeFile
-          if (!f) return
-          inlineUpdateMutation.mutate(
-            {
-              id,
-              data: {
-                name: f.name,
-                description: f.description || '',
-                filename: f.filename,
-                type: f.type,
-                url: f.url || '',
-                template_filename: f.template_filename || '',
-                selected_tags: f.selected_tags || [],
-                selected_custom_rule_ids: (f as any).selected_custom_rule_ids || [],
-                selected_override_script_ids: (f as any).selected_override_script_ids || [],
-                stats_server_ids: statsServerIds,
-                traffic_limit: f.traffic_limit ?? 0,
-                custom_short_code: f.custom_short_code || '',
-                raw_output: (f as any).raw_output ?? false,
-              },
-            },
-            { onSuccess: () => { setTrafficScopeOpen(false); setTrafficScopeFile(null) } },
-          )
-        }}
-        saving={inlineUpdateMutation.isPending}
-      />
+      {/* 流量统计范围已改为内联 Popover,由 files-list-section 在流量列按钮上挂载 */}
 
       {/* 代理集合Pro对话框 — 拆到 ./subscribe-files/dialogs/proxy-provider-pro-dialog */}
       <ProxyProviderProDialog

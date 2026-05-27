@@ -648,11 +648,6 @@ func (h *subscribeFilesHandler) handleTraffic(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	tagServerMap, err := h.repo.GetInboundTagServerMap(ctx)
-	if err != nil {
-		tagServerMap = make(map[string]int64)
-	}
-
 	allExternalSubs, _ := h.repo.ListAllExternalSubscriptions(ctx)
 	extSubByName := make(map[string]storage.ExternalSubscription, len(allExternalSubs))
 	for _, s := range allExternalSubs {
@@ -682,27 +677,33 @@ func (h *subscribeFilesHandler) handleTraffic(w http.ResponseWriter, r *http.Req
 			nodes = filtered
 		}
 
-		serverIDs := make(map[int64]bool)
+		// 收集外部订阅名(用于把订阅源自带的 used/total 也算进去 — 与服务器流量并列)
 		extSubNames := make(map[string]bool)
 		for _, n := range nodes {
-			if n.InboundTag != "" {
-				if sid, ok := tagServerMap[n.InboundTag]; ok {
-					serverIDs[sid] = true
-				}
-			}
 			if n.Tag != "" && n.Tag != "手动输入" {
 				extSubNames[n.Tag] = true
 			}
 		}
 
-		var totalUsed, totalLimit int64
-
-		if len(serverIDs) > 0 {
-			ids := make([]int64, 0, len(serverIDs))
-			for id := range serverIDs {
-				ids = append(ids, id)
+		// 服务器流量范围:
+		//   stats_server_ids 非空 → 仅统计选中的服务器
+		//   stats_server_ids 空(默认)→ 统计全部服务器
+		var serverScopeIDs []int64
+		if strings.TrimSpace(f.StatsServerIDs) != "" {
+			for _, s := range strings.Split(f.StatsServerIDs, ",") {
+				if id, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64); err == nil && id > 0 {
+					serverScopeIDs = append(serverScopeIDs, id)
+				}
 			}
-			limit, used, _ := h.repo.GetRemoteServerTrafficTotals(ctx, ids)
+		}
+
+		var totalUsed, totalLimit int64
+		if len(serverScopeIDs) > 0 {
+			limit, used, _ := h.repo.GetRemoteServerTrafficTotals(ctx, serverScopeIDs)
+			totalUsed += used
+			totalLimit += limit
+		} else {
+			limit, used, _ := h.repo.GetAllRemoteServersTrafficTotals(ctx)
 			totalUsed += used
 			totalLimit += limit
 		}

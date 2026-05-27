@@ -144,6 +144,9 @@ function XrayServersPage() {
   const [createDomain, setCreateDomain] = useState('')
   const [domainAutoFilled, setDomainAutoFilled] = useState(false)
   const [createXrayMode, setCreateXrayMode] = useState<'external' | 'embedded'>('external')
+  // 服务器层流量统计规则:both(上+下,默认)/ upload(仅上行)/ download(仅下行)
+  // 影响节点流量聚合方向,用户流量仍按套餐 traffic_mode 走
+  const [createTrafficStatsMode, setCreateTrafficStatsMode] = useState<'both' | 'upload' | 'download'>('both')
   const [createSiteType, setCreateSiteType] = useState<'static' | 'proxy'>('static')
   const [createSiteValue, setCreateSiteValue] = useState('')
   const [isAddWebsiteDialogOpen, setIsAddWebsiteDialogOpen] = useState(false)
@@ -185,8 +188,9 @@ function XrayServersPage() {
     traffic_limit_gb: '',
     traffic_used_gb: '',
     traffic_reset_day: '',
-    steal_mode: 'tunnel',
+    steal_mode: 'default',
     xray_mode: 'external',
+    traffic_stats_mode: 'both' as 'both' | 'upload' | 'download',
   })
   const [configServer, setConfigServer] = useState<{ type: 'remote'; server: RemoteServer } | null>(null)
   const [remoteXraySystemConfig, setRemoteXraySystemConfig] = useState<XraySystemConfig>({
@@ -249,7 +253,7 @@ function XrayServersPage() {
   })
 
   const createRemoteServerMutation = useMutation({
-    mutationFn: async (data: { name: string; traffic_limit?: number; traffic_used_offset?: number; traffic_reset_day?: number; connection_mode?: string; pull_address?: string; pull_port?: number; listen_port?: number; pull_token?: string; steal_self?: boolean; front_service?: 'xray' | 'nginx'; domain?: string; use_443?: boolean }) => {
+    mutationFn: async (data: { name: string; traffic_limit?: number; traffic_used_offset?: number; traffic_reset_day?: number; connection_mode?: string; pull_address?: string; pull_port?: number; listen_port?: number; pull_token?: string; steal_self?: boolean; front_service?: 'xray' | 'nginx'; domain?: string; use_443?: boolean; traffic_stats_mode?: 'both' | 'upload' | 'download' }) => {
       const response = await api.post('/api/admin/remote-servers/create', data)
       return response.data
     },
@@ -285,7 +289,7 @@ function XrayServersPage() {
       queryClient.invalidateQueries({ queryKey: ['remote-servers'] })
       setIsEditRemoteServerDialogOpen(false)
       setEditingRemoteServer(null)
-      setRemoteFormData({ name: '', pull_address: '', domain: '', traffic_limit_gb: '', traffic_used_gb: '', traffic_reset_day: '', steal_mode: 'tunnel' })
+      setRemoteFormData({ name: '', pull_address: '', domain: '', traffic_limit_gb: '', traffic_used_gb: '', traffic_reset_day: '', steal_mode: 'default', xray_mode: 'external', traffic_stats_mode: 'both' })
       toast.success(t('servers.serverUpdated'))
     },
     onError: handleServerError,
@@ -582,13 +586,13 @@ function XrayServersPage() {
 
   const handleEditRemoteServer = (server: RemoteServer) => {
     setEditingRemoteServer(server)
-    setRemoteFormData({ name: server.name, pull_address: server.pull_address || server.ip_address || '', domain: server.domain || '', traffic_limit_gb: server.traffic_limit ? (server.traffic_limit / 1024 / 1024 / 1024).toFixed(2) : '', traffic_used_gb: server.traffic_used ? (server.traffic_used / 1024 / 1024 / 1024).toFixed(2) : '', traffic_reset_day: server.traffic_reset_day?.toString() || '', steal_mode: server.steal_mode || 'tunnel', xray_mode: server.xray_mode || 'external', listen_port: server.listen_port ? String(server.listen_port) : '' })
+    setRemoteFormData({ name: server.name, pull_address: server.pull_address || server.ip_address || '', domain: server.domain || '', traffic_limit_gb: server.traffic_limit ? (server.traffic_limit / 1024 / 1024 / 1024).toFixed(2) : '', traffic_used_gb: server.traffic_used ? (server.traffic_used / 1024 / 1024 / 1024).toFixed(2) : '', traffic_reset_day: server.traffic_reset_day?.toString() || '', steal_mode: server.steal_mode || 'default', xray_mode: server.xray_mode || 'external', listen_port: server.listen_port ? String(server.listen_port) : '', traffic_stats_mode: ((server as any).traffic_stats_mode === 'upload' || (server as any).traffic_stats_mode === 'download') ? (server as any).traffic_stats_mode : 'both' } as any)
     setIsEditRemoteServerDialogOpen(true)
   }
 
   const handleSubmitRemoteServerEdit = () => {
     if (!editingRemoteServer) return
-    const oldMode = editingRemoteServer.steal_mode || 'tunnel'
+    const oldMode = editingRemoteServer.steal_mode || 'default'
     const newMode = remoteFormData.steal_mode
     if (oldMode !== newMode && editingRemoteServer.status === 'connected') {
       switchStealModeMutation.mutate({ serverId: editingRemoteServer.id, stealMode: newMode })
@@ -605,7 +609,7 @@ function XrayServersPage() {
         : t('servers.listenPortChangeConfirm', { port: newListenPort, defaultValue: '将把 Agent 监听端口改为 {{port}},Agent 会重启并短暂掉线,确定继续吗?' })
       if (!confirm(confirmMsg)) return
     }
-    updateRemoteServerMutation.mutate({ id: editingRemoteServer.id, name: remoteFormData.name, pull_address: remoteFormData.pull_address || undefined, domain: remoteFormData.domain, traffic_limit: trafficLimitGb > 0 ? Math.floor(trafficLimitGb * 1024 * 1024 * 1024) : 0, traffic_used: trafficUsedBytes, traffic_reset_day: parseInt(remoteFormData.traffic_reset_day) || 0, xray_mode: remoteFormData.xray_mode, listen_port: newListenPort } as any)
+    updateRemoteServerMutation.mutate({ id: editingRemoteServer.id, name: remoteFormData.name, pull_address: remoteFormData.pull_address || undefined, domain: remoteFormData.domain, traffic_limit: trafficLimitGb > 0 ? Math.floor(trafficLimitGb * 1024 * 1024 * 1024) : 0, traffic_used: trafficUsedBytes, traffic_reset_day: parseInt(remoteFormData.traffic_reset_day) || 0, xray_mode: remoteFormData.xray_mode, listen_port: newListenPort, traffic_stats_mode: remoteFormData.traffic_stats_mode } as any)
   }
 
   const loadRemoteServerStatusToCache = async (serverId: number, forceReload = false) => {
@@ -631,7 +635,7 @@ function XrayServersPage() {
     const trafficUsedOffsetBytes = formData.traffic_used_gb ? Math.round(parseFloat(formData.traffic_used_gb) * 1024 * 1024 * 1024) : 0
     const trafficResetDay = formData.traffic_reset_day ? parseInt(formData.traffic_reset_day) : 0
     setIsGeneratingToken(true)
-    createRemoteServerMutation.mutate({ name: remoteServerName, traffic_limit: trafficLimitBytes, traffic_used_offset: trafficUsedOffsetBytes, traffic_reset_day: trafficResetDay, connection_mode: 'auto', pull_address: pullAddress || undefined, pull_port: pullPort ? parseInt(pullPort) : undefined, listen_port: pullPort ? parseInt(pullPort) : undefined /* "Agent 端口"既是 pull 模式的 pull_port,也是 websocket 模式下主控连接 agent 的端口,语义一致,两个字段同时填 */, pull_token: pullToken || undefined, steal_self: createStealSelf, front_service: createFrontService, domain: createDomain.trim() || undefined, use_443: createUse443 || undefined, steal_mode: createStealSelf ? createStealMode : undefined, site_type: createStealSelf ? createSiteType : undefined, site_value: createStealSelf ? createSiteValue : undefined, xray_mode: createXrayMode })
+    createRemoteServerMutation.mutate({ name: remoteServerName, traffic_limit: trafficLimitBytes, traffic_used_offset: trafficUsedOffsetBytes, traffic_reset_day: trafficResetDay, connection_mode: 'auto', pull_address: pullAddress || undefined, pull_port: pullPort ? parseInt(pullPort) : undefined, listen_port: pullPort ? parseInt(pullPort) : undefined /* "Agent 端口"既是 pull 模式的 pull_port,也是 websocket 模式下主控连接 agent 的端口,语义一致,两个字段同时填 */, pull_token: pullToken || undefined, steal_self: createStealSelf, front_service: createFrontService, domain: createDomain.trim() || undefined, use_443: createUse443 || undefined, steal_mode: createStealSelf ? createStealMode : undefined, site_type: createStealSelf ? createSiteType : undefined, site_value: createStealSelf ? createSiteValue : undefined, xray_mode: createXrayMode, traffic_stats_mode: createTrafficStatsMode } as any)
   }
 
   const clipboardCopy = useCopyToClipboard()
@@ -639,7 +643,7 @@ function XrayServersPage() {
 
   const resetAddDialog = () => {
     setRemoteServerName(''); setGeneratedToken(''); setInstallCommand(''); setIsGeneratingToken(false)
-    setPullAddress(''); setPullPort('23889'); setPullToken(''); setCreateStealSelf(false); setCreateFrontService('xray'); setCreateStealMode('tunnel'); setCreateUse443(false); setCreateDomain(''); setDomainAutoFilled(false); setCreateSiteType('static'); setCreateSiteValue(''); setCreateXrayMode('external')
+    setPullAddress(''); setPullPort('23889'); setPullToken(''); setCreateStealSelf(false); setCreateFrontService('xray'); setCreateStealMode('tunnel'); setCreateUse443(false); setCreateDomain(''); setDomainAutoFilled(false); setCreateSiteType('static'); setCreateSiteValue(''); setCreateXrayMode('external'); setCreateTrafficStatsMode('both')
     setFormData({ ...formData, traffic_limit_gb: '', traffic_used_gb: '', traffic_reset_day: '1' })
   }
 
@@ -814,6 +818,15 @@ function XrayServersPage() {
                 </RadioGroup>
                 <p className="text-xs text-muted-foreground">{createXrayMode === 'external' ? t('servers.xrayModeExternalDesc') : t('servers.xrayModeEmbeddedDesc')}</p>
               </div>
+              <div className="grid gap-2 p-4 border rounded-lg">
+                <Label>流量统计规则</Label>
+                <RadioGroup value={createTrafficStatsMode} onValueChange={(v) => setCreateTrafficStatsMode(v as 'both' | 'upload' | 'download')} className="flex gap-4">
+                  <div className="flex items-center gap-2"><RadioGroupItem value="both" id="create-stats-mode-both" disabled={!!generatedToken} /><Label htmlFor="create-stats-mode-both" className="text-sm cursor-pointer">上行 + 下行</Label></div>
+                  <div className="flex items-center gap-2"><RadioGroupItem value="upload" id="create-stats-mode-upload" disabled={!!generatedToken} /><Label htmlFor="create-stats-mode-upload" className="text-sm cursor-pointer">仅上行</Label></div>
+                  <div className="flex items-center gap-2"><RadioGroupItem value="download" id="create-stats-mode-download" disabled={!!generatedToken} /><Label htmlFor="create-stats-mode-download" className="text-sm cursor-pointer">仅下行</Label></div>
+                </RadioGroup>
+                <p className="text-xs text-muted-foreground">控制该服务器节点流量的统计方向。用户流量按套餐配置的单向/双向规则单独计算,不受此设置影响。</p>
+              </div>
               <div className="grid gap-3 p-4 border rounded-lg">
                 <div className="flex items-center justify-between"><Label htmlFor="create-steal-self" className="cursor-pointer">{t('servers.stealSelf')}</Label><Switch id="create-steal-self" checked={createStealSelf} onCheckedChange={(checked) => { setCreateStealSelf(checked); if (checked) { setCreateUse443(true); if (pullAddress.trim()) checkSameIP(pullAddress) } else { setCreateUse443(false); setCreateDomain('') } }} disabled={!!generatedToken} /></div>
                 {createStealSelf && (
@@ -895,9 +908,18 @@ function XrayServersPage() {
                       <div className="flex flex-wrap items-center gap-1.5">
                         <RemoteServerStatusBadge status={server.status} />
                         {server.status === 'connected' && (
-                          server.encrypted
-                            ? <Lock className="h-3.5 w-3.5 text-green-500 flex-shrink-0" title={t('servers.encrypted')} />
-                            : <LockOpen className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" title={t('servers.unencrypted')} />
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                {server.encrypted
+                                  ? <Lock className="h-3.5 w-3.5 text-green-500 flex-shrink-0 cursor-help" />
+                                  : <LockOpen className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0 cursor-help" />}
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                {server.encrypted ? '主控与 Agent 之间通信已加密(端到端会话加密)' : '主控与 Agent 通信未加密(老版本 Agent 不支持,建议升级)'}
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
                         )}
                         {Math.abs(server.time_offset_seconds ?? 0) > 10 && (
                           <TooltipProvider>
@@ -922,7 +944,7 @@ function XrayServersPage() {
                       <Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); handleDeleteRemoteServer(server.id) }} className="h-8 w-8 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950" title={t('servers.deleteServer')}><X className="h-4 w-4" /></Button>
                     </div>
                   </div>
-                  <CardDescription className="text-xs text-muted-foreground ml-5 flex items-center gap-2">
+                  <CardDescription className="text-xs text-muted-foreground flex flex-wrap items-center gap-2">
                     <span>{server.ip_address || t('servers.waitConnection')}</span>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
@@ -950,45 +972,69 @@ function XrayServersPage() {
                         {server.ws_connected ? <><Wifi className="h-2.5 w-2.5" />WS</> : server.fallback_to_pull ? <><RefreshCw className="h-2.5 w-2.5" />{t('servers.pullMode')}</> : <><Radio className="h-2.5 w-2.5" />HTTP</>}
                       </span>
                     )}
-                  </CardDescription>
-                  <div className="flex items-center gap-4 mt-3">
+                    {/* Xray / Nginx 状态指示器并入 IP 行末尾,省一行高度 */}
                     <RemoteServiceStatusIndicator status={remoteStatus?.xray} name="Xray" serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} isFederated={server.is_federated} />
                     {remoteStatus?.nginx?.installed && (<RemoteServiceStatusIndicator status={remoteStatus?.nginx} name="Nginx" serverId={server.id} isFederated={server.is_federated} />)}
                     {remoteStatus?.loading && (<span className="text-xs text-muted-foreground">{t('servers.loadingStatus')}</span>)}
-                  </div>
-                  <div className="mt-4 flex flex-col gap-3">
-                    <div className="flex-1 min-w-0 bg-muted/50 rounded-lg p-3">
-                      <div className="flex items-center gap-1.5 text-xs text-muted-foreground mb-2">
+                  </CardDescription>
+                  {/* 紧凑信息块:实时网速单行(横排上下行) + 流量统计 + 心跳全部塞到同一面板,
+                      去除原先两个独立卡片的重复 padding/边距,避免大面积空白 */}
+                  <div className="mt-3 rounded-lg bg-muted/50 px-3 py-2.5 space-y-2.5">
+                    {/* 实时网速 — 单行 inline */}
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                      <div className="flex items-center gap-1.5 text-muted-foreground">
                         <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v20M2 12h20M7 7l5-5 5 5M7 17l5 5 5-5" /></svg>
                         <span>{t('servers.realtimeSpeed')}</span>
                       </div>
                       {(server.current_upload_speed !== undefined && server.current_upload_speed > 0) || (server.current_download_speed !== undefined && server.current_download_speed > 0) ? (
-                        <div className="space-y-1">
-                          <div className="flex items-center justify-between gap-1"><span className="text-xs text-muted-foreground shrink-0">{t('servers.upload')}</span><span className="text-sm font-mono font-medium text-green-600 dark:text-green-400 truncate min-w-0">↑ {formatSpeed(server.current_upload_speed || 0)}</span></div>
-                          <div className="flex items-center justify-between gap-1"><span className="text-xs text-muted-foreground shrink-0">{t('servers.download')}</span><span className="text-sm font-mono font-medium text-blue-600 dark:text-blue-400 truncate min-w-0">↓ {formatSpeed(server.current_download_speed || 0)}</span></div>
+                        <div className="flex items-center gap-3 font-mono">
+                          <span className="text-green-600 dark:text-green-400">↑ {formatSpeed(server.current_upload_speed || 0)}</span>
+                          <span className="text-blue-600 dark:text-blue-400">↓ {formatSpeed(server.current_download_speed || 0)}</span>
                         </div>
-                      ) : server.status === 'connected' ? (<p className="text-sm font-mono text-muted-foreground">{t('servers.waitingData')}</p>) : server.status === 'pending' ? (<p className="text-sm font-mono text-muted-foreground">{t('servers.pendingShort')}</p>) : (<p className="text-sm font-mono text-muted-foreground">{t('servers.offline')}</p>)}
+                      ) : (
+                        <span className="font-mono text-muted-foreground">
+                          {server.status === 'connected' ? t('servers.waitingData') : server.status === 'pending' ? t('servers.pendingShort') : t('servers.offline')}
+                        </span>
+                      )}
                     </div>
-                    <div className="flex-1 min-w-0 bg-muted/50 rounded-lg p-3">
-                      <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
-                        <div className="flex items-center gap-1.5">
+
+                    {/* 流量统计 */}
+                    <div className="border-t border-border/40 pt-2 space-y-1.5">
+                      <div className="flex items-center justify-between gap-2 text-xs">
+                        <div className="flex items-center gap-1.5 text-muted-foreground">
                           <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /><path d="M9 12l2 2 4-4" /></svg>
                           <span>{t('servers.trafficStats')}</span>
                         </div>
-                        {server.traffic_limit && server.traffic_limit > 0 ? <span>{t('servers.usedTotal')}</span> : <span>{t('servers.unlimited')}</span>}
+                        <span className="font-mono font-medium break-all">
+                          {server.traffic_limit && server.traffic_limit > 0
+                            ? `${formatTraffic(server.traffic_used || 0)} / ${formatTraffic(server.traffic_limit)}`
+                            : `${formatTraffic(server.traffic_used || 0)} · ${t('servers.unlimited')}`}
+                        </span>
                       </div>
-                      <div className="text-sm font-mono font-medium mb-2 break-all">{server.traffic_limit && server.traffic_limit > 0 ? `${formatTraffic(server.traffic_used || 0)} / ${formatTraffic(server.traffic_limit)}` : formatTraffic(server.traffic_used || 0)}</div>
                       {server.traffic_limit > 0 && (
-                        <div className="space-y-2">
-                          <div className="h-1.5 bg-muted rounded-full overflow-hidden"><div className={cn("h-full rounded-full transition-all", getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 90 ? "bg-red-500" : getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 70 ? "bg-yellow-500" : "bg-primary")} style={{ width: `${Math.min(getTrafficPercent(server.traffic_used || 0, server.traffic_limit), 100)}%` }} /></div>
-                          {!!server.traffic_reset_day && server.traffic_reset_day > 0 && (<div className="flex items-center justify-between text-xs text-muted-foreground"><span>{t('servers.resetLabel')}</span><span>{t('servers.monthlyReset', { day: server.traffic_reset_day })}</span></div>)}
-                        </div>
+                        <>
+                          <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                            <div className={cn("h-full rounded-full transition-all", getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 90 ? "bg-red-500" : getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 70 ? "bg-yellow-500" : "bg-primary")} style={{ width: `${Math.min(getTrafficPercent(server.traffic_used || 0, server.traffic_limit), 100)}%` }} />
+                          </div>
+                          {!!server.traffic_reset_day && server.traffic_reset_day > 0 && (
+                            <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                              <span>{t('servers.resetLabel')}</span>
+                              <span>{t('servers.monthlyReset', { day: server.traffic_reset_day })}</span>
+                            </div>
+                          )}
+                        </>
                       )}
                     </div>
+
+                    {/* 最后心跳 - 移进同一面板底部,小字 muted */}
+                    {server.last_heartbeat && (
+                      <div className="border-t border-border/40 pt-1.5 text-[11px] text-muted-foreground">
+                        {t('servers.lastHeartbeat')}: {new Date(server.last_heartbeat).toLocaleString()}
+                      </div>
+                    )}
                   </div>
-                  {server.last_heartbeat && (<div className="mt-3 text-xs text-muted-foreground">{t('servers.lastHeartbeat')}: {new Date(server.last_heartbeat).toLocaleString()}</div>)}
                 </CardHeader>
-                <CardFooter className="flex flex-wrap gap-2 pt-4">
+                <CardFooter className="flex flex-wrap gap-2 pt-3">
                   {server.status === 'connected' && (
                     <>
                       {!server.is_federated && (<InstallPopover serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} />)}
@@ -1036,28 +1082,40 @@ function XrayServersPage() {
                     <TableCell className="font-medium">
                       <div className="flex items-center gap-2">
                         <div className={cn("w-2.5 h-2.5 rounded-full flex-shrink-0", server.status === 'connected' ? "bg-green-500" : server.status === 'pending' ? "bg-yellow-500" : "bg-red-500")} />
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
+                        <div className="min-w-0 flex-1">
+                          {/* 名称左对齐,其它徽章 / 图标整体右对齐 */}
+                          <div className="flex items-center gap-2 justify-between">
                             <span className={cn("truncate", server.status !== 'connected' && 'cursor-pointer hover:text-primary')} onClick={() => { if (server.status !== 'connected') { setSelectedRemoteServer(server); setIsRemoteServerDetailDialogOpen(true) } }}><Twemoji>{server.name}</Twemoji></span>
-                            <RemoteServerStatusBadge status={server.status} />
-                            {server.status === 'connected' && (
-                              server.encrypted
-                                ? <Lock className="h-3 w-3 text-green-500 flex-shrink-0" title={t('servers.encrypted')} />
-                                : <LockOpen className="h-3 w-3 text-muted-foreground flex-shrink-0" title={t('servers.unencrypted')} />
-                            )}
-                            {Math.abs(server.time_offset_seconds ?? 0) > 10 && (
-                              <TooltipProvider>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <AlertTriangle className="h-4 w-4 text-yellow-500 cursor-help flex-shrink-0" />
-                                  </TooltipTrigger>
-                                  <TooltipContent>{t('servers.timeOffsetWarning')}</TooltipContent>
-                                </Tooltip>
-                              </TooltipProvider>
-                            )}
-                            {server.fallback_to_pull && (<Badge variant="secondary" className="text-xs bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200">{t('servers.degraded')}</Badge>)}
-                            {server.steal_mode && server.steal_mode !== 'tunnel' && (<Badge variant="outline" className="text-xs">{server.steal_mode === 'fallback' ? t('servers.fallbackLabel') : t('servers.stealModeDefault')}</Badge>)}
-                            <Badge variant="outline" className={cn("text-xs", server.xray_mode === 'embedded' ? "border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-400" : "border-gray-300 text-gray-600 dark:border-gray-600 dark:text-gray-400")}>{server.xray_mode === 'embedded' ? t('servers.xrayModeEmbedded') : t('servers.xrayModeExternal')}</Badge>
+                            <div className="flex flex-wrap items-center justify-end gap-1.5 shrink-0">
+                              <RemoteServerStatusBadge status={server.status} />
+                              {server.status === 'connected' && (
+                                <TooltipProvider>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      {server.encrypted
+                                        ? <Lock className="h-3 w-3 text-green-500 flex-shrink-0 cursor-help" />
+                                        : <LockOpen className="h-3 w-3 text-muted-foreground flex-shrink-0 cursor-help" />}
+                                    </TooltipTrigger>
+                                    <TooltipContent>
+                                      {server.encrypted ? '主控与 Agent 之间通信已加密(端到端会话加密)' : '主控与 Agent 通信未加密(老版本 Agent 不支持,建议升级)'}
+                                    </TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                              )}
+                              {Math.abs(server.time_offset_seconds ?? 0) > 10 && (
+                                <TooltipProvider>
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <AlertTriangle className="h-4 w-4 text-yellow-500 cursor-help flex-shrink-0" />
+                                    </TooltipTrigger>
+                                    <TooltipContent>{t('servers.timeOffsetWarning')}</TooltipContent>
+                                  </Tooltip>
+                                </TooltipProvider>
+                              )}
+                              {server.fallback_to_pull && (<Badge variant="secondary" className="text-xs bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200">{t('servers.degraded')}</Badge>)}
+                              {server.steal_mode && server.steal_mode !== 'tunnel' && (<Badge variant="outline" className="text-xs">{server.steal_mode === 'fallback' ? t('servers.fallbackLabel') : t('servers.stealModeDefault')}</Badge>)}
+                              <Badge variant="outline" className={cn("text-xs", server.xray_mode === 'embedded' ? "border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-400" : "border-gray-300 text-gray-600 dark:border-gray-600 dark:text-gray-400")}>{server.xray_mode === 'embedded' ? t('servers.xrayModeEmbedded') : t('servers.xrayModeExternal')}</Badge>
+                            </div>
                           </div>
                           {server.last_heartbeat && (<div className="text-xs text-muted-foreground mt-0.5">{t('servers.heartbeatLabel')}: {new Date(server.last_heartbeat).toLocaleString()}</div>)}
                         </div>
@@ -1279,7 +1337,7 @@ function XrayServersPage() {
       </Dialog>
 
       {/* Edit Remote Server Dialog */}
-      <Dialog open={isEditRemoteServerDialogOpen} onOpenChange={(open) => { setIsEditRemoteServerDialogOpen(open); if (!open) { setEditingRemoteServer(null); setRemoteFormData({ name: '', pull_address: '', domain: '', traffic_limit_gb: '', traffic_used_gb: '', traffic_reset_day: '', steal_mode: 'tunnel', xray_mode: 'external' }) } }}>
+      <Dialog open={isEditRemoteServerDialogOpen} onOpenChange={(open) => { setIsEditRemoteServerDialogOpen(open); if (!open) { setEditingRemoteServer(null); setRemoteFormData({ name: '', pull_address: '', domain: '', traffic_limit_gb: '', traffic_used_gb: '', traffic_reset_day: '', steal_mode: 'default', xray_mode: 'external', traffic_stats_mode: 'both' }) } }}>
         <DialogContent className="max-w-md">
           <DialogHeader><DialogTitle>{t('servers.editRemoteServer')}</DialogTitle><DialogDescription>{t('servers.editRemoteServerDesc')}</DialogDescription></DialogHeader>
           <div className="grid gap-4 py-4">
@@ -1314,6 +1372,15 @@ function XrayServersPage() {
                 </div>
               </RadioGroup>
               <p className="text-xs text-muted-foreground">{remoteFormData.xray_mode === 'external' ? t('servers.xrayModeExternalDesc') : t('servers.xrayModeEmbeddedDesc')}</p>
+            </div>
+            <div className="grid gap-2">
+              <Label>流量统计规则</Label>
+              <RadioGroup value={remoteFormData.traffic_stats_mode} onValueChange={(v) => setRemoteFormData({ ...remoteFormData, traffic_stats_mode: v as 'both' | 'upload' | 'download' })} className="flex gap-4">
+                <div className="flex items-center gap-2"><RadioGroupItem value="both" id="edit-stats-mode-both" /><Label htmlFor="edit-stats-mode-both" className="text-sm cursor-pointer">上行 + 下行</Label></div>
+                <div className="flex items-center gap-2"><RadioGroupItem value="upload" id="edit-stats-mode-upload" /><Label htmlFor="edit-stats-mode-upload" className="text-sm cursor-pointer">仅上行</Label></div>
+                <div className="flex items-center gap-2"><RadioGroupItem value="download" id="edit-stats-mode-download" /><Label htmlFor="edit-stats-mode-download" className="text-sm cursor-pointer">仅下行</Label></div>
+              </RadioGroup>
+              <p className="text-xs text-muted-foreground">影响该服务器节点流量的统计方向。用户流量按套餐 traffic_mode 单独算,不受影响。</p>
             </div>
             {editingRemoteServer?.status === 'connected' && editingRemoteServer?.steal_mode && (
               <div className="grid gap-2">
