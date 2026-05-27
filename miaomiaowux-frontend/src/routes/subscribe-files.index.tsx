@@ -27,7 +27,14 @@ import { FilesListSection } from './subscribe-files/components/files-list-sectio
 import { useSupportData } from './subscribe-files/hooks/use-support-data'
 import { useExternalSubs } from './subscribe-files/hooks/use-external-subs'
 import { useProxyProviders } from './subscribe-files/hooks/use-proxy-providers'
+import { useUserMeta } from './subscribe-files/hooks/use-user-meta'
+import { useAllNodes } from './subscribe-files/hooks/use-all-nodes'
 import { useSubscribeFiles } from './subscribe-files/hooks/use-subscribe-files'
+import { useNodeEditWorkflow } from './subscribe-files/hooks/use-node-edit-workflow'
+import {
+  batchCreateByRegion,
+  batchCreateByProtocol,
+} from './subscribe-files/utils/batch-create-providers'
 import {
   Upload,
   Download,
@@ -200,155 +207,6 @@ type ProxyProviderConfig = {
 
 // 代理协议类型列表搬到 ./subscribe-files/utils/proxy-provider-form.ts(被 ProxyProviderEditDialog 用)
 
-// 地域分裂配置（用于 Pro 批量创建）
-// countryCode 用于 GeoIP 匹配（仅 MMW 模式生效）
-const REGION_CONFIGS = [
-  {
-    name: '香港节点',
-    emoji: '🇭🇰',
-    filter: '🇭🇰|港|HK|hk|Hong Kong|HongKong|hongkong',
-    countryCode: 'HK',
-  },
-  {
-    name: '美国节点',
-    emoji: '🇺🇸',
-    filter:
-      '🇺🇸|美|波特兰|达拉斯|俄勒冈|凤凰城|费利蒙|硅谷|拉斯维加斯|洛杉矶|圣何塞|圣克拉拉|西雅图|芝加哥|US|United States|UnitedStates',
-    countryCode: 'US',
-  },
-  {
-    name: '日本节点',
-    emoji: '🇯🇵',
-    filter: '🇯🇵|日本|川日|东京|大阪|泉日|埼玉|沪日|深日|JP|Japan',
-    countryCode: 'JP',
-  },
-  {
-    name: '新加坡节点',
-    emoji: '🇸🇬',
-    filter: '🇸🇬|新加坡|坡|狮城|SG|Singapore',
-    countryCode: 'SG',
-  },
-  {
-    name: '台湾节点',
-    emoji: '🇹🇼',
-    filter: '🇹🇼|台|新北|彰化|TW|Taiwan',
-    countryCode: 'TW',
-  },
-  {
-    name: '韩国节点',
-    emoji: '🇰🇷',
-    filter: '🇰🇷|韩|KR|Korea|KOR|首尔',
-    countryCode: 'KR',
-  },
-  {
-    name: '加拿大节点',
-    emoji: '🇨🇦',
-    filter: '🇨🇦|加拿大|CA|Canada',
-    countryCode: 'CA',
-  },
-  {
-    name: '英国节点',
-    emoji: '🇬🇧',
-    filter: '🇬🇧|英|UK|伦敦|英格兰|GB|United Kingdom',
-    countryCode: 'GB',
-  },
-  {
-    name: '法国节点',
-    emoji: '🇫🇷',
-    filter: '🇫🇷|法|FR|France|巴黎',
-    countryCode: 'FR',
-  },
-  {
-    name: '德国节点',
-    emoji: '🇩🇪',
-    filter: '🇩🇪|德|DE|Germany|法兰克福',
-    countryCode: 'DE',
-  },
-  {
-    name: '荷兰节点',
-    emoji: '🇳🇱',
-    filter: '🇳🇱|荷|NL|Netherlands|阿姆斯特丹',
-    countryCode: 'NL',
-  },
-  {
-    name: '土耳其节点',
-    emoji: '🇹🇷',
-    filter: '🇹🇷|土耳其|TR|Turkey|伊斯坦布尔',
-    countryCode: 'TR',
-  },
-  {
-    name: '其他地区',
-    emoji: '🌍',
-    filter: '',
-    excludeFilter:
-      '🇭🇰|🇺🇸|🇯🇵|🇸🇬|🇹🇼|🇰🇷|🇨🇦|🇬🇧|🇫🇷|🇩🇪|🇳🇱|🇹🇷|港|HK|hk|Hong Kong|HongKong|hongkong|美|波特兰|达拉斯|俄勒冈|凤凰城|费利蒙|硅谷|拉斯维加斯|洛杉矶|圣何塞|圣克拉拉|西雅图|芝加哥|US|United States|UnitedStates|日本|川日|东京|大阪|泉日|埼玉|沪日|深日|JP|Japan|新加坡|坡|狮城|SG|Singapore|台|新北|彰化|TW|Taiwan|韩|KR|Korea|KOR|首尔|加拿大|CA|Canada|英|UK|伦敦|英格兰|GB|United Kingdom|法|FR|France|巴黎|德|DE|Germany|法兰克福|荷|NL|Netherlands|阿姆斯特丹|土耳其|TR|Turkey|伊斯坦布尔',
-    countryCode: '',
-  },
-]
-
-// 协议分裂配置（用于 Pro 批量创建）
-const PROTOCOL_CONFIGS = [
-  {
-    name: 'anytls',
-    excludeType:
-      'wireguard|vmess|vless|trojan|ss|socks5|http|ssr|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'wireguard',
-    excludeType:
-      'anytls|vmess|vless|trojan|ss|socks5|http|ssr|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'vmess',
-    excludeType:
-      'anytls|wireguard|vless|trojan|ss|socks5|http|ssr|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'vless',
-    excludeType:
-      'anytls|wireguard|vmess|trojan|ss|socks5|http|ssr|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'trojan',
-    excludeType:
-      'anytls|wireguard|vmess|vless|ss|socks5|http|ssr|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'ss',
-    excludeType:
-      'anytls|wireguard|vmess|vless|trojan|socks5|http|ssr|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'socks5',
-    excludeType:
-      'anytls|wireguard|vmess|vless|trojan|ss|http|ssr|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'http',
-    excludeType:
-      'anytls|wireguard|vmess|vless|trojan|ss|socks5|ssr|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'ssr',
-    excludeType:
-      'anytls|wireguard|vmess|vless|trojan|ss|socks5|http|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'hysteria',
-    excludeType:
-      'anytls|wireguard|vmess|vless|trojan|ss|socks5|http|ssr|tuic|hysteria2',
-  },
-  {
-    name: 'tuic',
-    excludeType:
-      'anytls|wireguard|vmess|vless|trojan|ss|socks5|http|ssr|hysteria|hysteria2',
-  },
-  {
-    name: 'hysteria2',
-    excludeType:
-      'anytls|wireguard|vmess|vless|trojan|ss|socks5|http|ssr|hysteria|tuic',
-  },
-]
 
 // IP 版本选项
 // IP_VERSION_OPTIONS 同上,搬到 ./subscribe-files/utils/proxy-provider-form.ts
@@ -587,45 +445,14 @@ function SubscribeFilesPage() {
     syncSingleMutation: syncSingleExternalSubMutation,
   } = useExternalSubs({ enabled: Boolean(auth.accessToken) })
 
-  // 获取用户订阅 token（用于代理集合 MMW 模式）
-  const { data: userTokenData } = useQuery({
-    queryKey: ['user-token'],
-    queryFn: async () => {
-      const response = await api.get('/api/user/token')
-      return response.data as { token: string; user_short_code?: string; custom_user_short_code?: string }
-    },
-    enabled: Boolean(auth.accessToken),
-  })
-  const userToken = userTokenData?.token ?? ''
-  // 当前登录用户的有效短码(自定义优先);管理员在 popover 展示
-  const myUserShortCode = userTokenData?.user_short_code ?? ''
-  const myCustomUserShortCode = userTokenData?.custom_user_short_code ?? ''
-
-  // 修改自己的 custom_user_short_code(管理员在 popover 里编辑)
-  const updateMyShortCodeMutation = useMutation({
-    mutationFn: async (custom: string) => {
-      const res = await api.put('/api/user/token', { custom_user_short_code: custom })
-      return res.data as { user_short_code?: string; custom_user_short_code?: string }
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['user-token'] })
-      toast.success('短码已更新')
-    },
-    onError: (e: any) => {
-      toast.error(e?.response?.data?.error || e?.message || '更新短码失败')
-    },
-  })
-
-  // 获取用户设置（用于判断是否显示代理集合）
-  const { data: userConfigData } = useQuery({
-    queryKey: ['user-config'],
-    queryFn: async () => {
-      const response = await api.get('/api/user/config')
-      return response.data as { enable_proxy_provider: boolean }
-    },
-    enabled: Boolean(auth.accessToken),
-  })
-  const enableProxyProvider = userConfigData?.enable_proxy_provider ?? false
+  // 用户元信息(token + custom short code + user-config)聚合到 hook,见 ./subscribe-files/hooks/use-user-meta
+  const {
+    userToken,
+    myUserShortCode,
+    myCustomUserShortCode,
+    updateShortCodeMutation: updateMyShortCodeMutation,
+    enableProxyProvider,
+  } = useUserMeta({ enabled: Boolean(auth.accessToken) })
 
   // 代理集合配置:list query + 5 个 mutation,聚合到 hook,见 ./subscribe-files/hooks/use-proxy-providers
   const {
@@ -672,19 +499,11 @@ function SubscribeFilesPage() {
     },
   })
 
-  // 获取所有节点（用于在外部订阅卡片中显示节点名称）
-  const { data: allNodesData } = useQuery({
-    queryKey: ['all-nodes-with-tags'],
-    queryFn: async () => {
-      const response = await api.get('/api/admin/nodes')
-      return response.data as {
-        nodes: Array<{ id: number; node_name: string; tag: string }>
-      }
-    },
+  // 全部节点 + 按 tag 分组,见 ./subscribe-files/hooks/use-all-nodes(只在外部订阅展开时拉)
+  const { allNodesData, allNodesLoaded, nodesByTag } = useAllNodes({
     enabled: Boolean(auth.accessToken && isExternalSubsExpanded),
   })
 
-  // 获取V3模板列表
   // 6 个支持数据 query(下拉候选 + 流量统计)聚合到 hook,见 ./subscribe-files/hooks/use-support-data
   const {
     templates: templatesData,
@@ -695,20 +514,6 @@ function SubscribeFilesPage() {
     traffic: trafficData,
     isTrafficLoading,
   } = useSupportData()
-
-  // 按 tag 分组的节点名称
-  const nodesByTag = useMemo(() => {
-    const nodes = allNodesData?.nodes ?? []
-    const grouped: Record<string, string[]> = {}
-    for (const node of nodes) {
-      const tag = node.tag || '手动输入'
-      if (!grouped[tag]) {
-        grouped[tag] = []
-      }
-      grouped[tag].push(node.node_name)
-    }
-    return grouped
-  }, [allNodesData])
 
   // 导入订阅
   // ↑ 7 个订阅文件 mutation 已搬到 ./subscribe-files/hooks/use-subscribe-files
@@ -770,239 +575,31 @@ function SubscribeFilesPage() {
 
   // toggleProcessModeMutation 已搬到 ./subscribe-files/hooks/use-proxy-providers
 
-  // 批量创建代理集合 - 按地域
-  // 使用 MMW 模式以支持 GeoIP 匹配
-  const handleBatchCreateByRegion = async () => {
-    if (!proSelectedExternalSub) {
-      toast.error(t('toast.selectExternalSub'))
-      return
-    }
-    if (!proNamePrefix.trim()) {
-      toast.error(t('toast.enterNamePrefix'))
-      return
-    }
+  // 批量创建代理集合(按地域 / 按协议)— 实现搬到 ./subscribe-files/utils/batch-create-providers
+  const handleBatchCreateByRegion = () =>
+    batchCreateByRegion({
+      selectedExternalSub: proSelectedExternalSub,
+      namePrefix: proNamePrefix,
+      enableGeoIPMatching,
+      setCreating: setProCreatingRegion,
+      setResults: setProCreationResults,
+      setNamePrefix: setProNamePrefix,
+      invalidateProviders: () =>
+        queryClient.invalidateQueries({ queryKey: ['proxy-provider-configs'] }),
+      t,
+    })
 
-    setProCreatingRegion(true)
-    setProCreationResults([])
-    const results: Array<{
-      name: string
-      success: boolean
-      error?: string
-      skipped?: boolean
-    }> = []
-    const prefix = proNamePrefix.trim()
-
-    // 先获取外部订阅的节点名称列表（仅用于非 GeoIP 模式）
-    let nodeNames: string[] = []
-    if (!enableGeoIPMatching) {
-      try {
-        const response = await api.get(
-          `/api/user/external-subscriptions/nodes?id=${proSelectedExternalSub.id}`
-        )
-        nodeNames = response.data.node_names || []
-      } catch (error: any) {
-        toast.error(
-          t('toast.getNodeListFailed') + (error.response?.data?.error || error.message)
-        )
-        setProCreatingRegion(false)
-        return
-      }
-
-      if (nodeNames.length === 0) {
-        toast.error(t('toast.noNodesInSub'))
-        setProCreatingRegion(false)
-        return
-      }
-    }
-
-    // 检查每个地区是否有匹配的节点（仅用于非 GeoIP 模式的前端检查）
-    const checkRegionHasNodesLocal = (
-      filter: string,
-      excludeFilter?: string
-    ): boolean => {
-      if (!filter && !excludeFilter) return true // 无过滤条件，认为有节点
-
-      let matchedNodes = nodeNames
-
-      // 应用 filter（包含过滤）- 区分大小写
-      if (filter) {
-        const filterRegex = new RegExp(filter)
-        matchedNodes = matchedNodes.filter((name) => filterRegex.test(name))
-      }
-
-      // 应用 excludeFilter（排除过滤）- 区分大小写
-      if (excludeFilter) {
-        const excludeRegex = new RegExp(excludeFilter)
-        matchedNodes = matchedNodes.filter((name) => !excludeRegex.test(name))
-      }
-
-      return matchedNodes.length > 0
-    }
-
-    // 检查是否有匹配的节点（GeoIP 模式使用后端 API）
-    const checkRegionHasNodes = async (
-      filter: string,
-      excludeFilter?: string,
-      geoIPFilter?: string
-    ): Promise<boolean> => {
-      // 如果开启 GeoIP 匹配，调用后端 API 检查（后端会同时检查正则和 IP 地域）
-      if (enableGeoIPMatching) {
-        try {
-          const response = await api.post(
-            '/api/user/external-subscriptions/check-filter',
-            {
-              subscription_id: proSelectedExternalSub.id,
-              filter: filter || '',
-              exclude_filter: excludeFilter || '',
-              geo_ip_filter: geoIPFilter || '',
-            }
-          )
-          return response.data.match_count > 0
-        } catch (error) {
-          // 如果 API 调用失败，默认不创建该地区（保守处理）
-          console.error('检查过滤器失败:', error)
-          return false
-        }
-      }
-
-      // 非 GeoIP 模式，使用前端检查
-      return checkRegionHasNodesLocal(filter, excludeFilter)
-    }
-
-    let skippedCount = 0
-    for (const region of REGION_CONFIGS) {
-      const providerName = `${prefix}-${region.emoji}${region.name}`
-
-      // 检查该地区是否有匹配的节点
-      const geoIPFilter = enableGeoIPMatching ? region.countryCode || '' : ''
-      const hasNodes = await checkRegionHasNodes(
-        region.filter,
-        region.excludeFilter,
-        geoIPFilter
-      )
-      if (!hasNodes) {
-        results.push({
-          name: providerName,
-          success: false,
-          skipped: true,
-          error: t('proxyProvider.basicDialog.noMatchNodes'),
-        })
-        skippedCount++
-        setProCreationResults([...results])
-        continue
-      }
-
-      try {
-        await api.post('/api/user/proxy-provider-configs', {
-          external_subscription_id: proSelectedExternalSub.id,
-          name: providerName,
-          type: 'http',
-          interval: 3600,
-          proxy: 'DIRECT',
-          size_limit: 0,
-          header: JSON.stringify({ 'User-Agent': ['Clash/v1.18.0'] }),
-          health_check_enabled: true,
-          health_check_url: 'https://www.gstatic.com/generate_204',
-          health_check_interval: 300,
-          health_check_timeout: 5000,
-          health_check_lazy: true,
-          health_check_expected_status: 204,
-          filter: region.filter || '',
-          exclude_filter: region.excludeFilter || '',
-          exclude_type: '',
-          geo_ip_filter: enableGeoIPMatching ? region.countryCode || '' : '', // GeoIP 过滤（仅开启时生效）
-          override: '',
-          process_mode: 'mmw', // 使用 MMW 模式以支持 GeoIP 匹配
-        })
-        results.push({ name: providerName, success: true })
-      } catch (error: any) {
-        results.push({
-          name: providerName,
-          success: false,
-          error: error.response?.data?.error || t('toast.createFailed'),
-        })
-      }
-      // 更新结果以显示进度
-      setProCreationResults([...results])
-    }
-
-    setProCreatingRegion(false)
-    queryClient.invalidateQueries({ queryKey: ['proxy-provider-configs'] })
-
-    const successCount = results.filter((r) => r.success).length
-    const failedCount = results.filter((r) => !r.success && !r.skipped).length
-    if (skippedCount > 0) {
-      toast.success(
-        t('toast.creationComplete', { success: successCount, skipped: skippedCount, failed: failedCount })
-      )
-    } else {
-      toast.success(t('toast.creationCompleteSimple', { success: successCount, total: results.length }))
-    }
-    // 清空{t('proxyProvider.dialog.namePrefix')}
-    setProNamePrefix('')
-  }
-
-  // 批量创建代理集合 - 按协议
-  // 使用 MMW 模式（妙妙屋处理）
-  const handleBatchCreateByProtocol = async () => {
-    if (!proSelectedExternalSub) {
-      toast.error(t('toast.selectExternalSub'))
-      return
-    }
-    if (!proNamePrefix.trim()) {
-      toast.error(t('toast.enterNamePrefix'))
-      return
-    }
-
-    setProCreatingProtocol(true)
-    setProCreationResults([])
-    const results: Array<{ name: string; success: boolean; error?: string }> =
-      []
-    const prefix = proNamePrefix.trim()
-
-    for (const protocol of PROTOCOL_CONFIGS) {
-      const providerName = `${prefix}-${protocol.name}`
-      try {
-        await api.post('/api/user/proxy-provider-configs', {
-          external_subscription_id: proSelectedExternalSub.id,
-          name: providerName,
-          type: 'http',
-          interval: 3600,
-          proxy: 'DIRECT',
-          size_limit: 0,
-          header: JSON.stringify({ 'User-Agent': ['Clash/v1.18.0'] }),
-          health_check_enabled: true,
-          health_check_url: 'https://www.gstatic.com/generate_204',
-          health_check_interval: 300,
-          health_check_timeout: 5000,
-          health_check_lazy: true,
-          health_check_expected_status: 204,
-          filter: '',
-          exclude_filter: '',
-          exclude_type: protocol.excludeType,
-          override: '',
-          process_mode: 'mmw', // 使用 MMW 模式（妙妙屋处理）
-        })
-        results.push({ name: providerName, success: true })
-      } catch (error: any) {
-        results.push({
-          name: providerName,
-          success: false,
-          error: error.response?.data?.error || t('toast.createFailed'),
-        })
-      }
-      // 更新结果以显示进度
-      setProCreationResults([...results])
-    }
-
-    setProCreatingProtocol(false)
-    queryClient.invalidateQueries({ queryKey: ['proxy-provider-configs'] })
-
-    const successCount = results.filter((r) => r.success).length
-    toast.success(t('toast.creationCompleteSimple', { success: successCount, total: results.length }))
-    // 清空{t('proxyProvider.dialog.namePrefix')}
-    setProNamePrefix('')
-  }
+  const handleBatchCreateByProtocol = () =>
+    batchCreateByProtocol({
+      selectedExternalSub: proSelectedExternalSub,
+      namePrefix: proNamePrefix,
+      setCreating: setProCreatingProtocol,
+      setResults: setProCreationResults,
+      setNamePrefix: setProNamePrefix,
+      invalidateProviders: () =>
+        queryClient.invalidateQueries({ queryKey: ['proxy-provider-configs'] }),
+      t,
+    })
 
   // 预览妙妙屋处理后的配置
   const handlePreviewProxyProvider = async (config: ProxyProviderConfig) => {
@@ -1124,52 +721,8 @@ function SubscribeFilesPage() {
     return dumpYAML(yamlObj, { indent: 2, lineWidth: -1 })
   }
 
-  // 获取文件内容
-  const fileContentQuery = useQuery({
-    queryKey: ['rule-file', editingFile?.filename],
-    queryFn: async () => {
-      if (!editingFile) return null
-      const response = await api.get(
-        `/api/admin/rules/${encodeURIComponent(editingFile.filename)}`
-      )
-      return response.data as {
-        name: string
-        content: string
-        latest_version: number
-      }
-    },
-    enabled: Boolean(editingFile && auth.accessToken),
-    refetchOnWindowFocus: false,
-  })
-
-  // 查询配置文件内容（编辑配置用）
-  const configFileContentQuery = useQuery({
-    queryKey: ['subscribe-file-content', editingConfigFile?.filename],
-    queryFn: async () => {
-      if (!editingConfigFile) return null
-      const response = await api.get(
-        `/api/admin/subscribe-files/${encodeURIComponent(editingConfigFile.filename)}/content`
-      )
-      return response.data as { content: string }
-    },
-    enabled: Boolean(editingConfigFile && auth.accessToken),
-    refetchOnWindowFocus: false,
-  })
-
-  // 查询节点列表（编辑节点用）
-  const nodesQuery = useQuery({
-    queryKey: ['nodes'],
-    queryFn: async () => {
-      const response = await api.get('/api/admin/nodes')
-      return response.data as {
-        nodes: Array<{ id: number; node_name: string }>
-      }
-    },
-    enabled: Boolean(editNodesDialogOpen && auth.accessToken),
-    refetchOnWindowFocus: false,
-  })
-
   // 获取用户配置（包含节点排序）
+  // 注意: 与 useUserMeta 共享 queryKey ['user-config']，但这里读的字段更多（node_order/match_rule 等）
   const userConfigQuery = useQuery({
     queryKey: ['user-config'],
     queryFn: async () => {
@@ -1185,71 +738,31 @@ function SubscribeFilesPage() {
     enabled: Boolean(auth.accessToken),
   })
 
-  // 查询配置文件内容（编辑节点用）
-  const nodesConfigQuery = useQuery({
-    queryKey: ['nodes-config-content', editingNodesFile?.filename],
-    queryFn: async () => {
-      if (!editingNodesFile) return null
-      const response = await api.get(
-        `/api/admin/subscribe-files/${encodeURIComponent(editingNodesFile.filename)}/content`
-      )
-      return response.data as { content: string }
-    },
-    enabled: Boolean(editingNodesFile && auth.accessToken),
-    refetchOnWindowFocus: false,
-  })
-
-  // 保存文件
-  const saveMutation = useMutation({
-    mutationFn: async (payload: { file: string; content: string }) => {
-      const response = await api.put(
-        `/api/admin/rules/${encodeURIComponent(payload.file)}`,
-        {
-          content: payload.content,
-        }
-      )
-      return response.data as { version: number }
-    },
-    onSuccess: () => {
-      toast.success(t('toast.ruleSaved'))
+  // 节点编辑工作流: 5 queries + 2 mutations
+  const {
+    fileContentQuery,
+    configFileContentQuery,
+    nodesQuery,
+    nodesConfigQuery,
+    saveMutation,
+    saveConfigMutation,
+  } = useNodeEditWorkflow({
+    enabled: Boolean(auth.accessToken),
+    editingFile,
+    editingConfigFile,
+    editingNodesFile,
+    editNodesDialogOpen,
+    onSaveSuccess: () => {
       setIsDirty(false)
       setValidationError(null)
-      queryClient.invalidateQueries({
-        queryKey: ['rule-file', editingFile?.filename],
-      })
-      // 关闭编辑对话框
       setEditDialogOpen(false)
       setEditingFile(null)
       setEditorValue('')
     },
-    onError: (error) => {
-      handleServerError(error)
-    },
-  })
-
-  // 保存配置文件内容
-  const saveConfigMutation = useMutation({
-    mutationFn: async (payload: { filename: string; content: string }) => {
-      const response = await api.put(
-        `/api/admin/subscribe-files/${encodeURIComponent(payload.filename)}/content`,
-        {
-          content: payload.content,
-        }
-      )
-      return response.data
-    },
-    onSuccess: () => {
-      toast.success(t('toast.configSaved'))
-      queryClient.invalidateQueries({
-        queryKey: ['subscribe-file-content', editingConfigFile?.filename],
-      })
-      queryClient.invalidateQueries({ queryKey: ['subscribe-files'] })
+    onSaveConfigSuccess: () => {
       setEditConfigDialogOpen(false)
       setEditingConfigFile(null)
       setConfigContent('')
-    },
-    onError: (error) => {
-      handleServerError(error)
     },
   })
 
@@ -2426,7 +1939,7 @@ function SubscribeFilesPage() {
           externalSubs={externalSubs}
           loading={isExternalSubsLoading}
           nodesByTag={nodesByTag}
-          allNodesLoaded={!!allNodesData}
+          allNodesLoaded={allNodesLoaded}
           expanded={isExternalSubsExpanded}
           onExpandedChange={setIsExternalSubsExpanded}
           syncingSingleId={syncingSingleId}
