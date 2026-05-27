@@ -419,6 +419,35 @@ func (h *XrayServerHandler) GetRemoteInstallScript(w http.ResponseWriter, r *htt
 		frontService = "xray"
 	}
 
+	// 计算 install 脚本里写入的 SERVER:
+	// 优先用系统设置 master_url 里的 host(用户配置的对外可达域名),
+	// 这是 agent 真正访问主控的地址。仅在 master_url 未配置时回退到 r.Host(可能是 nginx upstream 名,如 miaomiaowu_web,不可对外访问)。
+	// 若 master_url 已显式配置,EXPLICIT_MASTER=1 在脚本里禁用"同机部署"自动覆盖
+	// (避免在主控本机上安装 agent 时把 master_url 改写成 127.0.0.1)。
+	scriptServer := strings.TrimSpace(r.Host)
+	scriptProtocol := ""
+	explicitMaster := "0"
+	if mu, err := h.repo.GetSystemSetting(r.Context(), "master_url"); err == nil {
+		mu = strings.TrimSpace(mu)
+		if mu != "" {
+			explicitMaster = "1"
+			s := strings.TrimRight(mu, "/")
+			if strings.HasPrefix(s, "https://") {
+				scriptProtocol = "https"
+				s = strings.TrimPrefix(s, "https://")
+			} else if strings.HasPrefix(s, "http://") {
+				scriptProtocol = "http"
+				s = strings.TrimPrefix(s, "http://")
+			}
+			if i := strings.Index(s, "/"); i >= 0 {
+				s = s[:i]
+			}
+			if s != "" {
+				scriptServer = s
+			}
+		}
+	}
+
 	// 返回安装脚本内容
 	script := `#!/bin/bash
 # MMWX Remote Server Installation Script
@@ -427,7 +456,9 @@ func (h *XrayServerHandler) GetRemoteInstallScript(w http.ResponseWriter, r *htt
 set -e
 
 TOKEN="` + token + `"
-SERVER="` + r.Host + `"
+SERVER="` + scriptServer + `"
+SCRIPT_PROTOCOL="` + scriptProtocol + `"
+EXPLICIT_MASTER="` + explicitMaster + `"
 AUTO_STEAL_SELF="` + map[bool]string{true: "1", false: "0"}[stealSelf] + `"
 FRONT_SERVICE="` + frontService + `"
 XRAY_MODE="` + xrayMode + `"
@@ -435,23 +466,26 @@ MASTER_PUBLIC_KEY="` + h.masterPublicKeyBase64() + `"
 MASTER_PORT="` + h.getMasterPort() + `"
 LISTEN_PORT="` + listenPortParam + `"
 
-# Detect protocol (default to http if accessed locally)
-if [[ "$SERVER" == *":"* ]]; then
-    # Has port, likely development
+# 协议:优先用主控注入的 SCRIPT_PROTOCOL(来自系统设置 master_url 的 scheme),
+# 否则按 SERVER 是否带端口启发判断(开发场景常见 http)。
+if [ -n "$SCRIPT_PROTOCOL" ]; then
+    PROTOCOL="$SCRIPT_PROTOCOL"
+elif [[ "$SERVER" == *":"* ]]; then
     PROTOCOL="http"
 else
     PROTOCOL="https"
 fi
 
-# Allow override from environment
+# 允许通过环境变量强制覆盖协议
 if [ -n "$MMWX_PROTOCOL" ]; then
     PROTOCOL="$MMWX_PROTOCOL"
 fi
 
 MASTER_URL="${PROTOCOL}://${SERVER}"
 
-# 同机部署检测：如果本机能访问主控的 HTTP 端口，直接用 127.0.0.1 通信
-if curl -sf "http://127.0.0.1:${MASTER_PORT}/api/setup/status" >/dev/null 2>&1; then
+# 同机部署检测:只有在主控"没有显式配置 master_url"时才允许把 master_url 自动改成 127.0.0.1;
+# 用户配置了对外域名(EXPLICIT_MASTER=1)就必须用用户的域名,不让自动改写。
+if [ "$EXPLICIT_MASTER" != "1" ] && curl -sf "http://127.0.0.1:${MASTER_PORT}/api/setup/status" >/dev/null 2>&1; then
     MASTER_URL="http://127.0.0.1:${MASTER_PORT}"
     echo "Detected same-machine deployment, using ${MASTER_URL}"
 fi
@@ -557,9 +591,37 @@ esac
 # Get latest release URL
 RELEASE_URL="https://github.com/iluobei/mmw-agent/releases/latest/download/mmw-agent-linux-${ARCH_NAME}"
 
-# Download binary
+# Download binary — 优先用 curl(更普遍),没有就用 wget;两者都没就按发行版包管理器装一个,
+# 杜绝 "wget: command not found" 噪声 / "ERROR: 都没装" 卡死。
+ensure_downloader() {
+    if command -v curl >/dev/null 2>&1; then return 0; fi
+    if command -v wget >/dev/null 2>&1; then return 0; fi
+    echo "未检测到 curl/wget,尝试自动安装 curl..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq >/dev/null 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive apt-get install -y curl
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y curl
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y curl
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache curl
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm curl
+    elif command -v zypper >/dev/null 2>&1; then
+        zypper -n install curl
+    else
+        echo "ERROR: 无法识别系统包管理器,请手动安装 curl 或 wget 后重试" >&2
+        return 1
+    fi
+}
 echo "Downloading from $RELEASE_URL..."
-wget -q --show-progress -O /tmp/mmw-agent "$RELEASE_URL" || curl -fsSL -o /tmp/mmw-agent "$RELEASE_URL"
+ensure_downloader || exit 1
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL -o /tmp/mmw-agent "$RELEASE_URL"
+else
+    wget -q --show-progress -O /tmp/mmw-agent "$RELEASE_URL"
+fi
 
 # Install binary
 chmod +x /tmp/mmw-agent

@@ -665,11 +665,11 @@ function NodesPage() {
         <TooltipTrigger asChild>
           <Badge
             variant='outline'
-            className='gap-1 text-[10px] border-orange-300 text-orange-600 dark:text-orange-400'
+            className='h-5 w-5 p-0 flex items-center justify-center border-orange-300 text-orange-600 dark:text-orange-400'
             onClick={(e) => e.stopPropagation()}
+            aria-label={t('nodeList.forwardedByTunnel')}
           >
             <RouteIcon className='h-3 w-3' />
-            {t('nodeList.forwardedByTunnel')}
           </Badge>
         </TooltipTrigger>
         <TooltipContent>
@@ -684,6 +684,23 @@ function NodesPage() {
         </TooltipContent>
       </Tooltip>
     )
+  }
+
+  // 取节点所属服务器名:优先 original_server,兼容老数据 tag=「远程:服务器名」
+  const getNodeServerName = (dbNode: any): string => {
+    if (!dbNode) return ''
+    if (dbNode.original_server) return dbNode.original_server
+    if (typeof dbNode.tag === 'string' && dbNode.tag.startsWith('远程:')) {
+      return dbNode.tag.slice(3)
+    }
+    return ''
+  }
+
+  // 取要展示在 tag 徽章上的文本:若 tag 是「远程:xxx」形式,则不再显示(服务器名已挪到节点名下方)
+  const getDisplayTag = (dbNode: any, fallbackTag?: string): string => {
+    const raw = dbNode?.tag || fallbackTag || ''
+    if (typeof raw === 'string' && raw.startsWith('远程:')) return ''
+    return raw
   }
 
   // 远程服务器列表（admin 才能调,普通用户没有这个权限,跳过这个 query）
@@ -2664,16 +2681,14 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                       <RouteIcon className='h-4 w-4 mr-1' />
                       路由出站
                     </Button>
-                    {hasSpeedTest && (
-                      <Button
-                        variant='outline'
-                        size='sm'
-                        onClick={() => { setSpeedDialogOpen(true); setSpeedDialogMin(false) }}
-                      >
-                        <Gauge className='h-4 w-4 mr-1' />
-                        {t('speedtest.dialogTitle')}
-                      </Button>
-                    )}
+                    <Button
+                      variant='outline'
+                      size='sm'
+                      onClick={() => { setSpeedDialogOpen(true); setSpeedDialogMin(false) }}
+                    >
+                      <Gauge className='h-4 w-4 mr-1' />
+                      {t('speedtest.dialogTitle')}
+                    </Button>
                     <Button
                       variant='outline'
                       size='sm'
@@ -3039,7 +3054,14 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   </Button>
                                 </div>
                               ) : (
-                                <div className='font-medium text-sm break-all line-clamp-2'><Twemoji>{node.name || t('nodeList.unknown')}</Twemoji></div>
+                                <div>
+                                  <div className='font-medium text-sm break-all line-clamp-2'><Twemoji>{node.name || t('nodeList.unknown')}</Twemoji></div>
+                                  {getNodeServerName(node.dbNode) && (
+                                    <div className='text-[11px] text-muted-foreground mt-0.5 truncate'>
+                                      {getNodeServerName(node.dbNode)}
+                                    </div>
+                                  )}
+                                </div>
                               )}
                               {renderForwardedBadge(node)}
                             </div>
@@ -3182,12 +3204,19 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                 )}
                               </div>
                             )}
-                            <div className='flex items-center gap-2 flex-wrap text-xs'>
-                              <span className='text-muted-foreground shrink-0'>{t('label.tag')}</span>
-                              <Badge variant='secondary' className='text-xs'>
-                                {node.dbNode?.tag || node.tag || (currentTag === 'manual' ? manualTag.trim() || t('filter.manualInput') : currentTag === 'subscription' ? subscriptionTag.trim() || t('filter.subscriptionImport') : t('nodeList.unknown'))}
-                              </Badge>
-                            </div>
+                            {(() => {
+                              const tagText = getDisplayTag(node.dbNode, node.tag) ||
+                                (currentTag === 'manual' ? manualTag.trim() || t('filter.manualInput')
+                                  : currentTag === 'subscription' ? subscriptionTag.trim() || t('filter.subscriptionImport')
+                                  : '')
+                              if (!tagText) return null
+                              return (
+                                <div className='flex items-center gap-2 flex-wrap text-xs'>
+                                  <span className='text-muted-foreground shrink-0'>{t('label.tag')}</span>
+                                  <Badge variant='secondary' className='text-xs'>{tagText}</Badge>
+                                </div>
+                              )
+                            })()}
                           </div>
 
                           {/* 操作按钮组 */}
@@ -3416,6 +3445,11 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       )}
                                       {renderForwardedBadge(node)}
                                     </div>
+                                    {getNodeServerName(node.dbNode) && (
+                                      <div className='text-[11px] text-muted-foreground mt-0.5 truncate'>
+                                        {getNodeServerName(node.dbNode)}
+                                      </div>
+                                    )}
                                     {/* 服务器地址显示在节点名称下方 */}
                                     {node.parsed && (
                                       <div className='flex items-center gap-1 mt-0.5 text-xs text-muted-foreground'>
@@ -3532,9 +3566,16 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                             </TableCell>
                             <TableCell>
                               <div className='flex flex-wrap gap-1'>
-                                <Badge variant='secondary' className='text-xs max-w-[90px] truncate'>
-                                  {node.dbNode?.tag || node.tag || (currentTag === 'manual' ? manualTag.trim() || t('filter.manualInput') : currentTag === 'subscription' ? subscriptionTag.trim() || t('filter.subscriptionImport') : t('nodeList.unknown'))}
-                                </Badge>
+                                {(() => {
+                                  const tagText = getDisplayTag(node.dbNode, node.tag) ||
+                                    (currentTag === 'manual' ? manualTag.trim() || t('filter.manualInput')
+                                      : currentTag === 'subscription' ? subscriptionTag.trim() || t('filter.subscriptionImport')
+                                      : '')
+                                  if (!tagText) return null
+                                  return (
+                                    <Badge variant='secondary' className='text-xs max-w-[90px] truncate'>{tagText}</Badge>
+                                  )
+                                })()}
                               </div>
                             </TableCell>
                             <TableCell className='text-center'>
@@ -3724,6 +3765,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   </Button>
                                 </div>
                               ) : (
+                                <div className='min-w-0'>
                                 <div className='flex items-center gap-2 min-w-0'>
                                   <span className='truncate flex-1 min-w-0' title={node.name || t('nodeList.unknown')}><Twemoji>{node.name || t('nodeList.unknown')}</Twemoji></span>
                                   {node.isSaved && (
@@ -3825,17 +3867,32 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   />
                                   )}
                                 </div>
+                                {getNodeServerName(node.dbNode) && (
+                                  <div className='text-[11px] text-muted-foreground mt-0.5 truncate'>
+                                    {getNodeServerName(node.dbNode)}
+                                  </div>
+                                )}
+                                </div>
                               )}
                             </TableCell>
                             <TableCell>
                               <div className='flex flex-wrap gap-1'>
-                                <Badge
-                                  variant='secondary'
-                                  className='text-xs max-w-[120px] truncate'
-                                  title={node.dbNode?.tag || node.tag || (currentTag === 'manual' ? manualTag.trim() || t('filter.manualInput') : currentTag === 'subscription' ? subscriptionTag.trim() || t('filter.subscriptionImport') : t('nodeList.unknown'))}
-                                >
-                                  {node.dbNode?.tag || node.tag || (currentTag === 'manual' ? manualTag.trim() || t('filter.manualInput') : currentTag === 'subscription' ? subscriptionTag.trim() || t('filter.subscriptionImport') : t('nodeList.unknown'))}
-                                </Badge>
+                                {(() => {
+                                  const tagText = getDisplayTag(node.dbNode, node.tag) ||
+                                    (currentTag === 'manual' ? manualTag.trim() || t('filter.manualInput')
+                                      : currentTag === 'subscription' ? subscriptionTag.trim() || t('filter.subscriptionImport')
+                                      : '')
+                                  if (!tagText) return null
+                                  return (
+                                    <Badge
+                                      variant='secondary'
+                                      className='text-xs max-w-[120px] truncate'
+                                      title={tagText}
+                                    >
+                                      {tagText}
+                                    </Badge>
+                                  )
+                                })()}
                               </div>
                             </TableCell>
                             <TableCell style={{ maxWidth: '280px' }}>
@@ -5203,7 +5260,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
         onClose={() => { setSpeedDialogOpen(false); setSpeedDialogMin(false) }}
       />
       {/* 收起态:屏幕右侧垂直居中悬浮按钮,点击重新打开测速工作台 */}
-      {hasSpeedTest && speedDialogMin && !speedDialogOpen && (
+      {speedDialogMin && !speedDialogOpen && (
         <button
           type='button'
           onClick={() => { setSpeedDialogOpen(true); setSpeedDialogMin(false) }}

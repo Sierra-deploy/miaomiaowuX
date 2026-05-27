@@ -10,6 +10,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { useLicenseUsage } from '@/hooks/use-license'
 import { formatBytes as formatTraffic, formatSpeed } from '@/lib/format'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
+import { Twemoji } from '@/components/twemoji'
 
 import { InboundPanel } from '@/components/xray/inbound-panel'
 import { OutboundPanel } from '@/components/xray/outbound-panel'
@@ -179,6 +180,7 @@ function XrayServersPage() {
   const [editingRemoteServer, setEditingRemoteServer] = useState<RemoteServer | null>(null)
   const [remoteFormData, setRemoteFormData] = useState({
     name: '',
+    pull_address: '',
     domain: '',
     traffic_limit_gb: '',
     traffic_used_gb: '',
@@ -275,7 +277,7 @@ function XrayServersPage() {
   })
 
   const updateRemoteServerMutation = useMutation({
-    mutationFn: async (data: { id: number; name: string; domain?: string; traffic_limit: number; traffic_used?: number; traffic_reset_day: number; connection_mode?: string; xray_mode?: string; listen_port?: number }) => {
+    mutationFn: async (data: { id: number; name: string; pull_address?: string; domain?: string; traffic_limit: number; traffic_used?: number; traffic_reset_day: number; connection_mode?: string; xray_mode?: string; listen_port?: number }) => {
       const response = await api.put('/api/admin/remote-servers/update', data)
       return response.data
     },
@@ -283,7 +285,7 @@ function XrayServersPage() {
       queryClient.invalidateQueries({ queryKey: ['remote-servers'] })
       setIsEditRemoteServerDialogOpen(false)
       setEditingRemoteServer(null)
-      setRemoteFormData({ name: '', domain: '', traffic_limit_gb: '', traffic_used_gb: '', traffic_reset_day: '', steal_mode: 'tunnel' })
+      setRemoteFormData({ name: '', pull_address: '', domain: '', traffic_limit_gb: '', traffic_used_gb: '', traffic_reset_day: '', steal_mode: 'tunnel' })
       toast.success(t('servers.serverUpdated'))
     },
     onError: handleServerError,
@@ -580,7 +582,7 @@ function XrayServersPage() {
 
   const handleEditRemoteServer = (server: RemoteServer) => {
     setEditingRemoteServer(server)
-    setRemoteFormData({ name: server.name, domain: server.domain || '', traffic_limit_gb: server.traffic_limit ? (server.traffic_limit / 1024 / 1024 / 1024).toFixed(2) : '', traffic_used_gb: server.traffic_used ? (server.traffic_used / 1024 / 1024 / 1024).toFixed(2) : '', traffic_reset_day: server.traffic_reset_day?.toString() || '', steal_mode: server.steal_mode || 'tunnel', xray_mode: server.xray_mode || 'external', listen_port: server.listen_port ? String(server.listen_port) : '' })
+    setRemoteFormData({ name: server.name, pull_address: server.pull_address || server.ip_address || '', domain: server.domain || '', traffic_limit_gb: server.traffic_limit ? (server.traffic_limit / 1024 / 1024 / 1024).toFixed(2) : '', traffic_used_gb: server.traffic_used ? (server.traffic_used / 1024 / 1024 / 1024).toFixed(2) : '', traffic_reset_day: server.traffic_reset_day?.toString() || '', steal_mode: server.steal_mode || 'tunnel', xray_mode: server.xray_mode || 'external', listen_port: server.listen_port ? String(server.listen_port) : '' })
     setIsEditRemoteServerDialogOpen(true)
   }
 
@@ -603,7 +605,7 @@ function XrayServersPage() {
         : t('servers.listenPortChangeConfirm', { port: newListenPort, defaultValue: '将把 Agent 监听端口改为 {{port}},Agent 会重启并短暂掉线,确定继续吗?' })
       if (!confirm(confirmMsg)) return
     }
-    updateRemoteServerMutation.mutate({ id: editingRemoteServer.id, name: remoteFormData.name, domain: remoteFormData.domain, traffic_limit: trafficLimitGb > 0 ? Math.floor(trafficLimitGb * 1024 * 1024 * 1024) : 0, traffic_used: trafficUsedBytes, traffic_reset_day: parseInt(remoteFormData.traffic_reset_day) || 0, xray_mode: remoteFormData.xray_mode, listen_port: newListenPort } as any)
+    updateRemoteServerMutation.mutate({ id: editingRemoteServer.id, name: remoteFormData.name, pull_address: remoteFormData.pull_address || undefined, domain: remoteFormData.domain, traffic_limit: trafficLimitGb > 0 ? Math.floor(trafficLimitGb * 1024 * 1024 * 1024) : 0, traffic_used: trafficUsedBytes, traffic_reset_day: parseInt(remoteFormData.traffic_reset_day) || 0, xray_mode: remoteFormData.xray_mode, listen_port: newListenPort } as any)
   }
 
   const loadRemoteServerStatusToCache = async (serverId: number, forceReload = false) => {
@@ -888,7 +890,7 @@ function XrayServersPage() {
                     <div className="flex flex-col gap-1.5 min-w-0 flex-1">
                       <div className="flex items-center gap-2 min-w-0">
                         <div className={cn("w-3 h-3 rounded-full flex-shrink-0", server.status === 'connected' ? "bg-green-500" : server.status === 'pending' ? "bg-yellow-500" : "bg-red-500")} title={server.status === 'connected' ? t('servers.online') : server.status === 'pending' ? t('servers.pending') : t('servers.offline')} />
-                        <CardTitle className="text-lg truncate">{server.name}</CardTitle>
+                        <CardTitle className="text-lg truncate"><Twemoji>{server.name}</Twemoji></CardTitle>
                       </div>
                       <div className="flex flex-wrap items-center gap-1.5">
                         <RemoteServerStatusBadge status={server.status} />
@@ -1036,7 +1038,7 @@ function XrayServersPage() {
                         <div className={cn("w-2.5 h-2.5 rounded-full flex-shrink-0", server.status === 'connected' ? "bg-green-500" : server.status === 'pending' ? "bg-yellow-500" : "bg-red-500")} />
                         <div className="min-w-0">
                           <div className="flex items-center gap-2">
-                            <span className={cn("truncate", server.status !== 'connected' && 'cursor-pointer hover:text-primary')} onClick={() => { if (server.status !== 'connected') { setSelectedRemoteServer(server); setIsRemoteServerDetailDialogOpen(true) } }}>{server.name}</span>
+                            <span className={cn("truncate", server.status !== 'connected' && 'cursor-pointer hover:text-primary')} onClick={() => { if (server.status !== 'connected') { setSelectedRemoteServer(server); setIsRemoteServerDetailDialogOpen(true) } }}><Twemoji>{server.name}</Twemoji></span>
                             <RemoteServerStatusBadge status={server.status} />
                             {server.status === 'connected' && (
                               server.encrypted
@@ -1248,7 +1250,7 @@ function XrayServersPage() {
                   <p className="text-sm text-red-600 dark:text-red-400">{t('servers.lastHeartbeatTime', { time: selectedRemoteServer.last_heartbeat ? new Date(selectedRemoteServer.last_heartbeat).toLocaleString() : t('servers.neverConnected') })}</p>
                 </div>
               )}
-              <div className="space-y-2"><Label>{t('servers.serverName')}</Label><div className="text-sm font-medium">{selectedRemoteServer.name}</div></div>
+              <div className="space-y-2"><Label>{t('servers.serverName')}</Label><div className="text-sm font-medium"><Twemoji>{selectedRemoteServer.name}</Twemoji></div></div>
               {selectedRemoteServer.status === 'offline' && (
                 <div className="space-y-2">
                   <Label className="text-base font-semibold">{t('servers.startService')}</Label>
@@ -1277,11 +1279,12 @@ function XrayServersPage() {
       </Dialog>
 
       {/* Edit Remote Server Dialog */}
-      <Dialog open={isEditRemoteServerDialogOpen} onOpenChange={(open) => { setIsEditRemoteServerDialogOpen(open); if (!open) { setEditingRemoteServer(null); setRemoteFormData({ name: '', domain: '', traffic_limit_gb: '', traffic_used_gb: '', traffic_reset_day: '', steal_mode: 'tunnel', xray_mode: 'external' }) } }}>
+      <Dialog open={isEditRemoteServerDialogOpen} onOpenChange={(open) => { setIsEditRemoteServerDialogOpen(open); if (!open) { setEditingRemoteServer(null); setRemoteFormData({ name: '', pull_address: '', domain: '', traffic_limit_gb: '', traffic_used_gb: '', traffic_reset_day: '', steal_mode: 'tunnel', xray_mode: 'external' }) } }}>
         <DialogContent className="max-w-md">
           <DialogHeader><DialogTitle>{t('servers.editRemoteServer')}</DialogTitle><DialogDescription>{t('servers.editRemoteServerDesc')}</DialogDescription></DialogHeader>
           <div className="grid gap-4 py-4">
             <div className="grid gap-2"><Label htmlFor="edit-remote-name">{t('servers.serverName')}</Label><Input id="edit-remote-name" value={remoteFormData.name} onChange={(e) => setRemoteFormData({ ...remoteFormData, name: e.target.value })} placeholder={t('servers.serverNamePlaceholder')} /></div>
+            <div className="grid gap-2"><Label htmlFor="edit-remote-pull-address">{t('servers.serverAddress')}</Label><Input id="edit-remote-pull-address" value={remoteFormData.pull_address} onChange={(e) => setRemoteFormData({ ...remoteFormData, pull_address: e.target.value })} placeholder={t('servers.serverAddressPlaceholder')} /></div>
             <div className="grid gap-2"><Label htmlFor="edit-remote-domain">{t('servers.domainOptional')}</Label><Input id="edit-remote-domain" value={remoteFormData.domain} onChange={(e) => setRemoteFormData({ ...remoteFormData, domain: e.target.value })} placeholder="example.com" /><p className="text-xs text-muted-foreground">{t('servers.domainHint')}</p></div>
             <div className="grid gap-2">
               <Label htmlFor="edit-remote-listen-port">{t('servers.agentPort')}</Label>

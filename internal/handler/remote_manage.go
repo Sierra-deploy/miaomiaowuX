@@ -1717,6 +1717,16 @@ func (h *RemoteManageHandler) HandleScan(w http.ResponseWriter, r *http.Request)
 
 // 将远程服务器的入站同步到节点表（内部使用）
 func (h *RemoteManageHandler) syncInboundsToNodesInternal(ctx context.Context, serverID int64) SyncInboundsToNodesResponse {
+	return h.syncInboundsToNodes(ctx, serverID, "", false)
+}
+
+// syncInboundsToNodes 是真正的实现:auto-sync(WS scan_result)与手动同步(HandleSyncInboundsToNodes)
+// 共用一份逻辑,避免两边漂移(历史上手动同步分支没有 claim 逻辑,导致"回落+路由出站"场景下同一 inbound
+// 对应的多个外部节点无法被认领,见 issue: hk-n.2ha.me 节点只有 1 个被匹配的反馈)。
+//
+// serverHostOverride: 写入 clash proxy 配置的 server 字段;空时回退到 server.IPAddress。
+// forceOverride: true 时,遇到同名节点先删除再新建(手动同步对话框的"强制覆盖"开关)。
+func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID int64, serverHostOverride string, forceOverride bool) SyncInboundsToNodesResponse {
 	response := SyncInboundsToNodesResponse{
 		Success:    true,
 		SyncedTags: []string{},
@@ -1731,8 +1741,11 @@ func (h *RemoteManageHandler) syncInboundsToNodesInternal(ctx context.Context, s
 		return response
 	}
 
-	// 使用服务器的IP地址
-	serverHost := server.IPAddress
+	// 写入 clash proxy 的 server 字段:优先用调用方覆盖,否则用 IP
+	serverHost := strings.TrimSpace(serverHostOverride)
+	if serverHost == "" {
+		serverHost = server.IPAddress
+	}
 	if serverHost == "" {
 		response.Success = false
 		response.Errors = append(response.Errors, "服务器IP地址为空")
@@ -1815,34 +1828,10 @@ func (h *RemoteManageHandler) syncInboundsToNodesInternal(ctx context.Context, s
 			continue
 		}
 
-		// 通过服务器+inboundTag 去重（优先，覆盖 tunnel 端口映射场景）
-		if tag != "" && existingInboundTags[server.Name+":"+tag] {
-			response.SkippedCount++
-			continue
-		}
-
-		// 通过服务器+协议+端口进行重复数据删除
 		dedupeKey := fmt.Sprintf("%s:%s:%d", server.Name, protocol, int(port))
-		if existingNodeKeys[dedupeKey] {
-			response.SkippedCount++
-			continue
-		}
 
-		// 创建节点名称：如果没有标签，则使用协议：端口
-		var nodeName string
-		if tag != "" {
-			nodeName = fmt.Sprintf("[%s] %s", server.Name, tag)
-		} else {
-			nodeName = fmt.Sprintf("[%s] %s:%d", server.Name, protocol, int(port))
-		}
-
-		// 检查同名节点是否已存在
-		if existingNodeNames[nodeName] {
-			response.SkippedCount++
-			continue
-		}
-
-		// 将入站转换为 Clash 代理配置（server 保持用 IP，域名可能走 CDN）
+		// 将入站转换为 Clash 代理配置(server 保持用 IP,域名可能走 CDN)
+		// 即便该 inbound 会被 dedupe skip,我们仍需 clash_config 来 claim 同 server:port:proto 的其它外部节点
 		tunnelPort := 0
 		if tunnelInSettingsPort > 0 && int(port) == tunnelInSettingsPort {
 			tunnelPort = 443
@@ -1853,14 +1842,11 @@ func (h *RemoteManageHandler) syncInboundsToNodesInternal(ctx context.Context, s
 			response.SkippedCount++
 			continue
 		}
-
 		if clashProxy == nil {
 			response.Errors = append(response.Errors, fmt.Sprintf("tag=%s: 无法生成节点配置", tag))
 			response.SkippedCount++
 			continue
 		}
-
-		// 序列化 Clash 配置
 		clashConfigJSON, err := json.Marshal(clashProxy)
 		if err != nil {
 			response.Errors = append(response.Errors, fmt.Sprintf("tag=%s: 序列化配置失败", tag))
@@ -1868,14 +1854,61 @@ func (h *RemoteManageHandler) syncInboundsToNodesInternal(ctx context.Context, s
 			continue
 		}
 
-		// 先尝试 claim 现有外部节点(从 mmw 迁移过来、original_server='' 的)。
-		// 命中即把该节点升级为受管节点,不新建。
-		if claimed := h.tryClaimExternalNodeForSync(ctx, server, protocol, int(port), string(clashConfigJSON), tag); claimed {
-			response.SyncedCount++
+		// 先尝试 claim 所有匹配的未认领外部节点 — 这一步必须在 dedupe 之前,
+		// 因为「回落+路由出站」场景下 1 个 inbound 可能对应 N 个客户端节点(uuid/email 不同),
+		// 即使其中 1 个节点已经认领了这个 inbound(导致 dedupe 命中),其余的也仍需要 claim。
+		claimedThis := h.tryClaimExternalNodeForSync(ctx, server, protocol, int(port), string(clashConfigJSON), tag)
+		if claimedThis {
 			response.ClaimedCount++
 			if tag != "" {
 				response.SyncedTags = append(response.SyncedTags, fmt.Sprintf("%s (port:%d) [claimed]", tag, int(port)))
 			}
+		}
+
+		// 通过服务器+inboundTag 去重(优先,覆盖 tunnel 端口映射场景)
+		if tag != "" && existingInboundTags[server.Name+":"+tag] {
+			response.SkippedCount++
+			continue
+		}
+
+		// 通过服务器+协议+端口进行重复数据删除
+		if existingNodeKeys[dedupeKey] {
+			response.SkippedCount++
+			continue
+		}
+
+		// 创建节点名称:如果没有标签,则使用协议:端口
+		var nodeName string
+		if tag != "" {
+			nodeName = fmt.Sprintf("[%s] %s", server.Name, tag)
+		} else {
+			nodeName = fmt.Sprintf("[%s] %s:%d", server.Name, protocol, int(port))
+		}
+
+		// 检查同名节点是否已存在
+		if existingNodeNames[nodeName] {
+			if forceOverride {
+				// 强制覆盖:删除同名节点,后面走"创建"路径覆盖
+				for _, n := range existingNodes {
+					if n.NodeName == nodeName {
+						if err := h.repo.DeleteNode(ctx, n.ID, username); err != nil {
+							response.Errors = append(response.Errors, fmt.Sprintf("tag=%s: 删除旧节点失败: %v", tag, err))
+							response.SkippedCount++
+							continue
+						}
+						break
+					}
+				}
+				delete(existingNodeNames, nodeName)
+			} else {
+				response.SkippedCount++
+				continue
+			}
+		}
+
+		// 如果上一步 claim 命中,本次循环已经处理完,不再走"创建新节点"分支
+		if claimedThis {
+			response.SyncedCount++
 			existingNodeKeys[dedupeKey] = true
 			if tag != "" {
 				existingInboundTags[server.Name+":"+tag] = true
@@ -1943,9 +1976,13 @@ func protocolEquivalent(clashType, xrayProtocol string) bool {
 // 同样的等价判断,也给 NodeSyncListener / 别处用。在 event 包里也有 tryClaim,
 // 那边自己也保留一份语义一致的判断;此处不导出避免跨包耦合。
 
-// tryClaimExternalNodeForSync 在 sync inbounds → nodes 流程里,先扫"外部节点"
+// tryClaimExternalNodeForSync 在 sync inbounds → nodes 流程里,扫"外部节点"
 // (original_server='' AND inbound_tag=''),按 server 地址(IP/Domain/PullAddress 任一)+ port + protocol
-// 匹配,命中即把该节点升级为受管节点(填上 original_server + inbound_tag),返回 true。
+// 匹配,把命中的节点全部升级为受管节点(填上 original_server + inbound_tag),返回是否至少 claim 了一个。
+//
+// 全部 claim 而非 claim 第一个:同一台服务器使用「回落+路由出站」时,订阅里会出现多条
+// server+port+protocol 完全相同、只是用户凭据 / email 不同的客户端节点(各自走不同上游路径),
+// 都应该匹配到这台服务器,见 Issue: hk-n.2ha.me 多个节点只匹配到 1 个的反馈。
 func (h *RemoteManageHandler) tryClaimExternalNodeForSync(ctx context.Context, server *storage.RemoteServer, protocol string, port int, clashConfigJSON, inboundTag string) bool {
 	candidates := map[string]bool{}
 	for _, a := range []string{server.IPAddress, server.Domain, server.PullAddress} {
@@ -1961,6 +1998,7 @@ func (h *RemoteManageHandler) tryClaimExternalNodeForSync(ctx context.Context, s
 	if err != nil {
 		return false
 	}
+	claimedAny := false
 	for _, n := range allNodes {
 		if strings.TrimSpace(n.OriginalServer) != "" || strings.TrimSpace(n.InboundTag) != "" {
 			continue
@@ -1990,12 +2028,19 @@ func (h *RemoteManageHandler) tryClaimExternalNodeForSync(ctx context.Context, s
 		if !protocolEquivalent(proto, protocol) {
 			continue
 		}
-		// 命中:用 agent 转出来的 clash_config 替换,但保留原节点名(用户改过的中文名)
+		// 命中:用 agent 转出来的 clash_config 作为「连接配置」基础,但保留原节点名(用户改过的中文名)
+		// 以及原 clash_config 里区分各节点的凭据字段(uuid/password/email,因为这是回落+路由出站下区分 route 的关键)
 		mergedConfig := clashConfigJSON
 		var newCfg map[string]any
 		if err := json.Unmarshal([]byte(clashConfigJSON), &newCfg); err == nil {
 			if name, _ := cfg["name"].(string); name != "" {
 				newCfg["name"] = name
+			}
+			// 凭据字段 — 多节点共用同一 inbound 时,这些字段是区分路由的关键,必须保留原值
+			for _, k := range []string{"uuid", "password", "email", "alterId", "cipher"} {
+				if v, ok := cfg[k]; ok {
+					newCfg[k] = v
+				}
 			}
 			if updated, err := json.Marshal(newCfg); err == nil {
 				mergedConfig = string(updated)
@@ -2003,12 +2048,12 @@ func (h *RemoteManageHandler) tryClaimExternalNodeForSync(ctx context.Context, s
 		}
 		if err := h.repo.ClaimExternalNode(ctx, n.ID, server.Name, inboundTag, fmt.Sprintf("远程:%s", server.Name), mergedConfig); err != nil {
 			log.Printf("[Remote Manage] tryClaim node %d failed: %v", n.ID, err)
-			return false
+			continue
 		}
 		log.Printf("[Remote Manage] Claimed external node id=%d name=%q for %s/%s:%d", n.ID, n.NodeName, server.Name, protocol, port)
-		return true
+		claimedAny = true
 	}
-	return false
+	return claimedAny
 }
 
 // ================== X射线系统配置==================
@@ -2067,7 +2112,9 @@ type SyncInboundsToNodesResponse struct {
 	Errors       []string `json:"errors,omitempty"`
 }
 
-// 将远程服务器的入站同步到节点表
+// 将远程服务器的入站同步到节点表(手动触发)。
+// 与 WS scan_result 自动同步共用 syncInboundsToNodes 实现 — 不再单独写一份循环逻辑,
+// 防止 claim/dedupe/规则跨入口漂移。
 func (h *RemoteManageHandler) HandleSyncInboundsToNodes(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		remoteWriteError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -2086,188 +2133,16 @@ func (h *RemoteManageHandler) HandleSyncInboundsToNodes(w http.ResponseWriter, r
 		return
 	}
 
-	// 解析服务器主机的请求正文
+	// 解析请求体(server_host + force_override 都是可选)
 	var req SyncInboundsToNodesRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		remoteWriteError(w, http.StatusBadRequest, "invalid request body")
-		return
-	}
-
-	if req.ServerHost == "" {
-		remoteWriteError(w, http.StatusBadRequest, "server_host is required")
-		return
-	}
-
-	// 获取远程服务器信息
-	server, err := h.repo.GetRemoteServer(r.Context(), id)
-	if err != nil {
-		remoteWriteError(w, http.StatusNotFound, "remote server not found")
-		return
-	}
-
-	// 从远程服务器获取入站
-	result, err := h.forwardToRemoteServer(r.Context(), id, "GET", "/api/child/inbounds", nil)
-	if err != nil {
-		remoteWriteError(w, http.StatusBadGateway, fmt.Sprintf("failed to fetch inbounds: %v", err))
-		return
-	}
-
-	var inboundsResp struct {
-		Success  bool                     `json:"success"`
-		Inbounds []map[string]interface{} `json:"inbounds"`
-	}
-	if err := json.Unmarshal(result, &inboundsResp); err != nil {
-		remoteWriteError(w, http.StatusInternalServerError, fmt.Sprintf("failed to parse inbounds: %v", err))
-		return
-	}
-
-	if !inboundsResp.Success {
-		remoteWriteError(w, http.StatusBadGateway, "remote server returned error")
-		return
-	}
-
-	// 提取 tunnel-in 的 settings.port
-	tunnelInSettingsPort := 0
-	if server.Domain != "" && (server.StealMode == "tunnel" || server.StealMode == "") {
-		for _, ib := range inboundsResp.Inbounds {
-			if tag, _ := ib["tag"].(string); tag == "tunnel-in" {
-				if s, _ := ib["settings"].(map[string]interface{}); s != nil {
-					if p, ok := s["port"].(float64); ok && p > 0 {
-						tunnelInSettingsPort = int(p)
-					}
-				}
-				break
-			}
+	if r.ContentLength > 0 {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			remoteWriteError(w, http.StatusBadRequest, "invalid request body")
+			return
 		}
 	}
 
-	// 从请求上下文中获取用户名（管理员用户）
-	username := "admin" // 目前默认为管理员
-	if u := r.Context().Value("username"); u != nil {
-		if ustr, ok := u.(string); ok && ustr != "" {
-			username = ustr
-		}
-	}
-
-	response := SyncInboundsToNodesResponse{
-		Success:    true,
-		SyncedTags: []string{},
-		Errors:     []string{},
-	}
-
-	// 在循环之前获取现有节点一次
-	existingNodes, _ := h.repo.ListNodes(r.Context(), username)
-	existingNodeNames := make(map[string]bool)
-	for _, n := range existingNodes {
-		existingNodeNames[n.NodeName] = true
-	}
-
-	// 处理每个入站并创建节点
-	for _, inbound := range inboundsResp.Inbounds {
-		tag, _ := inbound["tag"].(string)
-		protocol, _ := inbound["protocol"].(string)
-		port, _ := inbound["port"].(float64)
-		settings, hasSettings := inbound["settings"].(map[string]interface{})
-
-		// 记录入站信息以进行调试
-		log.Printf("[Sync Nodes] Processing inbound: tag=%s, protocol=%s, port=%v, hasSettings=%v", tag, protocol, port, hasSettings)
-		if settings != nil {
-			clients, hasClients := settings["clients"].([]interface{})
-			accounts, hasAccounts := settings["accounts"].([]interface{})
-			log.Printf("[Sync Nodes]   settings: hasClients=%v (count=%d), hasAccounts=%v (count=%d)", hasClients, len(clients), hasAccounts, len(accounts))
-		}
-
-		// 跳过 api 入站
-		if tag == "api" || protocol == "tunnel" {
-			log.Printf("[Sync Nodes] Skipped: api/tunnel inbound")
-			response.SkippedCount++
-			continue
-		}
-
-		// 创建节点名称：[server_name]标签
-		nodeName := fmt.Sprintf("[%s] %s", server.Name, tag)
-
-		// 检查同名节点是否已存在
-		if existingNodeNames[nodeName] {
-			if req.ForceOverride {
-				// 强制覆盖：先删除已存在的节点
-				log.Printf("[Sync Nodes] Force override: deleting existing node: %s", nodeName)
-				for _, n := range existingNodes {
-					if n.NodeName == nodeName {
-						if err := h.repo.DeleteNode(r.Context(), n.ID, username); err != nil {
-							log.Printf("[Sync Nodes] Error deleting existing node %s: %v", nodeName, err)
-							response.Errors = append(response.Errors, fmt.Sprintf("tag=%s: 删除旧节点失败: %v", tag, err))
-							response.SkippedCount++
-							continue
-						}
-						break
-					}
-				}
-			} else {
-				log.Printf("[Sync Nodes] Skipped: node already exists: %s", nodeName)
-				response.Errors = append(response.Errors, fmt.Sprintf("tag=%s: 节点已存在", tag))
-				response.SkippedCount++
-				continue
-			}
-		}
-
-		// 将入站转换为 Clash 代理配置（server 保持用 IP，域名可能走 CDN）
-		tunnelPort := 0
-		if tunnelInSettingsPort > 0 && int(port) == tunnelInSettingsPort {
-			tunnelPort = 443
-		}
-		clashProxy, err := h.inboundToClashProxy(inbound, req.ServerHost, server.Name, tunnelPort)
-		if err != nil {
-			log.Printf("[Sync Nodes] Error converting inbound %s: %v", tag, err)
-			response.Errors = append(response.Errors, fmt.Sprintf("tag=%s: %v", tag, err))
-			response.SkippedCount++
-			continue
-		}
-
-		if clashProxy == nil {
-			log.Printf("[Sync Nodes] Skipped: clashProxy is nil for tag=%s", tag)
-			response.Errors = append(response.Errors, fmt.Sprintf("tag=%s: 无法生成节点配置", tag))
-			response.SkippedCount++
-			continue
-		}
-
-		// 序列化 Clash 配置
-		clashConfigJSON, err := json.Marshal(clashProxy)
-		if err != nil {
-			log.Printf("[Sync Nodes] Error serializing clash config for %s: %v", tag, err)
-			response.Errors = append(response.Errors, fmt.Sprintf("tag=%s: 序列化配置失败", tag))
-			response.SkippedCount++
-			continue
-		}
-
-		// 创建节点
-		node := storage.Node{
-			Username:       username,
-			NodeName:       nodeName,
-			Protocol:       protocol,
-			ClashConfig:    string(clashConfigJSON),
-			ParsedConfig:   string(clashConfigJSON),
-			Enabled:        true,
-			Tag:            fmt.Sprintf("远程:%s", server.Name),
-			OriginalServer: server.Name,
-			InboundTag:     tag,
-		}
-
-		if _, err := h.repo.CreateNode(r.Context(), node); err != nil {
-			response.Errors = append(response.Errors, fmt.Sprintf("tag=%s: failed to create node: %v", tag, err))
-			continue
-		}
-
-		response.SyncedCount++
-		response.CreatedCount++
-		response.SyncedTags = append(response.SyncedTags, fmt.Sprintf("%s (port:%d)", tag, int(port)))
-	}
-
-	response.Message = fmt.Sprintf("已同步 %d 个节点(绑定 %d 个，新增 %d 个)，跳过 %d 个",
-		response.SyncedCount, response.ClaimedCount, response.CreatedCount, response.SkippedCount)
-	if len(response.Errors) > 0 {
-		response.Success = response.SyncedCount > 0
-	}
+	response := h.syncInboundsToNodes(r.Context(), id, req.ServerHost, req.ForceOverride)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)

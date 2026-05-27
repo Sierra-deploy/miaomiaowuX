@@ -89,6 +89,8 @@ interface FilesListSectionProps {
   onMoveUp: (file: SubscribeFileRef) => void
   onMoveDown: (file: SubscribeFileRef) => void
   onToggleAutoSync: (id: number, checked: boolean) => void
+  // 管理员点击流量列时调用 — 弹"统计范围"抽屉
+  onConfigureTrafficScope?: (file: SubscribeFileRef) => void
   // mutation 状态 + 调用代理
   inlineUpdate: (payload: { id: number; data: Record<string, any> }) => void
   updateUserShortCode: (value: string) => void
@@ -112,6 +114,7 @@ export function FilesListSection({
   onMoveUp,
   onMoveDown,
   onToggleAutoSync,
+  onConfigureTrafficScope,
   inlineUpdate,
   updateUserShortCode,
   updateMetadataPending,
@@ -268,30 +271,46 @@ export function FilesListSection({
                 {
                   header: '流量',
                   cell: (file) => {
+                    const clickable = isAdmin && !!onConfigureTrafficScope
+                    const handleClick = clickable ? () => onConfigureTrafficScope!(file) : undefined
                     if (isTrafficLoading || !trafficData) {
                       return <div className='h-2 w-16 animate-pulse rounded bg-muted' />
                     }
                     const tr = trafficData[String(file.id)]
-                    if (!tr || (tr.used === 0 && tr.limit === 0)) {
-                      return <span className='text-xs text-muted-foreground'>-</span>
-                    }
-                    const pct = tr.limit > 0 ? Math.min(100, (tr.used / tr.limit) * 100) : 0
                     const formatSize = (bytes: number) => {
                       const gb = bytes / (1024 * 1024 * 1024)
                       return gb >= 1 ? `${gb.toFixed(1)}G` : `${(bytes / (1024 * 1024)).toFixed(0)}M`
                     }
+                    if (!tr || (tr.used === 0 && tr.limit === 0)) {
+                      const dash = <span className='text-xs text-muted-foreground'>-</span>
+                      return clickable ? (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <button type='button' onClick={handleClick} className='hover:underline'>{dash}</button>
+                          </TooltipTrigger>
+                          <TooltipContent>点击配置统计范围</TooltipContent>
+                        </Tooltip>
+                      ) : dash
+                    }
+                    const pct = tr.limit > 0 ? Math.min(100, (tr.used / tr.limit) * 100) : 0
+                    const inner = (
+                      <div className='w-20 space-y-0.5'>
+                        <Progress value={pct} className='h-2' />
+                        <span className='text-[10px] text-muted-foreground block'>
+                          {tr.limit > 0 ? `${Math.round(pct)}%` : formatSize(tr.used)}
+                        </span>
+                      </div>
+                    )
                     return (
                       <Tooltip>
                         <TooltipTrigger asChild>
-                          <div className='w-20 space-y-0.5'>
-                            <Progress value={pct} className='h-2' />
-                            <span className='text-[10px] text-muted-foreground block'>
-                              {tr.limit > 0 ? `${Math.round(pct)}%` : formatSize(tr.used)}
-                            </span>
-                          </div>
+                          {clickable ? (
+                            <button type='button' onClick={handleClick} className='block w-20 text-left hover:opacity-80'>{inner}</button>
+                          ) : inner}
                         </TooltipTrigger>
                         <TooltipContent>
                           {formatSize(tr.used)}{tr.limit > 0 ? ` / ${formatSize(tr.limit)}` : ''}
+                          {clickable && <div className='text-[10px] mt-0.5'>点击配置统计范围</div>}
                         </TooltipContent>
                       </Tooltip>
                     )
@@ -494,19 +513,22 @@ export function FilesListSection({
                 {
                   label: '流量',
                   value: (file) => {
+                    const clickable = isAdmin && !!onConfigureTrafficScope
+                    const handleClick = clickable ? () => onConfigureTrafficScope!(file) : undefined
                     if (isTrafficLoading || !trafficData) {
                       return <div className='h-2 w-20 animate-pulse rounded bg-muted' />
                     }
                     const tr = trafficData[String(file.id)]
-                    if (!tr || (tr.used === 0 && tr.limit === 0)) {
-                      return <span className='text-xs text-muted-foreground'>-</span>
-                    }
-                    const pct = tr.limit > 0 ? Math.min(100, (tr.used / tr.limit) * 100) : 0
                     const formatSize = (bytes: number) => {
                       const gb = bytes / (1024 * 1024 * 1024)
                       return gb >= 1 ? `${gb.toFixed(1)}G` : `${(bytes / (1024 * 1024)).toFixed(0)}M`
                     }
-                    return (
+                    if (!tr || (tr.used === 0 && tr.limit === 0)) {
+                      const dash = <span className='text-xs text-muted-foreground'>-</span>
+                      return clickable ? (<button type='button' onClick={handleClick} className='hover:underline'>{dash}</button>) : dash
+                    }
+                    const pct = tr.limit > 0 ? Math.min(100, (tr.used / tr.limit) * 100) : 0
+                    const inner = (
                       <div className='w-24 space-y-0.5'>
                         <Progress value={pct} className='h-2' />
                         <span className='text-[10px] text-muted-foreground'>
@@ -514,6 +536,9 @@ export function FilesListSection({
                         </span>
                       </div>
                     )
+                    return clickable ? (
+                      <button type='button' onClick={handleClick} className='block w-24 text-left hover:opacity-80'>{inner}</button>
+                    ) : inner
                   },
                 },
                 {

@@ -68,7 +68,7 @@ export function useProxyProviders(opts: {
     queryKey: ['proxy-provider-configs'],
     queryFn: async () => {
       const response = await api.get('/api/user/proxy-provider-configs')
-      return response.data as ProxyProviderConfig[]
+      return Array.isArray(response.data) ? (response.data as ProxyProviderConfig[]) : []
     },
     enabled: opts.enabled,
   })

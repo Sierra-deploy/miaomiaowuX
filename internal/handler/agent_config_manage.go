@@ -343,22 +343,38 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		listenPort = 0
 	}
 
+	resetDay := req.TrafficResetDay
+	if resetDay < 0 || resetDay > 31 {
+		resetDay = 0
+	}
+	trafficUsedOffset := req.TrafficUsedOffset
+	if trafficUsedOffset < 0 {
+		trafficUsedOffset = 0
+	}
+	trafficLimit := req.TrafficLimit
+	if trafficLimit < 0 {
+		trafficLimit = 0
+	}
+
 	server := &storage.RemoteServer{
-		Name:           req.Name,
-		Token:          token,
-		Status:         storage.RemoteServerStatusPending,
-		IPAddress:      req.IPAddress,
-		ConnectionMode: connectionMode,
-		ListenPort:     listenPort,
-		PullAddress:    req.PullAddress,
-		PullPort:       req.PullPort,
-		PullToken:      agentToken,
-		Domain:         strings.TrimSpace(req.Domain),
-		Use443:         req.Use443,
-		StealMode:      stealMode,
-		SiteType:       req.SiteType,
-		SiteValue:      req.SiteValue,
-		XrayMode:       xrayMode,
+		Name:              req.Name,
+		Token:             token,
+		Status:            storage.RemoteServerStatusPending,
+		IPAddress:         req.IPAddress,
+		ConnectionMode:    connectionMode,
+		ListenPort:        listenPort,
+		PullAddress:       req.PullAddress,
+		PullPort:          req.PullPort,
+		PullToken:         agentToken,
+		Domain:            strings.TrimSpace(req.Domain),
+		Use443:            req.Use443,
+		StealMode:         stealMode,
+		SiteType:          req.SiteType,
+		SiteValue:         req.SiteValue,
+		XrayMode:          xrayMode,
+		TrafficLimit:      trafficLimit,
+		TrafficUsedOffset: trafficUsedOffset,
+		TrafficResetDay:   resetDay,
 	}
 
 	if err := h.repo.CreateRemoteServer(ctx, server); err != nil {
@@ -370,22 +386,26 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		return
 	}
 
-	// 构建安装命令 - 更喜欢系统设置中的 master_url
+	// 构建安装命令 — 优先用系统设置里的 master_url(用户配置的对外域名),
+	// 这是 agent 实际访问主控的地址,r.Host 可能是 nginx upstream 名(如 miaomiaowu_web),
+	// 不可对外访问。仅在 master_url 未配置时回退到请求 Host。
 	serverURL := ""
-	host := r.Host
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	if forwardedProto := r.Header.Get("X-Forwarded-Proto"); forwardedProto != "" {
-		scheme = forwardedProto
-	}
-	if host != "" {
-		serverURL = fmt.Sprintf("%s://%s", scheme, host)
+	if masterURL, err := h.repo.GetSystemSetting(ctx, "master_url"); err == nil {
+		if mu := strings.TrimRight(strings.TrimSpace(masterURL), "/"); mu != "" {
+			serverURL = mu
+		}
 	}
 	if serverURL == "" {
-		if masterURL, err := h.repo.GetSystemSetting(ctx, "master_url"); err == nil && masterURL != "" {
-			serverURL = strings.TrimRight(masterURL, "/")
+		host := r.Host
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		if forwardedProto := r.Header.Get("X-Forwarded-Proto"); forwardedProto != "" {
+			scheme = forwardedProto
+		}
+		if host != "" {
+			serverURL = fmt.Sprintf("%s://%s", scheme, host)
 		}
 	}
 

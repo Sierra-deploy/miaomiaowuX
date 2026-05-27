@@ -47,7 +47,8 @@ export function useSupportData() {
     queryKey: ['node-tags'],
     queryFn: async () => {
       const { data } = await api.get('/api/admin/nodes/tags')
-      return data.tags as string[]
+      const tags = data?.tags
+      return Array.isArray(tags) ? (tags as string[]) : []
     },
   })
 
@@ -63,7 +64,7 @@ export function useSupportData() {
     queryKey: ['custom-rules-for-select'],
     queryFn: async () => {
       const { data } = await api.get('/api/admin/custom-rules')
-      return data as CustomRuleRef[]
+      return Array.isArray(data) ? (data as CustomRuleRef[]) : []
     },
   })
 
@@ -71,7 +72,7 @@ export function useSupportData() {
     queryKey: ['override-scripts-for-select'],
     queryFn: async () => {
       const { data } = await api.get('/api/admin/override-scripts')
-      return data as OverrideScriptRef[]
+      return Array.isArray(data) ? (data as OverrideScriptRef[]) : []
     },
   })
 

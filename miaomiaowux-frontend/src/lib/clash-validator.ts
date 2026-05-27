@@ -415,18 +415,20 @@ export function formatValidationIssues(issues: ValidationIssue[]): string {
 
   let message = ''
 
-  // 辅助函数：提取错误消息的模式（去掉引号中的内容）
+  // 辅助函数:提取错误消息的模式 — 把每个 "..." 用带序号的占位符替换,
+  // 后续重建消息时能区分"第 1 个引号"(通常是错误主体名)和"第 2 个引号"(通常是关联对象)。
   const extractPattern = (msg: string): string => {
-    return msg.replace(/"[^"]+"/g, '"{name}"')
+    let i = 0
+    return msg.replace(/"[^"]+"/g, () => `"{__p${i++}__}"`)
   }
 
-  // 辅助函数：从消息中提取名称
-  const extractName = (msg: string): string | null => {
-    const match = msg.match(/"([^"]+)"/)
-    return match ? match[1] : null
+  // 辅助函数:按位置提取名称 — index=0 取第 1 个 "...",index=1 取第 2 个,以此类推
+  const extractNameAt = (msg: string, index: number): string | null => {
+    const matches = Array.from(msg.matchAll(/"([^"]+)"/g))
+    return matches[index]?.[1] ?? null
   }
 
-  // 辅助函数：格式化分组的问题
+  // 辅助函数:格式化分组的问题
   const formatGroupedIssues = (issueList: ValidationIssue[], maxDisplay = 3): string => {
     // 按错误模式分组
     const grouped = new Map<string, ValidationIssue[]>()
@@ -444,7 +446,7 @@ export function formatValidationIssues(issues: ValidationIssue[]): string {
 
     grouped.forEach((items, pattern) => {
       if (items.length === 1) {
-        // 单个错误，直接显示
+        // 单个错误,直接显示
         const issue = items[0]
         result += `  ${itemIndex}. ${issue.message}`
         if (issue.location) {
@@ -453,13 +455,21 @@ export function formatValidationIssues(issues: ValidationIssue[]): string {
         result += '\n'
         itemIndex++
       } else {
-        // 多个相同模式的错误，合并显示
-        const names = items.map(i => extractName(i.message)).filter(Boolean)
+        // 多个相同模式的错误,合并显示
+        // 主体名(每个 issue 的第 1 个 "...")是"受影响项",次级名(第 2 个 "...")通常是关联对象(如缺失节点名)
+        const primaryNames = items.map(i => extractNameAt(i.message, 0)).filter((s): s is string => !!s)
+        const secondaryNames = items.map(i => extractNameAt(i.message, 1)).filter((s): s is string => !!s)
 
-        // 重建消息，将第一个名称替换为计数
-        let baseMessage = pattern.replace('"{name}"', t('itemCount', { count: items.length }))
+        // 重建消息:第 1 个占位符换成计数;其余占位符若有对应"次级名"就列出几个,否则用省略号兜底,
+        // 避免把字面 "{__p1__}" 之类内部 token 透给用户。
+        let baseMessage = pattern.replace('"{__p0__}"', t('itemCount', { count: items.length }))
+        const uniqueSecondary = Array.from(new Set(secondaryNames))
+        const secondaryDisplay = uniqueSecondary.length > 0
+          ? `"${uniqueSecondary.slice(0, maxDisplay).join('", "')}"${uniqueSecondary.length > maxDisplay ? ' ' + t('andMore', { count: uniqueSecondary.length - maxDisplay }) : ''}`
+          : '"…"'
+        baseMessage = baseMessage.replace(/"\{__p\d+__\}"/g, secondaryDisplay)
 
-        // 如果是关于"name字段位置"的警告，简化描述
+        // 如果是关于"name字段位置"的警告,简化描述
         if (baseMessage.includes(t('nameNotFirst'))) {
           baseMessage = t('nameFieldAdjust', { count: items.length })
         }
@@ -467,9 +477,9 @@ export function formatValidationIssues(issues: ValidationIssue[]): string {
         result += `  ${itemIndex}. ${baseMessage}\n`
 
         // 只显示前几个受影响的项目名称
-        if (names.length > 0) {
-          const displayNames = names.slice(0, maxDisplay)
-          const remaining = names.length - maxDisplay
+        if (primaryNames.length > 0) {
+          const displayNames = primaryNames.slice(0, maxDisplay)
+          const remaining = primaryNames.length - maxDisplay
           result += `     ${t('affected', { items: displayNames.join(', ') })}`
           if (remaining > 0) {
             result += ` ${t('andMore', { count: remaining })}`

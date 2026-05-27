@@ -128,6 +128,7 @@ import {
 import { DataTable } from '@/components/data-table'
 import type { DataTableColumn } from '@/components/data-table'
 import { MissingNodesReplaceDialog } from '@/components/missing-nodes-replace-dialog'
+import { TrafficScopeDrawer } from './subscribe-files/dialogs/traffic-scope-drawer'
 import { Twemoji } from '@/components/twemoji'
 
 export const Route = createFileRoute('/subscribe-files/')({
@@ -272,6 +273,10 @@ function SubscribeFilesPage() {
 
   // 编辑配置状态
   const [configContent, setConfigContent] = useState('')
+
+  // 流量统计范围抽屉(管理员点订阅"流量"列触发)
+  const [trafficScopeOpen, setTrafficScopeOpen] = useState(false)
+  const [trafficScopeFile, setTrafficScopeFile] = useState<SubscribeFile | null>(null)
 
   // 缺失节点替换对话框状态
   const [missingNodesDialogOpen, setMissingNodesDialogOpen] = useState(false)
@@ -1928,6 +1933,7 @@ function SubscribeFilesPage() {
           onMoveUp={handleMoveUp}
           onMoveDown={handleMoveDown}
           onToggleAutoSync={handleToggleAutoSync}
+          onConfigureTrafficScope={(file) => { setTrafficScopeFile(file); setTrafficScopeOpen(true) }}
           inlineUpdate={(payload) => inlineUpdateMutation.mutate(payload)}
           updateUserShortCode={(value) => updateMyShortCodeMutation.mutate(value)}
           updateMetadataPending={updateMetadataMutation.isPending}
@@ -2314,6 +2320,42 @@ function SubscribeFilesPage() {
         replacementOptions={missingNodeReplacementOptions}
         onConfirm={handleApplyReplacement}
         confirmText={t('editConfig.applyReplace')}
+      />
+
+      {/* 流量统计范围抽屉(管理员点"流量"列触发) — 拆到 ./subscribe-files/dialogs/traffic-scope-drawer */}
+      <TrafficScopeDrawer
+        open={trafficScopeOpen}
+        onOpenChange={(open) => { setTrafficScopeOpen(open); if (!open) setTrafficScopeFile(null) }}
+        file={trafficScopeFile}
+        servers={(remoteServersData?.servers ?? []).map((s: any) => ({ id: s.id, name: s.name }))}
+        onSave={(id, statsServerIds) => {
+          // 后端 update 同时会回写 traffic_limit / custom_short_code(它们的零值会清空原数据),
+          // 所以这里发完整 payload,只改 stats_server_ids,其它字段维持现状。
+          const f = trafficScopeFile
+          if (!f) return
+          inlineUpdateMutation.mutate(
+            {
+              id,
+              data: {
+                name: f.name,
+                description: f.description || '',
+                filename: f.filename,
+                type: f.type,
+                url: f.url || '',
+                template_filename: f.template_filename || '',
+                selected_tags: f.selected_tags || [],
+                selected_custom_rule_ids: (f as any).selected_custom_rule_ids || [],
+                selected_override_script_ids: (f as any).selected_override_script_ids || [],
+                stats_server_ids: statsServerIds,
+                traffic_limit: f.traffic_limit ?? 0,
+                custom_short_code: f.custom_short_code || '',
+                raw_output: (f as any).raw_output ?? false,
+              },
+            },
+            { onSuccess: () => { setTrafficScopeOpen(false); setTrafficScopeFile(null) } },
+          )
+        }}
+        saving={inlineUpdateMutation.isPending}
       />
 
       {/* 代理集合Pro对话框 — 拆到 ./subscribe-files/dialogs/proxy-provider-pro-dialog */}

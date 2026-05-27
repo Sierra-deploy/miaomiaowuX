@@ -41,7 +41,8 @@ import { api } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
 import { profileQueryFn } from '@/lib/profile'
 import { useAuthStore } from '@/stores/auth-store'
-import { Package, Pencil } from 'lucide-react'
+import { Package, Pencil, Users as UsersIcon } from 'lucide-react'
+import { ScrollArea } from '@/components/ui/scroll-area'
 
 // @ts-ignore - retained simple route definition
 export const Route = createFileRoute('/users')({
@@ -128,6 +129,16 @@ function UsersPage() {
   })
   const [packageManageState, setPackageManageState] = useState<PackageManageState | null>(null)
   const [remarkEditState, setRemarkEditState] = useState<{ username: string; remark: string } | null>(null)
+  // 查看用户子账户对话框
+  const [subaccountsViewUser, setSubaccountsViewUser] = useState<string | null>(null)
+  const subaccountsQuery = useQuery({
+    queryKey: ['user-subaccounts', subaccountsViewUser],
+    queryFn: async () => {
+      const r = await api.get(`/api/admin/users/subaccounts?username=${encodeURIComponent(subaccountsViewUser!)}`)
+      return r.data as { success: boolean; username: string; subaccounts: Array<{ type: 'routed' | 'inbound'; email?: string; identifier?: string; node_id?: number; node_name?: string; server_id?: number; server_name?: string; inbound_tag?: string; protocol?: string; is_active: boolean; updated_at?: string }> }
+    },
+    enabled: !!subaccountsViewUser,
+  })
   const [limitsEditState, setLimitsEditState] = useState<{ username: string; speed_limit_override: string; device_limit_override: string } | null>(null)
 
   const { data: profile, isLoading: profileLoading, isError: profileError } = useQuery({
@@ -550,6 +561,15 @@ function UsersPage() {
                         )}
                         <Button
                           size='sm'
+                          variant='outline'
+                          onClick={() => setSubaccountsViewUser(user.username)}
+                          title='查看子账户与所在节点'
+                        >
+                          <UsersIcon className='h-3 w-3 mr-1' />
+                          子账户
+                        </Button>
+                        <Button
+                          size='sm'
                           variant='destructive'
                           disabled={deleteMutation.isPending}
                           onClick={() => setDeleteUsername(user.username)}
@@ -660,6 +680,14 @@ function UsersPage() {
                         }
                       >
                         {t('package.manage')}
+                      </Button>
+                      <Button
+                        variant='outline'
+                        size='sm'
+                        className='flex-1'
+                        onClick={() => setSubaccountsViewUser(user.username)}
+                      >
+                        子账户
                       </Button>
                       <Button
                         variant='destructive'
@@ -1064,6 +1092,70 @@ function UsersPage() {
             >
               {limitsMutation.isPending ? t('remarkDialog.saving') : t('remarkDialog.confirmSave')}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 子账户与所在节点对话框(管理员视图) */}
+      <Dialog open={Boolean(subaccountsViewUser)} onOpenChange={(open) => !open && setSubaccountsViewUser(null)}>
+        <DialogContent className='max-w-2xl'>
+          <DialogHeader>
+            <DialogTitle>子账户与所在节点 — {subaccountsViewUser}</DialogTitle>
+          </DialogHeader>
+          <ScrollArea className='max-h-[60vh] pr-2'>
+            {subaccountsQuery.isLoading ? (
+              <div className='py-6 text-center text-sm text-muted-foreground'>加载中…</div>
+            ) : !subaccountsQuery.data?.subaccounts?.length ? (
+              <div className='py-6 text-center text-sm text-muted-foreground'>该用户暂无子账户</div>
+            ) : (
+              <div className='space-y-2'>
+                {subaccountsQuery.data.subaccounts.map((sa, idx) => (
+                  <div key={idx} className='rounded border p-3 text-sm space-y-1'>
+                    <div className='flex items-center gap-2'>
+                      <Badge variant={sa.type === 'routed' ? 'default' : 'secondary'}>
+                        {sa.type === 'routed' ? '路由出站' : '入站绑定'}
+                      </Badge>
+                      {!sa.is_active && <Badge variant='outline'>已暂停</Badge>}
+                      <span className='ml-auto text-xs text-muted-foreground'>{sa.updated_at}</span>
+                    </div>
+                    {sa.node_name && (
+                      <div className='text-xs'>
+                        <span className='text-muted-foreground'>节点: </span>
+                        <span className='font-mono'>{sa.node_name}</span>
+                      </div>
+                    )}
+                    {sa.server_name && (
+                      <div className='text-xs'>
+                        <span className='text-muted-foreground'>服务器: </span>
+                        <span className='font-mono'>{sa.server_name}</span>
+                      </div>
+                    )}
+                    {sa.inbound_tag && (
+                      <div className='text-xs'>
+                        <span className='text-muted-foreground'>入站 tag: </span>
+                        <span className='font-mono'>{sa.inbound_tag}</span>
+                        {sa.protocol && <span className='text-muted-foreground ml-2'>({sa.protocol})</span>}
+                      </div>
+                    )}
+                    {sa.email && (
+                      <div className='text-xs'>
+                        <span className='text-muted-foreground'>email: </span>
+                        <span className='font-mono'>{sa.email}</span>
+                      </div>
+                    )}
+                    {sa.identifier && (
+                      <div className='text-xs break-all'>
+                        <span className='text-muted-foreground'>凭据: </span>
+                        <span className='font-mono'>{sa.identifier}</span>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </ScrollArea>
+          <DialogFooter>
+            <Button variant='outline' onClick={() => setSubaccountsViewUser(null)}>关闭</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

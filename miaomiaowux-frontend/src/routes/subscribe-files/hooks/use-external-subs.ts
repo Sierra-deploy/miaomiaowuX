@@ -36,7 +36,7 @@ export function useExternalSubs(opts: { enabled: boolean }) {
     queryKey: ['external-subscriptions'],
     queryFn: async () => {
       const response = await api.get('/api/user/external-subscriptions')
-      return response.data as ExternalSubscription[]
+      return Array.isArray(response.data) ? (response.data as ExternalSubscription[]) : []
     },
     enabled: opts.enabled,
   })

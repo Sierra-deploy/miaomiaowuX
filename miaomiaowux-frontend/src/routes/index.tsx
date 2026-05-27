@@ -18,6 +18,7 @@ import {
   ChevronRight,
   Copy,
   Download,
+  Gauge,
   HardDrive,
   Info,
   Maximize2,
@@ -531,7 +532,7 @@ function AdminDashboard() {
     queryKey: ['remote-servers-speed'],
     queryFn: async () => {
       const response = await api.get('/api/admin/remote-servers')
-      return response.data as { success: boolean; servers: Array<{ name: string; current_upload_speed?: number; current_download_speed?: number; traffic_limit: number; traffic_used: number }> }
+      return response.data as { success: boolean; servers: Array<{ name: string; current_upload_speed?: number; current_download_speed?: number; traffic_limit: number; traffic_used: number; traffic_used_offset?: number }> }
     },
     staleTime: refetchMs,
     refetchInterval: refetchMs,
@@ -657,7 +658,10 @@ function AdminDashboard() {
     }
     for (const s of remoteServersData?.servers ?? []) {
       const traffic = trafficByServerName.get(s.name)
-      let used = traffic?.used ?? s.traffic_used ?? 0
+      const offset = s.traffic_used_offset ?? 0
+      // 实时聚合(traffic.used) 不含 offset 校准,需手动加上;
+      // 回退到 s.traffic_used 时后端已经把 offset 算进去了,直接用即可
+      let used = traffic ? traffic.used + offset : (s.traffic_used ?? 0)
       if (timeRange !== 'month' && traffic) {
         const snap = snapshotByServerId.get(traffic.server_id) ?? 0
         used = Math.max(0, used - snap)
@@ -788,7 +792,7 @@ function AdminDashboard() {
     { title: t('admin.stats.totalQuota'), description: t('admin.stats.totalQuotaDesc'), value: formatMetric(metrics.total_limit_gb, numberFormatter), icon: TrendingUp },
     { title: t('admin.stats.usedTraffic'), description: t('admin.stats.usedTrafficDesc'), value: formatMetric(metrics.total_used_gb, numberFormatter), icon: Activity, info: (metrics.unlimited_used_gb ?? 0) > 0 ? t('admin.stats.unlimitedUsedHint', { value: formatMetric(metrics.unlimited_used_gb, numberFormatter) }) : undefined },
     { title: t('admin.stats.remainingTraffic'), description: t('admin.stats.remainingTrafficDesc'), value: formatMetric(metrics.total_remaining_gb, numberFormatter), icon: HardDrive },
-    { title: t('admin.stats.realtimeSpeed'), description: t('admin.stats.realtimeSpeedDesc'), value: '', speedData: { upload: aggregatedSpeed.upload, download: aggregatedSpeed.download }, icon: Activity },
+    { title: t('admin.stats.realtimeSpeed'), description: t('admin.stats.realtimeSpeedDesc'), value: '', speedData: { upload: aggregatedSpeed.upload, download: aggregatedSpeed.download }, icon: Gauge },
   ], [metrics, numberFormatter, aggregatedSpeed, t])
 
   const chartData = useMemo(() => {
