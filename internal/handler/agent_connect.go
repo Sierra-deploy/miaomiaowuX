@@ -425,7 +425,21 @@ func (h *XrayServerHandler) GetRemoteInstallScript(w http.ResponseWriter, r *htt
 	// 若 master_url 已显式配置,EXPLICIT_MASTER=1 在脚本里禁用"同机部署"自动覆盖
 	// (避免在主控本机上安装 agent 时把 master_url 改写成 127.0.0.1)。
 	scriptServer := strings.TrimSpace(r.Host)
+	// nginx 默认 `proxy_set_header Host $host` 不带端口,导致 cf:8443 → nginx → mmwx 时 r.Host 只有域名,
+	// agent 安装命令缺端口连不上主控。这里如果检测到 X-Forwarded-Host(带端口最优)或 X-Forwarded-Port
+	// 且端口不是 80/443,主动把 :port 拼回去,方便用户不需要必须先去配 master_url 就能拿到正确安装命令。
+	if !strings.Contains(scriptServer, ":") {
+		if xfh := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); xfh != "" && strings.Contains(xfh, ":") {
+			scriptServer = xfh
+		} else if xfp := strings.TrimSpace(r.Header.Get("X-Forwarded-Port")); xfp != "" && xfp != "80" && xfp != "443" {
+			scriptServer = scriptServer + ":" + xfp
+		}
+	}
 	scriptProtocol := ""
+	// nginx 反代下大概率有 X-Forwarded-Proto,带这个就别走脚本里 "host 有 : 就当 http" 的启发,直接显式 https
+	if xfproto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); xfproto == "https" || xfproto == "http" {
+		scriptProtocol = xfproto
+	}
 	explicitMaster := "0"
 	if mu, err := h.repo.GetSystemSetting(r.Context(), "master_url"); err == nil {
 		mu = strings.TrimSpace(mu)
