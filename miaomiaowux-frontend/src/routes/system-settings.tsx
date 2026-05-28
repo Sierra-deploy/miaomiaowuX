@@ -19,6 +19,7 @@ import { Switch } from '@/components/ui/switch'
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { api } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
@@ -1522,12 +1523,31 @@ function LicenseSettingsCard() {
 // PRO 功能清单
 // 数据源:license.plan.features 字符串数组(后端按 feature key 下发)。
 // 这里硬编码 4 个已上线的 PRO 能力 + 各自的文档 URL,匹配 license.features 决定按钮可点性。
+// PRO 功能键名必须对齐后端 license features 列表(server_share / speed_test / limiter / embedded)。
+// 之前误写成 rate_limit / embedded_xray,导致即使许可证含这两项也命中不到、显示为锁定。
 const PRO_FEATURES: { key: string; label: string; doc: string }[] = [
   { key: 'speed_test', label: '节点测速', doc: 'https://miaomiaowu.net/x/docs/node-speedtest' },
-  { key: 'rate_limit', label: '节点限速', doc: 'https://miaomiaowu.net/x/docs/node-ratelimit' },
+  { key: 'limiter', label: '节点限速', doc: 'https://miaomiaowu.net/x/docs/node-ratelimit' },
   { key: 'server_share', label: '分享服务器', doc: 'https://miaomiaowu.net/x/docs/share-server' },
-  { key: 'embedded_xray', label: '内嵌 Xray', doc: 'https://miaomiaowu.net/x/docs/embedded-xray' },
+  { key: 'embedded', label: '内嵌 Xray', doc: 'https://miaomiaowu.net/x/docs/embedded-xray' },
 ]
+
+// 与 pro-feature-gate.tsx 里的 Pro 角标保持同一视觉:星形 SVG + "Pro" 字 + 琥珀渐变胶囊;未激活退灰
+function ProBadge({ active }: { active: boolean }) {
+  return (
+    <span className={cn(
+      'inline-flex items-center gap-0.5 rounded-full border px-1.5 py-0.5 text-[9px] font-bold leading-none shadow-sm',
+      active
+        ? 'border-amber-300/60 bg-gradient-to-r from-amber-400 to-yellow-300 text-amber-900 shadow-amber-200/50'
+        : 'border-gray-300/60 bg-gradient-to-r from-gray-200 to-gray-300 text-gray-500 dark:border-gray-500/60 dark:from-gray-700 dark:to-gray-600 dark:text-gray-300'
+    )}>
+      <svg className={cn('h-2 w-2', active && 'animate-pulse')} viewBox='0 0 24 24' fill='currentColor'>
+        <path d='M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z' />
+      </svg>
+      Pro
+    </span>
+  )
+}
 
 function ProFeaturesPanel({ features }: { features: string[] }) {
   const activeSet = new Set(features || [])
@@ -1545,10 +1565,11 @@ function ProFeaturesPanel({ features }: { features: string[] }) {
                     href={f.doc}
                     target='_blank'
                     rel='noopener noreferrer'
-                    className='inline-flex items-center justify-center gap-1.5 rounded-md border border-green-300 bg-green-50 px-3 py-2 text-sm font-medium text-green-700 transition-colors hover:bg-green-100 dark:border-green-900 dark:bg-green-950 dark:text-green-300 dark:hover:bg-green-900/60'
+                    className='inline-flex items-center justify-center gap-1.5 rounded-md border border-primary/40 bg-primary/10 px-3 py-2 text-sm font-medium text-primary transition-colors hover:bg-primary/15'
                   >
-                    <BookOpen className='h-3.5 w-3.5' />
+                    <ProBadge active />
                     {f.label}
+                    <BookOpen className='h-3 w-3 opacity-60' />
                   </a>
                 </TooltipTrigger>
                 <TooltipContent className='font-mono text-[11px]'>{f.doc}</TooltipContent>
@@ -1563,8 +1584,9 @@ function ProFeaturesPanel({ features }: { features: string[] }) {
                   disabled
                   className='inline-flex cursor-not-allowed items-center justify-center gap-1.5 rounded-md border bg-muted px-3 py-2 text-sm text-muted-foreground opacity-70'
                 >
-                  <Lock className='h-3.5 w-3.5' />
+                  <ProBadge active={false} />
                   {f.label}
+                  <Lock className='h-3 w-3' />
                 </button>
               </TooltipTrigger>
               <TooltipContent>需要升级许可证</TooltipContent>

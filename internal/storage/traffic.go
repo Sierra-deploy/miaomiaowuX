@@ -1613,6 +1613,9 @@ CREATE INDEX IF NOT EXISTS idx_remote_servers_status ON remote_servers(status);
 	}
 	// 服务器层流量统计规则: both / upload / download
 	// 影响节点流量聚合该服务器贡献的方向,用户流量仍按套餐 traffic_mode 算,二者独立。
+	if err := r.ensureRemoteServerColumn("sort_order", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if err := r.ensureRemoteServerColumn("traffic_stats_mode", "TEXT NOT NULL DEFAULT 'both'"); err != nil {
 		return err
 	}
@@ -7180,7 +7183,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		EXISTS(SELECT 1 FROM federated_servers fs WHERE fs.server_id = remote_servers.id),
 		COALESCE((SELECT prefix FROM federated_servers fs WHERE fs.server_id = remote_servers.id), ''),
 		created_at, updated_at
-		FROM remote_servers ORDER BY created_at DESC`
+		FROM remote_servers ORDER BY sort_order ASC, id ASC`
 	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("list remote servers: %w", err)
@@ -8284,6 +8287,36 @@ func (r *TrafficRepository) DeleteNodesByOriginalServer(ctx context.Context, ser
 }
 
 // 通过 ID 删除远程服务器。
+// ReorderRemoteServers 按给定顺序写 sort_order(单调递增,从 10、20、30… 起步,留间隙便于以后单点插入)。
+// ids 里没有给到的服务器维持当前 sort_order,会自然排到列表后面。
+func (r *TrafficRepository) ReorderRemoteServers(ctx context.Context, ids []int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx, `UPDATE remote_servers SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+	if err != nil {
+		return fmt.Errorf("prepare reorder: %w", err)
+	}
+	defer stmt.Close()
+	for i, id := range ids {
+		if _, err := stmt.ExecContext(ctx, (i+1)*10, id); err != nil {
+			return fmt.Errorf("reorder id=%d: %w", id, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit reorder: %w", err)
+	}
+	return nil
+}
+
 func (r *TrafficRepository) DeleteRemoteServer(ctx context.Context, id int64) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")

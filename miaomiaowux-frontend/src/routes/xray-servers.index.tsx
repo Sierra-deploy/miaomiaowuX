@@ -4,7 +4,11 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, useRef, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { Plus, RefreshCw, Search, Trash2, Download, Cog, ChevronDown, Terminal, Play, Square, RotateCcw, Copy, Pencil, X, Settings, Wifi, Radio, Eye, ArrowUpCircle, Globe, CheckCircle, XCircle, Loader2, AlertTriangle, Lock, LockOpen, Share2 } from 'lucide-react'
+import { Plus, RefreshCw, Search, Trash2, Download, Cog, ChevronDown, Terminal, Play, Square, RotateCcw, Copy, Pencil, X, Settings, Wifi, Radio, Eye, ArrowUpCircle, Globe, CheckCircle, XCircle, Loader2, AlertTriangle, Lock, LockOpen, Share2, GripVertical } from 'lucide-react'
+import { DndContext, PointerSensor, TouchSensor, KeyboardSensor, useSensor, useSensors, closestCenter, type DragEndEvent } from '@dnd-kit/core'
+import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove, sortableKeyboardCoordinates } from '@dnd-kit/sortable'
+import { CSS } from '@dnd-kit/utilities'
+import { useIsMobile } from '@/hooks/use-mobile'
 import { ViewToggle, type ViewMode } from '@/components/ui/view-toggle'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { useLicenseUsage } from '@/hooks/use-license'
@@ -100,6 +104,61 @@ function getTrafficPercent(used: number, limit: number): number {
   return (used / limit) * 100
 }
 
+// SortableServerCard / SortableServerRow:dnd-kit 包装层。把当前迭代项变成可拖动的 sortable,
+// 通过 render prop 把拖动把手 props 传给消费方,消费方决定把 GripVertical 按钮挂哪里。
+// 注意 TouchSensor + touch-none 必须同时存在,iPad / 手机长按拖动才能生效。
+// IPCell:固定列宽 + truncate 省略号;hover 通过 Tooltip 显示完整 IP(双栈时分多行)。
+function IPCell({ raw }: { raw: string }) {
+  const ips = (raw || '')
+    .split(/[,;\s]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+  if (ips.length === 0) return <span className='text-xs text-muted-foreground'>-</span>
+  const display = ips.join('  ·  ')
+  return (
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <div className='max-w-[140px] truncate font-mono text-xs text-muted-foreground cursor-default'>
+            {display}
+          </div>
+        </TooltipTrigger>
+        <TooltipContent className='font-mono text-[11px]'>
+          {ips.map((ip) => <div key={ip}>{ip}</div>)}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  )
+}
+
+function SortableServerCard({ id, children }: { id: number; children: (dragHandle: any, isDragging: boolean) => React.ReactNode }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id })
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  }
+  return (
+    <div ref={setNodeRef} style={style} className={isDragging ? 'z-50 relative' : ''}>
+      {children({ ...attributes, ...listeners }, isDragging)}
+    </div>
+  )
+}
+
+function SortableServerRow({ id, children }: { id: number; children: (dragHandle: any, isDragging: boolean) => React.ReactNode }) {
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id })
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  }
+  return (
+    <TableRow ref={setNodeRef as any} style={style} className={isDragging ? 'bg-muted/40' : ''}>
+      {children({ ...attributes, ...listeners }, isDragging)}
+    </TableRow>
+  )
+}
+
 export const Route = createFileRoute('/xray-servers/')({
   component: XrayServersPage,
 })
@@ -113,7 +172,15 @@ function XrayServersPage() {
   const serversAtLimit = Boolean(licenseUsage?.usage?.servers && licenseUsage.usage.servers.current >= licenseUsage.usage.servers.max)
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false)
   const [shareServer, setShareServer] = useState<{ id: number; name: string } | null>(null)
-  const [viewMode, setViewMode] = useState<ViewMode>(() => (localStorage.getItem('servers-view-mode') as ViewMode) || 'card')
+  const isMobile = useIsMobile()
+  const [viewModeRaw, setViewMode] = useState<ViewMode>(() => (localStorage.getItem('servers-view-mode') as ViewMode) || 'card')
+  // 手机端无视用户选择,强制卡片模式 —— table 在手机端体验差且不便拖动
+  const viewMode: ViewMode = isMobile ? 'card' : viewModeRaw
+  const dndSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+    useSensor(TouchSensor, { activationConstraint: { delay: 200, tolerance: 8 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  )
   const [formData, setFormData] = useState({
     name: '',
     traffic_limit_gb: '',
@@ -242,6 +309,39 @@ function XrayServersPage() {
     },
     staleTime: 5 * 60 * 1000,
   })
+
+  // 拖动结束后,带乐观更新地把新顺序持久化到后端;后端按 ids 数组写 sort_order
+  const reorderRemoteServersMutation = useMutation({
+    mutationFn: async (ids: number[]) => {
+      const response = await api.post('/api/admin/remote-servers/reorder', { ids })
+      return response.data
+    },
+    onMutate: async (ids: number[]) => {
+      await queryClient.cancelQueries({ queryKey: ['remote-servers'] })
+      const previous = queryClient.getQueryData<any>(['remote-servers'])
+      if (previous?.servers) {
+        const byId = new Map<number, any>(previous.servers.map((s: any) => [s.id, s]))
+        const reordered = ids.map(id => byId.get(id)).filter(Boolean)
+        queryClient.setQueryData(['remote-servers'], { ...previous, servers: reordered })
+      }
+      return { previous }
+    },
+    onError: (err, _ids, ctx) => {
+      if (ctx?.previous) queryClient.setQueryData(['remote-servers'], ctx.previous)
+      handleServerError(err as any)
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ['remote-servers'] }),
+  })
+
+  const handleServerDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event
+    if (!over || active.id === over.id) return
+    const oldIndex = remoteServers.findIndex((s: RemoteServer) => s.id === Number(active.id))
+    const newIndex = remoteServers.findIndex((s: RemoteServer) => s.id === Number(over.id))
+    if (oldIndex < 0 || newIndex < 0) return
+    const next = arrayMove(remoteServers, oldIndex, newIndex)
+    reorderRemoteServersMutation.mutate(next.map((s: RemoteServer) => s.id))
+  }
 
   const saveXrayRawConfigMutation = useMutation({
     mutationFn: async ({ serverId, config }: { serverId: number; config: string }) => {
@@ -912,15 +1012,22 @@ function XrayServersPage() {
       ) : remoteServers.length === 0 ? (
         <EmptyStateCard title={t('servers.noServers')} description={t('servers.noServersDesc')} />
       ) : viewMode === 'card' ? (
+        <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleServerDragEnd}>
+          <SortableContext items={remoteServers.map((s: RemoteServer) => s.id)} strategy={verticalListSortingStrategy}>
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
           {remoteServers.map((server: RemoteServer) => {
             const remoteStatus = remoteServicesStatusMap[server.id]
             return (
-              <Card key={`remote-${server.id}`} className={cn('min-w-0 overflow-hidden', server.status !== 'connected' ? 'cursor-pointer hover:border-primary/50 transition-colors' : '')} onClick={() => { if (server.status !== 'connected') { setSelectedRemoteServer(server); setIsRemoteServerDetailDialogOpen(true) } }}>
+              <SortableServerCard key={`remote-${server.id}`} id={server.id}>
+              {(dragHandle) => (
+              <Card className={cn('min-w-0 overflow-hidden', server.status !== 'connected' ? 'cursor-pointer hover:border-primary/50 transition-colors' : '')} onClick={() => { if (server.status !== 'connected') { setSelectedRemoteServer(server); setIsRemoteServerDetailDialogOpen(true) } }}>
                 <CardHeader className="pb-3 min-w-0">
                   <div className="flex flex-col gap-1.5 min-w-0">
                     <div className="flex items-center justify-between gap-2 min-w-0">
                       <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <button {...dragHandle} onClick={(e) => e.stopPropagation()} className="shrink-0 cursor-grab active:cursor-grabbing touch-none text-muted-foreground hover:text-foreground p-1 -ml-1" title={t('servers.dragToReorder', { defaultValue: '拖动排序' })}>
+                          <GripVertical className="h-4 w-4" />
+                        </button>
                         <div className={cn("w-3 h-3 rounded-full flex-shrink-0", server.status === 'connected' ? "bg-green-500" : server.status === 'pending' ? "bg-yellow-500" : "bg-red-500")} title={server.status === 'connected' ? t('servers.online') : server.status === 'pending' ? t('servers.pending') : t('servers.offline')} />
                         <CardTitle className="text-lg truncate min-w-0"><Twemoji>{server.name}</Twemoji></CardTitle>
                       </div>
@@ -1033,7 +1140,7 @@ function XrayServersPage() {
                             : `${formatTraffic(server.traffic_used || 0)} · ${t('servers.unlimited')}`}
                         </span>
                       </div>
-                      {server.traffic_limit > 0 && (
+                      {server.traffic_limit > 0 ? (
                         <>
                           <div className="h-1.5 bg-muted rounded-full overflow-hidden">
                             <div className={cn("h-full rounded-full transition-all", getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 90 ? "bg-red-500" : getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 70 ? "bg-yellow-500" : "bg-primary")} style={{ width: `${Math.min(getTrafficPercent(server.traffic_used || 0, server.traffic_limit), 100)}%` }} />
@@ -1044,6 +1151,17 @@ function XrayServersPage() {
                               <span>{t('servers.monthlyReset', { day: server.traffic_reset_day })}</span>
                             </div>
                           )}
+                        </>
+                      ) : (
+                        // 无限流量场景:进度条 100% 填满 + 彩虹渐变横向流动,保持卡片高度与有限额机器对齐;重置日改为"无需重置"
+                        <>
+                          <div className="h-1.5 rounded-full overflow-hidden">
+                            <div className="h-full w-full rounded-full rainbow-flow-bar" />
+                          </div>
+                          <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                            <span>{t('servers.resetLabel')}</span>
+                            <span>{t('servers.noResetNeeded', { defaultValue: '无需重置' })}</span>
+                          </div>
                         </>
                       )}
                     </div>
@@ -1079,17 +1197,22 @@ function XrayServersPage() {
                   )}
                 </CardFooter>
               </Card>
+              )}
+              </SortableServerCard>
             )
           })}
         </div>
+          </SortableContext>
+        </DndContext>
       ) : (
         <TableCard>
           <Table>
             <TableHeader>
               <TableRow>
+                <TableHead className="w-8 p-0" />
                 <TableHead>{t('servers.nameCol')}</TableHead>
                 <TableHead>{t('servers.connectionMode')}</TableHead>
-                <TableHead>{t('servers.ipAddress')}</TableHead>
+                <TableHead className="w-[140px] max-w-[140px]">{t('servers.ipAddress')}</TableHead>
                 <TableHead className="min-w-[120px] w-[120px]">{t('servers.speedCol')}</TableHead>
                 <TableHead>{t('servers.trafficCol')}</TableHead>
                 <TableHead>{t('servers.serviceCol')}</TableHead>
@@ -1097,10 +1220,18 @@ function XrayServersPage() {
               </TableRow>
             </TableHeader>
             <TableBody>
+              <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleServerDragEnd}>
+                <SortableContext items={remoteServers.map((s: RemoteServer) => s.id)} strategy={verticalListSortingStrategy}>
               {remoteServers.map((server: RemoteServer) => {
                 const remoteStatus = remoteServicesStatusMap[server.id]
                 return (
-                  <TableRow key={`remote-${server.id}`}>
+                  <SortableServerRow key={`remote-${server.id}`} id={server.id}>
+                  {(dragHandle) => (<>
+                    <TableCell className="w-8 p-0 text-center">
+                      <button {...dragHandle} className="cursor-grab active:cursor-grabbing touch-none text-muted-foreground hover:text-foreground p-1 inline-flex" title={t('servers.dragToReorder', { defaultValue: '拖动排序' })}>
+                        <GripVertical className="h-4 w-4" />
+                      </button>
+                    </TableCell>
                     <TableCell className="font-medium">
                       <div className="flex items-center gap-2">
                         <div className={cn("w-2.5 h-2.5 rounded-full flex-shrink-0", server.status === 'connected' ? "bg-green-500" : server.status === 'pending' ? "bg-yellow-500" : "bg-red-500")} />
@@ -1162,7 +1293,7 @@ function XrayServersPage() {
                         </DropdownMenuContent>
                       </DropdownMenu>
                     </TableCell>
-                    <TableCell className="text-muted-foreground">{server.ip_address || '-'}</TableCell>
+                    <TableCell className="text-muted-foreground"><IPCell raw={server.ip_address || ''} /></TableCell>
                     <TableCell className="min-w-[120px] w-[120px] tabular-nums">
                       {server.status === 'connected' && ((server.current_upload_speed || server.current_download_speed) ? (
                         <div className="text-xs space-y-0.5">
@@ -1179,7 +1310,13 @@ function XrayServersPage() {
                           <div className="h-1.5 bg-muted rounded-full overflow-hidden"><div className={cn("h-full rounded-full", getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 90 ? "bg-red-500" : getTrafficPercent(server.traffic_used || 0, server.traffic_limit) > 70 ? "bg-yellow-500" : "bg-green-500")} style={{ width: `${Math.min(getTrafficPercent(server.traffic_used || 0, server.traffic_limit), 100)}%` }} /></div>
                           {!!server.traffic_reset_day && server.traffic_reset_day > 0 && (<div className="text-xs text-muted-foreground mt-0.5">{t('servers.monthlyResetFull', { day: server.traffic_reset_day })}</div>)}
                         </div>
-                      ) : (<span className="text-xs text-muted-foreground">{t('servers.noLimit')}</span>)}
+                      ) : (
+                        <div className="min-w-[100px]">
+                          <div className="text-xs text-muted-foreground mb-1">{formatTraffic(server.traffic_used || 0)} · {t('servers.unlimited')}</div>
+                          <div className="h-1.5 rounded-full overflow-hidden"><div className="h-full w-full rounded-full rainbow-flow-bar" /></div>
+                          <div className="text-xs text-muted-foreground mt-0.5">{t('servers.noResetNeeded', { defaultValue: '无需重置' })}</div>
+                        </div>
+                      )}
                     </TableCell>
                     <TableCell>
                       {server.status === 'connected' ? (remoteStatus?.loading ? (<span className="text-xs text-muted-foreground">{t('servers.loadingStatus')}</span>) : (
@@ -1194,10 +1331,10 @@ function XrayServersPage() {
                         {server.status === 'connected' && (
                           <>
                             {!server.is_federated && (<InstallPopover serverId={server.id} compact isEmbedded={server.xray_mode === 'embedded'} />)}
-                            {(remoteStatus?.xray?.installed || server.xray_mode === 'embedded') && (<Button variant="outline" size="sm" className="h-7 px-2" onClick={() => handleOpenRemoteXrayConfig(server)} title={t('servers.xrayConfig')}><Cog className="h-3.5 w-3.5" /></Button>)}
+                            {(remoteStatus?.xray?.installed || server.xray_mode === 'embedded') && (<Button variant="outline" size="icon" className="h-7 w-7 p-0" onClick={() => handleOpenRemoteXrayConfig(server)} title={t('servers.xrayConfig')}><img src="/images/xray.svg" alt="Xray" className="h-4 w-4 dark:invert" /></Button>)}
                             {!server.is_federated && (remoteStatus?.xray?.installed || server.xray_mode === 'embedded') && (
                               <DropdownMenu>
-                                <DropdownMenuTrigger asChild><Button variant="outline" size="sm" className="h-7 px-2" title={t('servers.agentManagement')}><Settings className="h-3.5 w-3.5" /><ChevronDown className="h-3 w-3 ml-1" /></Button></DropdownMenuTrigger>
+                                <DropdownMenuTrigger asChild><Button variant="outline" size="icon" className="h-7 w-7 p-0" title={t('servers.agentManagement')}><Settings className="h-3.5 w-3.5" /></Button></DropdownMenuTrigger>
                                 <DropdownMenuContent>
                                   <DropdownMenuItem onClick={() => { setSyncingServerId(server.id); setSyncServerHost(server.ip_address || ''); setIsSyncNodesDialogOpen(true) }}><RefreshCw className="mr-2 h-4 w-4" />{t('servers.syncNodes')}</DropdownMenuItem>
                                   {server.domain && (<><DropdownMenuSeparator /><DropdownMenuItem onClick={() => deployStealSelfMutation.mutate(server.id)} disabled={deployStealSelfMutation.isPending}><Download className="mr-2 h-4 w-4" />{deployStealSelfMutation.isPending ? t('servers.deploying') : t('servers.deployConfig')}</DropdownMenuItem></>)}
@@ -1209,17 +1346,20 @@ function XrayServersPage() {
                                 </DropdownMenuContent>
                               </DropdownMenu>
                             )}
-                            {!server.is_federated && (<Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => setShareServer({ id: server.id, name: server.name })} title="分享服务器（PRO）"><Share2 className="h-3.5 w-3.5" /></Button>)}
-                            <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => remoteScanMutation.mutate(server.id)} disabled={remoteScanMutation.isPending} title={t('servers.scan')}><Search className={cn("h-3.5 w-3.5", remoteScanMutation.isPending && "animate-spin")} /></Button>
+                            {!server.is_federated && (<Button variant="ghost" size="icon" className="h-7 w-7 p-0" onClick={() => setShareServer({ id: server.id, name: server.name })} title="分享服务器（PRO）"><Share2 className="h-3.5 w-3.5" /></Button>)}
+                            <Button variant="ghost" size="icon" className="h-7 w-7 p-0" onClick={() => remoteScanMutation.mutate(server.id)} disabled={remoteScanMutation.isPending} title={t('servers.scan')}><Search className={cn("h-3.5 w-3.5", remoteScanMutation.isPending && "animate-spin")} /></Button>
                           </>
                         )}
-                        {!server.is_federated && (<Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => handleEditRemoteServer(server)} title={t('servers.editServer')}><Pencil className="h-3.5 w-3.5" /></Button>)}
-                        <Button variant="ghost" size="sm" className="h-7 px-2 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950" onClick={() => handleDeleteRemoteServer(server.id)} title={t('servers.deleteServer')}><X className="h-3.5 w-3.5" /></Button>
+                        {!server.is_federated && (<Button variant="ghost" size="icon" className="h-7 w-7 p-0" onClick={() => handleEditRemoteServer(server)} title={t('servers.editServer')}><Pencil className="h-3.5 w-3.5" /></Button>)}
+                        <Button variant="ghost" size="icon" className="h-7 w-7 p-0 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950" onClick={() => handleDeleteRemoteServer(server.id)} title={t('servers.deleteServer')}><X className="h-3.5 w-3.5" /></Button>
                       </div>
                     </TableCell>
-                  </TableRow>
+                  </>)}
+                  </SortableServerRow>
                 )
               })}
+                </SortableContext>
+              </DndContext>
             </TableBody>
           </Table>
         </TableCard>

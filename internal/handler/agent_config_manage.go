@@ -550,6 +550,32 @@ func (h *XrayServerHandler) DeleteRemoteServer(w stdhttp.ResponseWriter, r *stdh
 }
 
 // 更新远程服务器的基本信息
+// ReorderRemoteServers 接受按目标顺序排列的 server ID 数组,把数据库里 sort_order 字段按这个顺序写一遍。
+// 前端拖动结束就调一下,ListRemoteServers 已经按 sort_order ASC 排了,刷新自然看到新顺序。
+func (h *XrayServerHandler) ReorderRemoteServers(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+	if r.Method != stdhttp.MethodPost {
+		stdhttp.Error(w, "Method not allowed", stdhttp.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		IDs []int64 `json:"ids"`
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "无效的请求参数"})
+		return
+	}
+	if len(req.IDs) == 0 {
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "ids 不能为空"})
+		return
+	}
+	if err := h.repo.ReorderRemoteServers(r.Context(), req.IDs); err != nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "message": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+}
+
 func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 	if r.Method != "PUT" && r.Method != "POST" {
 		stdhttp.Error(w, "Method not allowed", stdhttp.StatusMethodNotAllowed)
