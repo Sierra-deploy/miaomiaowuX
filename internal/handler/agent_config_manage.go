@@ -634,6 +634,28 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		}
 	}
 
+	// 域名变更同步刷新该服务器下所有节点 clash_config.server。
+	// Domain 优先于 IP(动态 IP 场景下域名稳定),空 Domain 时回退到 IPAddress。
+	newDomain := strings.TrimSpace(req.Domain)
+	oldDomain := strings.TrimSpace(oldServer.Domain)
+	if newDomain != oldDomain {
+		addr := newDomain
+		if addr == "" {
+			addr = oldServer.IPAddress
+		}
+		if addr != "" {
+			finalName := req.Name
+			if finalName == "" {
+				finalName = oldServer.Name
+			}
+			if n, err := h.repo.RefreshNodesServerAddress(ctx, finalName, addr); err != nil {
+				log.Printf("[Remote Server] Refresh nodes server address failed for %s: %v", finalName, err)
+			} else if n > 0 {
+				log.Printf("[Remote Server] Refreshed %d node(s) server address → %s after domain change on %s", n, addr, finalName)
+			}
+		}
+	}
+
 	// 更新已用流量偏移量
 	if req.TrafficUsed != nil {
 		aggregated, _ := h.repo.GetServerTrafficUsed(ctx, req.ID)

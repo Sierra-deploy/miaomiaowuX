@@ -37,6 +37,7 @@ const CLASH_PROTOCOL_COLORS: Record<string, string> = {
   tuic: 'bg-cyan-500/10 text-cyan-700 dark:text-cyan-400',
   anytls: 'bg-teal-500/10 text-teal-700 dark:text-teal-400',
   wireguard: 'bg-orange-500/10 text-orange-700 dark:text-orange-400',
+  snell: 'bg-lime-500/10 text-lime-700 dark:text-lime-400',
 }
 
 // getClashProtocolColor:大小写不敏感,支持 generator 的链式代理 "vless ⇋ trojan" 写法(取首段)。

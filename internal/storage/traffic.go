@@ -7593,15 +7593,16 @@ func (r *TrafficRepository) UpdateRemoteServerHeartbeat(ctx context.Context, tok
 
 // UpdateRemoteServerLastActivity 通过服务器 ID 更新 last_heartbeat。
 // 当收到流量数据时会调用此方法，从而无需单独的心跳。
-func (r *TrafficRepository) UpdateRemoteServerLastActivity(ctx context.Context, serverID int64) error {
+// 返回 (prevStatus, serverName, ipAddress, err);调用方可比对 prev 决定要不要发上线通知。
+func (r *TrafficRepository) UpdateRemoteServerLastActivity(ctx context.Context, serverID int64) (string, string, string, error) {
 	if r == nil || r.db == nil {
-		return errors.New("traffic repository not initialized")
+		return "", "", "", errors.New("traffic repository not initialized")
 	}
 
 	// 首先检查当前状态以记录状态更改
-	var currentStatus, serverName string
-	checkStmt := `SELECT name, status FROM remote_servers WHERE id = ?`
-	if err := r.db.QueryRowContext(ctx, checkStmt, serverID).Scan(&serverName, &currentStatus); err == nil {
+	var currentStatus, serverName, ipAddress string
+	checkStmt := `SELECT name, status, COALESCE(ip_address, '') FROM remote_servers WHERE id = ?`
+	if err := r.db.QueryRowContext(ctx, checkStmt, serverID).Scan(&serverName, &currentStatus, &ipAddress); err == nil {
 		if currentStatus == RemoteServerStatusOffline {
 			log.Printf("[Online Detection] Server %s (ID=%d) status changing: OFFLINE -> CONNECTED (received traffic data)",
 				serverName, serverID)
@@ -7612,10 +7613,10 @@ func (r *TrafficRepository) UpdateRemoteServerLastActivity(ctx context.Context, 
 
 	_, err := r.db.ExecContext(ctx, stmt, RemoteServerStatusConnected, serverID)
 	if err != nil {
-		return fmt.Errorf("update remote server last activity: %w", err)
+		return currentStatus, serverName, ipAddress, fmt.Errorf("update remote server last activity: %w", err)
 	}
 
-	return nil
+	return currentStatus, serverName, ipAddress, nil
 }
 
 // UpdateRemoteServerHeartbeatWithRestart 通过重新启动检测来更新心跳。

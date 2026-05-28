@@ -602,6 +602,35 @@ func (r *TrafficRepository) DeleteNodesByInboundTag(ctx context.Context, serverN
 	return affected, nil
 }
 
+// RefreshNodesServerAddress 把指定服务器下所有节点的 clash_config.server 字段批量替换为 newAddr。
+// 场景:服务器 IP 漂移 / 新配置了域名,要把已存在的节点同步指向新地址。
+// 用 SQLite JSON1 的 json_set + json_extract,跳过 server 字段已经等于 newAddr 的行。
+// 返回实际改动的行数。
+func (r *TrafficRepository) RefreshNodesServerAddress(ctx context.Context, serverName, newAddr string) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	serverName = strings.TrimSpace(serverName)
+	newAddr = strings.TrimSpace(newAddr)
+	if serverName == "" || newAddr == "" {
+		return 0, nil
+	}
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE nodes
+		SET clash_config = json_set(clash_config, '$.server', ?),
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE original_server = ?
+		  AND clash_config IS NOT NULL
+		  AND json_valid(clash_config) = 1
+		  AND IFNULL(json_extract(clash_config, '$.server'), '') != ?
+	`, newAddr, serverName, newAddr)
+	if err != nil {
+		return 0, fmt.Errorf("refresh node server address: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	return affected, nil
+}
+
 // 当服务器名称更改时，UpdateNodesByServerName 会更新所有节点。
 // 这将更新该服务器中节点的original_server 字段和tag 字段。
 func (r *TrafficRepository) UpdateNodesByServerName(ctx context.Context, oldName, newName string) (int64, error) {

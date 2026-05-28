@@ -29,6 +29,9 @@ interface ParsedNode {
   parsed_config: string; clash_config: string; enabled: boolean
   tag: string; original_server: string; inbound_tag: string
   created_at: string; updated_at: string
+  // 路由出站节点附加字段(由 /api/admin/nodes 返回);为空表示这是个普通物理节点
+  node_type?: string             // 'physical' | 'routed'
+  routed_outbound_tag?: string   // routed 节点绑定的 outbound tag,用于过滤显示规则
 }
 
 interface NodeRoutingDialogProps {
@@ -37,7 +40,7 @@ interface NodeRoutingDialogProps {
   node: ParsedNode
   serverId: number
   serverName: string
-  allNodes?: Array<{ node_name: string; clash_config: string }>
+  allNodes?: Array<{ node_name: string; clash_config: string; original_server?: string }>
 }
 
 const QUICK_RULES = {
@@ -151,21 +154,33 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
   // 负载均衡器(在「服务管理 → 负载均衡」创建)。这里只引用,规则目标可选 balancerTag。
   const balancers = useMemo(() => ((routingData?.routing as any)?.balancers || []).map((b: any) => ({ tag: b.tag })), [routingData])
 
+  // 出站 tag → 显示名(节点 + 所在服务器)。
+  // 通过出站的目标地址 (server:port) 反查 allNodes 里同 server:port 的节点,
+  // 命中后取该节点的 node_name 与 original_server,渲染成 "节点名 · 服务器名"。
   const outboundTagToName = useMemo(() => {
     const map: Record<string, string> = {}
     if (!allNodes?.length || !outbounds.length) return map
-    const nodeByAddr: Record<string, string> = {}
-    for (const n of allNodes) {
+    const nodeByAddr: Record<string, { nodeName: string; server: string }> = {}
+    for (const n of allNodes as any[]) {
       try {
         const clash = JSON.parse(n.clash_config)
-        if (clash?.server) nodeByAddr[`${clash.server}:${clash.port || ''}`] = n.node_name
+        if (clash?.server) {
+          const key = `${clash.server}:${clash.port || ''}`
+          // 同 addr 多节点时保留第一个;路由出站父节点优先(node_type='physical')
+          if (!nodeByAddr[key]) {
+            nodeByAddr[key] = { nodeName: n.node_name, server: n.original_server || '' }
+          }
+        }
       } catch {}
     }
     for (const ob of outbounds) {
       const addr = getOutboundAddress(ob)
       if (addr && ob.tag) {
         const key = `${addr.address}:${addr.port}`
-        if (nodeByAddr[key]) map[ob.tag] = nodeByAddr[key]
+        const hit = nodeByAddr[key]
+        if (hit) {
+          map[ob.tag] = hit.server ? `${hit.nodeName} · ${hit.server}` : hit.nodeName
+        }
       }
     }
     return map
@@ -180,12 +195,24 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
       !rule.port && !rule.network && !rule.source?.length && !rule.user?.length
   }
 
+  // 路由出站节点判定:有 routed_outbound_tag 就是 routed 节点
+  // 这种节点只关心"自己的出站怎么走",不要展示一堆 ban_bt / ban_cn / 全局规则
+  const isRoutedNode = !!node.routed_outbound_tag
+  const routedTag = node.routed_outbound_tag
+
   const { dedicatedRules, globalRules, hasCatchAll, catchAllOutbound } = useMemo(() => {
     const dedicated: Array<{ rule: RoutingRule; originalIndex: number }> = []
     const global: Array<{ rule: RoutingRule; originalIndex: number }> = []
     const rawRules = routingData?.routing?.rules || []
     rawRules.forEach((rule, i) => {
       if (rule.outboundTag === 'api' || rule.inboundTag?.includes('api')) return
+      // 路由出站节点:仅保留 outboundTag 等于该节点 routed_outbound_tag 的规则,跳过其它一切
+      if (isRoutedNode && routedTag) {
+        if (rule.outboundTag === routedTag) {
+          dedicated.push({ rule, originalIndex: i })
+        }
+        return
+      }
       if (rule.inboundTag?.includes(inboundTag)) {
         dedicated.push({ rule, originalIndex: i })
       } else if (!rule.inboundTag || rule.inboundTag.length === 0) {
@@ -199,7 +226,7 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
       hasCatchAll: !!catchAll,
       catchAllOutbound: catchAll?.rule.outboundTag || '',
     }
-  }, [routingData, inboundTag])
+  }, [routingData, inboundTag, isRoutedNode, routedTag])
 
   const restartXray = async () => {
     try {

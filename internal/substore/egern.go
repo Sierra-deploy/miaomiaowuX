@@ -116,18 +116,19 @@ func (p *EgernProducer) Produce(proxies []Proxy, outputType string, opts *Produc
 		// Check VLESS network and flow
 		if proxyType == "vless" {
 			network := GetString(proxy, "network")
-			flow := GetString(proxy, "flow")
+			// flow := GetString(proxy, "flow")
 
+			// 已经支持 vless reality 和 xtls-rprx-vision , 不再过滤 flow 与 reality-opts 字段
 			// Check flow support
-			if !opts.IncludeUnsupportedProxy {
-				if IsPresent(proxy, "flow") || IsPresent(proxy, "reality-opts") {
-					continue
-				}
-			} else {
-				if flow != "" && flow != "xtls-rprx-vision" {
-					continue
-				}
-			}
+			// if !opts.IncludeUnsupportedProxy {
+			// 	if IsPresent(proxy, "flow") || IsPresent(proxy, "reality-opts") {
+			// 		continue
+			// 	}
+			// } else {
+			// 	if flow != "" && flow != "xtls-rprx-vision" {
+			// 		continue
+			// 	}
+			// }
 
 			// Check network
 			if network != "" && network != "http" && network != "ws" && network != "tcp" {

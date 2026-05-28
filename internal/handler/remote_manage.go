@@ -64,6 +64,25 @@ func (h *RemoteManageHandler) deployDefaultConfig(serverID int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	// 已存在配置则不下发 — 保护现网 inbound/outbound/routing,只在全新装机时初始化默认模板。
+	// 历史 BUG:scan_result xray_running=false 一旦上报(xray 启动失败 / 短暂故障 / 配置冲突),
+	// 这里就会无脑下发默认模板覆盖现有配置,导致服务器再次上线时业务入站全部丢失。
+	if cur, err := h.forwardToRemoteServer(ctx, serverID, http.MethodGet, "/api/child/xray/config", nil); err == nil {
+		// 解析返回:{ "success": true, "config": "<json string>" }
+		var resp struct {
+			Success bool   `json:"success"`
+			Config  string `json:"config"`
+		}
+		if json.Unmarshal(cur, &resp) == nil && resp.Success {
+			cfg := strings.TrimSpace(resp.Config)
+			// 判 "有效配置" 标准:能 parse + 至少包含 1 个非 api 的 inbound 或 1 个非默认 outbound
+			if cfg != "" && hasNonTemplateContent(cfg) {
+				log.Printf("[Remote Manage] Server %d already has non-empty xray config, skip auto-deploy default template", serverID)
+				return
+			}
+		}
+	}
+
 	configTpl, err := templates.ReadFile("default/config.json")
 	if err != nil {
 		log.Printf("[Remote Manage] Failed to read default/config.json template: %v", err)
@@ -82,7 +101,45 @@ func (h *RemoteManageHandler) deployDefaultConfig(serverID int64) {
 		log.Printf("[Remote Manage] %v", err)
 		return
 	}
-	log.Printf("[Remote Manage] Auto-deployed default config to server %d", serverID)
+	log.Printf("[Remote Manage] Auto-deployed default config to server %d (was empty)", serverID)
+}
+
+// hasNonTemplateContent 判断一份 xray config 是不是"用户有内容"的(而非空模板)。
+// 标准:
+//   - 至少 1 个 tag != "api" 的 inbound,或
+//   - 至少 1 个 tag != "direct" && tag != "block" 的 outbound,或
+//   - 任何 routing.rules
+// 任一满足即认为有内容,不应被默认模板覆盖。
+func hasNonTemplateContent(cfgJSON string) bool {
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(cfgJSON), &cfg); err != nil {
+		// parse 失败也别覆盖 — 让用户介入修复
+		return true
+	}
+	if ibs, ok := cfg["inbounds"].([]any); ok {
+		for _, raw := range ibs {
+			if m, ok := raw.(map[string]any); ok {
+				if tag, _ := m["tag"].(string); tag != "" && tag != "api" {
+					return true
+				}
+			}
+		}
+	}
+	if obs, ok := cfg["outbounds"].([]any); ok {
+		for _, raw := range obs {
+			if m, ok := raw.(map[string]any); ok {
+				if tag, _ := m["tag"].(string); tag != "" && tag != "direct" && tag != "block" {
+					return true
+				}
+			}
+		}
+	}
+	if r, ok := cfg["routing"].(map[string]any); ok {
+		if rules, ok := r["rules"].([]any); ok && len(rules) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // 处理通过 WebSocket 从代理收到的扫描结果。
@@ -1501,8 +1558,12 @@ func (h *RemoteManageHandler) autoSyncInboundToNodes(ctx context.Context, server
 		return
 	}
 
-	// 确定服务器地址：始终使用IP
-	serverHost := server.IPAddress
+	// 写入 clash proxy server 字段:Domain → IPAddress → PullAddress 优先序。
+	// IP 可能漂移(NAT / 动态 IP),Domain 配过就用 Domain。
+	serverHost := strings.TrimSpace(server.Domain)
+	if serverHost == "" {
+		serverHost = server.IPAddress
+	}
 	if serverHost == "" {
 		serverHost = server.PullAddress
 	}
@@ -1757,14 +1818,20 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 		return response
 	}
 
-	// 写入 clash proxy 的 server 字段:优先用调用方覆盖,否则用 IP
+	// 写入 clash proxy 的 server 字段。优先级:
+	//   1. 调用方显式 override
+	//   2. 服务器配置的 Domain(动态 IP 场景下域名更稳定,IP 会变,域名不会)
+	//   3. IPAddress 兜底
 	serverHost := strings.TrimSpace(serverHostOverride)
+	if serverHost == "" {
+		serverHost = strings.TrimSpace(server.Domain)
+	}
 	if serverHost == "" {
 		serverHost = server.IPAddress
 	}
 	if serverHost == "" {
 		response.Success = false
-		response.Errors = append(response.Errors, "服务器IP地址为空")
+		response.Errors = append(response.Errors, "服务器 IP/域名 均为空")
 		return response
 	}
 
@@ -1964,6 +2031,14 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 			existingInboundTags[server.Name+":"+tag] = true
 		}
 		existingNodeNames[nodeName] = true
+	}
+
+	// 同步末尾顺手把该服务器下已存在节点的 clash_config.server 字段刷成当前 serverHost。
+	// 主要处理"服务器配过域名后 / IP 漂移后,老节点的 server 字段还停在旧 IP"的场景 — 用户每次同步就自动校正。
+	if refreshed, err := h.repo.RefreshNodesServerAddress(ctx, server.Name, serverHost); err != nil {
+		log.Printf("[Remote Manage] Refresh node server address failed for %s: %v", server.Name, err)
+	} else if refreshed > 0 {
+		log.Printf("[Remote Manage] Refreshed %d node(s) server address → %s for %s", refreshed, serverHost, server.Name)
 	}
 
 	response.Message = fmt.Sprintf("已同步 %d 个节点(绑定 %d 个，新增 %d 个)，跳过 %d 个",

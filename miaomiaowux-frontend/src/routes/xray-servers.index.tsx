@@ -614,16 +614,35 @@ function XrayServersPage() {
 
   const loadRemoteServerStatusToCache = async (serverId: number, forceReload = false) => {
     if (!forceReload && (remoteServicesStatusMap[serverId]?.loaded || remoteServicesStatusMap[serverId]?.loading)) return
-    setRemoteServicesStatusMap(prev => ({ ...prev, [serverId]: { ...prev[serverId], loading: true, loaded: false } }))
+    // 首次加载才显示 loading 文案;强刷(15s 定时 / 操作后)走静默,避免 UI 每隔 15s 闪一下"加载中"
+    const isInitial = !remoteServicesStatusMap[serverId]?.loaded
+    if (isInitial) {
+      setRemoteServicesStatusMap(prev => ({ ...prev, [serverId]: { ...prev[serverId], loading: true, loaded: false } }))
+    }
     try {
       const response = await api.get(`/api/admin/remote/services/status?server_id=${serverId}`)
       if (response.data.success) setRemoteServicesStatusMap(prev => ({ ...prev, [serverId]: { xray: response.data.xray, nginx: response.data.nginx, loading: false, loaded: true } }))
-    } catch { setRemoteServicesStatusMap(prev => ({ ...prev, [serverId]: { loading: false, loaded: true } })) }
+    } catch {
+      if (isInitial) setRemoteServicesStatusMap(prev => ({ ...prev, [serverId]: { loading: false, loaded: true } }))
+    }
   }
 
   useEffect(() => {
     const servers: RemoteServer[] = remoteServersData?.servers || []
     servers.filter((s: RemoteServer) => s.status === 'connected').forEach((server: RemoteServer) => { loadRemoteServerStatusToCache(server.id) })
+  }, [remoteServersData])
+
+  // 每 15s 后台静默刷新所有 connected 服务器的 xray/nginx 状态。
+  // 仅对当前在 connected 的服务器拉,避免对离线机器无谓重试。
+  // forceReload=true 绕过 loaded 缓存,保证拿到最新值。
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const servers: RemoteServer[] = remoteServersData?.servers || []
+      servers
+        .filter((s: RemoteServer) => s.status === 'connected')
+        .forEach((server: RemoteServer) => { loadRemoteServerStatusToCache(server.id, true) })
+    }, 15_000)
+    return () => clearInterval(timer)
   }, [remoteServersData])
 
   const remoteServers: RemoteServer[] = remoteServersData?.servers || []
@@ -1068,7 +1087,7 @@ function XrayServersPage() {
                 <TableHead>{t('servers.nameCol')}</TableHead>
                 <TableHead>{t('servers.connectionMode')}</TableHead>
                 <TableHead>{t('servers.ipAddress')}</TableHead>
-                <TableHead>{t('servers.speedCol')}</TableHead>
+                <TableHead className="min-w-[120px] w-[120px]">{t('servers.speedCol')}</TableHead>
                 <TableHead>{t('servers.trafficCol')}</TableHead>
                 <TableHead>{t('servers.serviceCol')}</TableHead>
                 <TableHead className="text-right">{t('servers.actionsCol')}</TableHead>
@@ -1141,7 +1160,7 @@ function XrayServersPage() {
                       </DropdownMenu>
                     </TableCell>
                     <TableCell className="text-muted-foreground">{server.ip_address || '-'}</TableCell>
-                    <TableCell>
+                    <TableCell className="min-w-[120px] w-[120px] tabular-nums">
                       {server.status === 'connected' && ((server.current_upload_speed || server.current_download_speed) ? (
                         <div className="text-xs space-y-0.5">
                           <div className="text-green-600 dark:text-green-400">↑ {formatSpeed(server.current_upload_speed || 0)}</div>
@@ -1264,6 +1283,47 @@ function XrayServersPage() {
                   <Textarea value={xrayRawConfig} onChange={(e) => setXrayRawConfig(e.target.value)} className="font-mono text-sm flex-1 resize-none" placeholder={t('servers.xrayConfigPlaceholder')} />
                 )}
               </div>
+              {/* 实时 JSON 格式检测 + 一键格式化;不阻塞保存,只是给提示。错误时显示具体位置 / 信息。 */}
+              {(() => {
+                if (xrayRawConfigLoading) return null
+                let parseErr = ''
+                if (xrayRawConfig.trim() !== '') {
+                  try { JSON.parse(xrayRawConfig) } catch (e: any) { parseErr = e?.message || 'JSON 解析失败' }
+                }
+                return (
+                  <div className={cn('flex items-center justify-between gap-2 pt-2 text-xs flex-shrink-0', parseErr ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400')}>
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      {parseErr ? (
+                        <>
+                          <XCircle className="h-3.5 w-3.5 shrink-0" />
+                          <span className="truncate">JSON 格式错误: {parseErr}</span>
+                        </>
+                      ) : (
+                        <>
+                          <CheckCircle className="h-3.5 w-3.5 shrink-0" />
+                          <span>JSON 格式正确</span>
+                        </>
+                      )}
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 shrink-0"
+                      onClick={() => {
+                        try {
+                          setXrayRawConfig(JSON.stringify(JSON.parse(xrayRawConfig), null, 2))
+                          toast.success('已格式化')
+                        } catch {
+                          toast.error('JSON 格式错误,无法格式化')
+                        }
+                      }}
+                      disabled={!!parseErr || !xrayRawConfig.trim()}
+                    >
+                      格式化
+                    </Button>
+                  </div>
+                )
+              })()}
               <div className="flex justify-end gap-2 pt-3 flex-shrink-0">
                 <Button onClick={() => { if (xrayRawConfigServerId === null) return; try { JSON.parse(xrayRawConfig) } catch { toast.error(t('servers.jsonFormatError')); return }; saveXrayRawConfigMutation.mutate({ serverId: xrayRawConfigServerId, config: xrayRawConfig }); if (configServer?.type === 'remote') handleSaveXrayConfig() }} disabled={saveXrayRawConfigMutation.isPending || updateRemoteXraySystemConfigMutation.isPending || xrayRawConfigLoading}>
                   {(saveXrayRawConfigMutation.isPending || updateRemoteXraySystemConfigMutation.isPending) ? t('servers.saving') : t('servers.saveConfig')}

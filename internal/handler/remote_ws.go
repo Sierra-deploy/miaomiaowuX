@@ -592,9 +592,10 @@ func (h *RemoteWSHandler) handleTraffic(wsConn *RemoteWSConnection, payload json
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := h.repo.UpdateRemoteServerLastActivity(ctx, wsConn.ServerID); err != nil {
+	if _, _, _, err := h.repo.UpdateRemoteServerLastActivity(ctx, wsConn.ServerID); err != nil {
 		log.Printf("[Remote WS] Failed to update last activity for server %s: %v", wsConn.ServerName, err)
 	}
+	// 上线通知由 auth handler 那一头负责发(WS 重连必然走 auth),这里不重复
 
 	if err := h.collector.ProcessRemoteMetrics(ctx, wsConn.ServerID, trafficPayload.Stats); err != nil {
 		log.Printf("[Remote WS] Failed to process traffic from server %s: %v", wsConn.ServerName, err)
@@ -680,7 +681,7 @@ func (h *RemoteWSHandler) handleSpeed(wsConn *RemoteWSConnection, payload json.R
 	defer cancel()
 
 	// 更新速度报告上的last_heartbeat - 这使服务器标记为在线
-	if err := h.repo.UpdateRemoteServerLastActivity(ctx, wsConn.ServerID); err != nil {
+	if _, _, _, err := h.repo.UpdateRemoteServerLastActivity(ctx, wsConn.ServerID); err != nil {
 		log.Printf("[Remote WS] Failed to update last activity for server %s: %v", wsConn.ServerName, err)
 	}
 

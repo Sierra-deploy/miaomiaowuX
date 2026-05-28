@@ -101,9 +101,12 @@ func applyFederationInfo(ctx context.Context, repo *storage.TrafficRepository, s
 		_ = repo.UpdateRemoteServerXrayMode(ctx, serverID, mode)
 	}
 
-	// 拥有方报告 connected 时刷新心跳/状态
+	// 拥有方报告 connected 时刷新心跳/状态;联邦消费侧也补上离线→在线的 TG 通知
 	if st, _ := info["status"].(string); st == "connected" {
-		_ = repo.UpdateRemoteServerLastActivity(ctx, serverID)
+		prev, name, ip, _ := repo.UpdateRemoteServerLastActivity(ctx, serverID)
+		if prev == storage.RemoteServerStatusOffline && name != "" {
+			SendServerOnlineNotification(ctx, name, ip)
+		}
 	}
 }
 

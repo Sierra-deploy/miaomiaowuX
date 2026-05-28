@@ -523,9 +523,14 @@ func (h *RemoteTrafficHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	// 在实际实现中，您可能希望将远程服务器与 xray_servers 相关联
 	serverID := remoteServer.ID
 
-	// 更新流量报告上的last_heartbeat - 这取代了单独心跳的需要
-	if err := h.repo.UpdateRemoteServerLastActivity(ctx, serverID); err != nil {
-		log.Printf("[Remote Traffic] Failed to update last activity for %s: %v", remoteServer.Name, err)
+	// 更新流量报告上的 last_heartbeat — 这取代了单独心跳的需要;
+	// 同时检测离线→在线翻转,补发 TG 上线通知(WS 模式 auth 已经发过,
+	// HTTP push 模式以前只在这里悄悄翻状态,所以下线通知有、上线通知没有)。
+	prevStatus, serverName, serverIP, uErr := h.repo.UpdateRemoteServerLastActivity(ctx, serverID)
+	if uErr != nil {
+		log.Printf("[Remote Traffic] Failed to update last activity for %s: %v", remoteServer.Name, uErr)
+	} else if prevStatus == storage.RemoteServerStatusOffline {
+		SendServerOnlineNotification(ctx, serverName, serverIP)
 	}
 
 	// 处理指标
