@@ -868,9 +868,14 @@ func (h *nodesHandler) handleDelete(w http.ResponseWriter, r *http.Request, idSe
 		}
 	}
 
-	// 如果节点链接到远程服务器，则从代理删除远程入站
-	if !nodeNotFound && node.OriginalServer != "" && node.InboundTag != "" {
-		h.deleteRemoteInbound(r.Context(), node.OriginalServer, node.InboundTag)
+	// 如果节点链接到远程服务器:routed 节点只需清掉它绑定的 outbound + rule(不能动 inbound,会误删其它节点);
+	// 普通物理节点保持原来"清掉整个 inbound"的行为。
+	if !nodeNotFound && node.OriginalServer != "" {
+		if node.NodeType == "routed" && node.RoutedOutboundTag != "" {
+			h.deleteRemoteRoutedOutbound(r.Context(), node.OriginalServer, node.RoutedOutboundTag)
+		} else if node.InboundTag != "" {
+			h.deleteRemoteInbound(r.Context(), node.OriginalServer, node.InboundTag)
+		}
 	}
 
 	// 删除节点(按权限:管理员任意,普通用户仅自己的)
@@ -1040,6 +1045,46 @@ func (h *nodesHandler) handleBatchDelete(w http.ResponseWriter, r *http.Request)
 }
 
 // 通过 RemoteManageHandler 将删除入站请求转发给代理。
+// deleteRemoteRoutedOutbound:routed 节点删除时清掉服务器侧的 routing rule + outbound,但不动 inbound。
+// 同 outboundTag 的 rule 可能不止一条(理论上 sync 单一对一,防御性地全删);outbound 按 tag 删一次。
+// inbound 里的 client 留着 — 节点配置已经删了,client 留着也无害,后续如果重建可以复用同凭据。
+func (h *nodesHandler) deleteRemoteRoutedOutbound(ctx context.Context, serverName, outboundTag string) {
+	if h.remoteManage == nil {
+		return
+	}
+	server, err := h.repo.GetRemoteServerByName(ctx, serverName)
+	if err != nil {
+		log.Printf("[Nodes] routed delete: lookup server %q failed: %v", serverName, err)
+		return
+	}
+	// 1. routing rules by outboundTag(全删,从后往前避免 index 漂移)
+	if raw, err := h.remoteManage.forwardToRemoteServer(ctx, server.ID, "GET", "/api/child/routing", nil); err == nil {
+		var resp struct {
+			Success bool                   `json:"success"`
+			Routing map[string]interface{} `json:"routing"`
+		}
+		if json.Unmarshal(raw, &resp) == nil && resp.Routing != nil {
+			rules, _ := resp.Routing["rules"].([]interface{})
+			for i := len(rules) - 1; i >= 0; i-- {
+				rmap, _ := rules[i].(map[string]interface{})
+				if t, _ := rmap["outboundTag"].(string); t == outboundTag {
+					body, _ := json.Marshal(map[string]interface{}{"action": "remove_rule", "index": i})
+					if _, err := h.remoteManage.forwardToRemoteServer(ctx, server.ID, "POST", "/api/child/routing", body); err != nil {
+						log.Printf("[Nodes] routed delete: remove rule (server=%s tag=%s idx=%d) failed: %v", serverName, outboundTag, i, err)
+					}
+				}
+			}
+		}
+	}
+	// 2. outbound by tag
+	rmOut, _ := json.Marshal(map[string]string{"action": "remove", "tag": outboundTag})
+	if _, err := h.remoteManage.forwardToRemoteServer(ctx, server.ID, "POST", "/api/child/outbounds", rmOut); err != nil {
+		log.Printf("[Nodes] routed delete: remove outbound (server=%s tag=%s) failed: %v", serverName, outboundTag, err)
+	} else {
+		log.Printf("[Nodes] routed delete: cleared rule+outbound %s on %s", outboundTag, serverName)
+	}
+}
+
 func (h *nodesHandler) deleteRemoteInbound(ctx context.Context, serverName, inboundTag string) {
 	if h.remoteManage == nil {
 		return

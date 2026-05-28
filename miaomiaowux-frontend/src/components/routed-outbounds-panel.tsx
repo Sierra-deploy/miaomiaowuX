@@ -112,6 +112,37 @@ export function RoutedOutboundsPanel({ showHeader = true }: { showHeader?: boole
     },
   })
 
+  // 服务器与 outbound 数据(给 outboundDisplay 用,但 outboundDisplay 依赖 flatRouted,所以 useMemo 那条放后面)
+  const serverNamesByParent = useMemo(() => {
+    const m = new Map<number, string>()
+    physicalNodes.forEach((n) => m.set(n.id, n.original_server))
+    return m
+  }, [physicalNodes])
+  const uniqueServers = useMemo(() => Array.from(new Set(physicalNodes.map((n) => n.original_server).filter(Boolean))), [physicalNodes])
+  const remoteServersQ = useQuery({
+    queryKey: ['remote-servers-for-routed'],
+    queryFn: async () => (await api.get('/api/admin/remote-servers')).data,
+  })
+  const outboundsByServer = useQuery({
+    enabled: uniqueServers.length > 0 && !!remoteServersQ.data,
+    queryKey: ['outbounds-by-server', uniqueServers],
+    queryFn: async () => {
+      const serversList: any[] = remoteServersQ.data?.servers || []
+      const map = new Map<string, any[]>()
+      await Promise.all(
+        uniqueServers.map(async (name) => {
+          const sv = serversList.find((s) => s.name === name)
+          if (!sv) return
+          try {
+            const res = await api.get(`/api/admin/remote/outbounds?server_id=${sv.id}`)
+            map.set(name, res.data?.outbounds || [])
+          } catch {}
+        }),
+      )
+      return map
+    },
+  })
+
   const flatRouted: Array<{ parent: PhysicalNode; node: RoutedNode }> = useMemo(() => {
     const out: Array<{ parent: PhysicalNode; node: RoutedNode }> = []
     if (!routedQ.data) return out
@@ -121,6 +152,58 @@ export function RoutedOutboundsPanel({ showHeader = true }: { showHeader?: boole
     })
     return out
   }, [routedQ.data, physicalNodes])
+
+  // 路由出站 tag → 友好显示名(优先 节点名 → 服务器名 → 原 tag)
+  const outboundDisplay = useMemo(() => {
+    const map: Record<string, string> = {}
+    const nodesAll: any[] = nodesQ.data || []
+    const serversList: any[] = remoteServersQ.data?.servers || []
+    const nodeByAddr: Record<string, { nodeName: string; server: string }> = {}
+    for (const n of nodesAll) {
+      try {
+        const cfg = JSON.parse(n.clash_config)
+        if (cfg?.server) {
+          const key = `${cfg.server}:${cfg.port || ''}`
+          if (!nodeByAddr[key]) nodeByAddr[key] = { nodeName: n.node_name, server: n.original_server || '' }
+        }
+      } catch {}
+    }
+    const serverByAddr: Record<string, string> = {}
+    for (const s of serversList) {
+      for (const a of [s.ip_address, s.domain, s.pull_address]) {
+        if (a) serverByAddr[a] = s.name
+      }
+    }
+    flatRouted.forEach(({ parent, node }) => {
+      const serverName = serverNamesByParent.get(parent.id) || ''
+      const list = outboundsByServer.data?.get(serverName) || []
+      const ob = list.find((o: any) => o.tag === node.RoutedOutboundTag)
+      if (!ob) {
+        map[node.RoutedOutboundTag] = node.RoutedOutboundTag
+        return
+      }
+      let addr = ''
+      let port: any = ''
+      const vnext = ob.settings?.vnext?.[0]
+      const servers = ob.settings?.servers?.[0]
+      if (vnext) { addr = vnext.address; port = vnext.port }
+      else if (servers) { addr = servers.address; port = servers.port }
+      else if (ob.settings?.address) { addr = ob.settings.address; port = ob.settings.port }
+      const key = `${addr}:${port}`
+      const matchNode = nodeByAddr[key]
+      if (matchNode) {
+        map[node.RoutedOutboundTag] = matchNode.server ? `${matchNode.nodeName} · ${matchNode.server}` : matchNode.nodeName
+        return
+      }
+      const matchServer = serverByAddr[addr]
+      if (matchServer) {
+        map[node.RoutedOutboundTag] = matchServer
+        return
+      }
+      map[node.RoutedOutboundTag] = node.RoutedOutboundTag
+    })
+    return map
+  }, [flatRouted, outboundsByServer.data, nodesQ.data, remoteServersQ.data, serverNamesByParent])
 
   const createM = useMutation({
     mutationFn: async () => {
@@ -241,7 +324,12 @@ export function RoutedOutboundsPanel({ showHeader = true }: { showHeader?: boole
                     <TableCell>
                       <Badge variant='outline'>{node.OriginalServer}</Badge>
                     </TableCell>
-                    <TableCell className='font-mono text-xs'>{node.RoutedOutboundTag}</TableCell>
+                    <TableCell>
+                      <div className='font-medium text-xs'>{outboundDisplay[node.RoutedOutboundTag] || node.RoutedOutboundTag}</div>
+                      {outboundDisplay[node.RoutedOutboundTag] && outboundDisplay[node.RoutedOutboundTag] !== node.RoutedOutboundTag && (
+                        <div className='font-mono text-[10px] text-muted-foreground mt-0.5'>{node.RoutedOutboundTag}</div>
+                      )}
+                    </TableCell>
                     <TableCell>
                       <Button variant='ghost' size='sm' onClick={() => setCredPreview(node)}>
                         <Copy className='mr-1 h-3 w-3' />

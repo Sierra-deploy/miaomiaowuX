@@ -151,8 +151,13 @@ func (l *NodeSyncListener) createForwardTunnelNode(ctx context.Context, event In
 		log.Printf("[NodeSync] forward-tunnel: 源节点 %d 不存在: %v", event.ForwardNodeID, err)
 		return
 	}
-	if server.IPAddress == "" {
-		log.Printf("[NodeSync] forward-tunnel: 服务器 %s 无 IP,跳过", server.Name)
+	// server 优先用域名,IP 作为兜底
+	serverHost := strings.TrimSpace(server.Domain)
+	if serverHost == "" {
+		serverHost = server.IPAddress
+	}
+	if serverHost == "" {
+		log.Printf("[NodeSync] forward-tunnel: 服务器 %s 无 IP/域名,跳过", server.Name)
 		return
 	}
 

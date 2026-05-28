@@ -1859,6 +1859,44 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 		return response
 	}
 
+	// 拉一次全量 xray config,提取 routing.rules 用于构造 email → outboundTag 映射。
+	// 这是判定"路由出站节点"的依据 —— 客户端 email 命中 user[] 且规则有具体 outboundTag,即视为该客户端绑定到那条出站。
+	// 注意:agent 返回的 config 字段是 JSON 字符串(原文),需要二次 unmarshal,不能直接当 map 读。
+	// 拉取失败不算 sync 失败,仅放弃路由识别。
+	emailToOutbound := map[string]string{}
+	if rawCfg, err := h.forwardToRemoteServer(ctx, serverID, "GET", "/api/child/xray/config", nil); err == nil {
+		var cfgResp struct {
+			Success bool   `json:"success"`
+			Config  string `json:"config"`
+		}
+		if err := json.Unmarshal(rawCfg, &cfgResp); err == nil && cfgResp.Success && cfgResp.Config != "" {
+			var xrayCfg map[string]interface{}
+			if err := json.Unmarshal([]byte(cfgResp.Config), &xrayCfg); err == nil {
+				if routing, _ := xrayCfg["routing"].(map[string]interface{}); routing != nil {
+					if rules, _ := routing["rules"].([]interface{}); rules != nil {
+						for _, r := range rules {
+							rm, _ := r.(map[string]interface{})
+							if rm == nil {
+								continue
+							}
+							outTag, _ := rm["outboundTag"].(string)
+							if outTag == "" || outTag == "block" || outTag == "direct" || outTag == "api" {
+								continue
+							}
+							users, _ := rm["user"].([]interface{})
+							for _, u := range users {
+								if s, ok := u.(string); ok && s != "" {
+									emailToOutbound[s] = outTag
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	log.Printf("[Remote Manage] Sync server=%q: parsed %d routing user→outbound mappings", server.Name, len(emailToOutbound))
+
 	// 提取 tunnel-in 的 settings.port
 	tunnelInSettingsPort := 0
 	if server.Domain != "" && (server.StealMode == "tunnel" || server.StealMode == "") {
@@ -2083,6 +2121,247 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 		log.Printf("[Remote Manage] Refresh node server address failed for %s: %v", server.Name, err)
 	} else if refreshed > 0 {
 		log.Printf("[Remote Manage] Refreshed %d node(s) server address → %s for %s", refreshed, serverHost, server.Name)
+	}
+
+	// 路由出站节点识别:扫所有 inbound 的 clients[],建立 凭据值 → email 映射;
+	// 已存在节点的 clash_config 凭据(uuid / password)能在这里反查到 email,且 email 命中 emailToOutbound 时,
+	// 把节点升级为 routed_outbound 类型,parent 指向同 inbound 下"非路由"节点(master)。识别失败不阻断 sync。
+	if len(emailToOutbound) > 0 {
+		// per-inbound 视角:protocol:port → (credToEmail / clients)
+		type inboundClientMap struct {
+			credToEmail map[string]string                    // uuid|password → email
+			emailToCred map[string]map[string]interface{}    // email → 完整 client(用来自动建节点)
+			rawInbound  map[string]interface{}               // 原始 inbound 引用,后续可调 inboundToClashProxy
+		}
+		perInbound := map[string]*inboundClientMap{}
+		for _, inbound := range inboundsResp.Inbounds {
+			protocol, _ := inbound["protocol"].(string)
+			port, _ := inbound["port"].(float64)
+			if protocol == "" || port == 0 || protocol == "tunnel" {
+				continue
+			}
+			settings, _ := inbound["settings"].(map[string]interface{})
+			if settings == nil {
+				continue
+			}
+			clients, _ := settings["clients"].([]interface{})
+			if len(clients) == 0 {
+				continue
+			}
+			tunnelPortForKey := 0
+			if tunnelInSettingsPort > 0 && int(port) == tunnelInSettingsPort {
+				tunnelPortForKey = 443
+			}
+			effectivePort := int(port)
+			if tunnelPortForKey > 0 {
+				effectivePort = tunnelPortForKey
+			}
+			key := fmt.Sprintf("%s:%s:%d", server.Name, normalizeProtocol(protocol), effectivePort)
+			m := &inboundClientMap{
+				credToEmail: map[string]string{},
+				emailToCred: map[string]map[string]interface{}{},
+				rawInbound:  inbound,
+			}
+			for _, c := range clients {
+				cm, _ := c.(map[string]interface{})
+				if cm == nil {
+					continue
+				}
+				email, _ := cm["email"].(string)
+				if email == "" {
+					continue
+				}
+				m.emailToCred[email] = cm
+				if id, ok := cm["id"].(string); ok && id != "" {
+					m.credToEmail[id] = email
+				}
+				if pw, ok := cm["password"].(string); ok && pw != "" {
+					m.credToEmail[pw] = email
+				}
+			}
+			perInbound[key] = m
+		}
+
+		// 第一遍:按 fingerprint 找该 inbound 下的「master」物理节点 —— 凭据 email 不在 emailToOutbound 里的那个(默认/未路由用户)。
+		// 找不到 master 也允许其它路由节点处理,只是 parent 留空。
+		masterByFingerprint := map[string]int64{}
+		for i := range existingNodes {
+			n := &existingNodes[i]
+			if n.OriginalServer != server.Name || n.NodeType == "routed" {
+				continue
+			}
+			var cfg map[string]interface{}
+			if err := json.Unmarshal([]byte(n.ClashConfig), &cfg); err != nil {
+				continue
+			}
+			proto, _ := cfg["type"].(string)
+			port, _ := cfg["port"].(float64)
+			if proto == "" || port == 0 {
+				continue
+			}
+			fp := fmt.Sprintf("%s:%s:%d", server.Name, normalizeProtocol(proto), int(port))
+			ib := perInbound[fp]
+			if ib == nil {
+				continue
+			}
+			var cred string
+			for _, k := range []string{"uuid", "password"} {
+				if v, _ := cfg[k].(string); v != "" {
+					cred = v
+					break
+				}
+			}
+			if cred == "" {
+				continue
+			}
+			email := ib.credToEmail[cred]
+			if _, isRouted := emailToOutbound[email]; !isRouted {
+				// 该节点凭据对应的 email 不在路由规则里 → 视为 master(默认用户)
+				if _, exists := masterByFingerprint[fp]; !exists {
+					masterByFingerprint[fp] = n.ID
+				}
+			}
+		}
+
+		// 第二遍:已存在的节点凭据对应 email 命中路由规则 → 升级为 routed,parent 指 master
+		matchedEmails := map[string]bool{} // 用于第三遍判断"哪些 email 还没节点"
+		for i := range existingNodes {
+			n := &existingNodes[i]
+			if n.OriginalServer != server.Name {
+				continue
+			}
+			var cfg map[string]interface{}
+			if err := json.Unmarshal([]byte(n.ClashConfig), &cfg); err != nil {
+				continue
+			}
+			proto, _ := cfg["type"].(string)
+			port, _ := cfg["port"].(float64)
+			if proto == "" || port == 0 {
+				continue
+			}
+			fp := fmt.Sprintf("%s:%s:%d", server.Name, normalizeProtocol(proto), int(port))
+			ib := perInbound[fp]
+			if ib == nil {
+				continue
+			}
+			var cred string
+			for _, k := range []string{"uuid", "password"} {
+				if v, _ := cfg[k].(string); v != "" {
+					cred = v
+					break
+				}
+			}
+			if cred == "" {
+				continue
+			}
+			email := ib.credToEmail[cred]
+			outTag, ok := emailToOutbound[email]
+			if !ok {
+				continue
+			}
+			matchedEmails[fp+":"+email] = true
+			parentID := masterByFingerprint[fp]
+			if err := h.repo.MarkNodeAsRouted(ctx, n.ID, outTag, parentID); err != nil {
+				log.Printf("[Remote Manage] MarkNodeAsRouted id=%d email=%q → %s failed: %v", n.ID, email, outTag, err)
+				continue
+			}
+			log.Printf("[Remote Manage] Detected routed node id=%d %q: email=%q → outboundTag=%q parent=%d", n.ID, n.NodeName, email, outTag, parentID)
+		}
+
+		// 次级 dedup:扫已有节点,记录已经存在的 (server, inbound_tag, outbound_tag) 三元组,
+		// 防止上一次因为凭据映射错(uuid 取了 master 的)留下来的脏数据继续被当成"还没节点"再造一份。
+		existingRoutedTriple := map[string]bool{}
+		for _, n := range existingNodes {
+			if n.OriginalServer != server.Name {
+				continue
+			}
+			if n.NodeType != "routed" || n.RoutedOutboundTag == "" {
+				continue
+			}
+			existingRoutedTriple[n.InboundTag+":"+n.RoutedOutboundTag] = true
+		}
+
+		// 第三遍:为没有节点的 routed email 自动建一个 routed 节点
+		for fp, ib := range perInbound {
+			master, hasMaster := masterByFingerprint[fp]
+			if !hasMaster {
+				continue // 没找到 master,无法挂 parent,这一轮跳过(等用户先 sync 出 master 物理节点)
+			}
+			inboundTagStr, _ := ib.rawInbound["tag"].(string)
+			for email, client := range ib.emailToCred {
+				outTag, isRouted := emailToOutbound[email]
+				if !isRouted {
+					continue
+				}
+				if matchedEmails[fp+":"+email] {
+					continue // 已有节点的凭据对应该 email
+				}
+				if existingRoutedTriple[inboundTagStr+":"+outTag] {
+					continue // 已经有一个 routed 节点占据这条 outbound,即便凭据值错了也不再追加
+				}
+				// 用 inboundToClashProxy 构造 clash 配置,然后把凭据字段替换为本 client 的
+				tunnelPortForKey := 0
+				port, _ := ib.rawInbound["port"].(float64)
+				if tunnelInSettingsPort > 0 && int(port) == tunnelInSettingsPort {
+					tunnelPortForKey = 443
+				}
+				proxy, err := h.inboundToClashProxy(ib.rawInbound, serverHost, server.Name, tunnelPortForKey)
+				if err != nil || proxy == nil {
+					log.Printf("[Remote Manage] auto-create routed node for email=%q skip: build clash failed: %v", email, err)
+					continue
+				}
+				// xray 客户端的字段 ↔ clash 字段映射(vless/vmess/trojan):
+				//   client.id ↔ proxy.uuid (vless/vmess)
+				//   client.password ↔ proxy.password (trojan/ss)
+				//   client.email 透传方便后续反查
+				if id, ok := client["id"].(string); ok && id != "" {
+					proxy["uuid"] = id
+				}
+				if pw, ok := client["password"].(string); ok && pw != "" {
+					proxy["password"] = pw
+				}
+				if flow, ok := client["flow"].(string); ok && flow != "" {
+					proxy["flow"] = flow
+				}
+				if aid, ok := client["alterId"]; ok {
+					proxy["alterId"] = aid
+				}
+				if cipher, ok := client["cipher"].(string); ok && cipher != "" {
+					proxy["cipher"] = cipher
+				}
+				nodeName := fmt.Sprintf("[%s] %s · %s", server.Name, inboundTagStr, email)
+				proxy["name"] = nodeName
+				cfgJSON, err := json.Marshal(proxy)
+				if err != nil {
+					continue
+				}
+				protocolStr, _ := ib.rawInbound["protocol"].(string)
+				node := storage.Node{
+					Username:       username,
+					NodeName:       nodeName,
+					Protocol:       protocolStr,
+					ClashConfig:    string(cfgJSON),
+					ParsedConfig:   string(cfgJSON),
+					Enabled:        true,
+					Tag:            fmt.Sprintf("远程:%s", server.Name),
+					OriginalServer: server.Name,
+					InboundTag:     inboundTagStr,
+				}
+				created, err := h.repo.CreateNode(ctx, node)
+				if err != nil {
+					log.Printf("[Remote Manage] auto-create routed node for email=%q failed: %v", email, err)
+					continue
+				}
+				// CreateNode 没有写 node_type/parent/routed_outbound_tag,补一刀
+				if err := h.repo.MarkNodeAsRouted(ctx, created.ID, outTag, master); err != nil {
+					log.Printf("[Remote Manage] auto-create: MarkNodeAsRouted id=%d failed: %v", created.ID, err)
+				}
+				existingRoutedTriple[inboundTagStr+":"+outTag] = true
+				response.SyncedCount++
+				response.CreatedCount++
+				log.Printf("[Remote Manage] Auto-created routed node id=%d email=%q → outboundTag=%q parent=%d", created.ID, email, outTag, master)
+			}
+		}
 	}
 
 	response.Message = fmt.Sprintf("已同步 %d 个节点(绑定 %d 个，新增 %d 个)，跳过 %d 个",
@@ -2606,10 +2885,14 @@ func (h *RemoteManageHandler) InboundToClashProxyByServerID(serverID int64, inbo
 		return "", fmt.Errorf("get server: %w", err)
 	}
 
-	serverHost := server.IPAddress
+	// clash_config.server 优先使用域名(IP 可能变,域名相对稳定);只有当域名缺省时才回落到 IP。
+	serverHost := strings.TrimSpace(server.Domain)
+	if serverHost == "" {
+		serverHost = server.IPAddress
+	}
 	tunnelPort := 0
 
-	// tunnel 模式：仅当新入站端口 == tunnel-in 的 settings.port 时，使用 443 端口（server 保持用 IP，域名可能走 CDN）
+	// tunnel 模式:新入站端口正好等于 tunnel-in 的 settings.port,意味着这条入站会被 tunnel 暴露在 443
 	if server.Domain != "" && (server.StealMode == "tunnel" || server.StealMode == "") {
 		inboundPort := 0
 		if p, ok := inbound["port"].(float64); ok {

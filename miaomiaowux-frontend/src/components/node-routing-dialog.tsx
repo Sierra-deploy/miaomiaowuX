@@ -81,10 +81,12 @@ function getOutboundAddress(outbound: any): { address: string; port: number | st
   return null
 }
 
-function RuleRow({ rule, index, allRulesCount, onView, onDelete, outboundDisplayName }: {
+function RuleRow({ rule, index, allRulesCount, onView, onDelete, outboundDisplayName, leftOverride }: {
   rule: RoutingRule; index: number; allRulesCount: number
   onView: () => void; onDelete: () => void
   outboundDisplayName?: string
+  // 左侧 ruleType/matchCondition 整体替换文字(路由出站节点的专属规则用,改为显示节点绑定的服务器名)
+  leftOverride?: string
 }) {
   const { t } = useTranslation('nodes')
   const { ruleType, matchCondition } = getRuleDisplayInfo(rule, t)
@@ -92,11 +94,17 @@ function RuleRow({ rule, index, allRulesCount, onView, onDelete, outboundDisplay
   const displayTag = rule.balancerTag ? `⚖ ${rule.balancerTag}` : (outboundDisplayName || rule.outboundTag || t('nodeRoutingDialog.notSet'))
   return (
     <div className='flex items-center gap-2 py-2 px-3 rounded-md border bg-card text-sm'>
-      <Badge variant='outline' className='shrink-0 text-xs'>{ruleType}</Badge>
-      <span className='flex-1 min-w-0 truncate' title={matchCondition}>
-        {friendlyName ? <span className='font-medium'>{friendlyName}: </span> : null}
-        {matchCondition || '-'}
-      </span>
+      {leftOverride ? (
+        <span className='flex-1 min-w-0 truncate font-medium' title={leftOverride}>{leftOverride}</span>
+      ) : (
+        <>
+          <Badge variant='outline' className='shrink-0 text-xs'>{ruleType}</Badge>
+          <span className='flex-1 min-w-0 truncate' title={matchCondition}>
+            {friendlyName ? <span className='font-medium'>{friendlyName}: </span> : null}
+            {matchCondition || '-'}
+          </span>
+        </>
+      )}
       <span className='text-muted-foreground mx-1'>→</span>
       <Badge variant={rule.balancerTag ? 'secondary' : outboundBadgeVariant(rule.outboundTag || '')} className='shrink-0 text-xs' title={rule.balancerTag || rule.outboundTag}>
         {displayTag}
@@ -154,37 +162,81 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
   // 负载均衡器(在「服务管理 → 负载均衡」创建)。这里只引用,规则目标可选 balancerTag。
   const balancers = useMemo(() => ((routingData?.routing as any)?.balancers || []).map((b: any) => ({ tag: b.tag })), [routingData])
 
-  // 出站 tag → 显示名(节点 + 所在服务器)。
-  // 通过出站的目标地址 (server:port) 反查 allNodes 里同 server:port 的节点,
-  // 命中后取该节点的 node_name 与 original_server,渲染成 "节点名 · 服务器名"。
+  // 服务器列表 + tunnels(用于出站 tag 解析时跨 tunnel 跳一跳)
+  const { data: remoteServersForResolve } = useQuery({
+    queryKey: ['remote-servers-routing-resolve'],
+    queryFn: async () => (await api.get('/api/admin/remote-servers')).data,
+    enabled: open,
+    staleTime: 60_000,
+  })
+  const { data: tunnelsForResolve } = useQuery({
+    queryKey: ['tunnels-routing-resolve'],
+    queryFn: async () => (await api.get('/api/admin/tunnels')).data?.tunnels || [],
+    enabled: open,
+    staleTime: 60_000,
+  })
+
+  // 出站 tag → 显示名:优先节点绑定的服务器名 → 节点名 → 服务器名(地址命中) → tunnel 跳一跳 → tag 原值。
   const outboundTagToName = useMemo(() => {
     const map: Record<string, string> = {}
-    if (!allNodes?.length || !outbounds.length) return map
+    if (!outbounds.length) return map
     const nodeByAddr: Record<string, { nodeName: string; server: string }> = {}
-    for (const n of allNodes as any[]) {
+    for (const n of (allNodes || []) as any[]) {
       try {
         const clash = JSON.parse(n.clash_config)
         if (clash?.server) {
           const key = `${clash.server}:${clash.port || ''}`
-          // 同 addr 多节点时保留第一个;路由出站父节点优先(node_type='physical')
-          if (!nodeByAddr[key]) {
-            nodeByAddr[key] = { nodeName: n.node_name, server: n.original_server || '' }
-          }
+          if (!nodeByAddr[key]) nodeByAddr[key] = { nodeName: n.node_name, server: n.original_server || '' }
         }
       } catch {}
+    }
+    const serverByAddr = new Map<string, { id: number; name: string }>()
+    const allServers: any[] = remoteServersForResolve?.servers || []
+    for (const s of allServers) {
+      for (const a of [s.ip_address, s.domain, s.pull_address]) {
+        if (a) serverByAddr.set(a, { id: s.id, name: s.name })
+      }
+    }
+    const tunnelsArr: any[] = tunnelsForResolve || []
+    const tunnelsByServerId = new Map<number, any[]>()
+    for (const tn of tunnelsArr) {
+      const arr = tunnelsByServerId.get(tn.server_id) || []
+      arr.push(tn)
+      tunnelsByServerId.set(tn.server_id, arr)
+    }
+    const resolve = (addr: string, port: any, depth = 0): string | null => {
+      if (depth > 3 || !addr) return null
+      const hit = nodeByAddr[`${addr}:${port}`]
+      if (hit) return hit.server || hit.nodeName
+      const srv = serverByAddr.get(addr)
+      if (srv) {
+        const list = tunnelsByServerId.get(srv.id) || []
+        const tn = list.find((x) => Number(x.listen_port) === Number(port))
+        if (tn) {
+          const next = resolve(tn.target_address, tn.target_port, depth + 1)
+          if (next) return next
+        }
+        return srv.name
+      }
+      // 兜底:同一台服务器的多个域名别名没记录时,按 listen_port 全局唯一匹配 tunnel
+      const match = tunnelsArr.filter((x) => Number(x.listen_port) === Number(port))
+      if (match.length === 1) {
+        const tn = match[0]
+        const next = resolve(tn.target_address, tn.target_port, depth + 1)
+        if (next) return next
+        return tn.server_name
+      }
+      return null
     }
     for (const ob of outbounds) {
       const addr = getOutboundAddress(ob)
       if (addr && ob.tag) {
-        const key = `${addr.address}:${addr.port}`
-        const hit = nodeByAddr[key]
-        if (hit) {
-          map[ob.tag] = hit.server ? `${hit.nodeName} · ${hit.server}` : hit.nodeName
-        }
+        const resolved = resolve(addr.address, addr.port, 0)
+        if (resolved) map[ob.tag] = resolved
       }
     }
     return map
-  }, [allNodes, outbounds])
+  }, [allNodes, outbounds, remoteServersForResolve, tunnelsForResolve])
 
   const resolveOutboundName = useCallback((tag: string) => {
     return outboundTagToName[tag] || undefined
@@ -206,13 +258,20 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
     const rawRules = routingData?.routing?.rules || []
     rawRules.forEach((rule, i) => {
       if (rule.outboundTag === 'api' || rule.inboundTag?.includes('api')) return
-      // 路由出站节点:仅保留 outboundTag 等于该节点 routed_outbound_tag 的规则,跳过其它一切
+      // 用户级路由出站(rule.user[] 把单个客户端 email 绑死到某个 outbound)对当前节点的展示无意义 —
+      // 它们是别的节点的"专属规则",在这台 inbound 共用客户端时一对一互斥,不会作用于当前节点的流量,直接过滤掉
+      const isUserPin = !!rule.user?.length && !!rule.outboundTag && rule.outboundTag !== 'block' && rule.outboundTag !== 'direct'
+      // 路由出站节点:命中 routedTag 的规则放专属(展示在顶部);其它非 user-pin 的塞进 global 置灰为"不生效"
       if (isRoutedNode && routedTag) {
         if (rule.outboundTag === routedTag) {
           dedicated.push({ rule, originalIndex: i })
+        } else if (!isUserPin) {
+          global.push({ rule, originalIndex: i })
         }
         return
       }
+      // 非 routed 节点:user-pin 规则跟当前节点没关系,跳过
+      if (isUserPin) return
       if (rule.inboundTag?.includes(inboundTag)) {
         dedicated.push({ rule, originalIndex: i })
       } else if (!rule.inboundTag || rule.inboundTag.length === 0) {
@@ -252,8 +311,18 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
   })
 
   const removeRuleMutation = useMutation({
-    mutationFn: async (index: number) => {
+    mutationFn: async ({ index, outboundTag }: { index: number; outboundTag?: string }) => {
       const res = await api.post(`/api/admin/remote/routing?server_id=${serverId}`, { action: 'remove_rule', index })
+      // 顺手清掉关联 outbound:落地节点等场景下 rule 和 outbound 1:1,删 rule 留 outbound 是脏数据。
+      // 但要避开内置/共享 outbound(direct/block/api/freedom),它们可能被其它 rule 引用,且后端通常拒删。
+      const reserved = new Set(['direct', 'block', 'api', 'freedom'])
+      if (outboundTag && !reserved.has(outboundTag)) {
+        try {
+          await api.post(`/api/admin/remote/outbounds?server_id=${serverId}`, { action: 'remove', tag: outboundTag })
+        } catch {
+          // 失败大多是该 outbound 还被其它 rule 引用 — 删 rule 已经成功,出站清理失败不算大错,静默
+        }
+      }
       return res.data
     },
     onSuccess: async (data) => {
@@ -354,6 +423,7 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
                         onView={() => setViewingRule(rule)}
                         onDelete={() => setDeletingRule({ rule, index: originalIndex })}
                         outboundDisplayName={resolveOutboundName(rule.outboundTag || '')}
+                        leftOverride={isRoutedNode && rule.outboundTag === routedTag ? ((node as any).original_server || serverName) : undefined}
                       />
                     ))
                   )}
@@ -367,12 +437,17 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
 
               {!hasCatchAll && (
                 <>
-                  {/* 全局规则 */}
+                  {/* 全局规则;路由出站节点上方 dedicated 规则在 routing.rules 顶部就拦截了流量,下面的全局规则对该节点全部不生效 → 整组置灰 + 标记 */}
                   <Collapsible open={globalOpen} onOpenChange={setGlobalOpen}>
                     <CollapsibleTrigger className='flex items-center gap-1 text-sm font-medium w-full hover:text-primary transition-colors'>
                       {globalOpen ? <ChevronDown className='size-4' /> : <ChevronRight className='size-4' />}
                       {t('nodeRoutingDialog.globalRules')} ({globalRules.length})
                       <span className='text-xs text-muted-foreground font-normal ml-1'>{t('nodeRoutingDialog.globalRulesHint')}</span>
+                      {isRoutedNode && globalRules.length > 0 && (
+                        <Badge variant='outline' className='ml-2 text-[10px] text-muted-foreground border-dashed'>
+                          不生效
+                        </Badge>
+                      )}
                     </CollapsibleTrigger>
                     <CollapsibleContent className='space-y-1.5 mt-2'>
                       {globalRules.length === 0 ? (
@@ -380,17 +455,19 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
                           {t('nodeRoutingDialog.noGlobalRules')}
                         </div>
                       ) : (
-                        globalRules.map(({ rule, originalIndex }) => (
-                          <RuleRow
-                            key={originalIndex}
-                            rule={rule}
-                            index={originalIndex}
-                            allRulesCount={allRules.length}
-                            onView={() => setViewingRule(rule)}
-                            onDelete={() => setDeletingRule({ rule, index: originalIndex })}
-                            outboundDisplayName={resolveOutboundName(rule.outboundTag || '')}
-                          />
-                        ))
+                        <div className={isRoutedNode ? 'space-y-1.5 opacity-50 pointer-events-none' : 'space-y-1.5'}>
+                          {globalRules.map(({ rule, originalIndex }) => (
+                            <RuleRow
+                              key={originalIndex}
+                              rule={rule}
+                              index={originalIndex}
+                              allRulesCount={allRules.length}
+                              onView={() => setViewingRule(rule)}
+                              onDelete={() => setDeletingRule({ rule, index: originalIndex })}
+                              outboundDisplayName={resolveOutboundName(rule.outboundTag || '')}
+                            />
+                          ))}
+                        </div>
                       )}
                     </CollapsibleContent>
                   </Collapsible>
@@ -463,7 +540,7 @@ export function NodeRoutingDialog({ open, onOpenChange, node, serverId, serverNa
           <AlertDialogFooter>
             <AlertDialogCancel>{t('actions.cancel', { ns: 'common' })}</AlertDialogCancel>
             <AlertDialogAction className='bg-red-600 hover:bg-red-700' onClick={() => {
-              if (deletingRule) removeRuleMutation.mutate(deletingRule.index)
+              if (deletingRule) removeRuleMutation.mutate({ index: deletingRule.index, outboundTag: deletingRule.rule.outboundTag })
               setDeletingRule(null)
             }}>{t('dialog.confirmDeleteAction')}</AlertDialogAction>
           </AlertDialogFooter>

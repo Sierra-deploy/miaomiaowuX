@@ -234,21 +234,34 @@ function generateStreamSettings(formData: any, transport: string, security: stri
     streamSettings.security = getSecurityType(security)
 
     if (security === 'TLS' || security.includes('XTLS-Vision') && !security.includes('REALITY')) {
-      streamSettings.tlsSettings = {
-        certificates: [
+      streamSettings.tlsSettings = {}
+
+      // certificates 仅在用户真填了 cert/key 时才包含。出站(client-side)绝大多数情况不需要本地证书,
+      // 留空数组只会让 xray 报 "both file and bytes are empty"。
+      if (formData.certificateFile || formData.keyFile) {
+        streamSettings.tlsSettings.certificates = [
           {
-            certificateFile: formData.certificateFile,
-            keyFile: formData.keyFile,
+            certificateFile: formData.certificateFile || '',
+            keyFile: formData.keyFile || '',
           },
-        ],
+        ]
       }
 
-      if (formData.serverName) {
-        streamSettings.tlsSettings.serverName = formData.serverName
+      // serverNames(复数,Reality 字段)与 serverName(单数,普通 TLS)在 clashConfigToOutbound 里都可能被填,
+      // 这里两者兼容,取到非空就当 SNI 用,不然 Trojan/VLESS-TLS 落地后 SNI 为空会直接握手失败
+      const sni = formData.serverName || formData.serverNames || ''
+      if (sni) {
+        streamSettings.tlsSettings.serverName = String(sni).split(',')[0].trim()
       }
 
       if (formData.alpn) {
         streamSettings.tlsSettings.alpn = formData.alpn.split(',').map((a: string) => a.trim())
+      }
+      if (formData.allowInsecure) {
+        streamSettings.tlsSettings.allowInsecure = true
+      }
+      if (formData.fingerprint) {
+        streamSettings.tlsSettings.fingerprint = formData.fingerprint
       }
 
       if (formData.minVersion) {
@@ -367,15 +380,14 @@ function generateOutboundSettings(formData: any, protocol: string, security: str
     return settings
   }
 
-  // Protocols that use vnext structure (VLESS, VMess, Trojan)
-  if (protocol === 'VLESS' || protocol === 'VMess' || protocol === 'Trojan') {
+  // VLESS/VMess 用 vnext.users[] 嵌套结构;Trojan 用扁平 servers[](xray 要求 servers 数组有且仅一个成员)
+  if (protocol === 'VLESS' || protocol === 'VMess') {
     const vnext: any = {
       address: formData.address,
       port: formData.port,
       users: []
     }
 
-    // Generate users array based on protocol
     if (protocol === 'VLESS') {
       vnext.users = (formData.users || []).map((user: any) => {
         const u: any = {
@@ -383,7 +395,6 @@ function generateOutboundSettings(formData: any, protocol: string, security: str
           encryption: user.encryption || 'none',
         }
         if (user.level !== undefined) u.level = user.level
-        // Add flow for XTLS/Vision
         if (security && (security.includes('XTLS') || security.includes('Vision'))) {
           u.flow = user.flow || 'xtls-rprx-vision'
         }
@@ -399,21 +410,23 @@ function generateOutboundSettings(formData: any, protocol: string, security: str
         if (user.security) u.security = user.security
         return u
       })
-    } else if (protocol === 'Trojan') {
-      vnext.users = (formData.users || []).map((user: any) => {
-        const u: any = {
-          password: user.password,
-        }
-        if (user.level !== undefined) u.level = user.level
-        // Add flow for XTLS
-        if (security && (security.includes('XTLS') || security.includes('Vision'))) {
-          u.flow = user.flow || 'xtls-rprx-vision'
-        }
-        return u
-      })
     }
 
     settings.vnext = [vnext]
+  } else if (protocol === 'Trojan') {
+    // xray Trojan outbound 协议结构与 VLESS/VMess 不同:settings.servers[{address, port, password, level, flow?}]
+    // 且 servers 必须有且仅有 1 个元素,以前误用 vnext 会导致 "Multiple endpoints" / 字段缺失等错误
+    const firstUser: any = (formData.users || [])[0] || {}
+    const server: any = {
+      address: formData.address,
+      port: formData.port,
+      password: firstUser.password || formData.password || '',
+    }
+    if (firstUser.level !== undefined) server.level = firstUser.level
+    if (security && (security.includes('XTLS') || security.includes('Vision'))) {
+      server.flow = firstUser.flow || 'xtls-rprx-vision'
+    }
+    settings.servers = [server]
   }
   // Protocols that use servers structure (Shadowsocks, Socks)
   else if (protocol === 'Shadowsocks2022') {

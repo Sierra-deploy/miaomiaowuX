@@ -57,6 +57,24 @@ export function TunnelManagerDialog({
   })
   const tunnels = data || []
 
+  // 已添加的服务器列表 — 拿来把 tunnel 的 target_address 反查成服务器名(命中任一别名:ip/domain/pull_address)
+  const { data: serversResp } = useQuery({
+    queryKey: ['remote-servers-for-tunnel-mgmt'],
+    queryFn: async () => (await api.get('/api/admin/remote-servers')).data,
+    enabled: open,
+    staleTime: 60_000,
+  })
+  const addressToServerName = (addr: string): string | null => {
+    if (!addr) return null
+    const servers: any[] = serversResp?.servers || []
+    for (const s of servers) {
+      if (s.ip_address === addr || s.domain === addr || s.pull_address === addr) {
+        return s.name
+      }
+    }
+    return null
+  }
+
   const deleteMutation = useMutation({
     mutationFn: async (tunnel: TunnelInfo) => {
       await api.post(
@@ -115,9 +133,22 @@ export function TunnelManagerDialog({
                     <span>{tn.server_name}</span>
                     <span className='font-mono'>:{tn.listen_port}</span>
                     <ArrowRight className='h-3 w-3' />
-                    <span className='font-mono'>
-                      {tn.target_address}:{tn.target_port}
-                    </span>
+                    {(() => {
+                      const matched = addressToServerName(tn.target_address)
+                      if (matched) {
+                        return (
+                          <span title={`${tn.target_address}:${tn.target_port}`}>
+                            <span>{matched}</span>
+                            <span className='font-mono'>:{tn.target_port}</span>
+                          </span>
+                        )
+                      }
+                      return (
+                        <span className='font-mono'>
+                          {tn.target_address}:{tn.target_port}
+                        </span>
+                      )
+                    })()}
                     {tn.network && (
                       <Badge variant='outline' className='text-[10px] uppercase'>
                         {tn.network}

@@ -60,6 +60,17 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
 
   const remoteUpdateOutboundMutation = useMutation({
     mutationFn: async ({ outbound }: { outbound: XrayOutbound }) => {
+      // 优先尝试 agent 新加的 `update` 动作:持久化时原位置替换,前端列表不被甩到末尾。
+      // 老版本 agent 不识别 update → 回落到 remove+add(顺序会变,但保证向后兼容,等用户升级 agent 后自动恢复保序)。
+      try {
+        const response = await api.post(`/api/admin/remote/outbounds?server_id=${serverId}`, {
+          action: 'update', tag: outbound.tag, outbound,
+        })
+        if (response.data?.success) return response.data
+        // 后端返回 success=false 也走回退路径
+      } catch {
+        // 老 agent: status 400,落到回退
+      }
       await api.post(`/api/admin/remote/outbounds?server_id=${serverId}`, {
         action: 'remove', tag: outbound.tag,
       })

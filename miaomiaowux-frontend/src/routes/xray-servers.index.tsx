@@ -838,6 +838,8 @@ function XrayServersPage() {
     const xrayRunning = status?.xray?.running
     const nginxInstalled = status?.nginx?.installed
     const bothInstalled = xrayInstalled && nginxInstalled
+    // 列表(compact)模式下:状态未拉到 / 正在加载 时不渲染按钮 —— 否则等数据回来后按钮消失会触发动作列横向抖动
+    if (compact && (!status || status.loading)) return null
     if (isEmbedded && (xrayInstalled && xrayRunning)) return null
     if (isEmbedded) {
       const handleStartXray = () => {
@@ -1215,8 +1217,8 @@ function XrayServersPage() {
                 <TableHead className="w-[140px] max-w-[140px]">{t('servers.ipAddress')}</TableHead>
                 <TableHead className="min-w-[120px] w-[120px]">{t('servers.speedCol')}</TableHead>
                 <TableHead>{t('servers.trafficCol')}</TableHead>
-                <TableHead>{t('servers.serviceCol')}</TableHead>
-                <TableHead className="text-right">{t('servers.actionsCol')}</TableHead>
+                <TableHead className="min-w-[170px] w-[170px]">{t('servers.serviceCol')}</TableHead>
+                <TableHead className="text-right min-w-[230px] w-[230px]">{t('servers.actionsCol')}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -1318,15 +1320,21 @@ function XrayServersPage() {
                         </div>
                       )}
                     </TableCell>
-                    <TableCell>
-                      {server.status === 'connected' ? (remoteStatus?.loading ? (<span className="text-xs text-muted-foreground">{t('servers.loadingStatus')}</span>) : (
-                        <div className="flex items-center gap-3">
-                          <RemoteServiceStatusIndicator status={remoteStatus?.xray} name="Xray" serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} isFederated={server.is_federated} />
-                          {remoteStatus?.nginx?.installed && (<RemoteServiceStatusIndicator status={remoteStatus?.nginx} name="Nginx" serverId={server.id} isFederated={server.is_federated} />)}
-                        </div>
-                      )) : (<span className="text-xs text-muted-foreground">{t('servers.notConnected')}</span>)}
+                    <TableCell className="min-w-[170px] w-[170px]">
+                      <div className="flex items-center gap-3 min-h-[1.5rem]">
+                        {server.status !== 'connected' ? (
+                          <span className="text-xs text-muted-foreground">{t('servers.notConnected')}</span>
+                        ) : remoteStatus?.loading ? (
+                          <span className="inline-block h-4 w-[140px] rounded animate-pulse bg-muted" />
+                        ) : (
+                          <>
+                            <RemoteServiceStatusIndicator status={remoteStatus?.xray} name="Xray" serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} isFederated={server.is_federated} />
+                            {remoteStatus?.nginx?.installed && (<RemoteServiceStatusIndicator status={remoteStatus?.nginx} name="Nginx" serverId={server.id} isFederated={server.is_federated} />)}
+                          </>
+                        )}
+                      </div>
                     </TableCell>
-                    <TableCell className="text-right">
+                    <TableCell className="text-right min-w-[230px] w-[230px]">
                       <div className="flex justify-end gap-1">
                         {server.status === 'connected' && (
                           <>

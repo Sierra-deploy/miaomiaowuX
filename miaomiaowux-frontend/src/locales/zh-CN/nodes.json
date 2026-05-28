@@ -1,7 +1,7 @@
 {
   "page": {
     "title": "节点管理",
-    "description": "输入代理节点信息，每行一个节点，支持 VMess、VLESS、Trojan、Shadowsocks、Hysteria、Socks、TUIC、AnyTLS、WireGuard 协议。"
+    "description": "输入代理节点信息，每行一个节点，支持 VMess、VLESS、Trojan、Shadowsocks、Hysteria、Socks、TUIC、AnyTLS、WireGuard、Snell 协议。"
   },
   "importCard": {
     "title": "导入外部节点",

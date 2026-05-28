@@ -908,6 +908,31 @@ func (r *TrafficRepository) CountUserRoutedOutboundActionsToday(ctx context.Cont
 	return n, err
 }
 
+// MarkNodeAsRouted 将一个已存在的物理节点升级为路由出站节点。
+// 用途:同步 inbound 时发现节点的客户端 email 命中 xray routing.rules.user[] 且有具体 outboundTag,
+// 则把 node_type 标记为 routed,写入 routed_outbound_tag,并把 parent_node_id 指向同一 inbound 下的 master 节点。
+// 只对当前为 physical 的节点生效,避免覆盖手动配置或 routed_owner=user 的私有路由出站节点。
+// parentNodeID == 0 表示不知道 master,只更 type/tag,parent 留空(此时路由出站管理面板暂时查不到该节点,等下次同步时回填)。
+func (r *TrafficRepository) MarkNodeAsRouted(ctx context.Context, nodeID int64, outboundTag string, parentNodeID int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if parentNodeID > 0 {
+		_, err := r.db.ExecContext(ctx,
+			`UPDATE nodes SET node_type = 'routed', routed_outbound_tag = ?, parent_node_id = ?, updated_at = CURRENT_TIMESTAMP
+			 WHERE id = ? AND (node_type IS NULL OR node_type = '' OR node_type = 'physical' OR (node_type = 'routed' AND parent_node_id IS NULL))`,
+			outboundTag, parentNodeID, nodeID,
+		)
+		return err
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE nodes SET node_type = 'routed', routed_outbound_tag = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND (node_type IS NULL OR node_type = '' OR node_type = 'physical')`,
+		outboundTag, nodeID,
+	)
+	return err
+}
+
 // UpdateNodeInboundTag 把已绑定服务器节点的 inbound_tag 改为新值。
 // 用途:dedup 时通过 clash 配置指纹匹配到已存在节点,但 agent 这次扫到的 inbound_tag 与库里的不一致
 // (用户改了 tag,或老版本 agent tag 命名规则与新版不同),把库里 tag 校正过去,下次同步直接走 tag 匹配。

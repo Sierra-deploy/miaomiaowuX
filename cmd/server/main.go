@@ -827,21 +827,18 @@ func main() {
 
 		// 兼容妙妙屋短链接:旧版 mmw 直接 GET /<code>(无 /x/ 前缀)。
 		// 系统设置启用后,把单段 alphanumeric 路径(看起来像短码)按 /x/<code> 试一遍,
-		// 命中放行,不命中按暴力枚举计数。前端静态资源都带文件扩展名(. 在路径里),
-		// 这里检测 path 不含 / 也不含 . 才走这条兼容分支,不会与 SPA 路由冲突。
+		// 命中即返回订阅内容。不命中**必须 fall-through 到 SPA**,因为 /nodes / /users / /packages
+		// 这些前端路由也是单段 alphanumeric,如果直接 404 会把整个前端路由废掉。
 		if cfg, cfgErr := repo.GetSystemConfig(r.Context()); cfgErr == nil && cfg.EnableMmwShortLinkCompat &&
 			path != "" && !strings.Contains(path, "/") && !strings.Contains(path, ".") &&
 			len(path) >= 2 && isAlphanumeric(path) && subRateLimiter.Allow(clientIP) {
-			// 临时改写 URL 为 /x/<code> 让 shortLinkHandler 直接复用
 			origURL := r.URL.Path
 			r.URL.Path = "/x/" + path
 			if shortLinkHandler.TryServe(w, r) {
 				return
 			}
 			r.URL.Path = origURL
-			bruteForceProtector.RecordFailure(clientIP, r.URL.Path)
-			http.NotFound(w, r)
-			return
+			// 没命中短链接 → 不计暴力枚举(SPA 路由也长这样,无法区分),fall-through 让 web.Handler 决定
 		}
 
 		// 否则，传递给 Web 处理程序
