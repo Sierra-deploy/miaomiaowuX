@@ -917,15 +917,18 @@ function XrayServersPage() {
             const remoteStatus = remoteServicesStatusMap[server.id]
             return (
               <Card key={`remote-${server.id}`} className={cn('min-w-0 overflow-hidden', server.status !== 'connected' ? 'cursor-pointer hover:border-primary/50 transition-colors' : '')} onClick={() => { if (server.status !== 'connected') { setSelectedRemoteServer(server); setIsRemoteServerDetailDialogOpen(true) } }}>
-                <CardHeader className="pb-3">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex flex-col gap-1.5 min-w-0 flex-1">
-                      <div className="flex items-center gap-2 min-w-0">
+                <CardHeader className="pb-3 min-w-0">
+                  <div className="flex flex-col gap-1.5 min-w-0">
+                    <div className="flex items-center justify-between gap-2 min-w-0">
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
                         <div className={cn("w-3 h-3 rounded-full flex-shrink-0", server.status === 'connected' ? "bg-green-500" : server.status === 'pending' ? "bg-yellow-500" : "bg-red-500")} title={server.status === 'connected' ? t('servers.online') : server.status === 'pending' ? t('servers.pending') : t('servers.offline')} />
-                        <CardTitle className="text-lg truncate"><Twemoji>{server.name}</Twemoji></CardTitle>
+                        <CardTitle className="text-lg truncate min-w-0"><Twemoji>{server.name}</Twemoji></CardTitle>
                       </div>
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        <RemoteServerStatusBadge status={server.status} />
+                      <Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); handleDeleteRemoteServer(server.id) }} className="h-8 w-8 shrink-0 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950" title={t('servers.deleteServer')}><X className="h-4 w-4" /></Button>
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-1.5 min-w-0">
+                      <div className="flex flex-wrap items-center gap-1.5 min-w-0">
+                        <span className="hidden sm:inline-flex"><RemoteServerStatusBadge status={server.status} /></span>
                         {server.status === 'connected' && (
                           <TooltipProvider>
                             <Tooltip>
@@ -954,16 +957,15 @@ function XrayServersPage() {
                         {server.steal_mode && server.steal_mode !== 'tunnel' && (<Badge variant="outline" className="text-xs shrink-0">{server.steal_mode === 'fallback' ? t('servers.fallbackLabel') : t('servers.stealModeDefault')}</Badge>)}
                         <Badge variant="outline" className={cn("text-xs shrink-0", server.xray_mode === 'embedded' ? "border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-400" : "border-gray-300 text-gray-600 dark:border-gray-600 dark:text-gray-400")}>{server.xray_mode === 'embedded' ? t('servers.xrayModeEmbedded') : t('servers.xrayModeExternal')}</Badge>
                       </div>
-                    </div>
-                    <div className="flex items-center gap-1 shrink-0">
-                      {server.is_federated && (<Badge variant="outline" className="text-xs shrink-0 border-purple-300 text-purple-700 dark:border-purple-700 dark:text-purple-400">分享</Badge>)}
-                      {!server.is_federated && (<Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); setShareServer({ id: server.id, name: server.name }) }} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title="分享服务器（PRO）"><Share2 className="h-4 w-4" /></Button>)}
-                      {server.status === 'connected' && (<Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); remoteScanMutation.mutate(server.id) }} disabled={remoteScanMutation.isPending} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title={t('servers.scan')}><Search className={cn("h-4 w-4", remoteScanMutation.isPending && "animate-spin")} /></Button>)}
-                      {!server.is_federated && (<Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); handleEditRemoteServer(server) }} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title={t('servers.editServer')}><Pencil className="h-4 w-4" /></Button>)}
-                      <Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); handleDeleteRemoteServer(server.id) }} className="h-8 w-8 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950" title={t('servers.deleteServer')}><X className="h-4 w-4" /></Button>
+                      <div className="flex items-center gap-1 shrink-0 justify-end">
+                        {server.is_federated && (<Badge variant="outline" className="text-xs shrink-0 border-purple-300 text-purple-700 dark:border-purple-700 dark:text-purple-400">分享</Badge>)}
+                        {!server.is_federated && (<Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); setShareServer({ id: server.id, name: server.name }) }} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title="分享服务器（PRO）"><Share2 className="h-4 w-4" /></Button>)}
+                        {server.status === 'connected' && (<Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); remoteScanMutation.mutate(server.id) }} disabled={remoteScanMutation.isPending} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title={t('servers.scan')}><Search className={cn("h-4 w-4", remoteScanMutation.isPending && "animate-spin")} /></Button>)}
+                        {!server.is_federated && (<Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); handleEditRemoteServer(server) }} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title={t('servers.editServer')}><Pencil className="h-4 w-4" /></Button>)}
+                      </div>
                     </div>
                   </div>
-                  <CardDescription className="text-xs text-muted-foreground flex flex-wrap items-center gap-2">
+                  <CardDescription className="text-xs text-muted-foreground flex flex-wrap items-center gap-2 min-w-0">
                     <span>{server.ip_address || t('servers.waitConnection')}</span>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
@@ -997,18 +999,19 @@ function XrayServersPage() {
                     {remoteStatus?.loading && (<span className="text-xs text-muted-foreground">{t('servers.loadingStatus')}</span>)}
                   </CardDescription>
                   {/* 紧凑信息块:实时网速单行(横排上下行) + 流量统计 + 心跳全部塞到同一面板,
-                      去除原先两个独立卡片的重复 padding/边距,避免大面积空白 */}
-                  <div className="mt-3 rounded-lg bg-muted/50 px-3 py-2.5 space-y-2.5">
-                    {/* 实时网速 — 单行 inline */}
-                    <div className="flex items-center justify-between gap-2 text-xs">
-                      <div className="flex items-center gap-1.5 text-muted-foreground">
+                      去除原先两个独立卡片的重复 padding/边距,避免大面积空白。
+                      min-w-0 + overflow-hidden 防止子内容撑出卡片(手机窄屏出现的右侧溢出问题) */}
+                  <div className="mt-3 rounded-lg bg-muted/50 px-3 py-2.5 space-y-2.5 min-w-0 overflow-hidden">
+                    {/* 实时网速 — 单行 inline;flex-wrap 让窄屏数值过长时自动换行,而不是把整行撑出去 */}
+                    <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs">
+                      <div className="flex items-center gap-1.5 text-muted-foreground min-w-0">
                         <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v20M2 12h20M7 7l5-5 5 5M7 17l5 5 5-5" /></svg>
-                        <span>{t('servers.realtimeSpeed')}</span>
+                        <span className="truncate">{t('servers.realtimeSpeed')}</span>
                       </div>
                       {(server.current_upload_speed !== undefined && server.current_upload_speed > 0) || (server.current_download_speed !== undefined && server.current_download_speed > 0) ? (
-                        <div className="flex items-center gap-3 font-mono">
-                          <span className="text-green-600 dark:text-green-400">↑ {formatSpeed(server.current_upload_speed || 0)}</span>
-                          <span className="text-blue-600 dark:text-blue-400">↓ {formatSpeed(server.current_download_speed || 0)}</span>
+                        <div className="flex items-center gap-3 font-mono tabular-nums min-w-0">
+                          <span className="text-green-600 dark:text-green-400 whitespace-nowrap">↑ {formatSpeed(server.current_upload_speed || 0)}</span>
+                          <span className="text-blue-600 dark:text-blue-400 whitespace-nowrap">↓ {formatSpeed(server.current_download_speed || 0)}</span>
                         </div>
                       ) : (
                         <span className="font-mono text-muted-foreground">
@@ -1019,12 +1022,12 @@ function XrayServersPage() {
 
                     {/* 流量统计 */}
                     <div className="border-t border-border/40 pt-2 space-y-1.5">
-                      <div className="flex items-center justify-between gap-2 text-xs">
-                        <div className="flex items-center gap-1.5 text-muted-foreground">
+                      <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-xs">
+                        <div className="flex items-center gap-1.5 text-muted-foreground min-w-0">
                           <svg className="h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /><path d="M9 12l2 2 4-4" /></svg>
-                          <span>{t('servers.trafficStats')}</span>
+                          <span className="truncate">{t('servers.trafficStats')}</span>
                         </div>
-                        <span className="font-mono font-medium break-all">
+                        <span className="font-mono font-medium break-all min-w-0 text-right">
                           {server.traffic_limit && server.traffic_limit > 0
                             ? `${formatTraffic(server.traffic_used || 0)} / ${formatTraffic(server.traffic_limit)}`
                             : `${formatTraffic(server.traffic_used || 0)} · ${t('servers.unlimited')}`}

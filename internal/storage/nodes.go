@@ -908,6 +908,20 @@ func (r *TrafficRepository) CountUserRoutedOutboundActionsToday(ctx context.Cont
 	return n, err
 }
 
+// UpdateNodeInboundTag 把已绑定服务器节点的 inbound_tag 改为新值。
+// 用途:dedup 时通过 clash 配置指纹匹配到已存在节点,但 agent 这次扫到的 inbound_tag 与库里的不一致
+// (用户改了 tag,或老版本 agent tag 命名规则与新版不同),把库里 tag 校正过去,下次同步直接走 tag 匹配。
+func (r *TrafficRepository) UpdateNodeInboundTag(ctx context.Context, nodeID int64, inboundTag string) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE nodes SET inbound_tag = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		inboundTag, nodeID,
+	)
+	return err
+}
+
 // ClaimExternalNode 把一个"外部节点"(original_server='' AND inbound_tag='')升级为受管节点:
 // 填上 original_server / inbound_tag / tag / clash_config(用 agent 转出来的新 config 覆盖)。
 // 用于迁移场景下,把 mmw 时代手工录入的节点跟 agent 扫描出来的同 server:port 入站绑定。

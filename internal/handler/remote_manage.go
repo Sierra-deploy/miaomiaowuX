@@ -1876,26 +1876,50 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 
 	username := h.repo.GetSystemNodeOwner(ctx)
 
-	// 在循环之前获取现有节点一次
+	// 在循环之前获取现有节点一次。dedup 两步走:
+	//   1. inbound_tag 精确匹配 → 直接 skip(命中后续 tag 维护逻辑无需触发)
+	//   2. clash 配置指纹(server + 归一化 protocol + port)→ skip,并把库里该节点的 inbound_tag 校正成本次同步扫到的 tag,
+	//      下次再同步就能走第 1 步快速通道(tag 用户改名 / 老 agent 改命名规则,都是通过这一步收敛)。
+	// 端口与协议用 clash_config 字段(已应用过 tunnel 端口映射等规则,与本次同步生成的 clashProxy 同坐标系)。
 	existingNodes, _ := h.repo.ListNodes(ctx, username)
 	existingNodeNames := make(map[string]bool)
-	existingNodeKeys := make(map[string]bool)    // 键：服务器：协议：端口
-	existingInboundTags := make(map[string]bool) // 键：服务器：inboundTag
+	existingByTag := make(map[string]bool)            // 键: server.Name + ":" + inbound_tag
+	existingByFingerprint := make(map[string]*storage.Node) // 键: server.Name + ":" + 归一化协议 + ":" + 端口
 
-	for _, n := range existingNodes {
-		existingNodeNames[n.NodeName] = true
-		if n.OriginalServer != "" && n.InboundTag != "" {
-			existingInboundTags[n.OriginalServer+":"+n.InboundTag] = true
+	serverAddrSet := map[string]bool{}
+	for _, a := range []string{server.IPAddress, server.Domain, server.PullAddress, serverHost} {
+		a = strings.TrimSpace(a)
+		if a != "" {
+			serverAddrSet[a] = true
 		}
-		// 从现有节点的冲突配置构建重复数据删除密钥
+	}
+
+	for i := range existingNodes {
+		n := &existingNodes[i]
+		existingNodeNames[n.NodeName] = true
 		var config map[string]interface{}
-		if err := json.Unmarshal([]byte(n.ClashConfig), &config); err == nil {
-			if proto, ok := config["type"].(string); ok {
-				if port, ok := config["port"].(float64); ok {
-					key := fmt.Sprintf("%s:%s:%d", n.OriginalServer, proto, int(port))
-					existingNodeKeys[key] = true
-				}
-			}
+		if err := json.Unmarshal([]byte(n.ClashConfig), &config); err != nil {
+			continue
+		}
+		proto, _ := config["type"].(string)
+		port, _ := config["port"].(float64)
+		if proto == "" || port == 0 {
+			continue
+		}
+		cfgServer, _ := config["server"].(string)
+		// 节点归属本服务器的判定:已绑 original_server,或老的未绑节点但 clash_config.server 落在本服务器地址集内
+		belongs := n.OriginalServer == server.Name || (n.OriginalServer == "" && serverAddrSet[cfgServer])
+		if !belongs {
+			continue
+		}
+		if n.InboundTag != "" {
+			existingByTag[server.Name+":"+n.InboundTag] = true
+		}
+		fp := fmt.Sprintf("%s:%s:%d", server.Name, normalizeProtocol(proto), int(port))
+		// 多个节点共享同一 fingerprint(回落+路由出站)时,这里只挂第一个 —— 它代表「这条 inbound 连接坐标已被消耗」,
+		// 真正需要按 credential 区分的多节点 claim 走 tryClaimExternalNodeForSync 那条独立路径。
+		if _, ok := existingByFingerprint[fp]; !ok {
+			existingByFingerprint[fp] = n
 		}
 	}
 
@@ -1910,8 +1934,6 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 			response.SkippedCount++
 			continue
 		}
-
-		dedupeKey := fmt.Sprintf("%s:%s:%d", server.Name, protocol, int(port))
 
 		// 将入站转换为 Clash 代理配置(server 保持用 IP,域名可能走 CDN)
 		// 即便该 inbound 会被 dedupe skip,我们仍需 clash_config 来 claim 同 server:port:proto 的其它外部节点
@@ -1937,6 +1959,17 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 			continue
 		}
 
+		// dedup key 取 clashProxy 内的 type/port —— 与存量节点 clash_config 字段同源,确保 tunnel 端口映射等规则两边一致
+		proxyType, _ := clashProxy["type"].(string)
+		proxyPort := 0
+		switch p := clashProxy["port"].(type) {
+		case float64:
+			proxyPort = int(p)
+		case int:
+			proxyPort = p
+		}
+		dedupeKey := fmt.Sprintf("%s:%s:%d", server.Name, normalizeProtocol(proxyType), proxyPort)
+
 		// 先尝试 claim 所有匹配的未认领外部节点 — 这一步必须在 dedupe 之前,
 		// 因为「回落+路由出站」场景下 1 个 inbound 可能对应 N 个客户端节点(uuid/email 不同),
 		// 即使其中 1 个节点已经认领了这个 inbound(导致 dedupe 命中),其余的也仍需要 claim。
@@ -1948,14 +1981,24 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 			}
 		}
 
-		// 通过服务器+inboundTag 去重(优先,覆盖 tunnel 端口映射场景)
-		if tag != "" && existingInboundTags[server.Name+":"+tag] {
+		// Step 1: inbound_tag 精确匹配 → 直接 skip。最便宜的快速通道
+		if tag != "" && existingByTag[server.Name+":"+tag] {
 			response.SkippedCount++
 			continue
 		}
 
-		// 通过服务器+协议+端口进行重复数据删除
-		if existingNodeKeys[dedupeKey] {
+		// Step 2: clash 配置指纹(server+协议+端口)匹配 → skip 创建,但若 agent 这次扫到的 tag 与库里不一致,
+		//          把库里 tag 校正成最新值;这样下次同步就能走 Step 1 快速通道。
+		if existingNode, ok := existingByFingerprint[dedupeKey]; ok {
+			if tag != "" && existingNode.InboundTag != tag {
+				if err := h.repo.UpdateNodeInboundTag(ctx, existingNode.ID, tag); err != nil {
+					log.Printf("[Remote Manage] UpdateNodeInboundTag id=%d %q → %q failed: %v", existingNode.ID, existingNode.InboundTag, tag, err)
+				} else {
+					log.Printf("[Remote Manage] Reconciled inbound_tag id=%d: %q → %q (matched by config fingerprint)", existingNode.ID, existingNode.InboundTag, tag)
+					existingNode.InboundTag = tag
+					existingByTag[server.Name+":"+tag] = true
+				}
+			}
 			response.SkippedCount++
 			continue
 		}
@@ -1992,9 +2035,10 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 		// 如果上一步 claim 命中,本次循环已经处理完,不再走"创建新节点"分支
 		if claimedThis {
 			response.SyncedCount++
-			existingNodeKeys[dedupeKey] = true
+			// claim 后该节点已落库,占用当前 fingerprint/tag,后续同步循环里别再生成重复
+			existingByFingerprint[dedupeKey] = &storage.Node{InboundTag: tag}
 			if tag != "" {
-				existingInboundTags[server.Name+":"+tag] = true
+				existingByTag[server.Name+":"+tag] = true
 			}
 			continue
 		}
@@ -2025,10 +2069,10 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 			response.SyncedTags = append(response.SyncedTags, fmt.Sprintf("%s:%d", protocol, int(port)))
 		}
 
-		// 更新重复数据删除映射以防止同一批次出现重复
-		existingNodeKeys[dedupeKey] = true
+		// 更新 dedup 索引,防止同一批次同 fingerprint 的入站再次落到这里(理论上 inbound 列表不会重复,纯防御)
+		existingByFingerprint[dedupeKey] = &storage.Node{InboundTag: tag}
 		if tag != "" {
-			existingInboundTags[server.Name+":"+tag] = true
+			existingByTag[server.Name+":"+tag] = true
 		}
 		existingNodeNames[nodeName] = true
 	}
@@ -2050,19 +2094,19 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 // clash 用 `type: ss/vless/vmess/trojan`,xray 用 `protocol: shadowsocks/vless/vmess/trojan`,
 // 这里把 ss <-> shadowsocks 同等化(其他名字一致)。
 func protocolEquivalent(clashType, xrayProtocol string) bool {
-	a := strings.ToLower(strings.TrimSpace(clashType))
-	b := strings.ToLower(strings.TrimSpace(xrayProtocol))
-	if a == b {
-		return true
-	}
-	norm := func(s string) string {
-		if s == "ss" {
-			return "shadowsocks"
-		}
-		return s
-	}
-	return norm(a) == norm(b)
+	return normalizeProtocol(clashType) == normalizeProtocol(xrayProtocol)
 }
+
+// normalizeProtocol 把 clash type 和 xray protocol 统一成同一个规范形式,
+// 便于参与 dedup key 拼装(参与字符串匹配 而不只是相等判断)。
+func normalizeProtocol(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "ss" {
+		return "shadowsocks"
+	}
+	return s
+}
+
 
 // 同样的等价判断,也给 NodeSyncListener / 别处用。在 event 包里也有 tryClaim,
 // 那边自己也保留一份语义一致的判断;此处不导出避免跨包耦合。
