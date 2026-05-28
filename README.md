@@ -158,6 +158,13 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.1.4 (2026-05-28)
+- 🌈代理集合前端代码优化
+- 🌈优化xray管理代码结构
+- 🌈优化编辑节点代码结构
+- 🛠️ fix:Agent安装的主控地址错误
+- 🛠️ fix:修复若干BUG
+- 🛠️ fix:测速页面UIBUG
 ### v0.1.3 (2026-05-26)
 - 🌈合并妙妙屋更新补丁
 - 🌈增加妙妙屋迁移入口
