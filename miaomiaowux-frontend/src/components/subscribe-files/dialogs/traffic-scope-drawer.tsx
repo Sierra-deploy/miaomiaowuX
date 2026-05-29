@@ -62,6 +62,9 @@ export function TrafficScopePopover({ file, servers, onSave, saving, children }:
     // 空集合 = 统计全部服务器(语义与未设置一致)
     const payload = selectedIds.size === 0 ? '' : Array.from(selectedIds).sort((a, b) => a - b).join(',')
     onSave(file.id, payload)
+    // 保存后立刻关闭气泡;mutation 的 onSuccess 会 invalidate ['subscribe-files-traffic'],
+    // 1 秒内表格的流量列会自动刷成新统计范围下的值。
+    setOpen(false)
   }
 
   const handleSelectAll = () => setSelectedIds(new Set(servers.map((s) => s.id)))
