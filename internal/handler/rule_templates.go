@@ -128,16 +128,43 @@ func (h *RuleTemplatesHandler) handleListTemplates(w http.ResponseWriter, r *htt
 	}
 
 	// 归属信息(供前端控制"删除/修改仅自己的"),并附带当前用户名与是否管理员。
-	owners, _ := h.repo.ListRuleTemplateOwners(r.Context())
+	allOwners, _ := h.repo.ListRuleTemplateOwners(r.Context())
 	username := auth.UsernameFromContext(r.Context())
+	isAdmin := userIsAdmin(r.Context(), h.repo, username)
+
+	// 数据隔离:
+	//   - admin → 全部归属信息原样返回(管理需要)
+	//   - 非 admin → templates 里隐藏"别人私有的模板文件",owners 只保留自己的归属信息
+	//     (防止普通用户从该接口枚举其它用户名)
+	visibleTemplates := templates
+	visibleOwners := allOwners
+	if !isAdmin {
+		visibleOwners = make(map[string]string, 1)
+		filtered := make([]string, 0, len(templates))
+		for _, fn := range templates {
+			owner, hasOwner := allOwners[fn]
+			if !hasOwner {
+				// 无归属记录 = 内置/公共模板,所有人可见
+				filtered = append(filtered, fn)
+				continue
+			}
+			if owner == username {
+				// 自己的私有模板:保留 + 暴露归属(给前端显示"可编辑/删除")
+				filtered = append(filtered, fn)
+				visibleOwners[fn] = owner
+			}
+			// 其它人的私有模板:对当前用户彻底隐藏
+		}
+		visibleTemplates = filtered
+	}
 
 	// 返回 JSON 响应
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"templates": templates,
-		"owners":    owners,
+		"templates": visibleTemplates,
+		"owners":    visibleOwners,
 		"username":  username,
-		"is_admin":  userIsAdmin(r.Context(), h.repo, username),
+		"is_admin":  isAdmin,
 	})
 }
 

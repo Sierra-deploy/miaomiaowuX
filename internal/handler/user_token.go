@@ -58,6 +58,11 @@ func (h *userTokenHandler) handleUpdateShortCode(w http.ResponseWriter, r *http.
 		writeError(w, http.StatusBadRequest, errors.New("invalid request body"))
 		return
 	}
+	// 越权防护:不能跟其它用户的 username / 有效短码撞,也不能用系统保留字。
+	if err := validateCustomUserShortCode(r.Context(), h.repo, req.CustomUserShortCode, username); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 	if err := h.repo.UpdateUserCustomShortCode(r.Context(), username, req.CustomUserShortCode); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return

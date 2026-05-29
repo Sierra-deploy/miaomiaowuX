@@ -529,6 +529,60 @@ type userRemarkRequest struct {
 // shortCodeRe 跟前端 SHORT_CODE_RE 保持一致 — 留空表示清除自定义,系统回退到 user_short_code。
 var shortCodeRe = regexp.MustCompile(`^[A-Za-z0-9_-]{2,16}$`)
 
+// reservedShortCodes 不允许普通用户把自己短码设成这些字符串,防止订阅短链路由被误用 / 钓鱼。
+// 大小写不敏感比较。
+var reservedShortCodes = map[string]bool{
+	"admin":  true,
+	"root":   true,
+	"system": true,
+	"api":    true,
+	"share":  true,
+	"test":   true,
+	"user":   true,
+	"guest":  true,
+	"null":   true,
+	"www":    true,
+	"mmw":    true,
+	"mmwx":   true,
+}
+
+// validateCustomUserShortCode 在所有"设置用户自定义短码"路径(admin 改任意用户 + user 改自己)前调用。
+//   - code = ""             → 通过(清除自定义,系统回退自动 user_short_code)
+//   - 格式不匹配 shortCodeRe → 400
+//   - 命中保留字            → 400(防 /x/admin 之类的钓鱼)
+//   - 撞其他用户的 username  → 409
+//   - 撞其他用户的有效短码    → 409(custom_user_short_code 列的 UNIQUE 索引只防"custom 撞 custom",
+//                              并不阻止"custom 撞别人的自动 user_short_code")
+// targetUsername 是被设置短码的"目标用户";同名跳过(允许重置成自己当前的值)。
+func validateCustomUserShortCode(ctx context.Context, repo *storage.TrafficRepository, code, targetUsername string) error {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return nil
+	}
+	if !shortCodeRe.MatchString(code) {
+		return errors.New("短码只能含字母 / 数字 / 下划线 / 横杠,长度 2-16")
+	}
+	if reservedShortCodes[strings.ToLower(code)] {
+		return errors.New("该短码为系统保留字,请更换")
+	}
+	// 撞其他用户的 username(无论该用户角色)。同名跳过。
+	if u, err := repo.GetUser(ctx, code); err == nil && u.Username != "" && !strings.EqualFold(u.Username, targetUsername) {
+		return errors.New("该短码与已存在用户名冲突,请更换")
+	}
+	// 撞其他用户的有效短码 / 自定义短码。
+	if infos, err := repo.ListUserShortCodeInfo(ctx); err == nil {
+		for username, info := range infos {
+			if strings.EqualFold(username, targetUsername) {
+				continue
+			}
+			if strings.EqualFold(info.UserShortCode, code) || strings.EqualFold(info.CustomUserShortCode, code) {
+				return errors.New("该短码已被其他用户占用,请更换")
+			}
+		}
+	}
+	return nil
+}
+
 type userShortCodeRequest struct {
 	Username  string `json:"username"`
 	ShortCode string `json:"short_code"`
@@ -557,9 +611,9 @@ func NewUserShortCodeHandler(repo *storage.TrafficRepository) http.Handler {
 			return
 		}
 		code := strings.TrimSpace(payload.ShortCode)
-		// 非空时严格校验格式;空 = 清除
-		if code != "" && !shortCodeRe.MatchString(code) {
-			writeError(w, http.StatusBadRequest, errors.New("短码只能含字母 / 数字 / 下划线 / 横杠,长度 2-16"))
+		// 格式 / 保留字 / 撞别人 username / 撞别人 effective short code 一并校验。
+		if err := validateCustomUserShortCode(r.Context(), repo, code, username); err != nil {
+			writeError(w, http.StatusBadRequest, err)
 			return
 		}
 		if err := repo.UpdateUserCustomShortCode(r.Context(), username, code); err != nil {
