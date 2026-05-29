@@ -16,14 +16,37 @@ const (
 	SubscribeTypePackage = "package"
 )
 
-const subscribeFileSelectCols = `id, name, COALESCE(description, ''), url, type, filename,
-	COALESCE(file_short_code, ''), COALESCE(custom_short_code, ''),
-	COALESCE(auto_sync_custom_rules, 0),
-	COALESCE(template_filename, ''), COALESCE(selected_tags, '[]'),
-	COALESCE(selected_custom_rule_ids, '[]'), COALESCE(selected_override_script_ids, '[]'),
-	COALESCE(stats_server_ids, ''), traffic_limit,
-	COALESCE(sort_order, 0), COALESCE(raw_output, 0), COALESCE(created_by, ''),
-	created_at, updated_at`
+// subscribeFileSelectClause 返回 subscribe_files 的 SELECT 列表,可选用表别名前缀。
+// 之前用 const + JOIN 手抄列表的写法存在不一致(GetUserSubscriptions 漏了 selected_custom_rule_ids /
+// selected_override_script_ids 两列,scanSubscribeFile 扫描时 destination 数量对不上,直接 500)。
+// 单源定义,所有调用方一律走这里 — 列数永远跟 scanSubscribeFile 同步。
+func subscribeFileSelectClause(alias string) string {
+	pfx := ""
+	if alias != "" {
+		pfx = alias + "."
+	}
+	cols := []string{
+		pfx + "id", pfx + "name", "COALESCE(" + pfx + "description, '')",
+		pfx + "url", pfx + "type", pfx + "filename",
+		"COALESCE(" + pfx + "file_short_code, '')",
+		"COALESCE(" + pfx + "custom_short_code, '')",
+		"COALESCE(" + pfx + "auto_sync_custom_rules, 0)",
+		"COALESCE(" + pfx + "template_filename, '')",
+		"COALESCE(" + pfx + "selected_tags, '[]')",
+		"COALESCE(" + pfx + "selected_custom_rule_ids, '[]')",
+		"COALESCE(" + pfx + "selected_override_script_ids, '[]')",
+		"COALESCE(" + pfx + "stats_server_ids, '')",
+		pfx + "traffic_limit",
+		"COALESCE(" + pfx + "sort_order, 0)",
+		"COALESCE(" + pfx + "raw_output, 0)",
+		"COALESCE(" + pfx + "created_by, '')",
+		pfx + "created_at", pfx + "updated_at",
+	}
+	return strings.Join(cols, ", ")
+}
+
+// subscribeFileSelectCols 历史 const,所有原本拼字符串的地方继续走它,保持调用点不变。
+var subscribeFileSelectCols = subscribeFileSelectClause("")
 
 // marshalIDArray 把 ID 切片序列化为 JSON 数组字符串(nil/空 → "[]")。
 func marshalIDArray(ids []int64) string {

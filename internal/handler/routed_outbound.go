@@ -286,7 +286,78 @@ func (h *RoutedOutboundHandler) resolveServerIDByName(ctx context.Context, serve
 
 // 读父 inbound,返回第一个 client 的 flow 字段(VLESS Reality 子 client 必须继承)。
 func (h *RoutedOutboundHandler) peekInboundFirstClientFlow(ctx context.Context, serverID int64, inboundTag string) (string, error) {
-	result, err := h.remoteManage.forwardToRemoteServer(ctx, serverID, "GET", "/api/child/inbounds", nil)
+	return peekInboundFirstClientFlow(ctx, h.remoteManage, serverID, inboundTag)
+}
+
+// mutateRoutingRuleUserByOutboundTag 在 routing.rules 里找 outboundTag 匹配的 rule,
+// 给它的 user[] 数组加/删一个 email,然后用 agent 的 `set` action 把整个 routing 推回去。
+// 用途:auto-detected routed 节点没有 marktag,agent 的 add_user_to_rule 需要 marktag,绕开它。
+// add=true 表示新增 email(去重 append);add=false 表示移除。
+func mutateRoutingRuleUserByOutboundTag(ctx context.Context, rm *RemoteManageHandler, serverID int64, outboundTag, userEmail string, add bool) error {
+	raw, err := rm.forwardToRemoteServer(ctx, serverID, "GET", "/api/child/routing", nil)
+	if err != nil {
+		return fmt.Errorf("get routing: %w", err)
+	}
+	var resp struct {
+		Success bool                   `json:"success"`
+		Routing map[string]interface{} `json:"routing"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return fmt.Errorf("parse routing: %w", err)
+	}
+	if resp.Routing == nil {
+		return fmt.Errorf("no routing config")
+	}
+	rules, _ := resp.Routing["rules"].([]interface{})
+	matched := -1
+	for i, ru := range rules {
+		rm, _ := ru.(map[string]interface{})
+		if rm == nil {
+			continue
+		}
+		if t, _ := rm["outboundTag"].(string); t == outboundTag {
+			matched = i
+			break
+		}
+	}
+	if matched < 0 {
+		return fmt.Errorf("no routing rule with outboundTag=%q", outboundTag)
+	}
+	rule := rules[matched].(map[string]interface{})
+	users, _ := rule["user"].([]interface{})
+	if add {
+		for _, u := range users {
+			if s, _ := u.(string); s == userEmail {
+				return nil // 已存在,幂等
+			}
+		}
+		users = append(users, userEmail)
+	} else {
+		filtered := users[:0]
+		for _, u := range users {
+			if s, _ := u.(string); s != userEmail {
+				filtered = append(filtered, u)
+			}
+		}
+		users = filtered
+	}
+	rule["user"] = users
+	rules[matched] = rule
+	resp.Routing["rules"] = rules
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"action":  "set",
+		"routing": resp.Routing,
+	})
+	if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/routing", body); err != nil {
+		return fmt.Errorf("set routing: %w", err)
+	}
+	return nil
+}
+
+// peekInboundFirstClientFlow 给非 RoutedOutboundHandler 的调用方用(addUserToRoutedNode 直接拿 *RemoteManageHandler)。
+func peekInboundFirstClientFlow(ctx context.Context, rm *RemoteManageHandler, serverID int64, inboundTag string) (string, error) {
+	result, err := rm.forwardToRemoteServer(ctx, serverID, "GET", "/api/child/inbounds", nil)
 	if err != nil {
 		return "", err
 	}
@@ -316,101 +387,30 @@ func (h *RoutedOutboundHandler) peekInboundFirstClientFlow(ctx context.Context, 
 	return "", fmt.Errorf("inbound %s not found", inboundTag)
 }
 
-// 给目标 inbound 加一个 client。遵循 packages.go 的"读-改-删旧-加新"模式。
+// 给目标 inbound 加一个 client — 走 agent 原子 add-client,在 inboundsMu 锁内完成 read-modify-write。
+// 主控不再持有 inbound 快照,从根本上消除并发绑套餐丢 client 的问题。
 func addClientToInbound(ctx context.Context, rm *RemoteManageHandler, serverID int64, inboundTag string, client map[string]interface{}) error {
-	result, err := rm.forwardToRemoteServer(ctx, serverID, "GET", "/api/child/inbounds", nil)
-	if err != nil {
-		return err
-	}
-	var resp struct {
-		Success  bool                     `json:"success"`
-		Inbounds []map[string]interface{} `json:"inbounds"`
-	}
-	if err := json.Unmarshal(result, &resp); err != nil || !resp.Success {
-		return fmt.Errorf("parse inbounds: %v", err)
-	}
-	var target map[string]interface{}
-	for _, ib := range resp.Inbounds {
-		if tag, _ := ib["tag"].(string); tag == inboundTag {
-			target = ib
-			break
-		}
-	}
-	if target == nil {
-		return fmt.Errorf("inbound %s not found", inboundTag)
-	}
-	settings, _ := target["settings"].(map[string]interface{})
-	if settings == nil {
-		settings = map[string]interface{}{}
-		target["settings"] = settings
-	}
-	clients, _ := settings["clients"].([]interface{})
-	// 去重:同 email 已存在则不重复 append
-	emailNew, _ := client["email"].(string)
-	for _, c := range clients {
-		cm, _ := c.(map[string]interface{})
-		if e, _ := cm["email"].(string); e == emailNew {
-			return nil
-		}
-	}
-	clients = append(clients, client)
-	settings["clients"] = clients
-
-	rmBody, _ := json.Marshal(map[string]string{"action": "remove", "tag": inboundTag})
-	if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/inbounds", rmBody); err != nil {
-		return fmt.Errorf("remove old inbound: %w", err)
-	}
-	addBody, _ := json.Marshal(map[string]interface{}{"action": "add", "inbound": target})
-	if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/inbounds", addBody); err != nil {
-		return fmt.Errorf("add updated inbound: %w", err)
+	body, _ := json.Marshal(map[string]interface{}{
+		"action": "add-client",
+		"tag":    inboundTag,
+		"client": client,
+	})
+	if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/inbounds", body); err != nil {
+		return fmt.Errorf("add-client: %w", err)
 	}
 	return nil
 }
 
 // 从目标 inbound 移除一个 client(按 email 匹配)。
+// agent 的 matchClientCredential 在 id/password 等主键缺失时会回退到 email,所以这里只传 email 也能匹配。
 func removeClientFromInbound(ctx context.Context, rm *RemoteManageHandler, serverID int64, inboundTag, email string) error {
-	result, err := rm.forwardToRemoteServer(ctx, serverID, "GET", "/api/child/inbounds", nil)
-	if err != nil {
-		return err
-	}
-	var resp struct {
-		Success  bool                     `json:"success"`
-		Inbounds []map[string]interface{} `json:"inbounds"`
-	}
-	if err := json.Unmarshal(result, &resp); err != nil || !resp.Success {
-		return fmt.Errorf("parse inbounds: %v", err)
-	}
-	var target map[string]interface{}
-	for _, ib := range resp.Inbounds {
-		if tag, _ := ib["tag"].(string); tag == inboundTag {
-			target = ib
-			break
-		}
-	}
-	if target == nil {
-		return fmt.Errorf("inbound %s not found", inboundTag)
-	}
-	settings, _ := target["settings"].(map[string]interface{})
-	if settings == nil {
-		return nil
-	}
-	clients, _ := settings["clients"].([]interface{})
-	filtered := clients[:0]
-	for _, c := range clients {
-		cm, _ := c.(map[string]interface{})
-		if e, _ := cm["email"].(string); e != email {
-			filtered = append(filtered, c)
-		}
-	}
-	settings["clients"] = filtered
-
-	rmBody, _ := json.Marshal(map[string]string{"action": "remove", "tag": inboundTag})
-	if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/inbounds", rmBody); err != nil {
-		return fmt.Errorf("remove old inbound: %w", err)
-	}
-	addBody, _ := json.Marshal(map[string]interface{}{"action": "add", "inbound": target})
-	if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/inbounds", addBody); err != nil {
-		return fmt.Errorf("add updated inbound: %w", err)
+	body, _ := json.Marshal(map[string]interface{}{
+		"action": "remove-client",
+		"tag":    inboundTag,
+		"client": map[string]interface{}{"email": email},
+	})
+	if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/inbounds", body); err != nil {
+		return fmt.Errorf("remove-client: %w", err)
 	}
 	return nil
 }
@@ -446,9 +446,12 @@ func removeRuleByMarktag(ctx context.Context, rm *RemoteManageHandler, serverID 
 // addUserToRoutedNode 把用户 client 加进 routed 节点的父 inbound,并把 email 加入 routing rule.user[]。
 // 复用 user_subaccounts 里已保存的 credential(续费场景),否则生成新 uuid。is_active 置 1。
 //
-//   - 复用 routed.RoutedAdminEmail 的命名后缀("_admin__p8__direct" → "p8__direct"),
-//     生成用户 email = "<username>__p8__direct"
-//   - VLESS Reality 必须继承父 inbound 第一个 client 的 flow,这里读 admin client 的 flow 字段(已保存)
+// 支持两种 routed 节点来源:
+//   - 老的"管理员创建路由出站"流程:routed.RoutedAdminEmail = "_admin__<id>__<label>",带 marktag,
+//     用户 email = "<username>__<id>__<label>",rule 按 marktag 定位
+//   - 自动检测路由节点(同步入站时识别出来的):RoutedAdminEmail / RoutedRuleMarktag /
+//     RoutedAdminCredential 都为空,只有 RoutedOutboundTag。用户 email = "<username>-<outboundTag>",
+//     rule 按 outboundTag 定位(走 mmwx 本地改 + agent set 替换整个 routing,绕开 agent 必须 marktag 的限制)
 func addUserToRoutedNode(ctx context.Context, rm *RemoteManageHandler, repo *storage.TrafficRepository, user storage.User, routedNodeID int64) error {
 	routed, err := repo.GetRoutedNodeDetail(ctx, routedNodeID)
 	if err != nil {
@@ -473,8 +476,16 @@ func addUserToRoutedNode(ctx context.Context, rm *RemoteManageHandler, repo *sto
 		return fmt.Errorf("server %s not found", routed.OriginalServer)
 	}
 
-	suffix := strings.TrimPrefix(routed.RoutedAdminEmail, "_admin__")
-	userEmail := fmt.Sprintf("%s__%s", user.Username, suffix)
+	// 算用户 email:legacy `_admin__xxx` → `<user>__xxx`;auto-detected → `<user>-<outboundTag>`
+	var userEmail string
+	if strings.HasPrefix(routed.RoutedAdminEmail, "_admin__") {
+		suffix := strings.TrimPrefix(routed.RoutedAdminEmail, "_admin__")
+		userEmail = fmt.Sprintf("%s__%s", user.Username, suffix)
+	} else if routed.RoutedOutboundTag != "" {
+		userEmail = fmt.Sprintf("%s-%s", user.Username, routed.RoutedOutboundTag)
+	} else {
+		return fmt.Errorf("routed node %d has neither admin_email nor outbound_tag", routedNodeID)
+	}
 
 	// 复用已存子账号凭据(续费/恢复路径) or 新建
 	var credJSON string
@@ -483,19 +494,29 @@ func addUserToRoutedNode(ctx context.Context, rm *RemoteManageHandler, repo *sto
 	if existing != nil {
 		json.Unmarshal([]byte(existing.CredentialJSON), &credential)
 		credJSON = existing.CredentialJSON
-		// 强制 email 用 saved 值(避免命名规则变动导致 email 漂移)
-		userEmail = existing.Email
+		userEmail = existing.Email // saved 优先,避免命名规则变动导致 email 漂移
 	} else {
 		credential = map[string]interface{}{
 			"id":    uuid.New().String(),
 			"email": userEmail,
 		}
-		// flow 继承 admin client(同 inbound 的兄弟 client 都用同一 flow)
-		var adminCred map[string]interface{}
-		if err := json.Unmarshal([]byte(routed.RoutedAdminCredential), &adminCred); err == nil {
-			if flow, ok := adminCred["flow"].(string); ok && flow != "" {
-				credential["flow"] = flow
+		// flow 优先取 admin credential;auto-detected 没存 → 从 inbound 第一个 client 反查
+		var flow string
+		if routed.RoutedAdminCredential != "" {
+			var adminCred map[string]interface{}
+			if err := json.Unmarshal([]byte(routed.RoutedAdminCredential), &adminCred); err == nil {
+				if f, ok := adminCred["flow"].(string); ok {
+					flow = f
+				}
 			}
+		}
+		if flow == "" {
+			if f, err := peekInboundFirstClientFlow(ctx, rm, serverID, routed.InboundTag); err == nil {
+				flow = f
+			}
+		}
+		if flow != "" {
+			credential["flow"] = flow
 		}
 		if b, err := json.Marshal(credential); err == nil {
 			credJSON = string(b)
@@ -507,16 +528,24 @@ func addUserToRoutedNode(ctx context.Context, rm *RemoteManageHandler, repo *sto
 		return fmt.Errorf("add client to inbound: %w", err)
 	}
 
-	// 2. 加 email 到 rule.user[]
-	body, _ := json.Marshal(map[string]interface{}{
-		"action":     "add_user_to_rule",
-		"marktag":    routed.RoutedRuleMarktag,
-		"user_email": userEmail,
-	})
-	if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/routing", body); err != nil {
-		// rollback: 移除 inbound client
-		removeClientFromInbound(ctx, rm, serverID, routed.InboundTag, userEmail)
-		return fmt.Errorf("add_user_to_rule: %w", err)
+	// 2. 把 email 写进路由 rule。
+	//    legacy 节点有 marktag → 走 add_user_to_rule;auto-detected 没 marktag → 拉整个 routing、
+	//    找 outboundTag 匹配的 rule、本地改 user[]、再用 set 推回去。
+	if routed.RoutedRuleMarktag != "" {
+		body, _ := json.Marshal(map[string]interface{}{
+			"action":     "add_user_to_rule",
+			"marktag":    routed.RoutedRuleMarktag,
+			"user_email": userEmail,
+		})
+		if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/routing", body); err != nil {
+			removeClientFromInbound(ctx, rm, serverID, routed.InboundTag, userEmail)
+			return fmt.Errorf("add_user_to_rule: %w", err)
+		}
+	} else {
+		if err := mutateRoutingRuleUserByOutboundTag(ctx, rm, serverID, routed.RoutedOutboundTag, userEmail, true); err != nil {
+			removeClientFromInbound(ctx, rm, serverID, routed.InboundTag, userEmail)
+			return fmt.Errorf("mutate routing(add): %w", err)
+		}
 	}
 
 	// 3. UPSERT user_subaccounts(is_active=1)
@@ -560,14 +589,20 @@ func removeUserFromRoutedNode(ctx context.Context, rm *RemoteManageHandler, repo
 		return fmt.Errorf("server %s not found", routed.OriginalServer)
 	}
 
-	// 1. 从 rule.user[] 移除(best-effort,失败也继续)
-	body, _ := json.Marshal(map[string]interface{}{
-		"action":     "remove_user_from_rule",
-		"marktag":    routed.RoutedRuleMarktag,
-		"user_email": sa.Email,
-	})
-	if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/routing", body); err != nil {
-		log.Printf("[RoutedNode] remove_user_from_rule 失败 (continue): %v", err)
+	// 1. 从 rule.user[] 移除(best-effort,失败也继续)。同 add 路径分两种 routed 节点处理
+	if routed.RoutedRuleMarktag != "" {
+		body, _ := json.Marshal(map[string]interface{}{
+			"action":     "remove_user_from_rule",
+			"marktag":    routed.RoutedRuleMarktag,
+			"user_email": sa.Email,
+		})
+		if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/routing", body); err != nil {
+			log.Printf("[RoutedNode] remove_user_from_rule(marktag) 失败 (continue): %v", err)
+		}
+	} else if routed.RoutedOutboundTag != "" {
+		if err := mutateRoutingRuleUserByOutboundTag(ctx, rm, serverID, routed.RoutedOutboundTag, sa.Email, false); err != nil {
+			log.Printf("[RoutedNode] remove_user_from_rule(outboundTag) 失败 (continue): %v", err)
+		}
 	}
 
 	// 2. 从 inbound 移除 client

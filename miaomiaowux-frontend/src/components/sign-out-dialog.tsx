@@ -17,9 +17,9 @@ export function SignOutDialog({ open, onOpenChange }: SignOutDialogProps) {
 
   const handleSignOut = () => {
     auth.reset()
-    queryClient.removeQueries({ queryKey: ['traffic-summary'] })
-    queryClient.removeQueries({ queryKey: ['user-token'] })
-    queryClient.removeQueries({ queryKey: ['profile'] })
+    // 全清缓存,防止换用户登录后还看到上一个用户的数据(典型是订阅链接 'user-subscriptions':
+    // 之前只挨个 remove 几个 key,user-subscriptions 不在列表里 → 换号后新用户看到旧 URL,直到刷新)
+    queryClient.clear()
     navigate({
       to: '/',
       replace: true,

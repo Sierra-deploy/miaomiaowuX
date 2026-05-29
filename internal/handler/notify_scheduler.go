@@ -90,9 +90,16 @@ func sendDailyTrafficNotification(ctx context.Context, repo *storage.TrafficRepo
 
 	allUserTraffic, err := repo.GetAllUserTraffic(ctx)
 	if err == nil && len(allUserTraffic) > 0 {
+		// 拉一次「子账号 email → 父用户名」映射,把子账号产生的流量合并到主用户头上
+		// (路由出站子账号的 user_traffic.username 是 email,不合并的话主账号和子账号会各占一行)
+		subToParent, _ := repo.ListSubaccountEmailToUsername(ctx)
 		userTotals := make(map[string]int64)
 		for _, ut := range allUserTraffic {
-			userTotals[ut.Username] += ut.Uplink + ut.Downlink
+			name := ut.Username
+			if parent, ok := subToParent[name]; ok && parent != "" {
+				name = parent
+			}
+			userTotals[name] += ut.Uplink + ut.Downlink
 		}
 
 		// 应用流量倍率
@@ -171,12 +178,15 @@ func checkTrafficThreshold(ctx context.Context, repo *storage.TrafficRepository,
 	}
 }
 
+// 同步发送 — 调用方需要保证顺序的场景(下线 → 上线)直接靠"上一个 Send 返回再发下一个"来对齐;
+// 短消息发 telegram 通常 100-500ms,阻塞 caller 一两秒是可接受的代价。
+// 想异步不想阻塞的 caller 自己包一层 go func(){...}() 即可。
 func SendServerOnlineNotification(ctx context.Context, serverName, ip string) {
 	n := GetNotifier()
 	if n == nil {
 		return
 	}
-	go n.Send(ctx, notify.Event{
+	_ = n.Send(ctx, notify.Event{
 		Type:    notify.EventServerOnline,
 		Title:   "服务器上线",
 		Message: fmt.Sprintf("服务器: `%s`\nIP: `%s`", serverName, ip),
@@ -188,7 +198,7 @@ func SendServerOfflineNotification(ctx context.Context, serverName, ip string) {
 	if n == nil {
 		return
 	}
-	go n.Send(ctx, notify.Event{
+	_ = n.Send(ctx, notify.Event{
 		Type:    notify.EventServerOffline,
 		Title:   "服务器离线",
 		Message: fmt.Sprintf("服务器: `%s`\nIP: `%s`", serverName, ip),

@@ -781,6 +781,12 @@ function XrayServersPage() {
     const [open, setOpen] = useState(false)
     const timeoutRef = useRef<ReturnType<typeof setTimeout>>()
     const serviceName = name.toLowerCase() as 'xray' | 'nginx'
+    // 重启进行中:用 mutation.variables 精准识别本次操作的目标(同页面有多个 indicator,
+    // 全局 isPending 没法分辨是哪一台/哪个服务的重启)。
+    const isRestarting = remoteServiceControlMutation.isPending
+      && remoteServiceControlMutation.variables?.serverId === serverId
+      && remoteServiceControlMutation.variables?.service === serviceName
+      && remoteServiceControlMutation.variables?.action === 'restart'
     // 分享服务器(联邦):服务由拥有方控制,这里仅展示状态、不提供启停控制
     if (isFederated) {
       const running = !!status?.running
@@ -813,7 +819,10 @@ function XrayServersPage() {
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
           <div className={cn("flex items-center gap-1.5 text-xs px-2 py-1 rounded cursor-pointer transition-colors", status.running ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400 hover:bg-green-200 dark:hover:bg-green-900/50" : "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700")} onMouseEnter={handleOpen} onMouseLeave={handleClose}>
-            <div className={cn("w-2 h-2 rounded-full", status.running ? "bg-green-500" : "bg-gray-400")} />{name}
+            {isRestarting
+              ? <Loader2 className={cn("w-3 h-3 animate-spin", status.running ? "text-green-700 dark:text-green-400" : "text-gray-500 dark:text-gray-400")} />
+              : <div className={cn("w-2 h-2 rounded-full", status.running ? "bg-green-500" : "bg-gray-400")} />
+            }{name}
           </div>
         </PopoverTrigger>
         <PopoverContent className="w-auto p-2" side="top" sideOffset={6} onMouseEnter={handleOpen} onMouseLeave={handleClose} onOpenAutoFocus={(e) => e.preventDefault()}>

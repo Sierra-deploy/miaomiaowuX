@@ -4381,13 +4381,8 @@ func (r *TrafficRepository) GetUserSubscriptions(ctx context.Context, username s
 		return nil, errors.New("username is required")
 	}
 
-	rows, err := r.db.QueryContext(ctx, `SELECT s.id, s.name, COALESCE(s.description, ''), s.url, s.type, s.filename,
-		COALESCE(s.file_short_code, ''), COALESCE(s.custom_short_code, ''),
-		COALESCE(s.auto_sync_custom_rules, 0),
-		COALESCE(s.template_filename, ''), COALESCE(s.selected_tags, '[]'),
-		COALESCE(s.stats_server_ids, ''), s.traffic_limit,
-		COALESCE(s.sort_order, 0), COALESCE(s.raw_output, 0), COALESCE(s.created_by, ''),
-		s.created_at, s.updated_at
+	// 用 subscribeFileSelectClause 统一列定义,避免手抄列表跟 scanSubscribeFile 的 20 列对不上
+	rows, err := r.db.QueryContext(ctx, `SELECT `+subscribeFileSelectClause("s")+`
 		FROM subscribe_files s
 		INNER JOIN user_subscriptions us ON s.id = us.subscription_id
 		WHERE us.username = ?
@@ -6859,6 +6854,30 @@ func (r *TrafficRepository) DeleteUserSubaccount(ctx context.Context, id int64) 
 	return err
 }
 
+// ListSubaccountEmailToUsername 一次性拉所有子账号 email → 父用户名的映射。
+// 适合每日通知 / 报表这种"一次跑、需要把流量按主账号聚合"的场景,避免对每条流量逐行查 DB。
+func (r *TrafficRepository) ListSubaccountEmailToUsername(ctx context.Context) (map[string]string, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT email, username FROM user_subaccounts`)
+	if err != nil {
+		return nil, fmt.Errorf("list subaccount mappings: %w", err)
+	}
+	defer rows.Close()
+	m := make(map[string]string)
+	for rows.Next() {
+		var email, username string
+		if err := rows.Scan(&email, &username); err != nil {
+			return nil, fmt.Errorf("scan subaccount mapping: %w", err)
+		}
+		if email != "" && username != "" {
+			m[email] = username
+		}
+	}
+	return m, nil
+}
+
 // ResolveUsernameByEmail 把 xray 上报的 stats.User key (email) 反查到 mmwx 用户名。
 // 优先级:
 //  1. user_subaccounts.email → username (子账号路径)
@@ -7592,6 +7611,32 @@ func (r *TrafficRepository) UpdateRemoteServerHeartbeat(ctx context.Context, tok
 	}
 
 	return nil
+}
+
+// MarkRemoteServerOfflineByID 立即把指定服务器标记为离线(不等 60s 心跳超时)。
+// 返回 (prevStatus, name, ip, err);如果 prev == connected 才算"真的下线",调用方据此决定要不要发通知。
+// 用途:WS 断开时立刻下推下线状态(不然要等 traffic collector 下一轮才检测,可能 60s+)。
+func (r *TrafficRepository) MarkRemoteServerOfflineByID(ctx context.Context, serverID int64) (string, string, string, error) {
+	if r == nil || r.db == nil {
+		return "", "", "", errors.New("traffic repository not initialized")
+	}
+	var prevStatus, name, ip string
+	checkStmt := `SELECT name, status, COALESCE(ip_address, '') FROM remote_servers WHERE id = ?`
+	if err := r.db.QueryRowContext(ctx, checkStmt, serverID).Scan(&name, &prevStatus, &ip); err != nil {
+		return "", "", "", fmt.Errorf("check server status: %w", err)
+	}
+	if prevStatus != RemoteServerStatusConnected {
+		// 已经不是 connected 就不动 — 避免重复发下线通知(比如已经被 collector 标过了)
+		return prevStatus, name, ip, nil
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE remote_servers SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = ?`,
+		RemoteServerStatusOffline, serverID, RemoteServerStatusConnected,
+	)
+	if err != nil {
+		return prevStatus, name, ip, fmt.Errorf("mark server offline: %w", err)
+	}
+	return prevStatus, name, ip, nil
 }
 
 // UpdateRemoteServerLastActivity 通过服务器 ID 更新 last_heartbeat。

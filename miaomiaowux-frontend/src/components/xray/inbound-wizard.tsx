@@ -1030,9 +1030,9 @@ export function InboundWizard({
       tag = buildDefaultTag(submitData.port)
     }
 
-    // Build custom node name in simple mode
+    // 节点名称:简易/专家模式都用同一个 nodeName state(共用),不再只在简易模式生效
     let customNodeName = ''
-    if (isSimpleMode && nodeName) {
+    if (nodeName) {
       const flag = selectedFlag ? countryCodeToFlag(selectedFlag) + ' ' : ''
       customNodeName = flag + nodeName
     }
@@ -1592,6 +1592,45 @@ export function InboundWizard({
                           </CardDescription>
                         </CardHeader>
                         <CardContent className='space-y-4'>
+                          {/* 节点名称 — 跟简易模式共用 nodeName state,切换模式值保留;tunnel 转发已有节点时隐藏 */}
+                          {selectedProtocol !== 'Tunnel' && (
+                            <div className='space-y-1.5'>
+                              <Label className='text-sm font-medium'>{t('wizard.nodeName')}</Label>
+                              <div className='flex items-center gap-2 w-full'>
+                                <Popover open={showFlagPicker} onOpenChange={setShowFlagPicker}>
+                                  <PopoverTrigger asChild>
+                                    <Button variant='outline' size='sm' className='text-lg px-2 shrink-0' type='button'>
+                                      <Twemoji>{selectedFlag ? countryCodeToFlag(selectedFlag) : '\u{1F3F3}\u{FE0F}'}</Twemoji>
+                                    </Button>
+                                  </PopoverTrigger>
+                                  <PopoverContent className='w-72 p-2' align='start'>
+                                    <div className='grid grid-cols-7 gap-1'>
+                                      {FLAG_OPTIONS.map((opt) => (
+                                        <Button
+                                          key={opt.code}
+                                          variant='ghost'
+                                          size='sm'
+                                          className='text-lg px-1'
+                                          type='button'
+                                          onClick={() => { setSelectedFlag(opt.code); setShowFlagPicker(false) }}
+                                          title={opt.label}
+                                        >
+                                          <Twemoji>{countryCodeToFlag(opt.code)}</Twemoji>
+                                        </Button>
+                                      ))}
+                                    </div>
+                                  </PopoverContent>
+                                </Popover>
+                                <Input
+                                  placeholder={t('wizard.nodeNamePlaceholder')}
+                                  value={nodeName}
+                                  onChange={(e) => setNodeName(e.target.value)}
+                                  className='flex-1 min-w-0'
+                                />
+                              </div>
+                              <p className='text-xs text-muted-foreground'>{t('wizard.nodeNameDesc')}</p>
+                            </div>
+                          )}
                           {commonFields.map((field) => (
                             <FormField
                               key={field.name}

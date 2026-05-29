@@ -9,6 +9,9 @@ import (
 type Notifier struct {
 	mu  sync.RWMutex
 	cfg Config
+	// sendMu 串行化所有 Telegram 发送:多个 goroutine 同时 go n.Send(...) 会导致 HTTP 请求乱序到达,
+	// 用户看到的消息顺序就和事件触发顺序对不上(典型现象:重启 agent 后"上线"比"下线"先收到)。
+	sendMu sync.Mutex
 }
 
 func New(cfg Config) *Notifier {
@@ -57,6 +60,9 @@ func (n *Notifier) Send(ctx context.Context, event Event) error {
 	if !n.IsEnabled(event.Type) {
 		return nil
 	}
+	// 串行进入 telegram 发送 — 防止多个 go n.Send 并发跑时 HTTP 顺序乱掉(下/上线倒序的根因)
+	n.sendMu.Lock()
+	defer n.sendMu.Unlock()
 
 	cfg := n.GetConfig()
 	text := fmt.Sprintf("*%s*\n%s", event.Title, event.Message)

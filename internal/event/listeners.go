@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"strings"
 
 	"miaomiaowux/internal/storage"
@@ -135,10 +136,26 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 		InboundTag:     event.Tag,
 	}
 
-	if _, err := l.repo.CreateNode(ctx, node); err != nil {
+	created, err := l.repo.CreateNode(ctx, node)
+	if err != nil {
 		log.Printf("[NodeSync] Failed to create node: %v", err)
-	} else {
-		log.Printf("[NodeSync] Created node: %s", nodeName)
+		return
+	}
+	log.Printf("[NodeSync] Created node: %s", nodeName)
+	// 新建节点放到节点排序表最前面 — 用户在节点管理拖过顺序后,如果直接 append 新 ID 会被甩到底部,不直观。
+	if settings, err := l.repo.GetUserSettings(ctx, sysOwner); err == nil {
+		// 去重一下,避免节点 ID 已经在数组里时把它又塞前面造成重复
+		filtered := make([]int64, 0, len(settings.NodeOrder)+1)
+		filtered = append(filtered, created.ID)
+		for _, id := range settings.NodeOrder {
+			if id != created.ID {
+				filtered = append(filtered, id)
+			}
+		}
+		settings.NodeOrder = filtered
+		if err := l.repo.UpsertUserSettings(ctx, settings); err != nil {
+			log.Printf("[NodeSync] prepend new node to node_order failed: %v", err)
+		}
 	}
 }
 
@@ -151,10 +168,18 @@ func (l *NodeSyncListener) createForwardTunnelNode(ctx context.Context, event In
 		log.Printf("[NodeSync] forward-tunnel: 源节点 %d 不存在: %v", event.ForwardNodeID, err)
 		return
 	}
-	// server 优先用域名,IP 作为兜底
+	// 与 syncInboundsToNodes / InboundToClashProxyByServerID 同优先序:
+	// Domain → 非私有 PullAddress → IPAddress;不能用 chooseClashServerHost(在 handler 包,跨包麻烦)就内联一遍
 	serverHost := strings.TrimSpace(server.Domain)
 	if serverHost == "" {
-		serverHost = server.IPAddress
+		if p := strings.TrimSpace(server.PullAddress); p != "" {
+			if ip := net.ParseIP(p); ip == nil || (!ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()) {
+				serverHost = p
+			}
+		}
+	}
+	if serverHost == "" {
+		serverHost = strings.TrimSpace(server.IPAddress)
 	}
 	if serverHost == "" {
 		log.Printf("[NodeSync] forward-tunnel: 服务器 %s 无 IP/域名,跳过", server.Name)

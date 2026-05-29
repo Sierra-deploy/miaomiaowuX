@@ -367,11 +367,27 @@ func (h *RemoteWSHandler) handleConnection(conn *websocket.Conn, remoteAddr stri
 		}
 	}
 
-	// 断开连接时清理
+	// 断开连接时清理。注意 agent 快速重启时可能"新连接已经 auth 成功"在前,旧连接 read 报错才唤醒 cleanup。
+	// 需要先确认 conns map 里挂的还是 THIS 实例 — 是的话才真的清理 + 标离线;否则新连接已经接管,什么都别动。
 	if wsConn != nil {
-		h.conns.Delete(wsConn.Token)
 		h.clearUserSpeedCache(wsConn.ServerID)
 		log.Printf("[Remote WS] Connection closed for server %s (%d)", wsConn.ServerName, wsConn.ServerID)
+		if cur, ok := h.conns.Load(wsConn.Token); ok && cur == wsConn {
+			h.conns.Delete(wsConn.Token)
+			// 没有新连接接管 → 真的下线了,立即标 offline + 发通知(否则要等 traffic collector 下一轮 60s+ 检测)
+			// MarkOffline 用带超时的 ctx;通知发送用 context.Background() —— SendServer* 内部异步 go routine 发 telegram,
+			// 函数返回后 ctx 取消会把 telegram HTTP 请求一起 abort,通知发不出去。
+			dbCtx, dbCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer dbCancel()
+			if prev, name, ip, err := h.repo.MarkRemoteServerOfflineByID(dbCtx, wsConn.ServerID); err != nil {
+				log.Printf("[Remote WS] mark offline on disconnect failed for %s: %v", wsConn.ServerName, err)
+			} else if prev == storage.RemoteServerStatusConnected {
+				log.Printf("[Remote WS] %s disconnected: marked offline, sending notification", name)
+				SendServerOfflineNotification(context.Background(), name, ip)
+			}
+		} else {
+			log.Printf("[Remote WS] Connection for %s already replaced by newer conn; skip offline marking", wsConn.ServerName)
+		}
 	}
 }
 
@@ -472,15 +488,17 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 		return nil, false
 	}
 
-	// 检查是否已经连接
-	if existingConn, ok := h.conns.Load(authPayload.Token); ok {
-		// 关闭现有连接
-		existing := existingConn.(*RemoteWSConnection)
-		existing.mu.Lock()
-		existing.Conn.Close()
-		existing.mu.Unlock()
-		h.conns.Delete(authPayload.Token)
-		log.Printf("[Remote WS] Closed existing connection for server %s", server.Name)
+	// 检查是否已有连接 — 有的话表示老 cleanup 还没跑就新 auth 来了(快速重启),记下这个状态供后面发对应通知。
+	// 关闭并 delete 老连接,新 conn 立刻接管;老 goroutine 醒来后看到 conns 里不是自己,会跳过标 offline,避免互踩。
+	_, hadPrev := h.conns.Load(authPayload.Token)
+	if hadPrev {
+		if existingAny, ok := h.conns.LoadAndDelete(authPayload.Token); ok {
+			existing := existingAny.(*RemoteWSConnection)
+			existing.mu.Lock()
+			existing.Conn.Close()
+			existing.mu.Unlock()
+			log.Printf("[Remote WS] Closed existing connection for server %s", server.Name)
+		}
 	}
 
 	// 强制加密检查
@@ -521,8 +539,18 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 		log.Printf("[Remote WS] Failed to update server status for %s: %v", server.Name, err)
 	}
 
-	if server.Status != "connected" {
-		SendServerOnlineNotification(updateCtx, server.Name, ip)
+	// 通知策略:
+	//   - 抢占式重连(hadPrev=true):上次的 cleanup 还没跑就被新 auth 抢了 — 一对下/上线通知,反映"用户重启 agent"
+	//   - 普通重连(prev offline,新 conn 上来):只发上线通知
+	// 通知必须用 context.Background():SendServer* 内部 go n.Send(ctx, ...) 异步,函数返回后 updateCtx 被 defer cancel,
+	// telegram HTTP 请求会被一起 abort,通知发不出去
+	if hadPrev {
+		log.Printf("[Remote WS] Detected fast reconnect (old conn replaced) for %s", server.Name)
+		SendServerOfflineNotification(context.Background(), server.Name, ip)
+		SendServerOnlineNotification(context.Background(), server.Name, ip)
+	} else if server.Status != "connected" {
+		log.Printf("[Remote WS] %s status was %s, sending online notification", server.Name, server.Status)
+		SendServerOnlineNotification(context.Background(), server.Name, ip)
 	}
 
 	// 重置回退状态，以便当 WS 处于活动状态时拉收集器停止

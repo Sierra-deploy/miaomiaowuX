@@ -57,6 +57,8 @@ interface EditMetadataDialogProps {
   // 提交回调,父端负责真正调 mutation
   onSubmit: () => void
   saving: boolean
+  // 管理员限定字段:文件名 / 流量统计服务器 / 流量上限 / 自定义短码 — 非管理员隐藏
+  isAdmin?: boolean
 }
 
 // "编辑订阅信息"对话框:名称/描述/文件名/模板/规则/脚本/节点标签/流量统计服务器/流量上限/短码/原始输出。
@@ -73,6 +75,7 @@ export function EditMetadataDialog({
   remoteServers,
   onSubmit,
   saving,
+  isAdmin = false,
 }: EditMetadataDialogProps) {
   const { t } = useTranslation('subscribe')
 
@@ -106,16 +109,18 @@ export function EditMetadataDialog({
                 rows={3}
               />
             </div>
-            <div className='space-y-2'>
-              <Label htmlFor='metadata-filename'>{t('form.filename')} *</Label>
-              <Input
-                id='metadata-filename'
-                value={form.filename}
-                onChange={(e) => onFormChange({ ...form, filename: e.target.value })}
-                placeholder={t('editMetadata.filenamePlaceholder')}
-              />
-              <p className='text-muted-foreground text-xs'>{t('editMetadata.filenameHint')}</p>
-            </div>
+            {isAdmin && (
+              <div className='space-y-2'>
+                <Label htmlFor='metadata-filename'>{t('form.filename')} *</Label>
+                <Input
+                  id='metadata-filename'
+                  value={form.filename}
+                  onChange={(e) => onFormChange({ ...form, filename: e.target.value })}
+                  placeholder={t('editMetadata.filenamePlaceholder')}
+                />
+                <p className='text-muted-foreground text-xs'>{t('editMetadata.filenameHint')}</p>
+              </div>
+            )}
             <div className='space-y-2'>
               <Label>V3 模板</Label>
               <Select
@@ -217,49 +222,53 @@ export function EditMetadataDialog({
                 <p className='text-xs text-muted-foreground'>不选则包含所有节点</p>
               </div>
             )}
-            <div className='space-y-2'>
-              <Label>流量统计服务器</Label>
-              <div className='flex flex-wrap gap-2'>
-                {remoteServers.map((server) => {
-                  const selected = form.stats_server_ids.split(',').filter(Boolean).includes(String(server.id))
-                  return (
-                    <label key={server.id} className='flex items-center gap-1.5 text-sm'>
-                      <Checkbox
-                        checked={selected}
-                        onCheckedChange={(checked) => {
-                          onFormChange((prev) => {
-                            const ids = prev.stats_server_ids.split(',').filter(Boolean)
-                            const newIds = checked
-                              ? [...ids, String(server.id)]
-                              : ids.filter((id) => id !== String(server.id))
-                            return { ...prev, stats_server_ids: newIds.join(',') }
-                          })
-                        }}
-                      />
-                      {server.name}
-                    </label>
-                  )
-                })}
-              </div>
-              <p className='text-xs text-muted-foreground'>不选则汇总所有服务器流量</p>
-            </div>
-            <div className='space-y-2'>
-              <Label>流量上限 (GB)</Label>
-              <Input
-                type='number'
-                placeholder='留空则跟随服务器'
-                value={form.traffic_limit}
-                onChange={(e) => onFormChange((prev) => ({ ...prev, traffic_limit: e.target.value }))}
-              />
-            </div>
-            <div className='space-y-2'>
-              <Label>自定义短码</Label>
-              <Input
-                placeholder='留空使用自动生成'
-                value={form.custom_short_code}
-                onChange={(e) => onFormChange((prev) => ({ ...prev, custom_short_code: e.target.value }))}
-              />
-            </div>
+            {isAdmin && (
+              <>
+                <div className='space-y-2'>
+                  <Label>流量统计服务器</Label>
+                  <div className='flex flex-wrap gap-2'>
+                    {remoteServers.map((server) => {
+                      const selected = form.stats_server_ids.split(',').filter(Boolean).includes(String(server.id))
+                      return (
+                        <label key={server.id} className='flex items-center gap-1.5 text-sm'>
+                          <Checkbox
+                            checked={selected}
+                            onCheckedChange={(checked) => {
+                              onFormChange((prev) => {
+                                const ids = prev.stats_server_ids.split(',').filter(Boolean)
+                                const newIds = checked
+                                  ? [...ids, String(server.id)]
+                                  : ids.filter((id) => id !== String(server.id))
+                                return { ...prev, stats_server_ids: newIds.join(',') }
+                              })
+                            }}
+                          />
+                          {server.name}
+                        </label>
+                      )
+                    })}
+                  </div>
+                  <p className='text-xs text-muted-foreground'>不选则汇总所有服务器流量</p>
+                </div>
+                <div className='space-y-2'>
+                  <Label>流量上限 (GB)</Label>
+                  <Input
+                    type='number'
+                    placeholder='留空则跟随服务器'
+                    value={form.traffic_limit}
+                    onChange={(e) => onFormChange((prev) => ({ ...prev, traffic_limit: e.target.value }))}
+                  />
+                </div>
+                <div className='space-y-2'>
+                  <Label>自定义短码</Label>
+                  <Input
+                    placeholder='留空使用自动生成'
+                    value={form.custom_short_code}
+                    onChange={(e) => onFormChange((prev) => ({ ...prev, custom_short_code: e.target.value }))}
+                  />
+                </div>
+              </>
+            )}
             <div className='flex items-center justify-between'>
               <Label>原始输出</Label>
               <Switch

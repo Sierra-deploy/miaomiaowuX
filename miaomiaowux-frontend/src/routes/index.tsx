@@ -673,41 +673,59 @@ function AdminDashboard() {
 
   const nodeTrafficList = useMemo<NodeTrafficItem[]>(() => {
     if (!nodesData?.nodes) return []
-    const trafficByTag = new Map<string, { uplink: number; downlink: number; last_uplink: number; last_downlink: number; server_names: string[] }>()
+    // 物理节点按 inbound_tag 聚合,路由出站节点必须按 routed_outbound_tag 走 server.outbounds。
+    // KEY 必须是 `serverName::tag` 而不是裸 tag —— 不同服务器上同名 tag(例如多台 HK 服务器都叫
+    // shadowsocks-23889,或者多台机都有 yxl-att 出站)否则会被错误地串到一起,显示出一模一样的流量。
+    type Bucket = { uplink: number; downlink: number; last_uplink: number; last_downlink: number; server_names: string[] }
+    const inboundByKey = new Map<string, Bucket>()
+    const outboundByKey = new Map<string, Bucket>()
+    const collect = (map: Map<string, Bucket>, key: string, serverName: string, t: any) => {
+      const existing = map.get(key)
+      if (existing) {
+        existing.uplink += t.uplink ?? 0
+        existing.downlink += t.downlink ?? 0
+        existing.last_uplink += t.last_uplink ?? 0
+        existing.last_downlink += t.last_downlink ?? 0
+        if (!existing.server_names.includes(serverName)) existing.server_names.push(serverName)
+      } else {
+        map.set(key, { uplink: t.uplink ?? 0, downlink: t.downlink ?? 0, last_uplink: t.last_uplink ?? 0, last_downlink: t.last_downlink ?? 0, server_names: [serverName] })
+      }
+    }
     if (trafficData?.servers) {
       for (const server of trafficData.servers) {
-        for (const ib of server.inbounds ?? []) {
-          const existing = trafficByTag.get(ib.tag)
-          if (existing) {
-            existing.uplink += ib.uplink ?? 0
-            existing.downlink += ib.downlink ?? 0
-            existing.last_uplink += ib.last_uplink ?? 0
-            existing.last_downlink += ib.last_downlink ?? 0
-            if (!existing.server_names.includes(server.server_name)) existing.server_names.push(server.server_name)
-          } else {
-            trafficByTag.set(ib.tag, { uplink: ib.uplink ?? 0, downlink: ib.downlink ?? 0, last_uplink: ib.last_uplink ?? 0, last_downlink: ib.last_downlink ?? 0, server_names: [server.server_name] })
-          }
-        }
+        for (const ib of server.inbounds ?? []) collect(inboundByKey, `${server.server_name}::${ib.tag}`, server.server_name, ib)
+        for (const ob of (server as any).outbounds ?? []) collect(outboundByKey, `${server.server_name}::${ob.tag}`, server.server_name, ob)
       }
     }
-    const nodeSnapshotByTag = new Map<string, { uplink: number; downlink: number }>()
+    const inboundSnapByKey = new Map<string, { uplink: number; downlink: number }>()
+    const outboundSnapByKey = new Map<string, { uplink: number; downlink: number }>()
     if (timeRange !== 'month' && snapshotData?.nodeSnapshots) {
       for (const s of snapshotData.nodeSnapshots) {
-        const existing = nodeSnapshotByTag.get(s.tag)
+        // snapshot 数据如果带 server_name 就一起拼成 key,跟上面对齐
+        const srv = (s as any).server_name || ''
+        const map = ((s as any).type === 'outbound') ? outboundSnapByKey : inboundSnapByKey
+        const k = `${srv}::${s.tag}`
+        const existing = map.get(k)
         if (existing) { existing.uplink += s.uplink; existing.downlink += s.downlink }
-        else nodeSnapshotByTag.set(s.tag, { uplink: s.uplink, downlink: s.downlink })
+        else map.set(k, { uplink: s.uplink, downlink: s.downlink })
       }
     }
-    return nodesData.nodes.filter(n => n.inbound_tag).map(n => {
-      const t = trafficByTag.get(n.inbound_tag)
-      let uplink = t?.uplink ?? 0
-      let downlink = t?.downlink ?? 0
-      if (timeRange !== 'month') {
-        const snap = nodeSnapshotByTag.get(n.inbound_tag)
-        if (snap) { uplink = Math.max(0, uplink - snap.uplink); downlink = Math.max(0, downlink - snap.downlink) }
-      }
-      return { tag: n.inbound_tag, server_id: 0, server_name: '', server_names: t?.server_names ?? [], display_name: n.node_name, uplink, downlink, total_uplink: 0, total_downlink: 0, last_uplink: t?.last_uplink ?? 0, last_downlink: t?.last_downlink ?? 0, updated_at: '' }
-    })
+    return nodesData.nodes
+      .filter(n => n.inbound_tag || n.routed_outbound_tag) // 没绑入站也没绑出站的节点没法做流量归属
+      .map(n => {
+        const isRouted = (n as any).node_type === 'routed' && !!n.routed_outbound_tag
+        const lookupTag = isRouted ? (n.routed_outbound_tag as string) : n.inbound_tag
+        const srv = (n as any).original_server || ''
+        const key = `${srv}::${lookupTag}`
+        const t = (isRouted ? outboundByKey : inboundByKey).get(key)
+        let uplink = t?.uplink ?? 0
+        let downlink = t?.downlink ?? 0
+        if (timeRange !== 'month') {
+          const snap = (isRouted ? outboundSnapByKey : inboundSnapByKey).get(key)
+          if (snap) { uplink = Math.max(0, uplink - snap.uplink); downlink = Math.max(0, downlink - snap.downlink) }
+        }
+        return { tag: lookupTag, server_id: 0, server_name: '', server_names: t?.server_names ?? [srv].filter(Boolean), display_name: n.node_name, uplink, downlink, total_uplink: 0, total_downlink: 0, last_uplink: t?.last_uplink ?? 0, last_downlink: t?.last_downlink ?? 0, updated_at: '' }
+      })
       // 上下行都为 0 的节点不展示(没流量的占位会把卡片刷满,信息密度低)
       .filter(item => item.uplink > 0 || item.downlink > 0)
       .sort((a, b) => (b.uplink + b.downlink) - (a.uplink + a.downlink))

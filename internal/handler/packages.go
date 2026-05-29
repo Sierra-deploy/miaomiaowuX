@@ -311,6 +311,7 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 	log.Printf("[PackageUpdate] Syncing inbound users for package %d: %d added nodes, %d removed nodes, %d users",
 		packageID, len(addedNodes), len(removedNodes), len(targetUsers))
 
+	affectedServers := map[int64]bool{}
 	for _, user := range targetUsers {
 		for _, nodeID := range addedNodes {
 			node, err := h.repo.GetNodeByID(ctx, nodeID)
@@ -320,6 +321,9 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 			}
 			// routed 节点:走子账号路径,跳过物理 inbound 那套
 			if node.NodeType == "routed" {
+				if srv, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer); err == nil {
+					affectedServers[srv.ID] = true
+				}
 				if err := addUserToRoutedNode(ctx, h.remoteManage, h.repo, user, node.ID); err != nil {
 					log.Printf("[PackageUpdate] add user %s to routed node %d failed: %v", user.Username, node.ID, err)
 				}
@@ -333,6 +337,7 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 				log.Printf("[PackageUpdate] Failed to find server %s: %v", node.OriginalServer, err)
 				continue
 			}
+			affectedServers[server.ID] = true
 			if err := addUserToInbound(ctx, h.remoteManage, h.repo, user, server.ID, node.InboundTag); err != nil {
 				log.Printf("[PackageUpdate] Failed to add user %s to inbound %s on server %d: %v",
 					user.Username, node.InboundTag, server.ID, err)
@@ -346,6 +351,9 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 			}
 			// routed 节点:走子账号反向路径
 			if node.NodeType == "routed" {
+				if srv, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer); err == nil {
+					affectedServers[srv.ID] = true
+				}
 				if err := removeUserFromRoutedNode(ctx, h.remoteManage, h.repo, user.Username, node.ID); err != nil {
 					log.Printf("[PackageUpdate] remove user %s from routed node %d failed: %v", user.Username, node.ID, err)
 				}
@@ -358,6 +366,7 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 			if err != nil {
 				continue
 			}
+			affectedServers[server.ID] = true
 			cfg, err := h.repo.GetUserInboundConfig(ctx, user.Username, server.ID, node.InboundTag)
 			if err != nil {
 				continue
@@ -371,6 +380,12 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 
 		if h.pusher != nil {
 			h.pusher.PushToAllServersForUser(ctx, user.Username)
+		}
+	}
+	// 全部用户处理完后,统一对每台受影响服务器重启 xray —— routing rules 改了不重启不生效
+	for sid := range affectedServers {
+		if err := h.remoteManage.restartXrayWithRecovery(ctx, sid, "PackageUpdate"); err != nil {
+			log.Printf("[PackageUpdate] restart xray on server %d failed: %v", sid, err)
 		}
 	}
 }
@@ -389,11 +404,13 @@ func NewPackageDeleteHandler(repo *storage.TrafficRepository, remoteManage *Remo
 // unbindUserPackage 解除单个用户的套餐绑定:从入站移除凭据、删本地入站配置、推送 limiter、
 // 清空 package_id,并删除该用户残留的套餐订阅(历史 auto-gen)。best-effort,只记日志。
 func unbindUserPackage(ctx context.Context, repo *storage.TrafficRepository, remoteManage *RemoteManageHandler, pusher *LimiterConfigPusher, username string) {
+	affectedServers := map[int64]bool{}
 	configs, err := repo.GetUserInboundConfigs(ctx, username)
 	if err != nil {
 		log.Printf("[PackageUnbind] 获取用户 %s 入站配置失败: %v", username, err)
 	}
 	for _, cfg := range configs {
+		affectedServers[cfg.ServerID] = true
 		if err := removeUserFromInbound(ctx, remoteManage, cfg); err != nil {
 			log.Printf("[PackageUnbind] 从入站 %s(server %d)移除用户 %s 失败: %v", cfg.InboundTag, cfg.ServerID, username, err)
 		}
@@ -407,8 +424,20 @@ func unbindUserPackage(ctx context.Context, repo *storage.TrafficRepository, rem
 		if !sa.IsActive {
 			continue
 		}
+		// 取 routed 节点的服务器,统一进 affectedServers
+		if node, err := repo.GetNodeByID(ctx, sa.RoutedNodeID); err == nil && node.OriginalServer != "" {
+			if srv, err := repo.GetRemoteServerByName(ctx, node.OriginalServer); err == nil {
+				affectedServers[srv.ID] = true
+			}
+		}
 		if err := removeUserFromRoutedNode(ctx, remoteManage, repo, username, sa.RoutedNodeID); err != nil {
 			log.Printf("[PackageUnbind] routed node %d 下线用户 %s 失败: %v", sa.RoutedNodeID, username, err)
+		}
+	}
+	// 改完 inbound clients + routing rule 必须重启 xray 才生效
+	for sid := range affectedServers {
+		if err := remoteManage.restartXrayWithRecovery(ctx, sid, "PackageUnbind"); err != nil {
+			log.Printf("[PackageUnbind] restart xray on server %d failed: %v", sid, err)
 		}
 	}
 	if pusher != nil {
@@ -669,6 +698,7 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			log.Printf("[PackageAssign] Failed to get user: %v", err)
 		} else {
 			var warnings []string
+			affectedServers := map[int64]bool{} // 改了路由 / inbound 的服务器,循环结束后统一重启 xray
 			for _, nodeID := range pkg.Nodes {
 				node, err := h.repo.GetNodeByID(ctx, nodeID)
 				if err != nil {
@@ -677,6 +707,9 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 				}
 				// routed 节点:开子账号(自动复用 saved credential 续费场景)
 				if node.NodeType == "routed" {
+					if srv, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer); err == nil {
+						affectedServers[srv.ID] = true
+					}
 					if err := addUserToRoutedNode(ctx, h.remoteManage, h.repo, user, node.ID); err != nil {
 						log.Printf("[PackageAssign] routed node %d failed for user %s: %v", node.ID, req.Username, err)
 						warnings = append(warnings, fmt.Sprintf("路由出站 %s 添加用户失败", node.NodeName))
@@ -691,10 +724,17 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 					log.Printf("[PackageAssign] Failed to find server %s: %v", node.OriginalServer, err)
 					continue
 				}
+				affectedServers[server.ID] = true
 				if err := addUserToInbound(ctx, h.remoteManage, h.repo, user, server.ID, node.InboundTag); err != nil {
 					log.Printf("[PackageAssign] Failed to add user %s to inbound %s on server %d: %v",
 						req.Username, node.InboundTag, server.ID, err)
 					warnings = append(warnings, fmt.Sprintf("节点 %s 添加用户失败", node.NodeName))
+				}
+			}
+			// 改完路由必须重启 xray 才生效;改 inbound clients 也走重启避免运行时与 config 不一致
+			for sid := range affectedServers {
+				if err := h.remoteManage.restartXrayWithRecovery(ctx, sid, "PackageAssign"); err != nil {
+					log.Printf("[PackageAssign] restart xray on server %d failed: %v", sid, err)
 				}
 			}
 			if len(warnings) > 0 {
@@ -832,7 +872,9 @@ func (h *PackageAssignHandler) loadDefaultTemplate(ctx context.Context) (string,
 
 // addUserToInbound 获取远程入站配置，添加用户凭据，然后重新提交
 func addUserToInbound(ctx context.Context, rm *RemoteManageHandler, repo *storage.TrafficRepository, user storage.User, serverID int64, inboundTag string) error {
-	// 获取该服务器的所有入站
+	// 只读 inbound 列表,目的是拿到 protocol/method/flow 这些构造 credential 必需的字段。
+	// 不再在主控这边修改 inbound:实际的"加 client"由 agent 在 inboundsMu 锁内原子完成,
+	// 避免多用户并发绑套餐时主控基于同一份快照各自 append → 后写覆盖先写 → 丢 client。
 	result, err := rm.forwardToRemoteServer(ctx, serverID, "GET", "/api/child/inbounds", nil)
 	if err != nil {
 		return fmt.Errorf("get inbounds: %w", err)
@@ -846,7 +888,6 @@ func addUserToInbound(ctx context.Context, rm *RemoteManageHandler, repo *storag
 		return fmt.Errorf("parse inbounds response: %v", err)
 	}
 
-	// 找到目标入站
 	var targetInbound map[string]interface{}
 	for _, ib := range resp.Inbounds {
 		if tag, _ := ib["tag"].(string); tag == inboundTag {
@@ -860,12 +901,8 @@ func addUserToInbound(ctx context.Context, rm *RemoteManageHandler, repo *storag
 
 	protocol, _ := targetInbound["protocol"].(string)
 	settings, _ := targetInbound["settings"].(map[string]interface{})
-	if settings == nil {
-		settings = make(map[string]interface{})
-		targetInbound["settings"] = settings
-	}
 
-	// 尝试复用已保存的凭据（续费场景）
+	// 尝试复用已保存的凭据(续费场景);否则生成新的。
 	var credential map[string]interface{}
 	var credJSON string
 	existing, _ := repo.GetUserInboundConfig(ctx, user.Username, serverID, inboundTag)
@@ -874,9 +911,11 @@ func addUserToInbound(ctx context.Context, rm *RemoteManageHandler, repo *storag
 		credJSON = existing.CredentialJSON
 	}
 	if credential == nil {
-		// 对 shadowsocks 需要把 settings.method 传给 generator,因为 SS2022 的 key 长度跟着 method 走
-		// (2022-blake3-aes-128-gcm = 16B, 其余 2022-* = 32B, 普通 SS = 16B)
-		method, _ := settings["method"].(string)
+		// shadowsocks 需要 settings.method 决定 key 长度(SS2022 各档不同)
+		var method string
+		if settings != nil {
+			method, _ = settings["method"].(string)
+		}
 		var err error
 		credential, credJSON, err = generateCredential(protocol, user, method)
 		if err != nil {
@@ -884,14 +923,13 @@ func addUserToInbound(ctx context.Context, rm *RemoteManageHandler, repo *storag
 		}
 	}
 
-	// 从现有 client 继承 flow 字段（VLESS Reality 需要）
+	// 从现有 client 继承 flow 字段(VLESS Reality 需要)
 	if strings.EqualFold(protocol, "vless") {
-		if _, hasFlow := credential["flow"]; !hasFlow {
+		if _, hasFlow := credential["flow"]; !hasFlow && settings != nil {
 			if clients, ok := settings["clients"].([]interface{}); ok && len(clients) > 0 {
 				if first, ok := clients[0].(map[string]interface{}); ok {
 					if flow, ok := first["flow"].(string); ok && flow != "" {
 						credential["flow"] = flow
-						credJSON = ""
 						if b, err := json.Marshal(credential); err == nil {
 							credJSON = string(b)
 						}
@@ -901,28 +939,14 @@ func addUserToInbound(ctx context.Context, rm *RemoteManageHandler, repo *storag
 		}
 	}
 
-	switch strings.ToLower(protocol) {
-	case "vless", "vmess", "trojan", "shadowsocks", "hysteria":
-		clients, _ := settings["clients"].([]interface{})
-		clients = append(clients, credential)
-		settings["clients"] = clients
-	case "socks", "http":
-		accounts, _ := settings["accounts"].([]interface{})
-		accounts = append(accounts, credential)
-		settings["accounts"] = accounts
-	default:
-		return fmt.Errorf("unsupported protocol: %s", protocol)
-	}
-
-	// 先删除旧入站，再添加更新后的入站
-	removeBody, _ := json.Marshal(map[string]string{"action": "remove", "tag": inboundTag})
-	if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/inbounds", removeBody); err != nil {
-		return fmt.Errorf("remove old inbound: %w", err)
-	}
-
-	addBody, _ := json.Marshal(map[string]interface{}{"action": "add", "inbound": targetInbound})
-	if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/inbounds", addBody); err != nil {
-		return fmt.Errorf("add updated inbound: %w", err)
+	// 原子 add-client:agent 端在 inboundsMu 内做 read-modify-write,自带幂等(已存在则 no-op)。
+	body, _ := json.Marshal(map[string]interface{}{
+		"action": "add-client",
+		"tag":    inboundTag,
+		"client": credential,
+	})
+	if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/inbounds", body); err != nil {
+		return fmt.Errorf("add-client: %w", err)
 	}
 
 	// 仅在没有已保存记录时写入新记录
@@ -939,61 +963,21 @@ func addUserToInbound(ctx context.Context, rm *RemoteManageHandler, repo *storag
 	return nil
 }
 
-// removeUserFromInbound 从远程入站中移除用户凭据
+// removeUserFromInbound 通过 agent 原子 remove-client 移除用户凭据。
+// 主控不再持有 inbound 副本,所以也不存在并发解绑时彼此覆盖的可能。
 func removeUserFromInbound(ctx context.Context, rm *RemoteManageHandler, cfg storage.UserInboundConfig) error {
-	result, err := rm.forwardToRemoteServer(ctx, cfg.ServerID, "GET", "/api/child/inbounds", nil)
-	if err != nil {
-		return fmt.Errorf("get inbounds: %w", err)
-	}
-
-	var resp struct {
-		Success  bool                     `json:"success"`
-		Inbounds []map[string]interface{} `json:"inbounds"`
-	}
-	if err := json.Unmarshal(result, &resp); err != nil || !resp.Success {
-		return fmt.Errorf("parse inbounds response: %v", err)
-	}
-
-	var targetInbound map[string]interface{}
-	for _, ib := range resp.Inbounds {
-		if tag, _ := ib["tag"].(string); tag == cfg.InboundTag {
-			targetInbound = ib
-			break
-		}
-	}
-	if targetInbound == nil {
-		return nil // 入站已不存在，无需清理
-	}
-
-	settings, _ := targetInbound["settings"].(map[string]interface{})
-	if settings == nil {
-		return nil
-	}
-
-	// 解析保存的凭据用于匹配
 	var savedCred map[string]interface{}
-	json.Unmarshal([]byte(cfg.CredentialJSON), &savedCred)
-
-	protocol := strings.ToLower(cfg.Protocol)
-	switch protocol {
-	case "vless", "vmess", "trojan", "shadowsocks", "hysteria":
-		clients, _ := settings["clients"].([]interface{})
-		settings["clients"] = filterCredentials(clients, savedCred, protocol)
-	case "socks", "http":
-		accounts, _ := settings["accounts"].([]interface{})
-		settings["accounts"] = filterCredentials(accounts, savedCred, protocol)
+	if err := json.Unmarshal([]byte(cfg.CredentialJSON), &savedCred); err != nil || savedCred == nil {
+		return fmt.Errorf("parse saved credential: %v", err)
 	}
-
-	removeBody, _ := json.Marshal(map[string]string{"action": "remove", "tag": cfg.InboundTag})
-	if _, err := rm.forwardToRemoteServer(ctx, cfg.ServerID, "POST", "/api/child/inbounds", removeBody); err != nil {
-		return fmt.Errorf("remove old inbound: %w", err)
+	body, _ := json.Marshal(map[string]interface{}{
+		"action": "remove-client",
+		"tag":    cfg.InboundTag,
+		"client": savedCred,
+	})
+	if _, err := rm.forwardToRemoteServer(ctx, cfg.ServerID, "POST", "/api/child/inbounds", body); err != nil {
+		return fmt.Errorf("remove-client: %w", err)
 	}
-
-	addBody, _ := json.Marshal(map[string]interface{}{"action": "add", "inbound": targetInbound})
-	if _, err := rm.forwardToRemoteServer(ctx, cfg.ServerID, "POST", "/api/child/inbounds", addBody); err != nil {
-		return fmt.Errorf("add updated inbound: %w", err)
-	}
-
 	return nil
 }
 

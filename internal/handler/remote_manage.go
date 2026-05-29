@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +16,8 @@ import (
 
 	"encoding/base64"
 	"sync"
+
+	"github.com/google/uuid"
 
 	"miaomiaowux/internal/auth"
 	"miaomiaowux/internal/event"
@@ -1558,15 +1561,8 @@ func (h *RemoteManageHandler) autoSyncInboundToNodes(ctx context.Context, server
 		return
 	}
 
-	// 写入 clash proxy server 字段:Domain → IPAddress → PullAddress 优先序。
-	// IP 可能漂移(NAT / 动态 IP),Domain 配过就用 Domain。
-	serverHost := strings.TrimSpace(server.Domain)
-	if serverHost == "" {
-		serverHost = server.IPAddress
-	}
-	if serverHost == "" {
-		serverHost = server.PullAddress
-	}
+	// Domain → 非私有的 PullAddress → IPAddress 优先序
+	serverHost := chooseClashServerHost(server)
 	if serverHost == "" {
 		log.Printf("[Remote Manage] No server address available for server %d", serverID)
 		return
@@ -1818,16 +1814,10 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 		return response
 	}
 
-	// 写入 clash proxy 的 server 字段。优先级:
-	//   1. 调用方显式 override
-	//   2. 服务器配置的 Domain(动态 IP 场景下域名更稳定,IP 会变,域名不会)
-	//   3. IPAddress 兜底
+	// 调用方显式 override > Domain > 非私有 PullAddress > IPAddress
 	serverHost := strings.TrimSpace(serverHostOverride)
 	if serverHost == "" {
-		serverHost = strings.TrimSpace(server.Domain)
-	}
-	if serverHost == "" {
-		serverHost = server.IPAddress
+		serverHost = chooseClashServerHost(server)
 	}
 	if serverHost == "" {
 		response.Success = false
@@ -1913,6 +1903,65 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 	}
 
 	username := h.repo.GetSystemNodeOwner(ctx)
+
+	// 先确保 admin email 已经在 vless/vmess/trojan inbound 的 clients[] 里。
+	// 历史 inbound(从 mmw 迁过来 / 老 agent 手动加的)往往只有用户原始 client,没有 admin 的 — 流量统计会算到别人头上、
+	// admin 也无法以"自己的身份"连。这里给缺失的 inbound 自动补一个 admin client,凭据现场生成,后续同步幂等不重复。
+	for _, inbound := range inboundsResp.Inbounds {
+		protocol, _ := inbound["protocol"].(string)
+		// 只对带 clients[] 的协议补 admin client;ss 类协议是入站全局密码,没有 per-client 身份
+		if protocol != "vless" && protocol != "vmess" && protocol != "trojan" {
+			continue
+		}
+		tag, _ := inbound["tag"].(string)
+		if tag == "" || tag == "api" {
+			continue
+		}
+		settings, _ := inbound["settings"].(map[string]interface{})
+		if settings == nil {
+			continue
+		}
+		clients, _ := settings["clients"].([]interface{})
+		var refClient map[string]interface{}
+		hasAdmin := false
+		for _, c := range clients {
+			cm, _ := c.(map[string]interface{})
+			if cm == nil {
+				continue
+			}
+			if e, _ := cm["email"].(string); e == username {
+				hasAdmin = true
+				break
+			}
+			if refClient == nil {
+				refClient = cm
+			}
+		}
+		if hasAdmin {
+			continue
+		}
+		// 生成新 client。flow 复用现有 client 的(reality/vision 必须一致);其它字段 agent 端自行补默认
+		newClient := map[string]interface{}{"email": username}
+		switch protocol {
+		case "vless", "vmess":
+			newClient["id"] = uuid.New().String()
+			if refClient != nil {
+				if flow, ok := refClient["flow"].(string); ok && flow != "" {
+					newClient["flow"] = flow
+				}
+			}
+		case "trojan":
+			newClient["password"] = uuid.New().String()
+		}
+		if err := addClientToInbound(ctx, h, server.ID, tag, newClient); err != nil {
+			log.Printf("[Remote Manage] inject admin client failed (server=%s tag=%s): %v", server.Name, tag, err)
+			continue
+		}
+		log.Printf("[Remote Manage] Injected admin client into inbound (server=%s tag=%s email=%s protocol=%s)", server.Name, tag, username, protocol)
+		// 更新本次循环的 in-memory inbound 视图,后续 routed 检测 / 节点 dedup 才能正确看到 admin client
+		settings["clients"] = append(clients, newClient)
+		inbound["settings"] = settings
+	}
 
 	// 在循环之前获取现有节点一次。dedup 两步走:
 	//   1. inbound_tag 精确匹配 → 直接 skip(命中后续 tag 维护逻辑无需触发)
@@ -2266,6 +2315,17 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 				continue
 			}
 			log.Printf("[Remote Manage] Detected routed node id=%d %q: email=%q → outboundTag=%q parent=%d", n.ID, n.NodeName, email, outTag, parentID)
+			// 把这个 routed client 写进 admin 的 user_subaccounts(已存在则刷新凭据/激活状态)。
+			// 不写的话:每日流量通知合并子账号失败、套餐分配也找不到这个 routed 节点对应的 admin 子账号。
+			if client := ib.emailToCred[email]; client != nil {
+				if credJSON, err := json.Marshal(client); err == nil {
+					if _, err := h.repo.UpsertUserSubaccount(ctx, storage.UserSubaccount{
+						Username: username, RoutedNodeID: n.ID, Email: email, CredentialJSON: string(credJSON), IsActive: true,
+					}); err != nil {
+						log.Printf("[Remote Manage] UpsertUserSubaccount routed_node=%d email=%q failed: %v", n.ID, email, err)
+					}
+				}
+			}
 		}
 
 		// 次级 dedup:扫已有节点,记录已经存在的 (server, inbound_tag, outbound_tag) 三元组,
@@ -2351,6 +2411,14 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 				if err != nil {
 					log.Printf("[Remote Manage] auto-create routed node for email=%q failed: %v", email, err)
 					continue
+				}
+				// 同步给 admin 注册子账号 — 同 Pass 2 的理由
+				if credJSON, err := json.Marshal(client); err == nil {
+					if _, err := h.repo.UpsertUserSubaccount(ctx, storage.UserSubaccount{
+						Username: username, RoutedNodeID: created.ID, Email: email, CredentialJSON: string(credJSON), IsActive: true,
+					}); err != nil {
+						log.Printf("[Remote Manage] UpsertUserSubaccount routed_node=%d email=%q failed: %v", created.ID, email, err)
+					}
 				}
 				// CreateNode 没有写 node_type/parent/routed_outbound_tag,补一刀
 				if err := h.repo.MarkNodeAsRouted(ctx, created.ID, outTag, master); err != nil {
@@ -2562,6 +2630,27 @@ func (h *RemoteManageHandler) HandleSyncInboundsToNodes(w http.ResponseWriter, r
 	json.NewEncoder(w).Encode(response)
 }
 
+// chooseClashServerHost 给一台 remote server 选合适的 clash_config.server 值。
+// 优先级:Domain → PullAddress (非空 + 不是私有 IP) → IPAddress。
+//
+// 之所以把 PullAddress 排在 IPAddress 前:用户在"服务器地址"表单字段填的域名/公网地址其实存在 pull_address
+// 列里,如果跳过它直接拿 heartbeat 上报的 IPAddress,域名就用不上,而 IP 又是动态的(NAT/重启会变)。
+// PullAddress 是私有 IP(10/172.16/192.168/127)时不用 — 通常是用户配的内网测试地址,clash 客户端连不上。
+func chooseClashServerHost(server *storage.RemoteServer) string {
+	if server == nil {
+		return ""
+	}
+	if d := strings.TrimSpace(server.Domain); d != "" {
+		return d
+	}
+	if p := strings.TrimSpace(server.PullAddress); p != "" {
+		if ip := net.ParseIP(p); ip == nil || (!ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()) {
+			return p
+		}
+	}
+	return strings.TrimSpace(server.IPAddress)
+}
+
 // inboundToClashProxy 将 Xray 入站配置转换为 Clash 代理配置。
 // tunnelPort > 0 表示服务器使用隧道模式；将其用作节点的外部端口。
 func (h *RemoteManageHandler) inboundToClashProxy(inbound map[string]interface{}, serverHost, serverName string, tunnelPort int) (map[string]interface{}, error) {
@@ -2610,6 +2699,11 @@ func (h *RemoteManageHandler) inboundToClashProxy(inbound map[string]interface{}
 		// 检查流量
 		if flow, ok := client["flow"].(string); ok && flow != "" {
 			proxy["flow"] = flow
+		}
+		// VLESS Reality V2 encryption(mihomo 已支持):服务端的 settings.encryption 客户端配置必须带,
+		// 否则握手失败。注意是 settings.encryption(对外下发的密钥),不是 decryption(服务端自己解密)。
+		if enc, ok := settings["encryption"].(string); ok && enc != "" && enc != "none" {
+			proxy["encryption"] = enc
 		}
 		// 添加流设置
 		h.addStreamSettings(proxy, streamSettings)
@@ -2885,11 +2979,7 @@ func (h *RemoteManageHandler) InboundToClashProxyByServerID(serverID int64, inbo
 		return "", fmt.Errorf("get server: %w", err)
 	}
 
-	// clash_config.server 优先使用域名(IP 可能变,域名相对稳定);只有当域名缺省时才回落到 IP。
-	serverHost := strings.TrimSpace(server.Domain)
-	if serverHost == "" {
-		serverHost = server.IPAddress
-	}
+	serverHost := chooseClashServerHost(server)
 	tunnelPort := 0
 
 	// tunnel 模式:新入站端口正好等于 tunnel-in 的 settings.port,意味着这条入站会被 tunnel 暴露在 443

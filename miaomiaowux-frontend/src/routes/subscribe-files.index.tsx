@@ -2224,6 +2224,7 @@ function SubscribeFilesPage() {
         remoteServers={remoteServersData?.servers ?? []}
         onSubmit={handleUpdateMetadata}
         saving={updateMetadataMutation.isPending}
+        isAdmin={isAdmin}
       />
 
       {/* 编辑配置对话框 — 拆到 ./subscribe-files/dialogs/edit-config-dialog */}

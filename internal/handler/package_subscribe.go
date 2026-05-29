@@ -134,7 +134,10 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	clientType := strings.TrimSpace(r.URL.Query().Get("t"))
 	if clientType == "" || clientType == "clash" || clientType == "clashmeta" {
 		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
-		w.Header().Set("Content-Disposition", "attachment; filename=\""+pkg.Name+".yaml\"")
+		// 显式带 t=clash/clashmeta 通常是浏览器/调试预览,不想被强制下载;只有完全不带 t(典型 Clash 客户端拉取)才下发 attachment
+		if clientType == "" {
+			w.Header().Set("Content-Disposition", "attachment; filename=\""+pkg.Name+".yaml\"")
+		}
 		h.writeTrafficHeader(r.Context(), w, user, pkg)
 		w.Write([]byte(result))
 		return
@@ -217,7 +220,9 @@ func (h *PackageSubscribeHandler) serveAllNodes(w http.ResponseWriter, r *http.R
 	clientType := strings.TrimSpace(r.URL.Query().Get("t"))
 	if clientType == "" || clientType == "clash" || clientType == "clashmeta" {
 		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
-		w.Header().Set("Content-Disposition", `attachment; filename="all-nodes.yaml"`)
+		if clientType == "" {
+			w.Header().Set("Content-Disposition", `attachment; filename="all-nodes.yaml"`)
+		}
 		w.Write([]byte(result))
 		return
 	}

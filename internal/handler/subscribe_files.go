@@ -150,7 +150,6 @@ func (h *subscribeFilesHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 		SelectedOverrideScriptIDs: req.SelectedOverrideScriptIDs,
 		StatsServerIDs:   req.StatsServerIDs,
 		TrafficLimit:     req.TrafficLimit,
-		CustomShortCode:  req.CustomShortCode,
 		CreatedBy:        username,
 	}
 	if req.RawOutput != nil {
@@ -158,6 +157,9 @@ func (h *subscribeFilesHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 	}
 	if req.SortOrder != nil {
 		file.SortOrder = *req.SortOrder
+	}
+	if req.CustomShortCode != nil {
+		file.CustomShortCode = *req.CustomShortCode
 	}
 
 	created, err := h.repo.CreateSubscribeFile(r.Context(), file)
@@ -449,8 +451,10 @@ func (h *subscribeFilesHandler) handleUpdate(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// 短码编辑只允许管理员:普通用户即使是订阅创建者,也不能改 custom_short_code(短码归全局命名空间,必须管理)
-	if !isAdmin && req.CustomShortCode != existing.CustomShortCode {
+	// 短码编辑只允许管理员:普通用户即使是订阅创建者,也不能改 custom_short_code(短码归全局命名空间,必须管理)。
+	// CustomShortCode 是 *string:nil = 前端没传(内联更新模板/标签等场景),不要碰短码;
+	// 非 nil + 值变化 = 用户主动改 → 需要管理员权限。
+	if !isAdmin && req.CustomShortCode != nil && *req.CustomShortCode != existing.CustomShortCode {
 		writeError(w, http.StatusForbidden, errors.New("只有管理员可以编辑短码"))
 		return
 	}
@@ -485,7 +489,10 @@ func (h *subscribeFilesHandler) handleUpdate(w http.ResponseWriter, r *http.Requ
 	}
 	existing.StatsServerIDs = req.StatsServerIDs
 	existing.TrafficLimit = req.TrafficLimit
-	existing.CustomShortCode = req.CustomShortCode
+	// 仅当前端显式传了 custom_short_code 才覆盖(同上,nil = 内联更新场景,保留原值)
+	if req.CustomShortCode != nil {
+		existing.CustomShortCode = *req.CustomShortCode
+	}
 	if req.RawOutput != nil {
 		existing.RawOutput = *req.RawOutput
 	}
@@ -642,6 +649,16 @@ func (h *subscribeFilesHandler) handleTraffic(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	// 普通用户(开了"订阅管理"权限后能进来):流量列必须显示套餐口径,
+	// 跟 /api/traffic/summary 上的"流量信息"页保持一致 —— 否则下面那条
+	// GetAllRemoteServersTrafficTotals 路径会把全平台所有用户的 inbound 流量
+	// 全聚合返回,与该用户毫无关系。
+	username := auth.UsernameFromContext(ctx)
+	if !userIsAdmin(ctx, h.repo, username) {
+		h.handleTrafficForUser(ctx, w, username, files)
+		return
+	}
+
 	allNodes, err := h.repo.ListAllNodes(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -736,6 +753,43 @@ func (h *subscribeFilesHandler) handleTraffic(w http.ResponseWriter, r *http.Req
 	respondJSON(w, http.StatusOK, map[string]any{"traffic": result})
 }
 
+// handleTrafficForUser 给单个普通用户返回订阅流量:对该用户名下每个订阅文件
+// 都填同一组 {used, limit} = 用户套餐口径,跟 /api/traffic/summary 完全一致。
+// 没绑套餐的用户:返回 0/0(前端会显示无限制/未消耗,行为与流量信息页一致)。
+func (h *subscribeFilesHandler) handleTrafficForUser(ctx context.Context, w http.ResponseWriter, username string, files []storage.SubscribeFile) {
+	type trafficItem struct {
+		Used  int64 `json:"used"`
+		Limit int64 `json:"limit"`
+	}
+	result := make(map[int64]trafficItem, len(files))
+
+	var used, limit int64
+	if username != "" {
+		if user, err := h.repo.GetUser(ctx, username); err == nil && user.PackageID > 0 {
+			if pkg, perr := h.repo.GetPackage(ctx, user.PackageID); perr == nil {
+				limit = pkg.TrafficLimitBytes
+				if raw, terr := h.repo.GetUserTotalTraffic(ctx, username); terr == nil {
+					used = raw * pkg.TrafficMultiplier()
+				}
+			}
+		}
+	}
+
+	for _, f := range files {
+		if f.CreatedBy != username {
+			continue
+		}
+		// 订阅自定义限额覆盖套餐限额(管理员路径的同款语义)
+		fileLimit := limit
+		if f.TrafficLimit != nil {
+			fileLimit = int64(*f.TrafficLimit * 1024 * 1024 * 1024)
+		}
+		result[f.ID] = trafficItem{Used: used, Limit: fileLimit}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{"traffic": result})
+}
+
 // parseFilenameFromContentDisposition 从Content-Disposition头解析文件名
 // 支持格式: attachment;filename*=UTF-8”%E6%B3%A1%E6%B3%A1Dog
 func parseFilenameFromContentDisposition(header string) string {
@@ -779,7 +833,10 @@ type subscribeFileRequest struct {
 	SelectedOverrideScriptIDs []int64 `json:"selected_override_script_ids"`
 	StatsServerIDs      string   `json:"stats_server_ids"`
 	TrafficLimit        *float64 `json:"traffic_limit"`
-	CustomShortCode     string   `json:"custom_short_code"`
+	// 必须用指针以区分"前端没传"vs"前端想清空":
+	// 内联更新(只发 template_filename)时 CustomShortCode 字段缺省,
+	// 旧 string 零值会被误判为"想把短码清空"→ 触发"只有管理员可以编辑短码"。
+	CustomShortCode     *string  `json:"custom_short_code,omitempty"`
 	RawOutput           *bool    `json:"raw_output,omitempty"`
 	SortOrder           *int     `json:"sort_order,omitempty"`
 }

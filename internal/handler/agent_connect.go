@@ -511,10 +511,27 @@ echo ""
 echo "Master Server: $MASTER_URL"
 echo ""
 
+# 检测 init 系统:systemd(主流)/ OpenRC(Alpine)/ 兜底用 nohup + rc.local。
+# 大部分 LXC 容器没有 systemd —— 老脚本直接 systemctl 失败"systemctl: command not found"。
+HAS_SYSTEMD=0
+HAS_OPENRC=0
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then HAS_SYSTEMD=1; fi
+if command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1; then HAS_OPENRC=1; fi
+echo "Init system: $([ "$HAS_SYSTEMD" = 1 ] && echo systemd || ([ "$HAS_OPENRC" = 1 ] && echo openrc || echo none))"
+
 # Step 1: Stop existing service if running
 echo "[1/6] Stopping existing service (if any)..."
-systemctl stop mmw-agent 2>/dev/null || true
-systemctl disable mmw-agent 2>/dev/null || true
+if [ "$HAS_SYSTEMD" = "1" ]; then
+    systemctl stop mmw-agent 2>/dev/null || true
+    systemctl disable mmw-agent 2>/dev/null || true
+elif [ "$HAS_OPENRC" = "1" ]; then
+    rc-service mmw-agent stop 2>/dev/null || true
+    rc-update del mmw-agent 2>/dev/null || true
+else
+    # nohup 兜底:杀掉现有 mmw-agent 进程
+    pkill -f /usr/local/bin/mmw-agent 2>/dev/null || true
+    sleep 1
+fi
 
 # Step 2: Create config directory first
 echo ""
@@ -560,11 +577,12 @@ EOF
 
 echo "Configuration saved to /etc/mmw-agent/config.yaml"
 
-# Step 3: Create systemd service file (before install.sh runs)
+# Step 3: 创建 service 文件 — 按检测到的 init 系统选不同写法
 echo ""
-echo "[3/6] Creating systemd service..."
+echo "[3/6] Creating service..."
 
-cat > /etc/systemd/system/mmw-agent.service << EOF
+if [ "$HAS_SYSTEMD" = "1" ]; then
+    cat > /etc/systemd/system/mmw-agent.service << EOF
 [Unit]
 Description=MMW Agent Remote Server
 After=network.target
@@ -579,9 +597,43 @@ WorkingDirectory=/var/lib/mmw-agent
 [Install]
 WantedBy=multi-user.target
 EOF
+    systemctl daemon-reload
+elif [ "$HAS_OPENRC" = "1" ]; then
+    cat > /etc/init.d/mmw-agent << 'EOF'
+#!/sbin/openrc-run
+name="mmw-agent"
+description="MMW Agent Remote Server"
+command="/usr/local/bin/mmw-agent"
+command_args="-c /etc/mmw-agent/config.yaml"
+command_background="yes"
+pidfile="/run/mmw-agent.pid"
+output_log="/var/log/mmw-agent.log"
+error_log="/var/log/mmw-agent.log"
+depend() { need net; }
+EOF
+    chmod +x /etc/init.d/mmw-agent
+else
+    # 无 init 系统(典型 LXC 容器):写一个 supervisor 脚本,失败自动重启,放后台跑;同时塞进 rc.local 以便重启
+    cat > /usr/local/bin/mmw-agent-supervisor.sh << 'EOF'
+#!/bin/sh
+while true; do
+    /usr/local/bin/mmw-agent -c /etc/mmw-agent/config.yaml >> /var/log/mmw-agent.log 2>&1
+    echo "[supervisor] mmw-agent exited, restarting in 5s..." >> /var/log/mmw-agent.log
+    sleep 5
+done
+EOF
+    chmod +x /usr/local/bin/mmw-agent-supervisor.sh
 
-# Reload systemd to pick up new service file
-systemctl daemon-reload
+    # 写入 rc.local 实现重启自启动(若文件不存在就建一个)
+    if [ ! -f /etc/rc.local ]; then
+        echo "#!/bin/sh" > /etc/rc.local
+        echo "exit 0" >> /etc/rc.local
+        chmod +x /etc/rc.local
+    fi
+    if ! grep -q "mmw-agent-supervisor.sh" /etc/rc.local; then
+        sed -i '/^exit 0/i nohup /usr/local/bin/mmw-agent-supervisor.sh >/dev/null 2>&1 \&' /etc/rc.local
+    fi
+fi
 
 # Step 4: Download and install binary only (without starting)
 echo ""
@@ -643,11 +695,19 @@ mv /tmp/mmw-agent /usr/local/bin/mmw-agent
 
 echo "Binary installed to /usr/local/bin/mmw-agent"
 
-# Step 5: Enable and start service
+# Step 5: 启用并启动 service
 echo ""
 echo "[5/6] Starting service..."
-systemctl enable mmw-agent
-systemctl start mmw-agent
+if [ "$HAS_SYSTEMD" = "1" ]; then
+    systemctl enable mmw-agent
+    systemctl start mmw-agent
+elif [ "$HAS_OPENRC" = "1" ]; then
+    rc-update add mmw-agent default
+    rc-service mmw-agent start
+else
+    nohup /usr/local/bin/mmw-agent-supervisor.sh >/dev/null 2>&1 &
+    echo "Started via nohup (PID=$!); 安装重启后通过 /etc/rc.local 自启动"
+fi
 
 # Wait a moment for service to start
 sleep 3
@@ -662,10 +722,22 @@ echo "  Installation Complete!"
 echo "=========================================="
 echo ""
 echo "Service status:"
-systemctl status mmw-agent --no-pager -l 2>/dev/null | head -15 || echo "Service started"
+if [ "$HAS_SYSTEMD" = "1" ]; then
+    systemctl status mmw-agent --no-pager -l 2>/dev/null | head -15 || echo "Service started"
+elif [ "$HAS_OPENRC" = "1" ]; then
+    rc-service mmw-agent status 2>/dev/null || echo "Service started"
+else
+    pgrep -af /usr/local/bin/mmw-agent | head -5 || echo "Process not found in pgrep, check /var/log/mmw-agent.log"
+fi
 echo ""
 echo "To check status:"
-echo "  systemctl status mmw-agent"
+if [ "$HAS_SYSTEMD" = "1" ]; then
+    echo "  systemctl status mmw-agent"
+elif [ "$HAS_OPENRC" = "1" ]; then
+    echo "  rc-service mmw-agent status"
+else
+    echo "  tail -f /var/log/mmw-agent.log  # 或: pgrep -af mmw-agent"
+fi
 echo ""
 echo "To view logs:"
 echo "  journalctl -u mmw-agent -f"

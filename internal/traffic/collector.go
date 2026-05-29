@@ -328,21 +328,16 @@ func (c *Collector) ProcessMetrics(ctx context.Context, serverID int64, metrics 
 		}
 	}
 
-	// 处理用户流量
+	// 处理用户流量。
 	// xray stats 的 key 是 email,可能是:
 	//   - 主账号 email(== mmwx username,历史约定),直接落库
 	//   - 子账号 email(<username>__<routed_label>),通过 user_subaccounts 反查归到 username
 	//   - _admin__ 前缀的占位 client,流量丢弃(管理员测试用,不属任何用户)
-	// 多个 email 归到同一 username 后,user_traffic 的 UNIQUE(server_id, username) UPSERT 自动累加。
-	for emailKey, data := range stats.User {
-		username := c.repo.ResolveUsernameByEmail(ctx, emailKey)
-		if username == "" {
-			continue
-		}
-		if err := c.repo.UpsertUserTraffic(ctx, serverID, username, data.Uplink, data.Downlink); err != nil {
-			log.Printf("[Traffic Collector] Failed to upsert user traffic for %s (email=%s): %v", username, emailKey, err)
-		}
-	}
+	// !!! 必须先按 username 聚合再写库 — 直接每个 email 调一次 UpsertUserTraffic,
+	// 多个 email 映射到同一 username 时,UpsertUserTraffic 内部按"cumulative 计数器减 LastUplink"算 delta,
+	// 同一行 LastUplink 在循环里被一会儿写成 jimlee 的累计、一会儿写成 wtt 的累计,delta 会一会儿负(被当 xray 重启
+	// 把整个 LastUplink 推进 total)、一会儿正(整段累计当 delta 加),一轮 collector 把流量指数级放大。
+	aggregateAndUpsertUserTraffic(ctx, c.repo, serverID, stats.User)
 
 	log.Printf("[Traffic Collector] Processed metrics for server %d: %d inbounds, %d outbounds, %d users",
 		serverID, len(stats.Inbound), len(stats.Outbound), len(stats.User))
@@ -370,21 +365,44 @@ func (c *Collector) ProcessRemoteMetrics(ctx context.Context, serverID int64, st
 		}
 	}
 
-	// 处理用户流量(同上注释 — 远程上报路径)
-	for emailKey, data := range stats.User {
-		username := c.repo.ResolveUsernameByEmail(ctx, emailKey)
-		if username == "" {
-			continue
-		}
-		if err := c.repo.UpsertUserTraffic(ctx, serverID, username, data.Uplink, data.Downlink); err != nil {
-			log.Printf("[Traffic Collector] Failed to upsert remote user traffic for %s (email=%s): %v", username, emailKey, err)
-		}
-	}
+	// 用户流量同上 — 必须先按 username 聚合
+	aggregateAndUpsertUserTraffic(ctx, c.repo, serverID, stats.User)
 
 	log.Printf("[Traffic Collector] Processed remote metrics for server %d: %d inbounds, %d outbounds, %d users",
 		serverID, len(stats.Inbound), len(stats.Outbound), len(stats.User))
 
 	return nil
+}
+
+// aggregateAndUpsertUserTraffic 把 stats.User(key=email)里所有归到同一 username 的 cumulative 计数器加总,
+// 然后只对每个 username 调一次 UpsertUserTraffic。cumulative 计数器之和仍是 cumulative(每个组件计数器自身单调
+// 递增),delta 计算照常成立。
+func aggregateAndUpsertUserTraffic(ctx context.Context, repo userTrafficRepo, serverID int64, userStats map[string]TrafficData) {
+	type sum struct{ uplink, downlink int64 }
+	byUsername := make(map[string]*sum)
+	for emailKey, data := range userStats {
+		username := repo.ResolveUsernameByEmail(ctx, emailKey)
+		if username == "" {
+			continue
+		}
+		if s, ok := byUsername[username]; ok {
+			s.uplink += data.Uplink
+			s.downlink += data.Downlink
+		} else {
+			byUsername[username] = &sum{uplink: data.Uplink, downlink: data.Downlink}
+		}
+	}
+	for username, s := range byUsername {
+		if err := repo.UpsertUserTraffic(ctx, serverID, username, s.uplink, s.downlink); err != nil {
+			log.Printf("[Traffic Collector] Failed to upsert user traffic for %s on server %d: %v", username, serverID, err)
+		}
+	}
+}
+
+// userTrafficRepo 只取 collector 实际用到的两个方法,避免去 import 整个 storage 接口
+type userTrafficRepo interface {
+	ResolveUsernameByEmail(ctx context.Context, email string) string
+	UpsertUserTraffic(ctx context.Context, serverID int64, username string, uplink, downlink int64) error
 }
 
 // 为所有服务器创建每日快照

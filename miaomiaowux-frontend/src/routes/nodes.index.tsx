@@ -928,8 +928,12 @@ function NodesPage() {
         return
       }
 
-      // 刷新节点列表（NodeSyncListener 已自动创建节点）
-      setTimeout(() => queryClient.invalidateQueries({ queryKey: ['nodes'] }), 500)
+      // 刷新节点列表（NodeSyncListener 已自动创建节点）+ 用户配置(后端把新节点 ID 写到 node_order 顶部,
+      // 不一起刷新的话,前端 nodeOrder 还是旧数组,新节点 ID 拿不到序号会被排到末尾)
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ['nodes'] })
+        queryClient.invalidateQueries({ queryKey: ['user-config'] })
+      }, 500)
 
       setQuickCreateResult({ serverCount: successCount, inboundTag: trimmedTag, outboundTag: '' })
       setQuickCreateStep('done')
@@ -3257,7 +3261,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                               ) : (
                                 <div>
                                   <div className='font-medium text-sm break-all line-clamp-2'><Twemoji>{node.name || t('nodeList.unknown')}</Twemoji></div>
-                                  {getNodeServerName(node.dbNode) && (
+                                  {isAdmin && getNodeServerName(node.dbNode) && (
                                     <div className='text-[11px] text-muted-foreground mt-0.5 truncate'>
                                       {getNodeServerName(node.dbNode)}
                                     </div>
@@ -3341,7 +3345,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                     <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                   </Tooltip>
                                 )}
-                                {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
+                                {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (isAdmin || userRoutedEnabled) && (
                                   <Tooltip>
                                     <TooltipTrigger asChild>
                                       <Button
@@ -3522,7 +3526,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                           <TableHead style={{ width: '36px' }}></TableHead>
                           <TableHead style={{ width: '60px' }}>{t('columns.protocol')}</TableHead>
                           <TableHead>{t('columns.nodeName')}</TableHead>
-                          <TableHead style={{ width: '100px' }}>{t('columns.tag')}</TableHead>
+                          {isAdmin && <TableHead style={{ width: '100px' }}>{t('columns.tag')}</TableHead>}
                           <TableHead style={{ width: '70px' }} className='text-center'>{t('columns.config')}</TableHead>
                         {isAdmin && <TableHead style={{ width: '70px' }} className='text-center'>{t('columns.actions')}</TableHead>}
                       </TableRow>
@@ -3646,7 +3650,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       )}
                                       {renderForwardedBadge(node)}
                                     </div>
-                                    {getNodeServerName(node.dbNode) && (
+                                    {isAdmin && getNodeServerName(node.dbNode) && (
                                       <div className='text-[11px] text-muted-foreground mt-0.5 truncate'>
                                         {getNodeServerName(node.dbNode)}
                                       </div>
@@ -3739,7 +3743,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                     </Tooltip>
                                   )}
-                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
+                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (isAdmin || userRoutedEnabled) && (
                                     <Tooltip>
                                       <TooltipTrigger asChild>
                                         <Button
@@ -3765,6 +3769,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                 </div>
                               )}
                             </TableCell>
+                            {isAdmin && (
                             <TableCell>
                               <div className='flex flex-wrap gap-1'>
                                 {(() => {
@@ -3779,6 +3784,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                 })()}
                               </div>
                             </TableCell>
+                            )}
                             <TableCell className='text-center'>
                               {node.clash ? (
                                 <div className='flex gap-1 justify-center'>
@@ -3869,7 +3875,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                             <TableHead style={{ width: '36px' }}></TableHead>
                             <TableHead style={{ width: '90px' }}>{t('columns.protocol')}</TableHead>
                             <TableHead>{t('columns.nodeName')}</TableHead>
-                            <TableHead style={{ width: '120px' }}>{t('columns.tag')}</TableHead>
+                            {isAdmin && <TableHead style={{ width: '120px' }}>{t('columns.tag')}</TableHead>}
                             <TableHead style={{ width: '280px', maxWidth: '280px' }}>{t('columns.serverAddress')}</TableHead>
                             <TableHead style={{ width: '80px' }} className='text-center'>{t('columns.config')}</TableHead>
                             {isAdmin && <TableHead style={{ width: '80px' }} className='text-center'>{t('columns.actions')}</TableHead>}
@@ -4034,7 +4040,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                     </Tooltip>
                                   )}
-                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (
+                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (isAdmin || userRoutedEnabled) && (
                                     <Tooltip>
                                       <TooltipTrigger asChild>
                                         <Button
@@ -4068,7 +4074,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   />
                                   )}
                                 </div>
-                                {getNodeServerName(node.dbNode) && (
+                                {isAdmin && getNodeServerName(node.dbNode) && (
                                   <div className='text-[11px] text-muted-foreground mt-0.5 truncate'>
                                     {getNodeServerName(node.dbNode)}
                                   </div>
@@ -4076,6 +4082,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                 </div>
                               )}
                             </TableCell>
+                            {isAdmin && (
                             <TableCell>
                               <div className='flex flex-wrap gap-1'>
                                 {(() => {
@@ -4096,6 +4103,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                 })()}
                               </div>
                             </TableCell>
+                            )}
                             <TableCell style={{ maxWidth: '280px' }}>
                               <div className='text-sm text-muted-foreground'>
                                 {node.parsed ? (
