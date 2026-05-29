@@ -21,6 +21,7 @@
     "username": "用户名",
     "nickname": "昵称",
     "remark": "备注",
+    "userShortCode": "用户短码",
     "packageTraffic": "套餐/流量",
     "role": "角色",
     "status": "状态",
@@ -117,6 +118,13 @@
     "saving": "保存中…",
     "confirmSave": "确认保存"
   },
+  "shortCode": {
+    "label": "用户短码",
+    "placeholderAuto": "留空恢复自动 ({{code}})",
+    "placeholderEmpty": "留空使用自动短码",
+    "hint": "回车保存。留空恢复自动短码。允许字母 / 数字 / 下划线 / 横杠，长度 2-16。",
+    "editTooltip": "点击编辑短码"
+  },
   "toast": {
     "statusUpdated": "用户状态已更新",
     "passwordReset": "密码已重置",
@@ -125,6 +133,8 @@
     "packageUpdated": "套餐已更新",
     "packageWarning": "套餐已绑定，但部分节点配置失败：{{warnings}}",
     "remarkUpdated": "备注已更新",
-    "limitsUpdated": "限速设置已更新"
+    "limitsUpdated": "限速设置已更新",
+    "shortCodeUpdated": "短码已更新",
+    "shortCodeInvalid": "短码只能含字母 / 数字 / 下划线 / 横杠，长度 2-16"
   }
 }

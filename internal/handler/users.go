@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
@@ -38,6 +39,10 @@ type userEntry struct {
 	DeviceLimit         int      `json:"device_limit"`
 	SpeedLimitOverride  *float64 `json:"speed_limit_override"`
 	DeviceLimitOverride *int     `json:"device_limit_override"`
+	// 短码:user_short_code 是系统自动生成的;custom_user_short_code 非空时优先生效。
+	// 前端用 user_short_code 显示"当前生效",custom_user_short_code 作为编辑输入框的回填值。
+	UserShortCode       string   `json:"user_short_code"`
+	CustomUserShortCode string   `json:"custom_user_short_code"`
 }
 
 type userStatusRequest struct {
@@ -95,16 +100,22 @@ func NewUserListHandler(repo *storage.TrafficRepository) http.Handler {
 			trafficMap[t.Username] += t.Uplink + t.Downlink
 		}
 
+		// 一次性查所有用户短码,避免列表循环里逐个 query(N+1)。
+		shortCodeMap, _ := repo.ListUserShortCodeInfo(r.Context())
+
 		entries := make([]userEntry, 0, len(users))
 		for _, user := range users {
+			scInfo := shortCodeMap[user.Username]
 			entry := userEntry{
-				Username: user.Username,
-				Email:    user.Email,
-				Nickname: user.Nickname,
-				Avatar:   user.AvatarURL,
-				Role:     user.Role,
-				IsActive: user.IsActive,
-				Remark:   user.Remark,
+				Username:            user.Username,
+				Email:               user.Email,
+				Nickname:            user.Nickname,
+				Avatar:              user.AvatarURL,
+				Role:                user.Role,
+				IsActive:            user.IsActive,
+				Remark:              user.Remark,
+				UserShortCode:       scInfo.UserShortCode,
+				CustomUserShortCode: scInfo.CustomUserShortCode,
 			}
 			entry.SpeedLimitOverride = user.SpeedLimitOverride
 			entry.DeviceLimitOverride = user.DeviceLimitOverride
@@ -513,6 +524,59 @@ func generateRandomPassword(length int) (string, error) {
 type userRemarkRequest struct {
 	Username string `json:"username"`
 	Remark   string `json:"remark"`
+}
+
+// shortCodeRe 跟前端 SHORT_CODE_RE 保持一致 — 留空表示清除自定义,系统回退到 user_short_code。
+var shortCodeRe = regexp.MustCompile(`^[A-Za-z0-9_-]{2,16}$`)
+
+type userShortCodeRequest struct {
+	Username  string `json:"username"`
+	ShortCode string `json:"short_code"`
+}
+
+// 管理员改任意用户的自定义短码。前端在用户管理表的气泡编辑里用。
+//   - 留空 = 清除 custom_user_short_code,系统继续用自动生成的 user_short_code
+//   - 非空 = 必须匹配 shortCodeRe;UNIQUE 冲突由 DB 索引兜底
+func NewUserShortCodeHandler(repo *storage.TrafficRepository) http.Handler {
+	if repo == nil {
+		panic("user short code handler requires repository")
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, errors.New("only POST is supported"))
+			return
+		}
+		var payload userShortCodeRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		username := strings.TrimSpace(payload.Username)
+		if username == "" {
+			writeError(w, http.StatusBadRequest, errors.New("username is required"))
+			return
+		}
+		code := strings.TrimSpace(payload.ShortCode)
+		// 非空时严格校验格式;空 = 清除
+		if code != "" && !shortCodeRe.MatchString(code) {
+			writeError(w, http.StatusBadRequest, errors.New("短码只能含字母 / 数字 / 下划线 / 横杠,长度 2-16"))
+			return
+		}
+		if err := repo.UpdateUserCustomShortCode(r.Context(), username, code); err != nil {
+			// UpdateUserCustomShortCode 返回的"该短码已被占用..."字符串作为 409 抛上去
+			if strings.Contains(err.Error(), "已被占用") {
+				writeError(w, http.StatusConflict, err)
+				return
+			}
+			if errors.Is(err, storage.ErrUserNotFound) {
+				writeError(w, http.StatusNotFound, err)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]any{"status": "updated"})
+	})
 }
 
 func NewUserRemarkHandler(repo *storage.TrafficRepository) http.Handler {

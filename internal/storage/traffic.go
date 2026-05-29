@@ -3398,6 +3398,28 @@ func (r *TrafficRepository) GetAllUserShortCodes(ctx context.Context) (map[strin
 	return codes, rows.Err()
 }
 
+// ListUserShortCodeInfo 批量返回所有用户的 user_short_code 和 custom_user_short_code,
+// 避免 user list handler N+1 query。复用已有的 UserShortCodeInfo struct(见下方)。
+func (r *TrafficRepository) ListUserShortCodeInfo(ctx context.Context) (map[string]UserShortCodeInfo, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT username, COALESCE(user_short_code, ''), COALESCE(custom_user_short_code, '') FROM user_tokens`)
+	if err != nil {
+		return nil, fmt.Errorf("list user short code info: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]UserShortCodeInfo)
+	for rows.Next() {
+		var u UserShortCodeInfo
+		if err := rows.Scan(&u.Username, &u.UserShortCode, &u.CustomUserShortCode); err != nil {
+			return nil, fmt.Errorf("scan user short code info: %w", err)
+		}
+		out[u.Username] = u
+	}
+	return out, rows.Err()
+}
+
 func (r *TrafficRepository) UpdateUserCustomShortCode(ctx context.Context, username, code string) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")

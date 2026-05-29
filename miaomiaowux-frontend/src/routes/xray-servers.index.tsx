@@ -528,7 +528,20 @@ function XrayServersPage() {
   const handleRemoteRemoveXray = (serverId: number) => streamRemoteOp(`/api/admin/remote/xray/remove-stream?server_id=${serverId}`, t('servers.removeXray'), () => { loadRemoteServerStatusToCache(serverId, true); if (managingRemoteServer) loadRemoteServicesStatus(managingRemoteServer.id) })
   const handleRemoteInstallNginx = (serverId: number) => streamRemoteOp(`/api/admin/remote/nginx/install-stream?server_id=${serverId}`, t('servers.installNginx'), () => { loadRemoteServerStatusToCache(serverId, true); if (managingRemoteServer) loadRemoteServicesStatus(managingRemoteServer.id) })
   const handleRemoteRemoveNginx = (serverId: number) => streamRemoteOp(`/api/admin/remote/nginx/remove-stream?server_id=${serverId}`, t('servers.removeNginx'), () => { loadRemoteServerStatusToCache(serverId, true); if (managingRemoteServer) loadRemoteServicesStatus(managingRemoteServer.id) })
-  const handleAgentUpgrade = (serverId: number) => streamRemoteOp(`/api/admin/remote/agent/upgrade-stream?server_id=${serverId}`, t('servers.upgradeAgentAction'))
+  const handleAgentUpgrade = (serverId: number) => streamRemoteOp(
+    `/api/admin/remote/agent/upgrade-stream?server_id=${serverId}`,
+    t('servers.upgradeAgentAction'),
+    () => {
+      // 升级流结束后立刻刷:agent 重启窗口里 xray 状态查询会落空 → 灰色化,缓存 5min 不刷新版本号也不更新。
+      // 用 invalidate + 主动 refetch 双保险,5s 后再做一次让 agent 真正起来后的版本能拿到。
+      queryClient.invalidateQueries({ queryKey: ['agent-version-info', serverId] })
+      loadRemoteServerStatusToCache(serverId, true)
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ['agent-version-info', serverId] })
+        loadRemoteServerStatusToCache(serverId, true)
+      }, 5000)
+    }
+  )
 
   // 单台 agent 升级 stream,把进度写进 upgradeAllProgress[serverId]。返回是否成功。供"一键升级所有 agent"复用。
   const streamUpgradeOneAgent = async (serverId: number): Promise<boolean> => {
@@ -568,14 +581,28 @@ function XrayServersPage() {
         if (cur && cur.status === 'running') return { ...prev, [serverId]: { ...cur, status: 'success' } }
         return prev
       })
+      // 升级流跑完(成功或失败)立刻 invalidate 这台服务器的 version-info 缓存。
+      // 5s 后再 invalidate 一次,等 agent 真正重启 + 主控 probe 拿到新版本号 → chip 文案 + 红点自动更新。
+      // 不加这两次 invalidate 的话,前端 staleTime=5min/refetchInterval=10min,
+      // 升级后最坏 10min 才能看到新版本号。
+      queryClient.invalidateQueries({ queryKey: ['agent-version-info', serverId] })
+      loadRemoteServerStatusToCache(serverId, true)
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ['agent-version-info', serverId] })
+        loadRemoteServerStatusToCache(serverId, true)
+      }, 5000)
       return ok
     } catch (error: any) {
       setUpgradeAllProgress(prev => ({ ...prev, [serverId]: { ...prev[serverId], status: 'error', message: error?.message || t('servers.unknownError') } }))
+      // 失败也 invalidate,可能部分步骤成功了 / 用户重试观察版本号变化
+      queryClient.invalidateQueries({ queryKey: ['agent-version-info', serverId] })
       return false
     }
   }
 
-  // 一键升级所有 agent:顺序逐台升级(避免并发拉 GitHub release 造成限流),实时展示每台进度。
+  // 一键升级所有 agent:并行触发,每台机器自己跑 SSE 升级流互不阻塞。
+  // GitHub release CDN 单 IP 多并发拉同一个 binary 不会限流(各服务器是不同 IP),
+  // 之前担心的"限流"是误判 — 改回串行的代价是 N 台 × ~10s,客户端体验差。
   const handleUpgradeAllAgents = async () => {
     const targets = remoteServers
     if (targets.length === 0) return
@@ -584,11 +611,17 @@ function XrayServersPage() {
     setUpgradeAllProgress(initial)
     setIsUpgradeAllDialogOpen(true)
     setUpgradeAllRunning(true)
-    let failed = 0
-    for (const s of targets) {
-      const ok = await streamUpgradeOneAgent(s.id)
-      if (!ok) failed++
-    }
+    // Promise.all + 单独 catch,失败一台不影响其他台继续
+    const results = await Promise.all(
+      targets.map(async (s) => {
+        try {
+          return await streamUpgradeOneAgent(s.id)
+        } catch {
+          return false
+        }
+      }),
+    )
+    const failed = results.filter((ok) => !ok).length
     setUpgradeAllRunning(false)
     if (failed === 0) toast.success(t('servers.upgradeAllDone', { count: targets.length }))
     else toast.error(t('servers.upgradeAllPartial', { failed, total: targets.length }))
@@ -836,6 +869,64 @@ function XrayServersPage() {
           </div>
         </PopoverContent>
       </Popover>
+    )
+  }
+
+  // AgentVersionIndicator
+  // 旁路于 RemoteServiceStatusIndicator 展示 agent 版本号 + 升级提示。
+  //   - 已知版本:显示 "agent v0.1.2";有新版时附右上角红点
+  //   - 未知版本(老 agent 不返回):显示 "agent ?",一直带红点(强烈建议升级)
+  //   - 仅 connected 状态的非联邦服务器需要,联邦的 agent 由对端管理
+  // 点击 → 走现有 handleAgentUpgrade(SSE 升级流)
+  const AgentVersionIndicator = ({ serverId, isFederated }: { serverId: number; isFederated?: boolean }) => {
+    const { data } = useQuery({
+      queryKey: ['agent-version-info', serverId],
+      queryFn: async () => {
+        const resp = await api.get(`/api/admin/remote/agent/version-info?server_id=${serverId}`)
+        return resp.data as { current?: string; latest?: string; upgrade_available?: boolean; current_error?: string; latest_error?: string }
+      },
+      enabled: !isFederated,
+      staleTime: 5 * 60 * 1000,
+      refetchInterval: 10 * 60 * 1000,
+      retry: false,
+    })
+    if (isFederated) return null
+    const current = data?.current?.trim() || ''
+    const upgradeAvailable = !!data?.upgrade_available
+    const label = current ? `v${current}` : '?'
+    const tooltipLines: string[] = []
+    tooltipLines.push(`当前: ${current ? 'v' + current : '未知 (老版本 Agent 未上报)'}`)
+    if (data?.latest) tooltipLines.push(`GitHub 最新: v${data.latest}`)
+    tooltipLines.push(upgradeAvailable ? '点击升级' : '点击重新下载 latest 并重装')
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type='button'
+            // 始终可点 — 主控的 GitHub latest 缓存可能延迟,即使 UI 显示"已是最新",
+            // 实际 GitHub 可能已经有新 release。点击会从 GitHub /releases/latest/download
+            // 直拉,主控缓存只影响 chip 文案,不影响升级动作本身。
+            onClick={() => handleAgentUpgrade(serverId)}
+            className={cn(
+              'relative flex items-center gap-1.5 text-xs px-2 py-1 rounded transition-colors cursor-pointer',
+              upgradeAvailable
+                ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400 hover:bg-amber-200 dark:hover:bg-amber-900/50'
+                : 'bg-gray-100 text-gray-600 dark:bg-gray-800 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700',
+            )}
+          >
+            <ArrowUpCircle className='w-3 h-3' />
+            Agent {label}
+            {upgradeAvailable && (
+              <span className='absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-red-500 ring-1 ring-background' />
+            )}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent>
+          <div className='space-y-0.5 text-xs'>
+            {tooltipLines.map((l, i) => <div key={i}>{l}</div>)}
+          </div>
+        </TooltipContent>
+      </Tooltip>
     )
   }
 
@@ -1111,9 +1202,10 @@ function XrayServersPage() {
                         {server.ws_connected ? <><Wifi className="h-2.5 w-2.5" />WS</> : server.fallback_to_pull ? <><RefreshCw className="h-2.5 w-2.5" />{t('servers.pullMode')}</> : <><Radio className="h-2.5 w-2.5" />HTTP</>}
                       </span>
                     )}
-                    {/* Xray / Nginx 状态指示器并入 IP 行末尾,省一行高度 */}
+                    {/* Xray / Nginx / Agent 版本指示器并入 IP 行末尾,省一行高度 */}
                     <RemoteServiceStatusIndicator status={remoteStatus?.xray} name="Xray" serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} isFederated={server.is_federated} />
                     {remoteStatus?.nginx?.installed && (<RemoteServiceStatusIndicator status={remoteStatus?.nginx} name="Nginx" serverId={server.id} isFederated={server.is_federated} />)}
+                    {server.status === 'connected' && <AgentVersionIndicator serverId={server.id} isFederated={server.is_federated} />}
                     {remoteStatus?.loading && (<span className="text-xs text-muted-foreground">{t('servers.loadingStatus')}</span>)}
                   </CardDescription>
                   {/* 紧凑信息块:实时网速单行(横排上下行) + 流量统计 + 心跳全部塞到同一面板,
@@ -1226,7 +1318,7 @@ function XrayServersPage() {
                 <TableHead className="w-[140px] max-w-[140px]">{t('servers.ipAddress')}</TableHead>
                 <TableHead className="min-w-[120px] w-[120px]">{t('servers.speedCol')}</TableHead>
                 <TableHead>{t('servers.trafficCol')}</TableHead>
-                <TableHead className="min-w-[170px] w-[170px]">{t('servers.serviceCol')}</TableHead>
+                <TableHead className="min-w-[290px] w-[290px]">{t('servers.serviceCol')}</TableHead>
                 <TableHead className="text-right min-w-[230px] w-[230px]">{t('servers.actionsCol')}</TableHead>
               </TableRow>
             </TableHeader>
@@ -1339,6 +1431,7 @@ function XrayServersPage() {
                           <>
                             <RemoteServiceStatusIndicator status={remoteStatus?.xray} name="Xray" serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} isFederated={server.is_federated} />
                             {remoteStatus?.nginx?.installed && (<RemoteServiceStatusIndicator status={remoteStatus?.nginx} name="Nginx" serverId={server.id} isFederated={server.is_federated} />)}
+                            {server.status === 'connected' && <AgentVersionIndicator serverId={server.id} isFederated={server.is_federated} />}
                           </>
                         )}
                       </div>

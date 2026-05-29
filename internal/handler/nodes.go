@@ -286,9 +286,91 @@ func (h *nodesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 安全:把每个节点的 clash_config 里 admin uuid/password 等凭据替换为本用户的凭据。
+	// 不替换 = 把 admin 凭据原样下发给所有能看到节点的普通用户(节点管理眼睛图标会显示)。
+	// routed 节点没有用户子账号的 → 完全过滤掉(用户无访问权,不该出现在列表)。
+	nodes = substituteNodesForUser(r.Context(), h.repo, username, nodes)
+
 	respondJSON(w, http.StatusOK, map[string]any{
 		"nodes": convertNodes(nodes),
 	})
+}
+
+// buildUserCredMapForCreator 给某个用户构造 (server_name, inbound_tag) → credential_json 映射,
+// 给 applyUserCredentials 用。从 user_inbound_configs 表拉,跟 PackageSubscribeHandler.buildUserCredentialMap 同源。
+//
+// 复用点:nodes.go substituteNodesForUser + subscription.go generateFromTemplate(模板订阅) 都用这个。
+// 抽成包级函数避免重复 + 也避免漏改一处的安全隐患。
+func buildUserCredMapForCreator(ctx context.Context, repo *storage.TrafficRepository, username string) map[credKey]string {
+	if username == "" {
+		return nil
+	}
+	userConfigs, err := repo.GetUserInboundConfigs(ctx, username)
+	if err != nil || len(userConfigs) == 0 {
+		return nil
+	}
+	servers, err := repo.ListRemoteServers(ctx)
+	if err != nil {
+		return nil
+	}
+	idToName := make(map[int64]string, len(servers))
+	for _, s := range servers {
+		idToName[s.ID] = s.Name
+	}
+	m := make(map[credKey]string, len(userConfigs))
+	for _, cfg := range userConfigs {
+		if name, ok := idToName[cfg.ServerID]; ok {
+			m[credKey{name, cfg.InboundTag}] = cfg.CredentialJSON
+		}
+	}
+	return m
+}
+
+// substituteNodesForUser 把节点列表里的 clash_config 替换成该用户视角的版本。
+//   - 普通节点:applyUserCredentials 改 uuid / password 等
+//   - routed 节点:buildRoutedProxyForUser 用 user_subaccounts 凭据重建(没子账号即 drop)
+// 替换/重建失败的节点保留 admin 凭据 → 这种情况是数据异常(凭据没建好),为了不让用户彻底看不到节点,
+// 退而求其次返回原样;但更典型场景(用户从未绑过该节点)已经被 ListNodes 的 username 过滤掉了。
+func substituteNodesForUser(ctx context.Context, repo *storage.TrafficRepository, username string, nodes []storage.Node) []storage.Node {
+	if len(nodes) == 0 {
+		return nodes
+	}
+	credMap := buildUserCredMapForCreator(ctx, repo, username)
+	if credMap == nil {
+		credMap = map[credKey]string{}
+	}
+	out := make([]storage.Node, 0, len(nodes))
+	for _, n := range nodes {
+		if n.NodeType == "routed" {
+			// routed 节点必须有 active 子账号才能给用户;没的话整个节点过滤掉,
+			// 避免把 admin 的 routed 父凭据(uuid)泄露给无权用户。
+			proxy, ok := buildRoutedProxyForUser(ctx, repo, n, username)
+			if !ok {
+				continue
+			}
+			if raw, err := json.Marshal(proxy); err == nil {
+				n.ClashConfig = string(raw)
+			}
+			out = append(out, n)
+			continue
+		}
+		if n.ClashConfig == "" {
+			out = append(out, n)
+			continue
+		}
+		var proxy map[string]any
+		if err := json.Unmarshal([]byte(n.ClashConfig), &proxy); err != nil {
+			// 解析失败保持原样,避免凭空丢节点;但日志记一下方便排查
+			out = append(out, n)
+			continue
+		}
+		applyUserCredentials(proxy, n, credMap)
+		if raw, err := json.Marshal(proxy); err == nil {
+			n.ClashConfig = string(raw)
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 func (h *nodesHandler) handleCreate(w http.ResponseWriter, r *http.Request) {

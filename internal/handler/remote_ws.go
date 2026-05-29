@@ -185,6 +185,42 @@ type RemoteWSConnection struct {
 	mu         sync.Mutex
 }
 
+// upgradeWindows 记录每台 server 的"升级抑制窗口"截止时间。
+// 期间该 server 的 WS 离线 / 重连不发上下线通知 — 升级本来就是 agent 必然要退出 + 重连,
+// 不抑制的话批量升级会给每台 server 各产生一对上下线通知,Telegram 风控立刻爆。
+//
+// 由 RemoteManageHandler.forwardUpgradeStream 进入升级流程前调用 MarkServerUpgrading 设置;
+// remote_ws.go 在 cleanup + handleAuth 两处 SendServer* 之前用 IsServerUpgrading 检查。
+// 窗口典型 ~90s(含 GitHub 下载 + agent 重启 + WS 重连):上限留 2min 兜底。
+var upgradeWindows sync.Map // map[int64]time.Time(serverID → upgrade window until)
+
+// MarkServerUpgrading 把一台 server 标记为"未来 d 时间内的离线/上线视为升级噪音,别通知"。
+// 同一台多次调用会用最晚的 deadline。
+func MarkServerUpgrading(serverID int64, d time.Duration) {
+	until := time.Now().Add(d)
+	if prev, ok := upgradeWindows.Load(serverID); ok {
+		if t, _ := prev.(time.Time); t.After(until) {
+			return
+		}
+	}
+	upgradeWindows.Store(serverID, until)
+}
+
+// IsServerUpgrading 返回该 server 是否仍在升级抑制窗口内。
+// 过期窗口会被 LoadAndDelete 清掉,避免 sync.Map 长尾累积。
+func IsServerUpgrading(serverID int64) bool {
+	v, ok := upgradeWindows.Load(serverID)
+	if !ok {
+		return false
+	}
+	until, _ := v.(time.Time)
+	if time.Now().Before(until) {
+		return true
+	}
+	upgradeWindows.CompareAndDelete(serverID, v)
+	return false
+}
+
 // RemoteWSHandler 处理来自远程（子）服务器的 WebSocket 连接
 type RemoteWSHandler struct {
 	repo              *storage.TrafficRepository
@@ -382,8 +418,12 @@ func (h *RemoteWSHandler) handleConnection(conn *websocket.Conn, remoteAddr stri
 			if prev, name, ip, err := h.repo.MarkRemoteServerOfflineByID(dbCtx, wsConn.ServerID); err != nil {
 				log.Printf("[Remote WS] mark offline on disconnect failed for %s: %v", wsConn.ServerName, err)
 			} else if prev == storage.RemoteServerStatusConnected {
-				log.Printf("[Remote WS] %s disconnected: marked offline, sending notification", name)
-				SendServerOfflineNotification(context.Background(), name, ip)
+				if IsServerUpgrading(wsConn.ServerID) {
+					log.Printf("[Remote WS] %s disconnected during upgrade window — suppressing offline notification", name)
+				} else {
+					log.Printf("[Remote WS] %s disconnected: marked offline, sending notification", name)
+					go SendServerOfflineNotification(context.Background(), name, ip)
+				}
 			}
 		} else {
 			log.Printf("[Remote WS] Connection for %s already replaced by newer conn; skip offline marking", wsConn.ServerName)
@@ -540,17 +580,22 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 	}
 
 	// 通知策略:
-	//   - 抢占式重连(hadPrev=true):上次的 cleanup 还没跑就被新 auth 抢了 — 一对下/上线通知,反映"用户重启 agent"
-	//   - 普通重连(prev offline,新 conn 上来):只发上线通知
-	// 通知必须用 context.Background():SendServer* 内部 go n.Send(ctx, ...) 异步,函数返回后 updateCtx 被 defer cancel,
-	// telegram HTTP 请求会被一起 abort,通知发不出去
+	//   - 抢占式重连(hadPrev=true):**不通知**。这是 supervise-daemon 双开 race / agent 升级 /
+	//     用户 rc-service restart / 网络抖动 之类的瞬态事件 — 服务器实际不算"下线",用户看到
+	//     上下线通知对刷屏是噪音(历史 BUG:LXC supervise-daemon stop/start race 触发数十次
+	//     fast reconnect → 几十对通知 → 风控)。OLD conn 的 cleanup goroutine 会检查 conns map,
+	//     看到自己已经被替换会跳过 offline 标记;新 conn 的 auth 路径(else 分支)在状态变化时
+	//     才发上线通知 — 这俩配合保证只有"真正离线 → 恢复"才有通知。
+	//   - 普通重连(prev offline,新 conn 上来):发上线通知。这是真离线 → 恢复。
 	if hadPrev {
-		log.Printf("[Remote WS] Detected fast reconnect (old conn replaced) for %s", server.Name)
-		SendServerOfflineNotification(context.Background(), server.Name, ip)
-		SendServerOnlineNotification(context.Background(), server.Name, ip)
+		log.Printf("[Remote WS] Detected fast reconnect (old conn replaced) for %s — suppressing notification pair", server.Name)
 	} else if server.Status != "connected" {
-		log.Printf("[Remote WS] %s status was %s, sending online notification", server.Name, server.Status)
-		SendServerOnlineNotification(context.Background(), server.Name, ip)
+		if IsServerUpgrading(server.ID) {
+			log.Printf("[Remote WS] %s came back online during upgrade window — suppressing online notification", server.Name)
+		} else {
+			log.Printf("[Remote WS] %s status was %s, sending online notification", server.Name, server.Status)
+			go SendServerOnlineNotification(context.Background(), server.Name, ip)
+		}
 	}
 
 	// 重置回退状态，以便当 WS 处于活动状态时拉收集器停止

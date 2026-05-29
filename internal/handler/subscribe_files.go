@@ -89,9 +89,14 @@ func (h *subscribeFilesHandler) handleList(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// 数据隔离:普通用户只看自己创建的;admin 看全部。
+	// 数据隔离:
+	//   - 普通用户:只看自己创建的
+	//   - admin:看 created_by="" / created_by=自己 / created_by 是另一个 admin。
+	//     普通用户通过"生成订阅"创建的私有订阅对 admin 不可见(避免泄露其他用户的私订阅)。
+	//   注:这里只过滤"列表"。admin 仍可通过 GET/PUT/DELETE 路径直接拿订阅 ID 操作,后台清理 / 帮用户排错时需要。
 	username := auth.UsernameFromContext(ctx)
-	if !userIsAdmin(ctx, h.repo, username) {
+	isAdmin := userIsAdmin(ctx, h.repo, username)
+	if !isAdmin {
 		filtered := make([]storage.SubscribeFile, 0, len(files))
 		for _, f := range files {
 			if f.CreatedBy == username {
@@ -99,6 +104,8 @@ func (h *subscribeFilesHandler) handleList(w http.ResponseWriter, r *http.Reques
 			}
 		}
 		files = filtered
+	} else {
+		files = filterAdminVisibleSubscribeFiles(ctx, h.repo, files, username)
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{
@@ -1380,4 +1387,35 @@ func (h *subscribeFilesHandler) handleGetSubscriptionUsers(w http.ResponseWriter
 	}
 
 	respondJSON(w, http.StatusOK, map[string]any{"users": users})
+}
+
+// filterAdminVisibleSubscribeFiles 给 admin 视角的 handleList 用 — 隐藏掉普通用户私创的订阅文件。
+// 实现:对所有 distinct created_by 一次性查 role,O(distinct creators) 次 GetUser,避免每条订阅 N+1。
+//   - created_by 空 → 保留(无主历史数据)
+//   - created_by == self(当前 admin) → 保留
+//   - created_by 是另一个 admin → 保留(admin 之间互见)
+//   - created_by 是普通用户 → 隐藏(该用户私创的"生成订阅",不应被其他 admin 看到)
+func filterAdminVisibleSubscribeFiles(ctx context.Context, repo *storage.TrafficRepository, files []storage.SubscribeFile, self string) []storage.SubscribeFile {
+	if len(files) == 0 {
+		return files
+	}
+	creators := map[string]struct{}{}
+	for _, f := range files {
+		if f.CreatedBy != "" && f.CreatedBy != self {
+			creators[f.CreatedBy] = struct{}{}
+		}
+	}
+	adminCreators := make(map[string]bool, len(creators))
+	for c := range creators {
+		if u, err := repo.GetUser(ctx, c); err == nil && u.Role == storage.RoleAdmin {
+			adminCreators[c] = true
+		}
+	}
+	out := make([]storage.SubscribeFile, 0, len(files))
+	for _, f := range files {
+		if f.CreatedBy == "" || f.CreatedBy == self || adminCreators[f.CreatedBy] {
+			out = append(out, f)
+		}
+	}
+	return out
 }

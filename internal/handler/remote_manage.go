@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -677,7 +678,181 @@ func (h *RemoteManageHandler) HandleAgentUpgradeStream(w http.ResponseWriter, r 
 		remoteSSEError(w, "invalid server_id")
 		return
 	}
-	h.forwardStreamToRemote(w, r, id, "/api/child/agent/upgrade-stream")
+	h.forwardUpgradeStream(w, r, id)
+}
+
+// forwardUpgradeStream 是升级专用版本的 SSE 转发,在 forwardStreamToRemote 基础上加了:
+//   1. 主控侧 5min 硬超时 — 老 agent 的 sseStreamCmd 会卡死,通用 forward 无 timeout 浏览器会一直转
+//   2. 升级成功检测 — 用 system-info.agent_version 前后对比;无 agent_version 字段的老 agent 退化为
+//      "ping 是否变化"(老 binary 没重启 → 旧 PID 还在响应原 conn;若新 binary 起来 → 短暂 502 然后恢复)
+//   3. 失败时往 SSE 末尾追一条 {type:"result", success:false, hint:"..."} — 前端可据此提示
+//      用户哪几台需要手工 ssh 上去跑 upgrade-agent.sh
+func (h *RemoteManageHandler) forwardUpgradeStream(w http.ResponseWriter, r *http.Request, serverID int64) {
+	const upgradeTimeout = 5 * time.Minute
+
+	server, err := h.repo.GetRemoteServer(r.Context(), serverID)
+	if err != nil {
+		remoteSSEError(w, "server not found: "+err.Error())
+		return
+	}
+	if server.Status != "connected" {
+		remoteSSEError(w, "server not connected")
+		return
+	}
+
+	// 进入升级流程前先 mark — 升级期间 agent 必然要退出 + 重连一次,WS cleanup 和 handleAuth
+	// 会跳过上下线通知,防止批量升级一台一对 → Telegram 风控爆。
+	// 窗口 2min 兜底:GitHub CDN 慢 + agent 重启 + WS 重连,正常 <30s,留够冗余。
+	MarkServerUpgrading(serverID, 2*time.Minute)
+
+	// 拿升级前的 agent_version 做对比基线(老 agent 没这个字段就空,后面用其它信号)
+	preVersion := h.probeAgentVersion(r.Context(), serverID)
+
+	ip := server.IPAddress
+	if idx := strings.LastIndex(ip, ":"); idx != -1 && !strings.Contains(ip, "[") {
+		ip = ip[:idx]
+	}
+	if strings.Contains(ip, ":") {
+		ip = "[" + ip + "]"
+	}
+	port := "23889"
+	if server.ListenPort > 0 {
+		port = fmt.Sprintf("%d", server.ListenPort)
+	}
+	childURL := fmt.Sprintf("http://%s:%s%s", ip, port, "/api/child/agent/upgrade-stream")
+	log.Printf("[Remote Manage] Forwarding upgrade stream to server %s (%s) preVersion=%q", server.Name, childURL, preVersion)
+
+	ctx, cancel := context.WithTimeout(r.Context(), upgradeTimeout)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, childURL, nil)
+	if err != nil {
+		remoteSSEError(w, "failed to create request: "+err.Error())
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+server.Token)
+	req.Header.Set("User-Agent", version.AgentUserAgent)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		remoteSSEError(w, "agent unreachable: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		remoteSSEError(w, fmt.Sprintf("agent error %d: %s", resp.StatusCode, string(body)))
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		remoteSSEError(w, "streaming not supported")
+		return
+	}
+
+	// 透传 SSE,同时记录是否看到 "Binary replaced" 标记 — 那是 agent 脚本里最后一条 echo,
+	// 看到代表脚本跑到了最后一步;没看到代表脚本中途卡死或失败。
+	sawBinaryReplaced := false
+	timeoutHit := false
+	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.Contains(line, "Binary replaced") {
+			sawBinaryReplaced = true
+		}
+		fmt.Fprintf(w, "%s\n", line)
+		flusher.Flush()
+		select {
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				timeoutHit = true
+			}
+			goto verify
+		default:
+		}
+	}
+	if ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		timeoutHit = true
+	}
+
+verify:
+	// 升级验证:等 agent 重启窗口结束,再 ping 一次 system-info 拿新版本号。
+	// 给 agent 8 秒重启时间(systemd Restart + 我们的 PromoteAllTagsOnStartup 等启动开销)。
+	time.Sleep(8 * time.Second)
+	postVersion := h.probeAgentVersion(context.Background(), serverID)
+
+	result := upgradeResult(preVersion, postVersion, sawBinaryReplaced, timeoutHit)
+	resultJSON, _ := json.Marshal(result)
+	fmt.Fprintf(w, "data: %s\n\n", resultJSON)
+	flusher.Flush()
+	log.Printf("[Remote Manage] Upgrade verification for %s: pre=%q post=%q sawReplaced=%v timeout=%v → %+v",
+		server.Name, preVersion, postVersion, sawBinaryReplaced, timeoutHit, result)
+}
+
+// probeAgentVersion GET 一次 system-info 取 agent_version,失败返回空字符串。
+// 5s 超时 — 我们只想瞄一眼,不希望卡这条主流程。
+func (h *RemoteManageHandler) probeAgentVersion(parent context.Context, serverID int64) string {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+	defer cancel()
+	body, err := h.forwardToRemoteServer(ctx, serverID, http.MethodGet, "/api/child/system/info", nil)
+	if err != nil {
+		return ""
+	}
+	var info struct {
+		AgentVersion string `json:"agent_version"`
+	}
+	if err := json.Unmarshal(body, &info); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(info.AgentVersion)
+}
+
+// upgradeResult 推导升级最终结果,根据前后版本号 + 脚本输出标记综合判断。
+// 用于追加到 SSE 末尾告诉前端是否真的升级成功了 — 这是因为 agent 自身 SSE 在卡死/部分失败场景
+// 不能保证有 type=complete/error 事件,主控这边再兜一道。
+func upgradeResult(preVersion, postVersion string, sawBinaryReplaced, timeoutHit bool) map[string]any {
+	r := map[string]any{
+		"type":         "result",
+		"pre_version":  preVersion,
+		"post_version": postVersion,
+	}
+
+	switch {
+	case postVersion != "" && preVersion != "" && postVersion != preVersion:
+		// 新版本号 ≠ 旧版本号 → agent 重启 + 新 binary 装上了 → 真升上去了
+		r["success"] = true
+		r["message"] = fmt.Sprintf("升级成功:v%s → v%s", preVersion, postVersion)
+	case postVersion != "" && preVersion == "" && sawBinaryReplaced:
+		// 旧 agent 没上报版本,但脚本完整跑完且现在能查到版本号 → 大概率成功
+		r["success"] = true
+		r["message"] = fmt.Sprintf("升级成功:agent v%s(旧版本无法识别,以脚本完成 + 当前可查为准)", postVersion)
+	case timeoutHit:
+		r["success"] = false
+		r["message"] = "升级超时(5min):agent 脚本可能卡死。请在服务器上手工跑 scripts/upgrade-agent.sh 救场"
+		r["hint"] = "old_agent_stuck"
+	case !sawBinaryReplaced:
+		r["success"] = false
+		r["message"] = "升级失败:agent 未跑到 'Binary replaced'(脚本中途出错)。请检查日志 journalctl -u mmw-agent / /var/log/mmw-agent.log,或手工 ssh 跑 upgrade-agent.sh"
+		r["hint"] = "script_aborted"
+	case preVersion != "" && postVersion == preVersion:
+		r["success"] = false
+		r["message"] = fmt.Sprintf("升级失败:版本号未变(v%s)。可能 agent 进程没真正重启,或 sseStreamCmd 卡死。请手工 ssh 跑 upgrade-agent.sh", preVersion)
+		r["hint"] = "no_restart"
+	case preVersion == "" && postVersion == "":
+		r["success"] = false
+		r["message"] = "升级状态未知:agent 老版本不上报 version,无法自动确认。建议手工 ssh 检查 /usr/local/bin/mmw-agent 时间戳"
+		r["hint"] = "unknown_old_agent"
+	default:
+		// 兜底:脚本说看到 "Binary replaced" 但版本号没变 / 没拿到,认为"大概率成功",前端可正常 toast
+		r["success"] = true
+		r["message"] = "升级看似完成(脚本跑完最后一步)"
+	}
+	return r
 }
 
 func (h *RemoteManageHandler) HandleAgentUninstallStream(w http.ResponseWriter, r *http.Request) {

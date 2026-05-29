@@ -27,6 +27,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Switch } from '@/components/ui/switch'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Badge } from '@/components/ui/badge'
@@ -75,7 +76,12 @@ type UserRow = {
   device_limit?: number
   speed_limit_override?: number | null
   device_limit_override?: number | null
+  user_short_code?: string
+  custom_user_short_code?: string
 }
+
+// 跟后端 shortCodeRe 严格保持一致(users.go)。前端做 UX 校验避免无效请求,后端兜底。
+const SHORT_CODE_RE = /^[A-Za-z0-9_-]{2,16}$/
 
 type ResetState = {
   username: string
@@ -284,6 +290,30 @@ function UsersPage() {
     onError: handleServerError,
   })
 
+  // 短码 mutation:留空 = 清自定义(回退到自动生成 user_short_code);非空必须匹配 SHORT_CODE_RE。
+  // 后端会再校验一次 + DB UNIQUE 索引兜底冲突。
+  const shortCodeMutation = useMutation({
+    mutationFn: async (payload: { username: string; short_code: string }) => {
+      if (payload.short_code !== '' && !SHORT_CODE_RE.test(payload.short_code)) {
+        throw new Error(t('toast.shortCodeInvalid', { defaultValue: '短码只能含字母 / 数字 / 下划线 / 横杠,长度 2-16' }))
+      }
+      await api.post('/api/admin/users/short-code', payload)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+      toast.success(t('toast.shortCodeUpdated', { defaultValue: '短码已更新' }))
+    },
+    onError: (err: any) => {
+      // 显式抛出的 Error(前端格式校验)直接弹 message;后端 409 / 500 走通用 handler
+      const msg = err?.message || err?.response?.data?.error || err?.response?.data?.message
+      if (msg) {
+        toast.error(msg)
+      } else {
+        handleServerError(err)
+      }
+    },
+  })
+
   const limitsMutation = useMutation({
     mutationFn: async (payload: { username: string; speed_limit_override: number | null; device_limit_override: number | null }) => {
       await api.put('/api/admin/users/limits', payload)
@@ -400,6 +430,51 @@ function UsersPage() {
                     </div>
                   ),
                   width: '180px'
+                },
+                {
+                  header: t('columns.userShortCode', { defaultValue: '用户短码' }),
+                  cell: (user) => {
+                    // 当前生效:custom 非空走 custom,否则系统自动生成的 user_short_code。
+                    // 跟后端 GetEffectiveUserShortCode 一致。
+                    const effective = user.custom_user_short_code || user.user_short_code || ''
+                    return (
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <Button
+                            variant='ghost'
+                            size='sm'
+                            className='h-7 px-2 font-mono text-xs gap-1'
+                            title={t('shortCode.editTooltip', { defaultValue: '点击编辑短码' })}
+                          >
+                            <span>{effective || '—'}</span>
+                            <Pencil className='h-3 w-3 opacity-60' />
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent className='w-72 p-3' align='start'>
+                          <Label className='text-xs'>{t('shortCode.label', { defaultValue: '用户短码' })}</Label>
+                          <Input
+                            className='h-7 text-sm font-mono mt-1'
+                            placeholder={user.user_short_code ? t('shortCode.placeholderAuto', { code: user.user_short_code, defaultValue: '留空恢复自动 ({{code}})' }) : t('shortCode.placeholderEmpty', { defaultValue: '留空使用自动短码' })}
+                            defaultValue={user.custom_user_short_code || ''}
+                            disabled={shortCodeMutation.isPending}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault()
+                                const value = (e.target as HTMLInputElement).value.trim()
+                                shortCodeMutation.mutate({ username: user.username, short_code: value })
+                              }
+                            }}
+                          />
+                          <p className='text-[10px] text-muted-foreground mt-1'>
+                            {t('shortCode.hint', {
+                              defaultValue: '回车保存。留空恢复自动短码。允许字母 / 数字 / 下划线 / 横杠,长度 2-16。',
+                            })}
+                          </p>
+                        </PopoverContent>
+                      </Popover>
+                    )
+                  },
+                  width: '140px'
                 },
                 {
                   header: t('columns.packageTraffic'),

@@ -42,8 +42,8 @@ dns:
       - https://dns.cloudflare.com/dns-query
       - https://dns.google/dns-query
   proxy-server-nameserver:
-    - https://doh.pub/dns-query
-    - https://dns.alidns.com/dns-query
+    - https://120.53.53.53/dns-query
+    - https://223.5.5.5/dns-query
   respect-rules: true
 geo-auto-update: true
 geo-update-interval: 24
@@ -317,18 +317,32 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 模板生成：如果订阅绑定了 V3 模板，使用模板动态生成配置
+	// 模板生成：
+	//   - 订阅本身绑了模板 → 用订阅绑定的模板
+	//   - 没绑但系统配了默认模板 → 用系统默认模板
+	//   - 两个都没 → 走静态文件路径(原行为)
 	var data []byte
 	fromTemplate := false
-	if hasSubscribeFile && subscribeFile.TemplateFilename != "" {
-		stepStart = time.Now()
-		templateData, genErr := h.generateFromTemplate(r.Context(), subscribeFile)
-		if genErr != nil {
-			logger.Info("[Subscription] 模板生成失败，回退到原始文件", "error", genErr, "template", subscribeFile.TemplateFilename)
-		} else {
-			data = templateData
-			fromTemplate = true
-			logger.Info("[⏱️ 耗时监测] 模板生成完成", "step", "template_generate", "duration_ms", time.Since(stepStart).Milliseconds(), "bytes", len(data))
+	if hasSubscribeFile {
+		effectiveTemplate := subscribeFile.TemplateFilename
+		if effectiveTemplate == "" && h.repo != nil {
+			if cfg, cerr := h.repo.GetSystemConfig(r.Context()); cerr == nil && cfg.DefaultTemplateFilename != "" {
+				effectiveTemplate = cfg.DefaultTemplateFilename
+				logger.Info("[Subscription] 订阅未绑定模板，使用系统默认模板", "template", effectiveTemplate)
+			}
+		}
+		if effectiveTemplate != "" {
+			stepStart = time.Now()
+			sfForGen := subscribeFile
+			sfForGen.TemplateFilename = effectiveTemplate
+			templateData, genErr := h.generateFromTemplate(r.Context(), sfForGen)
+			if genErr != nil {
+				logger.Info("[Subscription] 模板生成失败，回退到原始文件", "error", genErr, "template", effectiveTemplate)
+			} else {
+				data = templateData
+				fromTemplate = true
+				logger.Info("[⏱️ 耗时监测] 模板生成完成", "step", "template_generate", "duration_ms", time.Since(stepStart).Milliseconds(), "bytes", len(data))
+			}
 		}
 	}
 	_ = fromTemplate
@@ -733,24 +747,45 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", contentType)
 
-	// 远程服务器流量统计（基于 subscribe_file 的 stats_server_ids 和 traffic_limit）
+	// 远程服务器流量统计:
+	//   - 订阅创建者是普通用户且绑了套餐 → 用套餐口径(pkg.TrafficLimitBytes + 用户已用 × multiplier),
+	//     跟"流量信息"页一致,避免把全平台所有服务器流量塞进 subscription-userinfo。
+	//   - admin / 无套餐 / 找不到用户 → 沿用 stats_server_ids 那套老逻辑。
 	remoteTrafficLimit, remoteTrafficUsed := int64(0), int64(0)
 	if hasSubscribeFile && h.repo != nil {
-		var serverIDs []int64
-		if subscribeFile.StatsServerIDs != "" {
-			for _, idStr := range strings.Split(subscribeFile.StatsServerIDs, ",") {
-				idStr = strings.TrimSpace(idStr)
-				if id, err := strconv.ParseInt(idStr, 10, 64); err == nil && id > 0 {
-					serverIDs = append(serverIDs, id)
+		creator := strings.TrimSpace(subscribeFile.CreatedBy)
+		usedPackageScope := false
+		if creator != "" {
+			if user, uerr := h.repo.GetUser(r.Context(), creator); uerr == nil && user.Role != storage.RoleAdmin && user.PackageID > 0 {
+				if pkg, perr := h.repo.GetPackage(r.Context(), user.PackageID); perr == nil && pkg != nil {
+					remoteTrafficLimit = pkg.TrafficLimitBytes
+					if raw, terr := h.repo.GetUserTotalTraffic(r.Context(), creator); terr == nil {
+						remoteTrafficUsed = raw * pkg.TrafficMultiplier()
+					}
+					usedPackageScope = true
 				}
 			}
 		}
-		if len(serverIDs) > 0 {
-			remoteTrafficLimit, remoteTrafficUsed, _ = h.repo.GetRemoteServerTrafficTotals(r.Context(), serverIDs)
-		} else {
-			remoteTrafficLimit, remoteTrafficUsed, _ = h.repo.GetAllRemoteServersTrafficTotals(r.Context())
-		}
-		if subscribeFile.TrafficLimit != nil {
+		if !usedPackageScope {
+			var serverIDs []int64
+			if subscribeFile.StatsServerIDs != "" {
+				for _, idStr := range strings.Split(subscribeFile.StatsServerIDs, ",") {
+					idStr = strings.TrimSpace(idStr)
+					if id, err := strconv.ParseInt(idStr, 10, 64); err == nil && id > 0 {
+						serverIDs = append(serverIDs, id)
+					}
+				}
+			}
+			if len(serverIDs) > 0 {
+				remoteTrafficLimit, remoteTrafficUsed, _ = h.repo.GetRemoteServerTrafficTotals(r.Context(), serverIDs)
+			} else {
+				remoteTrafficLimit, remoteTrafficUsed, _ = h.repo.GetAllRemoteServersTrafficTotals(r.Context())
+			}
+			if subscribeFile.TrafficLimit != nil {
+				remoteTrafficLimit = int64(*subscribeFile.TrafficLimit * 1024 * 1024 * 1024)
+			}
+		} else if subscribeFile.TrafficLimit != nil {
+			// 套餐口径下,如果订阅自带 traffic_limit 覆盖,以覆盖为准
 			remoteTrafficLimit = int64(*subscribeFile.TrafficLimit * 1024 * 1024 * 1024)
 		}
 	}
@@ -825,9 +860,32 @@ func (h *SubscriptionHandler) generateFromTemplate(ctx context.Context, subscrib
 		return nil, fmt.Errorf("读取模板文件失败: %w", err)
 	}
 
-	nodes, err := h.repo.ListAllNodes(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("获取节点列表失败: %w", err)
+	// 节点池选择:
+	//   - 订阅创建者是普通用户且绑了套餐 → 仅套餐内的节点(避免普通用户订阅里出现他没买的节点)
+	//   - 订阅创建者是管理员 / 普通用户没套餐 / 没找到用户 → 沿用旧行为(所有节点)
+	// 这跟 routes/nodes.index.tsx 普通用户的"自己导入 + 套餐"视图一致,符合用户预期。
+	var nodes []storage.Node
+	creator := strings.TrimSpace(subscribeFile.CreatedBy)
+	restrictToPackage := false
+	if creator != "" {
+		if user, uerr := h.repo.GetUser(ctx, creator); uerr == nil && user.Role != storage.RoleAdmin && user.PackageID > 0 {
+			if pkg, perr := h.repo.GetPackage(ctx, user.PackageID); perr == nil && pkg != nil {
+				restrictToPackage = true
+				nodes = make([]storage.Node, 0, len(pkg.Nodes))
+				for _, nid := range pkg.Nodes {
+					if pn, nerr := h.repo.GetNodeByID(ctx, nid); nerr == nil {
+						nodes = append(nodes, pn)
+					}
+				}
+			}
+		}
+	}
+	if !restrictToPackage {
+		allNodes, lerr := h.repo.ListAllNodes(ctx)
+		if lerr != nil {
+			return nil, fmt.Errorf("获取节点列表失败: %w", lerr)
+		}
+		nodes = allNodes
 	}
 
 	selectedTagsMap := make(map[string]bool)
@@ -841,17 +899,42 @@ func (h *SubscriptionHandler) generateFromTemplate(ctx context.Context, subscrib
 		nodeIDToName[node.ID] = node.NodeName
 	}
 
+	// 凭据替换基础设施 — 普通用户只能拿到自己的 uuid/password/auth,不能下发 admin 凭据。
+	//   - 普通节点:applyUserCredentials 按协议主键覆写
+	//   - routed 节点:buildRoutedProxyForUser 用 user_subaccounts 重建 proxy
+	// admin 创建的订阅不走这条路径(用 admin 自己的凭据正常)。
+	var credMap map[credKey]string
+	if creator != "" && restrictToPackage {
+		credMap = buildUserCredMapForCreator(ctx, h.repo, creator)
+	}
+
 	var proxies []map[string]any
 	for _, node := range nodes {
-		if !node.Enabled || node.ClashConfig == "" {
+		if !node.Enabled {
 			continue
 		}
 		if hasTagFilter && !node.HasAnyTag(selectedTagsMap) {
 			continue
 		}
 		var proxyConfig map[string]any
-		if err := json.Unmarshal([]byte(node.ClashConfig), &proxyConfig); err != nil {
-			continue
+		if restrictToPackage && node.NodeType == "routed" {
+			// routed:必须有 active 子账号才能给该用户;没的话整个节点过滤掉,
+			// 否则会泄露 admin 在父节点的 uuid。
+			built, ok := buildRoutedProxyForUser(ctx, h.repo, node, creator)
+			if !ok {
+				continue
+			}
+			proxyConfig = built
+		} else {
+			if node.ClashConfig == "" {
+				continue
+			}
+			if err := json.Unmarshal([]byte(node.ClashConfig), &proxyConfig); err != nil {
+				continue
+			}
+			if credMap != nil {
+				applyUserCredentials(proxyConfig, node, credMap)
+			}
 		}
 		proxyConfig["name"] = node.NodeName
 		if node.ChainProxyNodeID != nil {
@@ -861,7 +944,7 @@ func (h *SubscriptionHandler) generateFromTemplate(ctx context.Context, subscrib
 		}
 		proxies = append(proxies, proxyConfig)
 	}
-	logger.Info("[模板生成] 节点筛选完成", "total", len(nodes), "filtered", len(proxies), "tag_filter", hasTagFilter)
+	logger.Info("[模板生成] 节点筛选完成", "total", len(nodes), "filtered", len(proxies), "tag_filter", hasTagFilter, "restricted_to_package", restrictToPackage)
 
 	if len(proxies) == 0 {
 		return nil, errors.New("无可用节点")

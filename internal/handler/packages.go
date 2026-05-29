@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"miaomiaowux/internal/storage"
@@ -311,83 +312,117 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 	log.Printf("[PackageUpdate] Syncing inbound users for package %d: %d added nodes, %d removed nodes, %d users",
 		packageID, len(addedNodes), len(removedNodes), len(targetUsers))
 
-	affectedServers := map[int64]bool{}
+	// 只 routed 节点改 routing rules 才需要重启 xray;非 routed 的 add-client / remove-client
+	// 由 agent 走 HandlerService 热更新,运行态立即生效。同步路径上每台少 ~3s。
+	var mu sync.Mutex
+	restartNeeded := map[int64]bool{}
+	// per-server 收集 routed 节点的 batch items(addedNodes 路径),阶段二 per-server 一次性提交。
+	routedBatch := map[int64][]routedBatchItem{}
+	// 用户间互不影响 + 节点间互不影响 → 全部并发跑。
+	// agent 端 inboundsMu 自动同服务器顺序化,master 这边不需要 per-server 锁。
+	var bindWg sync.WaitGroup
 	for _, user := range targetUsers {
 		for _, nodeID := range addedNodes {
-			node, err := h.repo.GetNodeByID(ctx, nodeID)
-			if err != nil {
-				log.Printf("[PackageUpdate] Failed to get node %d: %v", nodeID, err)
-				continue
-			}
-			// routed 节点:走子账号路径,跳过物理 inbound 那套
-			if node.NodeType == "routed" {
-				if srv, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer); err == nil {
-					affectedServers[srv.ID] = true
+			bindWg.Add(1)
+			go func(user storage.User, nodeID int64) {
+				defer bindWg.Done()
+				node, err := h.repo.GetNodeByID(ctx, nodeID)
+				if err != nil {
+					log.Printf("[PackageUpdate] Failed to get node %d: %v", nodeID, err)
+					return
 				}
-				if err := addUserToRoutedNode(ctx, h.remoteManage, h.repo, user, node.ID); err != nil {
-					log.Printf("[PackageUpdate] add user %s to routed node %d failed: %v", user.Username, node.ID, err)
+				if node.NodeType == "routed" {
+					if srv, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer); err == nil {
+						mu.Lock()
+						restartNeeded[srv.ID] = true
+						mu.Unlock()
+					}
+					item, err := collectRoutedBatchItem(ctx, h.remoteManage, h.repo, user, node.ID)
+					if err != nil {
+						log.Printf("[PackageUpdate] collect routed item user=%s node=%d failed: %v", user.Username, node.ID, err)
+						return
+					}
+					if item != nil {
+						mu.Lock()
+						routedBatch[item.ServerID] = append(routedBatch[item.ServerID], *item)
+						mu.Unlock()
+					}
+					return
 				}
-				continue
-			}
-			if node.InboundTag == "" || node.OriginalServer == "" {
-				continue
-			}
-			server, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer)
-			if err != nil {
-				log.Printf("[PackageUpdate] Failed to find server %s: %v", node.OriginalServer, err)
-				continue
-			}
-			affectedServers[server.ID] = true
-			if err := addUserToInbound(ctx, h.remoteManage, h.repo, user, server.ID, node.InboundTag); err != nil {
-				log.Printf("[PackageUpdate] Failed to add user %s to inbound %s on server %d: %v",
-					user.Username, node.InboundTag, server.ID, err)
-			}
+				if node.InboundTag == "" || node.OriginalServer == "" {
+					return
+				}
+				server, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer)
+				if err != nil {
+					log.Printf("[PackageUpdate] Failed to find server %s: %v", node.OriginalServer, err)
+					return
+				}
+				if err := addUserToInbound(ctx, h.remoteManage, h.repo, user, server.ID, node.InboundTag); err != nil {
+					log.Printf("[PackageUpdate] Failed to add user %s to inbound %s on server %d: %v",
+						user.Username, node.InboundTag, server.ID, err)
+				}
+			}(user, nodeID)
 		}
 
 		for _, nodeID := range removedNodes {
-			node, err := h.repo.GetNodeByID(ctx, nodeID)
-			if err != nil {
-				continue
-			}
-			// routed 节点:走子账号反向路径
-			if node.NodeType == "routed" {
-				if srv, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer); err == nil {
-					affectedServers[srv.ID] = true
+			bindWg.Add(1)
+			go func(user storage.User, nodeID int64) {
+				defer bindWg.Done()
+				node, err := h.repo.GetNodeByID(ctx, nodeID)
+				if err != nil {
+					return
 				}
-				if err := removeUserFromRoutedNode(ctx, h.remoteManage, h.repo, user.Username, node.ID); err != nil {
-					log.Printf("[PackageUpdate] remove user %s from routed node %d failed: %v", user.Username, node.ID, err)
+				if node.NodeType == "routed" {
+					if srv, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer); err == nil {
+						mu.Lock()
+						restartNeeded[srv.ID] = true
+						mu.Unlock()
+					}
+					if err := removeUserFromRoutedNode(ctx, h.remoteManage, h.repo, user.Username, node.ID); err != nil {
+						log.Printf("[PackageUpdate] remove user %s from routed node %d failed: %v", user.Username, node.ID, err)
+					}
+					return
 				}
-				continue
-			}
-			if node.InboundTag == "" || node.OriginalServer == "" {
-				continue
-			}
-			server, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer)
-			if err != nil {
-				continue
-			}
-			affectedServers[server.ID] = true
-			cfg, err := h.repo.GetUserInboundConfig(ctx, user.Username, server.ID, node.InboundTag)
-			if err != nil {
-				continue
-			}
-			if err := removeUserFromInbound(ctx, h.remoteManage, *cfg); err != nil {
-				log.Printf("[PackageUpdate] Failed to remove user %s from inbound %s on server %d: %v",
-					user.Username, cfg.InboundTag, cfg.ServerID, err)
-			}
-			_ = h.repo.DeleteUserInboundConfig(ctx, user.Username, server.ID, node.InboundTag)
+				if node.InboundTag == "" || node.OriginalServer == "" {
+					return
+				}
+				server, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer)
+				if err != nil {
+					return
+				}
+				cfg, err := h.repo.GetUserInboundConfig(ctx, user.Username, server.ID, node.InboundTag)
+				if err != nil {
+					return
+				}
+				if err := removeUserFromInbound(ctx, h.remoteManage, *cfg); err != nil {
+					log.Printf("[PackageUpdate] Failed to remove user %s from inbound %s on server %d: %v",
+						user.Username, cfg.InboundTag, cfg.ServerID, err)
+				}
+				_ = h.repo.DeleteUserInboundConfig(ctx, user.Username, server.ID, node.InboundTag)
+			}(user, nodeID)
 		}
+	}
+	bindWg.Wait()
 
-		if h.pusher != nil {
-			h.pusher.PushToAllServersForUser(ctx, user.Username)
+	// 阶段二 — per-server 并行调 batch-apply(新 agent 1 次 round-trip / 老 agent fallback)。
+	var routeWg sync.WaitGroup
+	for serverID, items := range routedBatch {
+		routeWg.Add(1)
+		go func(sid int64, list []routedBatchItem) {
+			defer routeWg.Done()
+			_ = applyRoutedBatchOrFallback(ctx, h.remoteManage, h.repo, sid, list, "PackageUpdate")
+		}(serverID, items)
+	}
+	routeWg.Wait()
+
+	// limiter push 后台异步,不阻塞响应
+	if h.pusher != nil {
+		for _, user := range targetUsers {
+			go h.pusher.PushToAllServersForUser(context.Background(), user.Username)
 		}
 	}
-	// 全部用户处理完后,统一对每台受影响服务器重启 xray —— routing rules 改了不重启不生效
-	for sid := range affectedServers {
-		if err := h.remoteManage.restartXrayWithRecovery(ctx, sid, "PackageUpdate"); err != nil {
-			log.Printf("[PackageUpdate] restart xray on server %d failed: %v", sid, err)
-		}
-	}
+
+	restartXrayInParallel(ctx, h.remoteManage, restartNeeded, "PackageUpdate")
 }
 
 // PackageDeleteHandler 处理删除包模板
@@ -404,42 +439,55 @@ func NewPackageDeleteHandler(repo *storage.TrafficRepository, remoteManage *Remo
 // unbindUserPackage 解除单个用户的套餐绑定:从入站移除凭据、删本地入站配置、推送 limiter、
 // 清空 package_id,并删除该用户残留的套餐订阅(历史 auto-gen)。best-effort,只记日志。
 func unbindUserPackage(ctx context.Context, repo *storage.TrafficRepository, remoteManage *RemoteManageHandler, pusher *LimiterConfigPusher, username string) {
-	affectedServers := map[int64]bool{}
+	var mu sync.Mutex
+	// 只 routed 路径(改 routing rules)需要重启;普通 inbound remove-client 由 agent 热更新。
+	restartNeeded := map[int64]bool{}
+
+	// inbound 移除 + routed 下线并发执行 — 每条目独立,失败只 log。
+	var wg sync.WaitGroup
+
 	configs, err := repo.GetUserInboundConfigs(ctx, username)
 	if err != nil {
 		log.Printf("[PackageUnbind] 获取用户 %s 入站配置失败: %v", username, err)
 	}
 	for _, cfg := range configs {
-		affectedServers[cfg.ServerID] = true
-		if err := removeUserFromInbound(ctx, remoteManage, cfg); err != nil {
-			log.Printf("[PackageUnbind] 从入站 %s(server %d)移除用户 %s 失败: %v", cfg.InboundTag, cfg.ServerID, username, err)
-		}
+		wg.Add(1)
+		go func(cfg storage.UserInboundConfig) {
+			defer wg.Done()
+			if err := removeUserFromInbound(ctx, remoteManage, cfg); err != nil {
+				log.Printf("[PackageUnbind] 从入站 %s(server %d)移除用户 %s 失败: %v", cfg.InboundTag, cfg.ServerID, username, err)
+			}
+		}(cfg)
 	}
-	if err := repo.DeleteUserInboundConfigs(ctx, username); err != nil {
-		log.Printf("[PackageUnbind] 删除用户 %s 入站配置记录失败: %v", username, err)
-	}
+
 	// 子账号路径:从所有 active routed 节点下线(凭据保留,续费可恢复)
 	subaccs, _ := repo.ListUserSubaccounts(ctx, username)
 	for _, sa := range subaccs {
 		if !sa.IsActive {
 			continue
 		}
-		// 取 routed 节点的服务器,统一进 affectedServers
-		if node, err := repo.GetNodeByID(ctx, sa.RoutedNodeID); err == nil && node.OriginalServer != "" {
-			if srv, err := repo.GetRemoteServerByName(ctx, node.OriginalServer); err == nil {
-				affectedServers[srv.ID] = true
+		wg.Add(1)
+		go func(routedNodeID int64) {
+			defer wg.Done()
+			if node, err := repo.GetNodeByID(ctx, routedNodeID); err == nil && node.OriginalServer != "" {
+				if srv, err := repo.GetRemoteServerByName(ctx, node.OriginalServer); err == nil {
+					mu.Lock()
+					restartNeeded[srv.ID] = true
+					mu.Unlock()
+				}
 			}
-		}
-		if err := removeUserFromRoutedNode(ctx, remoteManage, repo, username, sa.RoutedNodeID); err != nil {
-			log.Printf("[PackageUnbind] routed node %d 下线用户 %s 失败: %v", sa.RoutedNodeID, username, err)
-		}
+			if err := removeUserFromRoutedNode(ctx, remoteManage, repo, username, routedNodeID); err != nil {
+				log.Printf("[PackageUnbind] routed node %d 下线用户 %s 失败: %v", routedNodeID, username, err)
+			}
+		}(sa.RoutedNodeID)
 	}
-	// 改完 inbound clients + routing rule 必须重启 xray 才生效
-	for sid := range affectedServers {
-		if err := remoteManage.restartXrayWithRecovery(ctx, sid, "PackageUnbind"); err != nil {
-			log.Printf("[PackageUnbind] restart xray on server %d failed: %v", sid, err)
-		}
+	wg.Wait()
+
+	if err := repo.DeleteUserInboundConfigs(ctx, username); err != nil {
+		log.Printf("[PackageUnbind] 删除用户 %s 入站配置记录失败: %v", username, err)
 	}
+
+	restartXrayInParallel(ctx, remoteManage, restartNeeded, "PackageUnbind")
 	if pusher != nil {
 		go pusher.PushToAllServersForUser(context.Background(), username)
 	}
@@ -698,45 +746,86 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			log.Printf("[PackageAssign] Failed to get user: %v", err)
 		} else {
 			var warnings []string
-			affectedServers := map[int64]bool{} // 改了路由 / inbound 的服务器,循环结束后统一重启 xray
+			var mu sync.Mutex
+			// 只收集"必须重启 xray 才能让改动生效"的服务器:
+			//   - routed 节点:改了 routing rules → 必须重启
+			//   - 非 routed 节点:add-client 已由 agent 走 HandlerService 热更新(replaceRuntimeInbound)→ 不需要重启
+			// 早先的版本无差别对所有受影响服务器重启,跨 5 台机器串行能多花 15s。
+			restartNeeded := map[int64]bool{}
+			// per-server 收集 routed 节点的 batch items。
+			// 新 agent 支持 /api/child/batch-apply → 同 server 所有 client + routing 改动一次 round-trip;
+			// 老 agent 不支持 → applyRoutedBatchOrFallback 内部退到 prepareRoutedNodeForUser + applyRoutingAdditionsBatch。
+			routedBatch := map[int64][]routedBatchItem{}
+
+			// 节点绑定并发跑 — 普通 inbound 节点 agent 锁内并发安全;routed 节点这里只算 cred,
+			// 不调 agent / 不写 DB,真正提交放在阶段二(per-server batch)。
+			var bindWg sync.WaitGroup
 			for _, nodeID := range pkg.Nodes {
-				node, err := h.repo.GetNodeByID(ctx, nodeID)
-				if err != nil {
-					log.Printf("[PackageAssign] Failed to get node %d: %v", nodeID, err)
-					continue
-				}
-				// routed 节点:开子账号(自动复用 saved credential 续费场景)
-				if node.NodeType == "routed" {
-					if srv, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer); err == nil {
-						affectedServers[srv.ID] = true
+				bindWg.Add(1)
+				go func(nodeID int64) {
+					defer bindWg.Done()
+					node, err := h.repo.GetNodeByID(ctx, nodeID)
+					if err != nil {
+						log.Printf("[PackageAssign] Failed to get node %d: %v", nodeID, err)
+						return
 					}
-					if err := addUserToRoutedNode(ctx, h.remoteManage, h.repo, user, node.ID); err != nil {
-						log.Printf("[PackageAssign] routed node %d failed for user %s: %v", node.ID, req.Username, err)
-						warnings = append(warnings, fmt.Sprintf("路由出站 %s 添加用户失败", node.NodeName))
+					if node.NodeType == "routed" {
+						if srv, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer); err == nil {
+							mu.Lock()
+							restartNeeded[srv.ID] = true
+							mu.Unlock()
+						}
+						item, err := collectRoutedBatchItem(ctx, h.remoteManage, h.repo, user, node.ID)
+						if err != nil {
+							log.Printf("[PackageAssign] routed node %d collect failed for user %s: %v", node.ID, req.Username, err)
+							mu.Lock()
+							warnings = append(warnings, fmt.Sprintf("路由出站 %s 添加用户失败", node.NodeName))
+							mu.Unlock()
+							return
+						}
+						if item != nil {
+							mu.Lock()
+							routedBatch[item.ServerID] = append(routedBatch[item.ServerID], *item)
+							mu.Unlock()
+						}
+						return
 					}
-					continue
-				}
-				if node.InboundTag == "" || node.OriginalServer == "" {
-					continue
-				}
-				server, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer)
-				if err != nil {
-					log.Printf("[PackageAssign] Failed to find server %s: %v", node.OriginalServer, err)
-					continue
-				}
-				affectedServers[server.ID] = true
-				if err := addUserToInbound(ctx, h.remoteManage, h.repo, user, server.ID, node.InboundTag); err != nil {
-					log.Printf("[PackageAssign] Failed to add user %s to inbound %s on server %d: %v",
-						req.Username, node.InboundTag, server.ID, err)
-					warnings = append(warnings, fmt.Sprintf("节点 %s 添加用户失败", node.NodeName))
-				}
+					if node.InboundTag == "" || node.OriginalServer == "" {
+						return
+					}
+					server, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer)
+					if err != nil {
+						log.Printf("[PackageAssign] Failed to find server %s: %v", node.OriginalServer, err)
+						return
+					}
+					if err := addUserToInbound(ctx, h.remoteManage, h.repo, user, server.ID, node.InboundTag); err != nil {
+						log.Printf("[PackageAssign] Failed to add user %s to inbound %s on server %d: %v",
+							req.Username, node.InboundTag, server.ID, err)
+						mu.Lock()
+						warnings = append(warnings, fmt.Sprintf("节点 %s 添加用户失败", node.NodeName))
+						mu.Unlock()
+					}
+				}(nodeID)
 			}
-			// 改完路由必须重启 xray 才生效;改 inbound clients 也走重启避免运行时与 config 不一致
-			for sid := range affectedServers {
-				if err := h.remoteManage.restartXrayWithRecovery(ctx, sid, "PackageAssign"); err != nil {
-					log.Printf("[PackageAssign] restart xray on server %d failed: %v", sid, err)
-				}
+			bindWg.Wait()
+
+			// 阶段二 — per-server 并行调 batch-apply(新 agent 1 次 round-trip / 老 agent fallback)。
+			var routeWg sync.WaitGroup
+			for serverID, items := range routedBatch {
+				routeWg.Add(1)
+				go func(sid int64, list []routedBatchItem) {
+					defer routeWg.Done()
+					ws := applyRoutedBatchOrFallback(ctx, h.remoteManage, h.repo, sid, list, "PackageAssign")
+					if len(ws) > 0 {
+						mu.Lock()
+						warnings = append(warnings, ws...)
+						mu.Unlock()
+					}
+				}(serverID, items)
 			}
+			routeWg.Wait()
+
+			restartXrayInParallel(ctx, h.remoteManage, restartNeeded, "PackageAssign")
 			if len(warnings) > 0 {
 				if h.pusher != nil {
 					go h.pusher.PushToAllServersForUser(context.Background(), req.Username)
@@ -871,6 +960,26 @@ func (h *PackageAssignHandler) loadDefaultTemplate(ctx context.Context) (string,
 }
 
 // addUserToInbound 获取远程入站配置，添加用户凭据，然后重新提交
+// restartXrayInParallel 并发对多台服务器做 xray restart-with-recovery,等全部完成后返回。
+// 单台 restartXrayWithRecovery 至少 2s(verify wait),5 台串行 ≥10s;并发后整体只看最慢一台。
+// 失败只记日志,不打断 —— 调用方语义里"重启 best-effort",和原顺序版本一致。
+func restartXrayInParallel(ctx context.Context, rm *RemoteManageHandler, serverIDs map[int64]bool, logPrefix string) {
+	if len(serverIDs) == 0 {
+		return
+	}
+	var wg sync.WaitGroup
+	for sid := range serverIDs {
+		wg.Add(1)
+		go func(sid int64) {
+			defer wg.Done()
+			if err := rm.restartXrayWithRecovery(ctx, sid, logPrefix); err != nil {
+				log.Printf("[%s] restart xray on server %d failed: %v", logPrefix, sid, err)
+			}
+		}(sid)
+	}
+	wg.Wait()
+}
+
 func addUserToInbound(ctx context.Context, rm *RemoteManageHandler, repo *storage.TrafficRepository, user storage.User, serverID int64, inboundTag string) error {
 	// 只读 inbound 列表,目的是拿到 protocol/method/flow 这些构造 credential 必需的字段。
 	// 不再在主控这边修改 inbound:实际的"加 client"由 agent 在 inboundsMu 锁内原子完成,

@@ -21,6 +21,7 @@
     "username": "Username",
     "nickname": "Nickname",
     "remark": "Remark",
+    "userShortCode": "Short Code",
     "packageTraffic": "Package / Traffic",
     "role": "Role",
     "status": "Status",
@@ -117,6 +118,13 @@
     "saving": "Saving...",
     "confirmSave": "Confirm Save"
   },
+  "shortCode": {
+    "label": "User Short Code",
+    "placeholderAuto": "Leave empty to revert to auto ({{code}})",
+    "placeholderEmpty": "Leave empty for auto-generated code",
+    "hint": "Press Enter to save. Leave empty to revert to auto. Allowed: letters / digits / underscore / hyphen, length 2-16.",
+    "editTooltip": "Click to edit short code"
+  },
   "toast": {
     "statusUpdated": "User status updated",
     "passwordReset": "Password has been reset",
@@ -125,6 +133,8 @@
     "packageUpdated": "Package updated",
     "packageWarning": "Package bound, but some node configurations failed: {{warnings}}",
     "remarkUpdated": "Remark updated",
-    "limitsUpdated": "Limits updated"
+    "limitsUpdated": "Limits updated",
+    "shortCodeUpdated": "Short code updated",
+    "shortCodeInvalid": "Short code must be letters / digits / underscore / hyphen, length 2-16"
   }
 }

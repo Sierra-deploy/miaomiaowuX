@@ -10,11 +10,27 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 
 	"miaomiaowux/internal/storage"
 )
+
+// routingMutateLocks 是 auto-detected routed 节点更新 routing rule 时的 per-server 锁。
+// 套餐绑用户路径 (packages.go) 对每个 routed 节点并发跑 addUserToRoutedNode,
+// 同台服务器多个 auto-detected routed 节点会并发跑 mutateRoutingRuleUserByOutboundTag
+// (GET routing → 本地改 → SET routing)。两个 goroutine 都拿到 v1,各自加自己的 user,
+// 后写的 SET 会覆盖先写的 SET,导致部分子用户的路由 rule 丢失。
+// 加锁后同服务器内串行,跨服务器仍并行。
+var routingMutateLocks sync.Map // map[int64]*sync.Mutex (key=serverID)
+
+func acquireRoutingMutateLock(serverID int64) *sync.Mutex {
+	m, _ := routingMutateLocks.LoadOrStore(serverID, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	return mu
+}
 
 // RoutedOutboundHandler 管理"路由出站"虚拟节点。
 // 创建时自动:
@@ -294,6 +310,10 @@ func (h *RoutedOutboundHandler) peekInboundFirstClientFlow(ctx context.Context, 
 // 用途:auto-detected routed 节点没有 marktag,agent 的 add_user_to_rule 需要 marktag,绕开它。
 // add=true 表示新增 email(去重 append);add=false 表示移除。
 func mutateRoutingRuleUserByOutboundTag(ctx context.Context, rm *RemoteManageHandler, serverID int64, outboundTag, userEmail string, add bool) error {
+	// 串行化同服务器的 GET-modify-SET,防止并发覆盖。
+	mu := acquireRoutingMutateLock(serverID)
+	defer mu.Unlock()
+
 	raw, err := rm.forwardToRemoteServer(ctx, serverID, "GET", "/api/child/routing", nil)
 	if err != nil {
 		return fmt.Errorf("get routing: %w", err)
@@ -345,9 +365,12 @@ func mutateRoutingRuleUserByOutboundTag(ctx context.Context, rm *RemoteManageHan
 	rules[matched] = rule
 	resp.Routing["rules"] = rules
 
+	// no_restart=true:批量套餐绑用户场景,主控在循环末尾会统一对受影响服务器重启,
+	// 不让 agent 为每条路由变更都串行重启一次(N 个 routed 节点能省 N×(1~3s))。
 	body, _ := json.Marshal(map[string]interface{}{
-		"action":  "set",
-		"routing": resp.Routing,
+		"action":     "set",
+		"routing":    resp.Routing,
+		"no_restart": true,
 	})
 	if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/routing", body); err != nil {
 		return fmt.Errorf("set routing: %w", err)
@@ -443,27 +466,42 @@ func removeRuleByMarktag(ctx context.Context, rm *RemoteManageHandler, serverID 
 	return nil
 }
 
-// addUserToRoutedNode 把用户 client 加进 routed 节点的父 inbound,并把 email 加入 routing rule.user[]。
-// 复用 user_subaccounts 里已保存的 credential(续费场景),否则生成新 uuid。is_active 置 1。
-//
-// 支持两种 routed 节点来源:
-//   - 老的"管理员创建路由出站"流程:routed.RoutedAdminEmail = "_admin__<id>__<label>",带 marktag,
-//     用户 email = "<username>__<id>__<label>",rule 按 marktag 定位
-//   - 自动检测路由节点(同步入站时识别出来的):RoutedAdminEmail / RoutedRuleMarktag /
-//     RoutedAdminCredential 都为空,只有 RoutedOutboundTag。用户 email = "<username>-<outboundTag>",
-//     rule 按 outboundTag 定位(走 mmwx 本地改 + agent set 替换整个 routing,绕开 agent 必须 marktag 的限制)
-func addUserToRoutedNode(ctx context.Context, rm *RemoteManageHandler, repo *storage.TrafficRepository, user storage.User, routedNodeID int64) error {
+// routingRuleAddition 描述"给某条 routing rule 加一个 user email"的待办,
+// 由 prepareRoutedNodeForUser 产出,applyRoutingAdditionsBatch 在 per-server 锁内一次性应用。
+type routingRuleAddition struct {
+	ServerID    int64
+	Marktag     string // 优先匹配
+	OutboundTag string // marktag 空时 fallback
+	UserEmail   string
+}
+
+// routedNodeUserCred 包含算 cred 后的所有上下文,供 add-client(单点 / batch)和 routing rule 改动复用。
+type routedNodeUserCred struct {
+	ServerID       int64
+	InboundTag     string
+	Marktag        string
+	OutboundTag    string
+	UserEmail      string
+	Credential     map[string]interface{}
+	CredentialJSON string
+	Username       string
+	RoutedNodeID   int64
+}
+
+// computeRoutedNodeUserCred 解析 routed 节点 + 算 email/credential(复用已存或新建)。
+// 不调 agent inbound add-client、不写 DB。供 prepareRoutedNodeForUser(单点)和 collectRoutedBatchItem(批量)共用。
+func computeRoutedNodeUserCred(ctx context.Context, rm *RemoteManageHandler, repo *storage.TrafficRepository, user storage.User, routedNodeID int64) (*routedNodeUserCred, error) {
 	routed, err := repo.GetRoutedNodeDetail(ctx, routedNodeID)
 	if err != nil {
-		return fmt.Errorf("get routed node %d: %w", routedNodeID, err)
+		return nil, fmt.Errorf("get routed node %d: %w", routedNodeID, err)
 	}
 	if routed.NodeType != "routed" {
-		return fmt.Errorf("node %d is not a routed node", routedNodeID)
+		return nil, fmt.Errorf("node %d is not a routed node", routedNodeID)
 	}
 
 	serverIDList, err := repo.ListRemoteServers(ctx)
 	if err != nil {
-		return fmt.Errorf("list servers: %w", err)
+		return nil, fmt.Errorf("list servers: %w", err)
 	}
 	var serverID int64
 	for _, s := range serverIDList {
@@ -473,7 +511,7 @@ func addUserToRoutedNode(ctx context.Context, rm *RemoteManageHandler, repo *sto
 		}
 	}
 	if serverID == 0 {
-		return fmt.Errorf("server %s not found", routed.OriginalServer)
+		return nil, fmt.Errorf("server %s not found", routed.OriginalServer)
 	}
 
 	// 算用户 email:legacy `_admin__xxx` → `<user>__xxx`;auto-detected → `<user>-<outboundTag>`
@@ -484,7 +522,7 @@ func addUserToRoutedNode(ctx context.Context, rm *RemoteManageHandler, repo *sto
 	} else if routed.RoutedOutboundTag != "" {
 		userEmail = fmt.Sprintf("%s-%s", user.Username, routed.RoutedOutboundTag)
 	} else {
-		return fmt.Errorf("routed node %d has neither admin_email nor outbound_tag", routedNodeID)
+		return nil, fmt.Errorf("routed node %d has neither admin_email nor outbound_tag", routedNodeID)
 	}
 
 	// 复用已存子账号凭据(续费/恢复路径) or 新建
@@ -523,41 +561,327 @@ func addUserToRoutedNode(ctx context.Context, rm *RemoteManageHandler, repo *sto
 		}
 	}
 
-	// 1. 加 client 到 inbound
-	if err := addClientToInbound(ctx, rm, serverID, routed.InboundTag, credential); err != nil {
-		return fmt.Errorf("add client to inbound: %w", err)
-	}
-
-	// 2. 把 email 写进路由 rule。
-	//    legacy 节点有 marktag → 走 add_user_to_rule;auto-detected 没 marktag → 拉整个 routing、
-	//    找 outboundTag 匹配的 rule、本地改 user[]、再用 set 推回去。
-	if routed.RoutedRuleMarktag != "" {
-		body, _ := json.Marshal(map[string]interface{}{
-			"action":     "add_user_to_rule",
-			"marktag":    routed.RoutedRuleMarktag,
-			"user_email": userEmail,
-		})
-		if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/routing", body); err != nil {
-			removeClientFromInbound(ctx, rm, serverID, routed.InboundTag, userEmail)
-			return fmt.Errorf("add_user_to_rule: %w", err)
-		}
-	} else {
-		if err := mutateRoutingRuleUserByOutboundTag(ctx, rm, serverID, routed.RoutedOutboundTag, userEmail, true); err != nil {
-			removeClientFromInbound(ctx, rm, serverID, routed.InboundTag, userEmail)
-			return fmt.Errorf("mutate routing(add): %w", err)
-		}
-	}
-
-	// 3. UPSERT user_subaccounts(is_active=1)
-	if _, err := repo.UpsertUserSubaccount(ctx, storage.UserSubaccount{
+	return &routedNodeUserCred{
+		ServerID:       serverID,
+		InboundTag:     routed.InboundTag,
+		Marktag:        routed.RoutedRuleMarktag,
+		OutboundTag:    routed.RoutedOutboundTag,
+		UserEmail:      userEmail,
+		Credential:     credential,
+		CredentialJSON: credJSON,
 		Username:       user.Username,
 		RoutedNodeID:   routedNodeID,
-		Email:          userEmail,
-		CredentialJSON: credJSON,
+	}, nil
+}
+
+// prepareRoutedNodeForUser 做 addUserToRoutedNode 的前置工作:算 email/cred、加 client 到 inbound、
+// UPSERT user_subaccounts。返回 routing rule 改动描述,**不动 routing**。
+// 调用方负责把所有 addition 聚合后调 applyRoutingAdditionsBatch(per-server 锁内一次 GET+SET)。
+func prepareRoutedNodeForUser(ctx context.Context, rm *RemoteManageHandler, repo *storage.TrafficRepository, user storage.User, routedNodeID int64) (*routingRuleAddition, error) {
+	info, err := computeRoutedNodeUserCred(ctx, rm, repo, user, routedNodeID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 1. 加 client 到 inbound — agent 端 inboundsMu 锁内,跨节点可并发。
+	if err := addClientToInbound(ctx, rm, info.ServerID, info.InboundTag, info.Credential); err != nil {
+		return nil, fmt.Errorf("add client to inbound: %w", err)
+	}
+
+	// 2. UPSERT user_subaccounts(is_active=1)
+	if _, err := repo.UpsertUserSubaccount(ctx, storage.UserSubaccount{
+		Username:       info.Username,
+		RoutedNodeID:   info.RoutedNodeID,
+		Email:          info.UserEmail,
+		CredentialJSON: info.CredentialJSON,
 		IsActive:       true,
 	}); err != nil {
-		log.Printf("[RoutedNode] DB upsert subaccount failed (agent ops 已完成,需排查): %v", err)
-		return fmt.Errorf("upsert subaccount: %w", err)
+		log.Printf("[RoutedNode] DB upsert subaccount failed (agent client 已加,需排查): %v", err)
+		return nil, fmt.Errorf("upsert subaccount: %w", err)
+	}
+
+	return &routingRuleAddition{
+		ServerID:    info.ServerID,
+		Marktag:     info.Marktag,
+		OutboundTag: info.OutboundTag,
+		UserEmail:   info.UserEmail,
+	}, nil
+}
+
+// routedBatchItem 批量套餐绑定路径专用:不调 agent、不写 DB,只算 cred + 描述 batch 操作。
+// 调用方收集 per-server → 一次 POST /api/child/batch-apply → 全成功后批量 UpsertUserSubaccount。
+type routedBatchItem struct {
+	ServerID       int64
+	InboundTag     string
+	Marktag        string
+	OutboundTag    string
+	UserEmail      string
+	Credential     map[string]interface{}
+	CredentialJSON string
+	Username       string
+	RoutedNodeID   int64
+}
+
+// collectRoutedBatchItem 算 cred,**不调 agent、不写 DB**,返回 batch 描述。
+func collectRoutedBatchItem(ctx context.Context, rm *RemoteManageHandler, repo *storage.TrafficRepository, user storage.User, routedNodeID int64) (*routedBatchItem, error) {
+	info, err := computeRoutedNodeUserCred(ctx, rm, repo, user, routedNodeID)
+	if err != nil {
+		return nil, err
+	}
+	return &routedBatchItem{
+		ServerID:       info.ServerID,
+		InboundTag:     info.InboundTag,
+		Marktag:        info.Marktag,
+		OutboundTag:    info.OutboundTag,
+		UserEmail:      info.UserEmail,
+		Credential:     info.Credential,
+		CredentialJSON: info.CredentialJSON,
+		Username:       info.Username,
+		RoutedNodeID:   info.RoutedNodeID,
+	}, nil
+}
+
+// ErrAgentBatchNotSupported 老 agent 没 /api/child/batch-apply 端点时返回,调用方应 fallback。
+var ErrAgentBatchNotSupported = errors.New("agent batch-apply endpoint not supported")
+
+// applyRoutedBatchOrFallback 同台 server 上的 routed 节点改动一次性发给 agent,
+// 老 agent 不支持就 fallback 到逐项 prepareRoutedNodeForUser + applyRoutingAdditionsBatch。
+// 返回收集到的人类可读 warning 列表(给前端 toast 用,空切片=全成功)。
+// label 仅用于日志(如 "PackageAssign" / "PackageUpdate")。
+func applyRoutedBatchOrFallback(ctx context.Context, rm *RemoteManageHandler, repo *storage.TrafficRepository, serverID int64, items []routedBatchItem, label string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	// 把 batchItem → user(主要拿 Username,fallback 时 prepareRoutedNodeForUser 需要 User 对象)。
+	// 简单起见这里只用 Username 字段,prepareRoutedNodeForUser 内部不依赖 user 的其它字段。
+	err := applyRoutedBatchToAgent(ctx, rm, repo, serverID, items)
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, ErrAgentBatchNotSupported) {
+		log.Printf("[%s] batch-apply server=%d failed: %v", label, serverID, err)
+		return []string{fmt.Sprintf("服务器 %d 批量绑定失败", serverID)}
+	}
+
+	// 老 agent fallback:逐项 prepareRoutedNodeForUser(每项各发 1 次 add-client + 写 DB),
+	// 然后一次 applyRoutingAdditionsBatch 把所有 routing 改动 GET+SET 推回。
+	log.Printf("[%s] agent server=%d 不支持 batch-apply,fallback per-item", label, serverID)
+	var warnings []string
+	var routingAdds []routingRuleAddition
+	for _, it := range items {
+		user := storage.User{Username: it.Username}
+		add, perr := prepareRoutedNodeForUser(ctx, rm, repo, user, it.RoutedNodeID)
+		if perr != nil {
+			log.Printf("[%s] fallback prepare failed user=%s node=%d: %v", label, it.Username, it.RoutedNodeID, perr)
+			warnings = append(warnings, fmt.Sprintf("用户 %s 路由出站绑定失败", it.Username))
+			continue
+		}
+		if add != nil {
+			routingAdds = append(routingAdds, *add)
+		}
+	}
+	if len(routingAdds) > 0 {
+		if rerr := applyRoutingAdditionsBatch(ctx, rm, serverID, routingAdds); rerr != nil {
+			log.Printf("[%s] fallback routing batch server=%d failed: %v", label, serverID, rerr)
+			warnings = append(warnings, fmt.Sprintf("服务器 %d 路由规则批量更新失败", serverID))
+		}
+	}
+	return warnings
+}
+
+// applyRoutedBatchToAgent 把同台 server 上的 routed 节点批量改动(inbound add-client + routing add-user)
+// 一次 POST /api/child/batch-apply 提交。
+//   - 成功:批量 UpsertUserSubaccount 写 DB,返回 nil
+//   - agent 不支持(404)→ 返回 ErrAgentBatchNotSupported,caller 走 prepareRoutedNodeForUser fallback
+//   - 其它失败 → 返回 wrapped error,DB 不写(下次重试幂等)
+func applyRoutedBatchToAgent(ctx context.Context, rm *RemoteManageHandler, repo *storage.TrafficRepository, serverID int64, items []routedBatchItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	// 同服务器 batch 写盘也要走 routingMutateLocks,跟 applyRoutingAdditionsBatch 串行,
+	// 避免 batch 与单点 routing mutate 并发改 routing 数组。
+	mu := acquireRoutingMutateLock(serverID)
+	defer mu.Unlock()
+
+	type batchInboundClient struct {
+		Tag    string                 `json:"tag"`
+		Client map[string]interface{} `json:"client"`
+	}
+	type batchRoutingAddition struct {
+		Marktag     string `json:"marktag,omitempty"`
+		OutboundTag string `json:"outbound_tag,omitempty"`
+		UserEmail   string `json:"user_email"`
+	}
+	type batchReq struct {
+		InboundClients       []batchInboundClient   `json:"inbound_clients,omitempty"`
+		RoutingUserAdditions []batchRoutingAddition `json:"routing_user_additions,omitempty"`
+		NoRestart            bool                   `json:"no_restart,omitempty"`
+	}
+
+	req := batchReq{NoRestart: true}
+	for _, it := range items {
+		req.InboundClients = append(req.InboundClients, batchInboundClient{
+			Tag:    it.InboundTag,
+			Client: it.Credential,
+		})
+		req.RoutingUserAdditions = append(req.RoutingUserAdditions, batchRoutingAddition{
+			Marktag:     it.Marktag,
+			OutboundTag: it.OutboundTag,
+			UserEmail:   it.UserEmail,
+		})
+	}
+
+	body, _ := json.Marshal(req)
+	raw, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/batch-apply", body)
+	if err != nil {
+		// 老 agent 没这个端点 → 路径处理由 caller fallback。检测错误信息中的 404 / not found / unknown route。
+		msg := err.Error()
+		low := strings.ToLower(msg)
+		if strings.Contains(low, "404") || strings.Contains(low, "not found") || strings.Contains(low, "method not allowed") {
+			return ErrAgentBatchNotSupported
+		}
+		return fmt.Errorf("batch-apply server=%d: %w", serverID, err)
+	}
+
+	var resp struct {
+		Success         bool     `json:"success"`
+		InboundResults  []string `json:"inbound_results"`
+		RoutingResults  []string `json:"routing_results"`
+		RuntimeWarnings []string `json:"runtime_warnings"`
+		Message         string   `json:"message"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return fmt.Errorf("parse batch-apply response: %w", err)
+	}
+	if !resp.Success {
+		return fmt.Errorf("batch-apply rejected: %s", resp.Message)
+	}
+
+	// 全部 agent ops 成功 → 批量写 DB。即使个别 item 在 agent 端返回了 "err: ..."
+	// (比如 rule 没找到),也只跳过该 item 的 upsert,不影响其它。
+	for i, it := range items {
+		if i < len(resp.InboundResults) && strings.HasPrefix(resp.InboundResults[i], "err:") {
+			log.Printf("[RoutedBatch] inbound add-client err server=%d item=%d: %s", serverID, i, resp.InboundResults[i])
+			continue
+		}
+		if i < len(resp.RoutingResults) && strings.HasPrefix(resp.RoutingResults[i], "err:") {
+			log.Printf("[RoutedBatch] routing add-user err server=%d item=%d: %s", serverID, i, resp.RoutingResults[i])
+			continue
+		}
+		if _, err := repo.UpsertUserSubaccount(ctx, storage.UserSubaccount{
+			Username:       it.Username,
+			RoutedNodeID:   it.RoutedNodeID,
+			Email:          it.UserEmail,
+			CredentialJSON: it.CredentialJSON,
+			IsActive:       true,
+		}); err != nil {
+			log.Printf("[RoutedBatch] DB upsert subaccount failed user=%s node=%d: %v", it.Username, it.RoutedNodeID, err)
+		}
+	}
+	for _, w := range resp.RuntimeWarnings {
+		log.Printf("[RoutedBatch] agent runtime warning server=%d: %s", serverID, w)
+	}
+	return nil
+}
+
+// applyRoutingAdditionsBatch 把同台服务器多个 routing rule 改动一次 GET+SET 推回。
+// 调用方应该把 additions 按 ServerID 分组后,per-server 调一次本函数。
+// 失败时 routing 未更新,但 client 已在 inbound 里 + DB 有 subaccount 记录,
+// 重试本函数即可幂等补全(去重 append email)。
+func applyRoutingAdditionsBatch(ctx context.Context, rm *RemoteManageHandler, serverID int64, additions []routingRuleAddition) error {
+	if len(additions) == 0 {
+		return nil
+	}
+	mu := acquireRoutingMutateLock(serverID)
+	defer mu.Unlock()
+
+	raw, err := rm.forwardToRemoteServer(ctx, serverID, "GET", "/api/child/routing", nil)
+	if err != nil {
+		return fmt.Errorf("get routing: %w", err)
+	}
+	var resp struct {
+		Success bool                   `json:"success"`
+		Routing map[string]interface{} `json:"routing"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return fmt.Errorf("parse routing: %w", err)
+	}
+	if resp.Routing == nil {
+		return fmt.Errorf("no routing config")
+	}
+	rules, _ := resp.Routing["rules"].([]interface{})
+
+	for _, a := range additions {
+		matched := -1
+		for i, ru := range rules {
+			r, _ := ru.(map[string]interface{})
+			if r == nil {
+				continue
+			}
+			if a.Marktag != "" {
+				if mt, _ := r["marktag"].(string); mt == a.Marktag {
+					matched = i
+					break
+				}
+			} else if a.OutboundTag != "" {
+				if t, _ := r["outboundTag"].(string); t == a.OutboundTag {
+					matched = i
+					break
+				}
+			}
+		}
+		if matched < 0 {
+			log.Printf("[RoutedBatch] rule not found server=%d marktag=%q outboundTag=%q, skip", serverID, a.Marktag, a.OutboundTag)
+			continue
+		}
+		rule := rules[matched].(map[string]interface{})
+		users, _ := rule["user"].([]interface{})
+		// 去重 append
+		exists := false
+		for _, u := range users {
+			if s, _ := u.(string); s == a.UserEmail {
+				exists = true
+				break
+			}
+		}
+		if !exists {
+			users = append(users, a.UserEmail)
+			rule["user"] = users
+		}
+		rules[matched] = rule
+	}
+	resp.Routing["rules"] = rules
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"action":     "set",
+		"routing":    resp.Routing,
+		"no_restart": true, // 主控统一在末尾 restartXrayInParallel
+	})
+	if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/routing", body); err != nil {
+		return fmt.Errorf("set routing: %w", err)
+	}
+	return nil
+}
+
+// addUserToRoutedNode 是单节点版的包装,给非套餐路径(单用户加路由出站等)用,
+// 保留 prepare 失败时已加 client 不回滚的语义 — 调用方按需 removeClient + remove subaccount。
+func addUserToRoutedNode(ctx context.Context, rm *RemoteManageHandler, repo *storage.TrafficRepository, user storage.User, routedNodeID int64) error {
+	add, err := prepareRoutedNodeForUser(ctx, rm, repo, user, routedNodeID)
+	if err != nil {
+		return err
+	}
+	if add == nil {
+		return nil
+	}
+	if err := applyRoutingAdditionsBatch(ctx, rm, add.ServerID, []routingRuleAddition{*add}); err != nil {
+		// routing 失败 → 回滚 client(保留旧语义,单节点路径用户期望"失败即清理")。
+		// DB 里 UpsertUserSubaccount 已写入 is_active=true,这里只 remove client;
+		// 下次手动重试 batch 可幂等补全 routing,DB 记录复用。
+		routed, gerr := repo.GetRoutedNodeDetail(ctx, routedNodeID)
+		if gerr == nil && routed.InboundTag != "" {
+			removeClientFromInbound(ctx, rm, add.ServerID, routed.InboundTag, add.UserEmail)
+		}
+		return err
 	}
 	return nil
 }
@@ -595,6 +919,7 @@ func removeUserFromRoutedNode(ctx context.Context, rm *RemoteManageHandler, repo
 			"action":     "remove_user_from_rule",
 			"marktag":    routed.RoutedRuleMarktag,
 			"user_email": sa.Email,
+			"no_restart": true, // 主控 PackageUnbind 在末尾统一重启,见 packages.go restartXrayInParallel
 		})
 		if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/routing", body); err != nil {
 			log.Printf("[RoutedNode] remove_user_from_rule(marktag) 失败 (continue): %v", err)
