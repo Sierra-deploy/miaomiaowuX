@@ -3568,7 +3568,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                       ? node.dbNode.protocol.toUpperCase()
                                       : (node.parsed?.type || node.dbNode?.protocol || '').toUpperCase()}
                                   </Badge>
-                                  {node.dbNode?.node_type === 'routed' && node.dbNode?.routed_outbound_tag && (
+                                  {node.dbNode?.node_type === 'routed' && node.dbNode?.routed_outbound_tag && (isAdmin || (node.dbNode?.routed_owner === 'user' && node.dbNode?.created_by === profile?.username)) && (
                                     <Tooltip>
                                       <TooltipTrigger asChild>
                                         <span className='text-[10px] text-indigo-600 dark:text-indigo-400 font-mono max-w-[110px] truncate'>
@@ -3918,7 +3918,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLSèŠ‚ç‚
                                       ? node.dbNode.protocol.toUpperCase()
                                       : (node.parsed?.type || node.dbNode?.protocol || '').toUpperCase()}
                                   </Badge>
-                                  {node.dbNode?.node_type === 'routed' && node.dbNode?.routed_outbound_tag && (
+                                  {node.dbNode?.node_type === 'routed' && node.dbNode?.routed_outbound_tag && (isAdmin || (node.dbNode?.routed_owner === 'user' && node.dbNode?.created_by === profile?.username)) && (
                                     <Tooltip>
                                       <TooltipTrigger asChild>
                                         <span className='text-[10px] text-indigo-600 dark:text-indigo-400 font-mono max-w-[110px] truncate'>

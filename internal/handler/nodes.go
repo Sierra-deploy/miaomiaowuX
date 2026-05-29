@@ -1249,7 +1249,10 @@ type nodeDTO struct {
 	ParsedConfig     string    `json:"parsed_config"`
 	ClashConfig      string    `json:"clash_config"`
 	Enabled          bool      `json:"enabled"`
-	Tag              string    `json:"tag"`
+	// Tag 字段后端仍保留(订阅生成里按 subscribe_files.selected_tags 过滤要用),但不再回前端。
+	// 节点来源(直连节点 / 手动输入 / 订阅导入)这种归类元数据对普通用户没有价值,
+	// 而管理员视角已经有 original_server / inbound_tag 等更精确的标识。
+	Tag              string    `json:"-"`
 	OriginalServer   string    `json:"original_server"`
 	OriginalDomain   string    `json:"original_domain"`
 	InboundTag       string    `json:"inbound_tag"`

@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAuthStore } from '@/stores/auth-store'
+import { profileQueryFn } from '@/lib/profile'
 import { api } from '@/lib/api'
 import { getClashProtocolColor as getProtocolColor } from '@/lib/protocol-colors'
 import {
@@ -225,6 +226,9 @@ type SavedNode = {
   tag: string
   node_type?: string
   routed_outbound_tag?: string
+  // 用于普通用户视角区分"这是我自己创建的私有路由出站":routed_owner=='user' && created_by==自己
+  routed_owner?: 'shared' | 'user' | string
+  created_by?: string
   created_at: string
   updated_at: string
 }
@@ -258,6 +262,15 @@ function SubscriptionGeneratorPage() {
   const { t } = useTranslation('subscribe')
   const { auth } = useAuthStore()
   const queryClient = useQueryClient()
+
+  // 用于路由出站标记的可见性判定:仅管理员或"自己创建的私有路由出站"才显示 ↳ marker
+  const { data: profile } = useQuery({
+    queryKey: ['profile'],
+    queryFn: profileQueryFn,
+    enabled: Boolean(auth.accessToken),
+    staleTime: 5 * 60 * 1000,
+  })
+  const isAdmin = Boolean(profile?.is_admin)
   const isMobile = useMediaQuery('(max-width: 640px)')
   const [ruleSet, setRuleSet] = useState<PredefinedRuleSetType>('balanced')
   const [selectedCategories, setSelectedCategories] = useState<string[]>([])
@@ -865,8 +878,9 @@ function SubscriptionGeneratorPage() {
     new Set(sortedEnabledNodes.map((n) => n.protocol.toLowerCase()))
   ).sort()
 
-  // 获取所有标签类型
-  const tags = Array.from(new Set(sortedEnabledNodes.map((n) => n.tag))).sort()
+  // 获取所有标签类型(过滤掉空 tag — 后端 nodeDTO 已不返回 tag 字段;
+  // 历史数据 / 兼容场景里若仍带有 tag 值,这里继续支持按 tag 筛选,不破坏老行为)
+  const tags = Array.from(new Set(sortedEnabledNodes.map((n) => n.tag).filter(Boolean))).sort()
 
   // 节点列表根据选中的协议和标签筛选
   const filteredNodes = useMemo(() => {
@@ -2531,7 +2545,7 @@ function SubscriptionGeneratorPage() {
                               >
                                 {node.protocol.toUpperCase()}
                               </Badge>
-                              {node.node_type === 'routed' && node.routed_outbound_tag && (
+              {node.node_type === 'routed' && node.routed_outbound_tag && (isAdmin || (node.routed_owner === 'user' && node.created_by === profile?.username)) && (
                                 <span
                                   className='text-[10px] text-indigo-600 dark:text-indigo-400 font-mono max-w-[110px] truncate'
                                   title={node.routed_outbound_tag}
@@ -2570,19 +2584,6 @@ function SubscriptionGeneratorPage() {
                           },
                           headerClassName: 'min-w-[150px]',
                         },
-                        {
-                          header: t('generator.columns.tag'),
-                          cell: (node) => (
-                            <div className='flex flex-wrap gap-1'>
-                              {node.tag && (
-                                <Badge variant='secondary' className='text-xs'>
-                                  {node.tag}
-                                </Badge>
-                              )}
-                            </div>
-                          ),
-                          width: '100px',
-                        },
                       ] as DataTableColumn<SavedNode>[]
                     }
                     mobileCard={{
@@ -2606,18 +2607,8 @@ function SubscriptionGeneratorPage() {
                             </div>
                           </div>
 
-                          {/* 第二行：标签 + 服务器地址 */}
+                          {/* 第二行：服务器地址 */}
                           <div className='flex items-center gap-2 text-xs'>
-                            {/* 标签部分 */}
-                            {node.tag && (
-                              <div className='flex shrink-0 items-center gap-1'>
-                                <Badge variant='secondary' className='text-xs'>
-                                  {node.tag}
-                                </Badge>
-                              </div>
-                            )}
-
-                            {/* 地址部分 */}
                             <span className='text-muted-foreground min-w-0 flex-1 truncate font-mono'>
                               {(() => {
                                 let serverAddress = '-'
