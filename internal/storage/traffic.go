@@ -200,6 +200,7 @@ type Package struct {
 	AutoSpeedRules    []AutoSpeedLimitRule `json:"auto_speed_rules,omitempty"`
 	ShortCode         string    `json:"short_code"`
 	TrafficMode       string    `json:"traffic_mode"`
+	TemplateFilename  string    `json:"template_filename"` // 套餐绑的 V3 模板;空 = 走系统默认模板
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }
@@ -1625,6 +1626,7 @@ CREATE INDEX IF NOT EXISTS idx_remote_servers_status ON remote_servers(status);
 	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 0")
 	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN auto_speed_limit_json TEXT DEFAULT ''")
 	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN traffic_mode TEXT NOT NULL DEFAULT 'oneway'")
+	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN template_filename TEXT NOT NULL DEFAULT ''")
 
 	// 用户限速覆写字段
 	_, _ = r.db.Exec("ALTER TABLE users ADD COLUMN speed_limit_override REAL")
@@ -6188,7 +6190,7 @@ func (r *TrafficRepository) ListPackages(ctx context.Context) ([]Package, error)
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
 		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
-		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), created_at, updated_at
+		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), COALESCE(template_filename, ''), created_at, updated_at
 		FROM packages
 		ORDER BY created_at DESC
 	`
@@ -6206,7 +6208,7 @@ func (r *TrafficRepository) ListPackages(ctx context.Context) ([]Package, error)
 		var nodesJSON, autoSpeedJSON string
 		err := rows.Scan(&pkg.ID, &pkg.Name, &pkg.Description, &pkg.TrafficLimitBytes,
 			&pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON, &pkg.SpeedLimitMbps, &pkg.DeviceLimit,
-			&autoSpeedJSON, &pkg.ShortCode, &pkg.TrafficMode, &pkg.CreatedAt, &pkg.UpdatedAt)
+			&autoSpeedJSON, &pkg.ShortCode, &pkg.TrafficMode, &pkg.TemplateFilename, &pkg.CreatedAt, &pkg.UpdatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("scan package: %w", err)
 		}
@@ -6242,7 +6244,7 @@ func (r *TrafficRepository) GetPackage(ctx context.Context, id int64) (*Package,
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
 		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
-		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), created_at, updated_at
+		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), COALESCE(template_filename, ''), created_at, updated_at
 		FROM packages
 		WHERE id = ?
 	`
@@ -6253,7 +6255,7 @@ func (r *TrafficRepository) GetPackage(ctx context.Context, id int64) (*Package,
 	err := r.db.QueryRowContext(ctx, query, id).Scan(&pkg.ID, &pkg.Name, &pkg.Description,
 		&pkg.TrafficLimitBytes, &pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON,
 		&pkg.SpeedLimitMbps, &pkg.DeviceLimit, &autoSpeedJSON, &pkg.ShortCode, &pkg.TrafficMode,
-		&pkg.CreatedAt, &pkg.UpdatedAt)
+		&pkg.TemplateFilename, &pkg.CreatedAt, &pkg.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrPackageNotFound
@@ -6291,7 +6293,7 @@ func (r *TrafficRepository) GetPackageByName(ctx context.Context, name string) (
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
 		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
-		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), created_at, updated_at
+		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), COALESCE(template_filename, ''), created_at, updated_at
 		FROM packages
 		WHERE name = ?
 	`
@@ -6302,7 +6304,7 @@ func (r *TrafficRepository) GetPackageByName(ctx context.Context, name string) (
 	err := r.db.QueryRowContext(ctx, query, name).Scan(&pkg.ID, &pkg.Name, &pkg.Description,
 		&pkg.TrafficLimitBytes, &pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON,
 		&pkg.SpeedLimitMbps, &pkg.DeviceLimit, &autoSpeedJSON, &pkg.ShortCode, &pkg.TrafficMode,
-		&pkg.CreatedAt, &pkg.UpdatedAt)
+		&pkg.TemplateFilename, &pkg.CreatedAt, &pkg.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrPackageNotFound
@@ -6360,8 +6362,8 @@ func (r *TrafficRepository) CreatePackage(ctx context.Context, pkg Package) (int
 	}
 
 	const query = `
-		INSERT INTO packages (name, description, traffic_limit_bytes, cycle_days, is_reset, reset_day, nodes, speed_limit_mbps, device_limit, auto_speed_limit_json, short_code, traffic_mode)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO packages (name, description, traffic_limit_bytes, cycle_days, is_reset, reset_day, nodes, speed_limit_mbps, device_limit, auto_speed_limit_json, short_code, traffic_mode, template_filename)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	isReset := 0
@@ -6375,7 +6377,7 @@ func (r *TrafficRepository) CreatePackage(ctx context.Context, pkg Package) (int
 	}
 
 	result, err := r.db.ExecContext(ctx, query, name, pkg.Description, pkg.TrafficLimitBytes,
-		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, autoSpeedJSON, shortCode, trafficMode)
+		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, autoSpeedJSON, shortCode, trafficMode, pkg.TemplateFilename)
 	if err != nil {
 		return 0, fmt.Errorf("create package: %w", err)
 	}
@@ -6419,7 +6421,7 @@ func (r *TrafficRepository) UpdatePackage(ctx context.Context, pkg Package) erro
 		UPDATE packages
 		SET name = ?, description = ?, traffic_limit_bytes = ?, cycle_days = ?,
 		    is_reset = ?, reset_day = ?, nodes = ?, speed_limit_mbps = ?, device_limit = ?,
-		    auto_speed_limit_json = ?, traffic_mode = ?, updated_at = CURRENT_TIMESTAMP
+		    auto_speed_limit_json = ?, traffic_mode = ?, template_filename = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`
 
@@ -6434,7 +6436,7 @@ func (r *TrafficRepository) UpdatePackage(ctx context.Context, pkg Package) erro
 	}
 
 	result, err := r.db.ExecContext(ctx, query, name, pkg.Description, pkg.TrafficLimitBytes,
-		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, autoSpeedJSON, trafficMode, pkg.ID)
+		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, autoSpeedJSON, trafficMode, pkg.TemplateFilename, pkg.ID)
 	if err != nil {
 		return fmt.Errorf("update package: %w", err)
 	}

@@ -58,17 +58,37 @@ func NewPackageCreateHandler(repo *storage.TrafficRepository) *PackageCreateHand
 }
 
 type createPackageRequest struct {
-	Name           string                       `json:"name"`
-	Description    string                       `json:"description"`
-	TrafficLimitGB float64                      `json:"traffic_limit_gb"`
-	CycleDays      int                          `json:"cycle_days"`
-	IsReset        bool                         `json:"is_reset"`
-	ResetDay       int                          `json:"reset_day"`
-	Nodes          []int64                      `json:"nodes"`
-	SpeedLimitMbps float64                      `json:"speed_limit_mbps"`
-	DeviceLimit    int                          `json:"device_limit"`
-	AutoSpeedRules []storage.AutoSpeedLimitRule `json:"auto_speed_rules"`
-	TrafficMode    string                       `json:"traffic_mode"`
+	Name             string                       `json:"name"`
+	Description      string                       `json:"description"`
+	TrafficLimitGB   float64                      `json:"traffic_limit_gb"`
+	CycleDays        int                          `json:"cycle_days"`
+	IsReset          bool                         `json:"is_reset"`
+	ResetDay         int                          `json:"reset_day"`
+	Nodes            []int64                      `json:"nodes"`
+	SpeedLimitMbps   float64                      `json:"speed_limit_mbps"`
+	DeviceLimit      int                          `json:"device_limit"`
+	AutoSpeedRules   []storage.AutoSpeedLimitRule `json:"auto_speed_rules"`
+	TrafficMode      string                       `json:"traffic_mode"`
+	TemplateFilename string                       `json:"template_filename"` // 空 = 走系统默认
+}
+
+// validatePackageTemplateFilename 非空时校验 rule_templates 下文件存在。空字符串直接通过(表示用系统默认)。
+func validatePackageTemplateFilename(name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	// 防目录穿越
+	if strings.Contains(name, "..") || strings.ContainsAny(name, "/\\") {
+		return fmt.Errorf("invalid template filename")
+	}
+	if _, err := os.Stat(filepath.Join("rule_templates", name)); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("template file not found: %s", name)
+		}
+		return fmt.Errorf("stat template: %w", err)
+	}
+	return nil
 }
 
 func (h *PackageCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -104,6 +124,11 @@ func (h *PackageCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if err := validatePackageTemplateFilename(req.TemplateFilename); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	// 如果 nil 则初始化空节点数组
 	nodes := req.Nodes
 	if nodes == nil {
@@ -128,6 +153,7 @@ func (h *PackageCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		DeviceLimit:       req.DeviceLimit,
 		AutoSpeedRules:    req.AutoSpeedRules,
 		TrafficMode:       trafficMode,
+		TemplateFilename:  strings.TrimSpace(req.TemplateFilename),
 	}
 
 	id, err := h.repo.CreatePackage(r.Context(), pkg)
@@ -160,18 +186,19 @@ func NewPackageUpdateHandler(repo *storage.TrafficRepository, remoteManage *Remo
 }
 
 type updatePackageRequest struct {
-	ID             int64                        `json:"id"`
-	Name           string                       `json:"name"`
-	Description    string                       `json:"description"`
-	TrafficLimitGB float64                      `json:"traffic_limit_gb"`
-	CycleDays      int                          `json:"cycle_days"`
-	IsReset        bool                         `json:"is_reset"`
-	ResetDay       int                          `json:"reset_day"`
-	Nodes          []int64                      `json:"nodes"`
-	SpeedLimitMbps float64                      `json:"speed_limit_mbps"`
-	DeviceLimit    int                          `json:"device_limit"`
-	AutoSpeedRules []storage.AutoSpeedLimitRule `json:"auto_speed_rules"`
-	TrafficMode    string                       `json:"traffic_mode"`
+	ID               int64                        `json:"id"`
+	Name             string                       `json:"name"`
+	Description      string                       `json:"description"`
+	TrafficLimitGB   float64                      `json:"traffic_limit_gb"`
+	CycleDays        int                          `json:"cycle_days"`
+	IsReset          bool                         `json:"is_reset"`
+	ResetDay         int                          `json:"reset_day"`
+	Nodes            []int64                      `json:"nodes"`
+	SpeedLimitMbps   float64                      `json:"speed_limit_mbps"`
+	DeviceLimit      int                          `json:"device_limit"`
+	AutoSpeedRules   []storage.AutoSpeedLimitRule `json:"auto_speed_rules"`
+	TrafficMode      string                       `json:"traffic_mode"`
+	TemplateFilename string                       `json:"template_filename"` // 空 = 走系统默认
 }
 
 func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -212,6 +239,11 @@ func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	if err := validatePackageTemplateFilename(req.TemplateFilename); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	// 如果 nil 则初始化空节点数组
 	nodes := req.Nodes
 	if nodes == nil {
@@ -243,6 +275,7 @@ func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		DeviceLimit:       req.DeviceLimit,
 		AutoSpeedRules:    req.AutoSpeedRules,
 		TrafficMode:       trafficMode,
+		TemplateFilename:  strings.TrimSpace(req.TemplateFilename),
 	}
 
 	if err := h.repo.UpdatePackage(r.Context(), pkg); err != nil {

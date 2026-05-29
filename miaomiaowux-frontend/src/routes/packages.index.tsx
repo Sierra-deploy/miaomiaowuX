@@ -56,6 +56,7 @@ interface PackageTemplate {
   speed_limit_mbps: number
   device_limit: number
   traffic_mode: string
+  template_filename: string
   created_at: string
   updated_at: string
 }
@@ -70,7 +71,16 @@ interface PackageFormData {
   speed_limit_mbps: number
   device_limit: number
   traffic_mode: string
+  template_filename: string
 }
+
+interface RuleTemplateEntry {
+  name: string
+  filename: string
+}
+
+// Select 的 value 不允许空字符串(Radix 限制),用这个 sentinel 表示"使用系统默认"。
+const TEMPLATE_DEFAULT_SENTINEL = '__system_default__'
 
 function PackagesPage() {
   const queryClient = useQueryClient()
@@ -86,7 +96,17 @@ function PackagesPage() {
     speed_limit_mbps: 0,
     device_limit: 0,
     traffic_mode: 'oneway',
+    template_filename: '',
   })
+
+  const { data: templatesData } = useQuery({
+    queryKey: ['rule-templates'],
+    queryFn: async () => {
+      const response = await api.get('/api/admin/template-v3')
+      return response.data as { templates?: RuleTemplateEntry[] }
+    },
+  })
+  const ruleTemplates: RuleTemplateEntry[] = templatesData?.templates ?? []
 
   const { data: packagesData, isLoading } = useQuery({
     queryKey: ['packages'],
@@ -178,6 +198,7 @@ function PackagesPage() {
       speed_limit_mbps: 0,
       device_limit: 0,
       traffic_mode: 'oneway',
+      template_filename: '',
     })
   }
 
@@ -198,6 +219,7 @@ function PackagesPage() {
       speed_limit_mbps: pkg.speed_limit_mbps || 0,
       device_limit: pkg.device_limit || 0,
       traffic_mode: pkg.traffic_mode || 'oneway',
+      template_filename: pkg.template_filename || '',
     })
   }
 
@@ -417,6 +439,34 @@ function PackagesPage() {
                   </SelectContent>
                 </Select>
                 <p className="text-xs text-muted-foreground">{t('dialog.trafficModeDesc')}</p>
+              </div>
+
+              <div className="space-y-2">
+                <Label>{t('dialog.templateFilename')}</Label>
+                <Select
+                  value={formData.template_filename === '' ? TEMPLATE_DEFAULT_SENTINEL : formData.template_filename}
+                  onValueChange={(value) =>
+                    setFormData({
+                      ...formData,
+                      template_filename: value === TEMPLATE_DEFAULT_SENTINEL ? '' : value,
+                    })
+                  }
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={TEMPLATE_DEFAULT_SENTINEL}>
+                      {t('dialog.templateFilenameDefault')}
+                    </SelectItem>
+                    {ruleTemplates.map((tpl) => (
+                      <SelectItem key={tpl.filename} value={tpl.filename}>
+                        {tpl.name} ({tpl.filename})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">{t('dialog.templateFilenameDesc')}</p>
               </div>
 
               <div className="space-y-2">

@@ -109,8 +109,8 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Load template: default.yaml > redirhost__v3.yaml
-	templateContent, err := h.loadTemplate(r)
+	// Load template: 套餐模板 > 系统默认 > 目录第一个
+	templateContent, err := h.loadTemplate(r, pkg)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -154,12 +154,20 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	w.Write(converted)
 }
 
-func (h *PackageSubscribeHandler) loadTemplate(r *http.Request) (string, error) {
+// loadTemplate 优先级:套餐绑的模板 → 系统默认模板 → rule_templates 目录第一个 yaml。
+// pkg 为 nil 时跳过套餐模板这一级(serveAllNodes 等无套餐上下文场景)。
+func (h *PackageSubscribeHandler) loadTemplate(r *http.Request, pkg *storage.Package) (string, error) {
 	templatesDir := "rule_templates"
 
-	cfg, err := h.repo.GetSystemConfig(r.Context())
-	if err == nil && cfg.DefaultTemplateFilename != "" {
-		content, err := os.ReadFile(filepath.Join(templatesDir, cfg.DefaultTemplateFilename))
+	var candidates []string
+	if pkg != nil && strings.TrimSpace(pkg.TemplateFilename) != "" {
+		candidates = append(candidates, pkg.TemplateFilename)
+	}
+	if cfg, err := h.repo.GetSystemConfig(r.Context()); err == nil && cfg.DefaultTemplateFilename != "" {
+		candidates = append(candidates, cfg.DefaultTemplateFilename)
+	}
+	for _, name := range candidates {
+		content, err := os.ReadFile(filepath.Join(templatesDir, name))
 		if err == nil {
 			return string(content), nil
 		}
@@ -201,7 +209,8 @@ func (h *PackageSubscribeHandler) serveAllNodes(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusNotFound, errors.New("无可用节点"))
 		return
 	}
-	templateContent, err := h.loadTemplate(r)
+	// serveAllNodes 是"无套餐上下文,导出全部节点"的旁路调试入口 — 传 nil 走系统默认模板。
+	templateContent, err := h.loadTemplate(r, nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -384,20 +393,31 @@ func applyUserCredentials(proxy map[string]any, node storage.Node, credMap map[c
 //
 // 返回 (proxy_map, true) 或 (nil, false)(用户未绑定子账号 / 未 active / 父节点不可用 → 跳过)。
 func buildRoutedProxyForUser(ctx context.Context, repo *storage.TrafficRepository, routedNode storage.Node, username string) (map[string]any, bool) {
-	if routedNode.ParentNodeID == nil || *routedNode.ParentNodeID <= 0 {
-		return nil, false
-	}
 	// 子账号必须 is_active=1,否则该用户当前没有访问权(下线 / 未绑套餐 / 暂停)
 	sa, err := repo.GetUserSubaccount(ctx, routedNode.ID, username)
 	if err != nil || sa == nil || !sa.IsActive {
 		return nil, false
 	}
-	parent, err := repo.GetNodeByID(ctx, *routedNode.ParentNodeID)
-	if err != nil || !parent.Enabled || parent.ClashConfig == "" {
+
+	// clash_config 来源优先级:
+	//   1. 父节点的 clash_config(绑定到普通 inbound 物理节点的标准 routed)
+	//   2. routed 节点自身的 clash_config(纯出站 server 场景:server 上没默认 inbound,
+	//      同步入站时识别不出 parent,但 routed 节点入库时已克隆了完整可连配置)
+	var clashJSON string
+	if routedNode.ParentNodeID != nil && *routedNode.ParentNodeID > 0 {
+		if parent, perr := repo.GetNodeByID(ctx, *routedNode.ParentNodeID); perr == nil && parent.Enabled && parent.ClashConfig != "" {
+			clashJSON = parent.ClashConfig
+		}
+	}
+	if clashJSON == "" && strings.TrimSpace(routedNode.ClashConfig) != "" {
+		clashJSON = routedNode.ClashConfig
+	}
+	if clashJSON == "" {
 		return nil, false
 	}
+
 	var proxy map[string]any
-	if err := json.Unmarshal([]byte(parent.ClashConfig), &proxy); err != nil {
+	if err := json.Unmarshal([]byte(clashJSON), &proxy); err != nil {
 		return nil, false
 	}
 	// 覆盖 uuid(VLESS/VMess 主键)、节点名

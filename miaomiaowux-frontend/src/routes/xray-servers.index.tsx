@@ -1,10 +1,10 @@
 // @ts-nocheck
 import { createFileRoute, useNavigate } from '@tanstack/react-router'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState, useRef, useEffect } from 'react'
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { Plus, RefreshCw, Search, Trash2, Download, Cog, ChevronDown, Terminal, Play, Square, RotateCcw, Copy, Pencil, X, Settings, Wifi, Radio, Eye, ArrowUpCircle, Globe, CheckCircle, XCircle, Loader2, AlertTriangle, Lock, LockOpen, Share2, GripVertical } from 'lucide-react'
+import { Plus, RefreshCw, Search, Trash2, Download, Cog, ChevronDown, Terminal, Play, Square, RotateCcw, Copy, Pencil, X, Settings, Wifi, Radio, Eye, ArrowUpCircle, Globe, CheckCircle, XCircle, Loader2, AlertTriangle, Lock, LockOpen, Share2, GripVertical, Bug } from 'lucide-react'
 import { DndContext, PointerSensor, TouchSensor, KeyboardSensor, useSensor, useSensors, closestCenter, type DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove, sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -289,6 +289,41 @@ function XrayServersPage() {
     },
     refetchInterval: 3000,
   })
+
+  // 老 Agent BUG 检测:批量查所有 connected & 非联邦 server 的 agent-version-info。
+  // queryKey 跟 AgentVersionIndicator 完全一致,共享 react-query cache,不产生额外网络请求。
+  // 任一 current < 0.2.0 → 标题旁出现红色 BUG 按钮,点击展示升级指引。
+  const upgradeBugServers = useMemo<any[]>(() => {
+    return ((remoteServersData?.servers ?? []) as any[]).filter(
+      (s) => s && s.id && !s.is_federated && s.status === 'connected',
+    )
+  }, [remoteServersData])
+  const agentVersionResults = useQueries({
+    queries: upgradeBugServers.map((s) => ({
+      queryKey: ['agent-version-info', s.id],
+      queryFn: async () => {
+        const resp = await api.get(`/api/admin/remote/agent/version-info?server_id=${s.id}`)
+        return resp.data as { current?: string }
+      },
+      staleTime: 5 * 60 * 1000,
+      retry: false,
+    })),
+  })
+  const compareSemver = (a: string, b: string): number => {
+    const pa = a.split('.').map((x) => parseInt(x, 10) || 0)
+    const pb = b.split('.').map((x) => parseInt(x, 10) || 0)
+    for (let i = 0; i < 3; i++) if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0)
+    return 0
+  }
+  const hasOldAgent = useMemo(() => {
+    for (const q of agentVersionResults) {
+      const cur = ((q.data as any)?.current ?? '').trim()
+      if (cur && compareSemver(cur, '0.2.0') < 0) return true
+    }
+    return false
+  }, [agentVersionResults])
+  const [agentBugDialogOpen, setAgentBugDialogOpen] = useState(false)
+  const AGENT_UPGRADE_CMD = 'bash <(curl -sL https://raw.githubusercontent.com/iluobei/mmw-agent/refs/heads/main/scripts/upgrade-agent.sh)'
 
   const { data: masterUrlData } = useQuery({
     queryKey: ['master-url'],
@@ -994,9 +1029,57 @@ function XrayServersPage() {
   return (
     <div className="container mx-auto py-8 px-4 pt-24">
       <div className="mb-8">
-        <h1 className="text-3xl font-bold mb-2">{t('servers.title')}</h1>
+        <div className="flex items-center gap-3 mb-2">
+          <h1 className="text-3xl font-bold">{t('servers.title')}</h1>
+          {hasOldAgent && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type='button'
+                  onClick={() => setAgentBugDialogOpen(true)}
+                  className='inline-flex items-center justify-center h-8 w-8 rounded-md bg-red-100 text-red-600 hover:bg-red-200 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50 transition-colors animate-pulse'
+                  aria-label='Agent BUG 升级提示'
+                >
+                  <Bug className='h-4 w-4' />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent>
+                <div className='text-xs max-w-xs'>检测到部分服务器 Agent 版本 &lt; 0.2.0,存在恶性 BUG 无法通过主控升级。点击查看升级指引。</div>
+              </TooltipContent>
+            </Tooltip>
+          )}
+        </div>
         <p className="text-gray-600">{t('servers.desc')}</p>
       </div>
+
+      <Dialog open={agentBugDialogOpen} onOpenChange={setAgentBugDialogOpen}>
+        <DialogContent className='max-w-xl'>
+          <DialogHeader>
+            <DialogTitle className='flex items-center gap-2 text-red-600'>
+              <Bug className='h-5 w-5' /> Agent 紧急升级
+            </DialogTitle>
+            <DialogDescription>
+              非常抱歉,当前 Agent 有恶性 BUG 无法升级版本,请尝试在服务器上执行以下命令升级到 0.2.0 版本,后续可使用主控一键更新。
+            </DialogDescription>
+          </DialogHeader>
+          <div className='space-y-2'>
+            <div className='flex items-start gap-2 rounded-md border bg-muted/40 p-3'>
+              <code className='flex-1 text-xs font-mono break-all whitespace-pre-wrap select-all'>{AGENT_UPGRADE_CMD}</code>
+              <Button
+                size='sm'
+                variant='outline'
+                className='shrink-0'
+                onClick={() => copyToClipboard(AGENT_UPGRADE_CMD, '升级命令')}
+              >
+                <Copy className='h-3.5 w-3.5 mr-1' /> 复制
+              </Button>
+            </div>
+            <p className='text-xs text-muted-foreground'>
+              SSH 登录受影响服务器后粘贴执行即可。升级完成后刷新本页面,BUG 提示会自动消失。
+            </p>
+          </div>
+        </DialogContent>
+      </Dialog>
       <div className="flex flex-wrap gap-4 mb-6">
         <ViewToggle view={viewMode} onViewChange={(v) => { setViewMode(v); localStorage.setItem('servers-view-mode', v) }} />
         <Dialog open={isAddDialogOpen} onOpenChange={(open) => { setIsAddDialogOpen(open); if (!open) resetAddDialog() }}>

@@ -317,14 +317,26 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// 模板生成：
+	// 模板生成优先级:
 	//   - 订阅本身绑了模板 → 用订阅绑定的模板
-	//   - 没绑但系统配了默认模板 → 用系统默认模板
-	//   - 两个都没 → 走静态文件路径(原行为)
+	//   - 没绑 + 创建者有套餐 + 套餐配了模板 → 用套餐模板
+	//   - 还没 + 系统配了默认模板 → 用系统默认模板
+	//   - 都没 → 走静态文件路径(原行为)
 	var data []byte
 	fromTemplate := false
 	if hasSubscribeFile {
 		effectiveTemplate := subscribeFile.TemplateFilename
+		if effectiveTemplate == "" && h.repo != nil {
+			creator := strings.TrimSpace(subscribeFile.CreatedBy)
+			if creator != "" {
+				if u, uerr := h.repo.GetUser(r.Context(), creator); uerr == nil && u.PackageID > 0 {
+					if pkg, perr := h.repo.GetPackage(r.Context(), u.PackageID); perr == nil && pkg != nil && strings.TrimSpace(pkg.TemplateFilename) != "" {
+						effectiveTemplate = pkg.TemplateFilename
+						logger.Info("[Subscription] 订阅未绑定模板，使用套餐模板", "template", effectiveTemplate, "package_id", pkg.ID)
+					}
+				}
+			}
+		}
 		if effectiveTemplate == "" && h.repo != nil {
 			if cfg, cerr := h.repo.GetSystemConfig(r.Context()); cerr == nil && cfg.DefaultTemplateFilename != "" {
 				effectiveTemplate = cfg.DefaultTemplateFilename

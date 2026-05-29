@@ -773,7 +773,9 @@ func main() {
 	mux.Handle("/api/user/custom-short-code", auth.RequireToken(tokenStore, userRepo, handler.NewUserCustomShortCodeSelfHandler(repo)))
 
 	// 临时订阅端点
-	mux.Handle("/api/admin/temp-subscription", auth.RequireAdmin(tokenStore, userRepo, handler.NewTempSubscriptionHandler()))
+	// 中间件:RequireToken(非 admin 也能进 handler),handler 内按"妙妙屋功能 → 节点管理"开关决定是否放行。
+	// 路径保留 /api/admin/ 前缀以避免破坏既有前端调用;实际权限语义由 handler 控制。
+	mux.Handle("/api/admin/temp-subscription", auth.RequireToken(tokenStore, userRepo, handler.NewTempSubscriptionHandler(repo)))
 	tempSubAccessHandler := handler.NewTempSubscriptionAccessHandler()
 
 	// 短链接和 Web 应用程序的组合处理程序
