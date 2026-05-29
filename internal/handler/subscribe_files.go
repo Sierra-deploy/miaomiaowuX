@@ -751,7 +751,9 @@ func (h *subscribeFilesHandler) handleTraffic(w http.ResponseWriter, r *http.Req
 			}
 		}
 
-		if f.TrafficLimit != nil {
+		// 仅当订阅自带 traffic_limit > 0 时才作为"用户显式覆盖"使用;
+		// nil / 0 都视作"跟随服务器算出的 totalLimit",避免前端 inline payload 把 0 持久化后覆盖掉服务器额度。
+		if f.TrafficLimit != nil && *f.TrafficLimit > 0 {
 			totalLimit = int64(*f.TrafficLimit * 1024 * 1024 * 1024)
 		}
 		result[f.ID] = trafficItem{Used: totalUsed, Limit: totalLimit}

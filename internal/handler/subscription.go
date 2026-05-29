@@ -793,10 +793,12 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			} else {
 				remoteTrafficLimit, remoteTrafficUsed, _ = h.repo.GetAllRemoteServersTrafficTotals(r.Context())
 			}
-			if subscribeFile.TrafficLimit != nil {
+			// 同流量列表口径:仅当订阅自带 traffic_limit > 0 才作"显式覆盖",
+			// nil / 0 都视作"跟随服务器"。
+			if subscribeFile.TrafficLimit != nil && *subscribeFile.TrafficLimit > 0 {
 				remoteTrafficLimit = int64(*subscribeFile.TrafficLimit * 1024 * 1024 * 1024)
 			}
-		} else if subscribeFile.TrafficLimit != nil {
+		} else if subscribeFile.TrafficLimit != nil && *subscribeFile.TrafficLimit > 0 {
 			// 套餐口径下,如果订阅自带 traffic_limit 覆盖,以覆盖为准
 			remoteTrafficLimit = int64(*subscribeFile.TrafficLimit * 1024 * 1024 * 1024)
 		}

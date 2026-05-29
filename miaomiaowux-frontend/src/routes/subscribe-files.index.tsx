@@ -1958,7 +1958,8 @@ function SubscribeFilesPage() {
                 selected_custom_rule_ids: (file as any).selected_custom_rule_ids || [],
                 selected_override_script_ids: (file as any).selected_override_script_ids || [],
                 stats_server_ids: statsServerIds,
-                traffic_limit: (file as any).traffic_limit ?? 0,
+                // 透传原值:不强转 0,避免"原本 NULL/未设置"被 inline update 持久化成 0,导致流量计算被覆盖为 0。
+                traffic_limit: (file as any).traffic_limit,
                 custom_short_code: (file as any).custom_short_code || '',
                 raw_output: (file as any).raw_output ?? false,
               },

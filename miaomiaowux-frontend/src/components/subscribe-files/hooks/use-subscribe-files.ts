@@ -131,7 +131,7 @@ export function useSubscribeFiles(opts: {
     },
   })
 
-  // 内联字段更新(自定义短码 / 模板绑定 / 标签等):无 dialog,无副作用,只 invalidate
+  // 内联字段更新(自定义短码 / 模板绑定 / 标签 / stats_server_ids 等):无 dialog,无副作用,只 invalidate
   const inlineUpdateMutation = useMutation({
     mutationFn: async (payload: { id: number; data: Record<string, any> }) => {
       const response = await api.put(`/api/admin/subscribe-files/${payload.id}`, payload.data)
@@ -140,6 +140,8 @@ export function useSubscribeFiles(opts: {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['subscribe-files'] })
       queryClient.invalidateQueries({ queryKey: ['user-subscriptions'] })
+      // stats_server_ids 改变后,流量列要按新范围重新聚合,必须 invalidate 流量 query
+      queryClient.invalidateQueries({ queryKey: ['subscribe-files-traffic'] })
     },
     onError: (error: any) => {
       toast.error(error.response?.data?.error || t('toast.updateFailed'))
