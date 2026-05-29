@@ -56,6 +56,11 @@ type WSMessage struct {
 // WSAuthPayload 表示身份验证消息负载
 type WSAuthPayload struct {
 	Token string `json:"token"`
+	// PublicIPv4 由 agent 在 detect 后随 auth 一起上报。master 优先用它写 db.IPAddress,
+	// 避免 master 重启 → preferV4DialContext 偶尔 fallback v6 → auth 用 WS 源 IP (v6) 写 db
+	// → 立刻反向请求 agent (HTTP) 用 v6 → 失败。心跳里也会上报,但 auth 早于第一次 heartbeat
+	// ~10s,窗口期足以触发"IP 已变 v6 → 反向不通"的可观察故障。老 agent 不发该字段 = 空串 = fallback 旧行为。
+	PublicIPv4 string `json:"public_ipv4,omitempty"`
 }
 
 // WSAuthResultPayload 表示身份验证结果消息负载
@@ -302,6 +307,31 @@ func (h *RemoteWSHandler) handleConnection(conn *websocket.Conn, remoteAddr stri
 		conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 		return nil
 	})
+
+	// 双向保活:agent 端每 3s 发 traffic frame 维持上行,但中间代理(Cloudflare 等)看的是
+	// "agent → master 和 master → agent 都要有 frame"才不算 idle;空闲时段 master 这侧若长时间
+	// 没下行,Cloudflare 默认 ~100s 会撕掉 TCP,agent 端就报 `close 1006 unexpected EOF`,
+	// 主控随即触发上下线通知。
+	//
+	// 修复:每 30s 主动从 master 发一个 PingMessage(gorilla/websocket 文档明确 WriteControl 与
+	// 主循环的 WriteMessage 并发安全 — 不需要额外加锁)。conn 关闭后 WriteControl 会返回 error,
+	// goroutine 自然退出;defer close(pingStop) 兜底,避免 readLoop 在 break 前就阻塞了 goroutine。
+	pingStop := make(chan struct{})
+	defer close(pingStop)
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-pingStop:
+				return
+			case <-ticker.C:
+				if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second)); err != nil {
+					return
+				}
+			}
+		}
+	}()
 
 	var wsConn *RemoteWSConnection
 	authenticated := false
@@ -571,6 +601,10 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 		if !strings.Contains(ip, "[") {
 			ip = ip[:idx]
 		}
+	}
+	// 治本:agent 自报的 PublicIPv4 优先,WS 源 IP 只作 fallback。详细原因见 WSAuthPayload 注释。
+	if reported := strings.TrimSpace(authPayload.PublicIPv4); reported != "" {
+		ip = reported
 	}
 
 	updateCtx, updateCancel := context.WithTimeout(context.Background(), 5*time.Second)
