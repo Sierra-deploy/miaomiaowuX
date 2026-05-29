@@ -158,6 +158,12 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.1.5 (2026-05-29)
+- 🛠️ fix:dns配置错误
+- 🛠️ fix:模板越权问题
+- 🛠️ fix:调整普通用户的查看权限
+- 🛠️ fix:路由出站功能BUG
+- 🛠️ fix:迁移的用户订阅错误
 ### v0.1.4 (2026-05-28)
 - 🌈代理集合前端代码优化
 - 🌈优化xray管理代码结构
