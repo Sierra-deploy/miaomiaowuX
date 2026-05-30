@@ -61,6 +61,18 @@ type WSAuthPayload struct {
 	// → 立刻反向请求 agent (HTTP) 用 v6 → 失败。心跳里也会上报,但 auth 早于第一次 heartbeat
 	// ~10s,窗口期足以触发"IP 已变 v6 → 反向不通"的可观察故障。老 agent 不发该字段 = 空串 = fallback 旧行为。
 	PublicIPv4 string `json:"public_ipv4,omitempty"`
+	// Capabilities agent 上报支持的扩展能力。老 agent 不发 = 全 false → master 走 HTTP 旧路径。
+	// 新 agent 上报 RPC=true → master 反向调用优先走 WS RPC,失败/超时再 fallback HTTP。
+	Capabilities AgentCapabilities `json:"capabilities,omitempty"`
+}
+
+// AgentCapabilities 描述 agent 端支持的扩展能力位。
+// 新增字段时 master 老二进制反序列化忽略未知字段,agent 老二进制不发字段 = false,
+// 因此该结构可以前向兼容地扩展。
+type AgentCapabilities struct {
+	// RPC 表示 agent 实现了 WSMsgTypeRPCCall handler — master 可以用 WS 通道
+	// 替代反向 HTTP 调用 /api/child/* 系列 endpoint。
+	RPC bool `json:"rpc,omitempty"`
 }
 
 // WSAuthResultPayload 表示身份验证结果消息负载
@@ -188,6 +200,9 @@ type RemoteWSConnection struct {
 	session    *securechan.Session
 	Encrypted  bool
 	mu         sync.Mutex
+	// Capabilities 从 auth payload 读到的 agent 能力位。RPC=true 时 forwardToRemoteServer 走 WS RPC,
+	// 否则走 HTTP(老 agent 兼容)。
+	Capabilities AgentCapabilities
 }
 
 // upgradeWindows 记录每台 server 的"升级抑制窗口"截止时间。
@@ -234,6 +249,7 @@ type RemoteWSHandler struct {
 	conns             sync.Map // 令牌 -> *RemoteWSConnection
 	stealSelfDeployer func(ctx context.Context, serverID int64) error
 	pendingProbes     sync.Map // 详见上下文
+	pendingRPC        sync.Map // map[requestID]chan WSRPCReplyPayload — WS RPC 反向调用响应路由,详见 ws_rpc.go
 	limiterPusher     *LimiterConfigPusher
 	licenseManager    *license.Manager
 	crypto            *CryptoConfig
@@ -412,6 +428,13 @@ func (h *RemoteWSHandler) handleConnection(conn *websocket.Conn, remoteAddr stri
 			h.handleCertUpdate(wsConn, msg.Payload)
 			conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
 
+		case WSMsgTypeRPCReply:
+			// 反向 RPC 响应:按 RequestID 路由回 CallAgent 的等待 channel。
+			// 不需要 authenticated 限制 — RequestID 唯一性已经保证只能匹配本次 connection
+			// 通过 master 主动发起的 pending 调用。
+			h.routeRPCReply(msg.Payload)
+			conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+
 		case WSMsgTypeScanResult:
 			if !authenticated {
 				h.sendAuthRequired(conn)
@@ -580,11 +603,12 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 
 	// 创建新连接，继承密钥交换阶段的 session
 	wsConn := &RemoteWSConnection{
-		ServerID:   server.ID,
-		ServerName: server.Name,
-		Token:      authPayload.Token,
-		Conn:       conn,
-		LastPing:   time.Now(),
+		ServerID:     server.ID,
+		ServerName:   server.Name,
+		Token:        authPayload.Token,
+		Conn:         conn,
+		LastPing:     time.Now(),
+		Capabilities: authPayload.Capabilities,
 	}
 	if preAuthConn != nil && preAuthConn.session != nil {
 		wsConn.session = preAuthConn.session

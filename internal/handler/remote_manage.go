@@ -992,6 +992,16 @@ func (h *RemoteManageHandler) forwardToRemoteServer(ctx context.Context, serverI
 		return h.doFederationRequest(ctx, fed, method, path, body)
 	}
 
+	// WS-first:agent 上报 capabilities.rpc=true 且 WS 当前已连接 → 走反向 RPC,
+	// 绕开 db.IPAddress 漂移 / agent 公网端口不可达 / 中间代理瞬时撕连 等 HTTP 反向请求痛点。
+	// 只在以下情况 fallback 到 HTTP:
+	//   - agent 老二进制不支持 RPC(Capabilities.RPC=false)→ tryWSRPC 直接 return nil,false
+	//   - WS 临时断开 / RPC 调用超时 → tryWSRPC 返回 ErrWSRPCUnavailable
+	//   - 业务级错误(handler 返回非 2xx)直接透传,**不** fallback(语义错就是错)
+	if respBody, ok, err := h.tryWSRPC(ctx, serverID, method, path, body); ok {
+		return respBody, err
+	}
+
 	server, err := h.repo.GetRemoteServer(ctx, serverID)
 	if err != nil {
 		return nil, fmt.Errorf("server not found: %v", err)
