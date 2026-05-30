@@ -495,6 +495,21 @@ func (h *RemoteManageHandler) forwardStreamToRemote(w http.ResponseWriter, r *ht
 		return
 	}
 
+	// WS-first 流式 RPC:agent capabilities.stream=true 时直接走 WS,绕开反向 HTTP 的 IP 漂移痛点。
+	// 写 SSE headers 必须在 try 之前 — 数据帧会立刻通过 out 写出,前端 EventSource 看到 headers
+	// 才会开始解析事件。
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, _ := w.(http.Flusher)
+	// 5 分钟硬超时跟 forwardUpgradeStream 对齐 — install/nginx 大部分场景几十秒内完成,够用。
+	if ok, err := h.tryWSRPCStream(r.Context(), serverID, http.MethodPost, agentPath, nil, w, flusher, 5*time.Minute); ok {
+		if err != nil {
+			log.Printf("[Remote Manage] WS stream %s for server %s ended with error (no fallback): %v", agentPath, server.Name, err)
+		}
+		return
+	}
+
 	ip := server.IPAddress
 	if idx := strings.LastIndex(ip, ":"); idx != -1 && !strings.Contains(ip, "[") {
 		ip = ip[:idx]
@@ -708,6 +723,30 @@ func (h *RemoteManageHandler) forwardUpgradeStream(w http.ResponseWriter, r *htt
 	// 拿升级前的 agent_version 做对比基线(老 agent 没这个字段就空,后面用其它信号)
 	preVersion := h.probeAgentVersion(r.Context(), serverID)
 
+	// WS-first:capabilities.stream=true 时走 WS,数据帧用 io.MultiWriter fork 一份给
+	// markerWriter,继续扫 "Binary replaced" 关键字,verify 路径完全跟 HTTP 一致。
+	// 升级末期 agent 必然重启 → WS 断 → CallAgentStream 返回 stream interrupted 错误,
+	// 但 markerWriter 已经看到 Binary replaced(那是脚本最后一步,先于重启输出),正常进 verify。
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	if flusher, ok := w.(http.Flusher); ok {
+		mw := &markerWriter{marker: []byte("Binary replaced")}
+		out := io.MultiWriter(w, mw)
+		ctx, cancel := context.WithTimeout(r.Context(), upgradeTimeout)
+		wsOk, wsErr := h.tryWSRPCStream(ctx, serverID, http.MethodPost, "/api/child/agent/upgrade-stream", nil, out, flusher, upgradeTimeout)
+		cancel()
+		if wsOk {
+			// 已走 WS 路径,直接 verify(agent 重启导致 wsErr 非 nil 是预期内的,不阻塞 verify)
+			sawBinaryReplaced := mw.matched
+			timeoutHit := wsErr != nil && (errors.Is(wsErr, context.DeadlineExceeded) ||
+				strings.Contains(wsErr.Error(), "timed out"))
+			h.upgradeVerify(w, flusher, server.Name, serverID, preVersion, sawBinaryReplaced, timeoutHit)
+			return
+		}
+		// WS 不可用,继续走下面老 HTTP 路径(headers 已经写过,无副作用)
+	}
+
 	ip := server.IPAddress
 	if idx := strings.LastIndex(ip, ":"); idx != -1 && !strings.Contains(ip, "[") {
 		ip = ip[:idx]
@@ -781,17 +820,54 @@ func (h *RemoteManageHandler) forwardUpgradeStream(w http.ResponseWriter, r *htt
 	}
 
 verify:
-	// 升级验证:等 agent 重启窗口结束,再 ping 一次 system-info 拿新版本号。
-	// 给 agent 8 秒重启时间(systemd Restart + 我们的 PromoteAllTagsOnStartup 等启动开销)。
+	h.upgradeVerify(w, flusher, server.Name, serverID, preVersion, sawBinaryReplaced, timeoutHit)
+}
+
+// upgradeVerify 抽出来供 WS 路径和 HTTP 路径共用 — 等 8 秒 agent 重启窗口,再 probe 一次
+// 新版本号,把结果追到 SSE 末尾。
+func (h *RemoteManageHandler) upgradeVerify(w io.Writer, flusher http.Flusher, serverName string, serverID int64, preVersion string, sawBinaryReplaced, timeoutHit bool) {
 	time.Sleep(8 * time.Second)
 	postVersion := h.probeAgentVersion(context.Background(), serverID)
 
 	result := upgradeResult(preVersion, postVersion, sawBinaryReplaced, timeoutHit)
 	resultJSON, _ := json.Marshal(result)
 	fmt.Fprintf(w, "data: %s\n\n", resultJSON)
-	flusher.Flush()
+	if flusher != nil {
+		flusher.Flush()
+	}
 	log.Printf("[Remote Manage] Upgrade verification for %s: pre=%q post=%q sawReplaced=%v timeout=%v → %+v",
-		server.Name, preVersion, postVersion, sawBinaryReplaced, timeoutHit, result)
+		serverName, preVersion, postVersion, sawBinaryReplaced, timeoutHit, result)
+}
+
+// markerWriter 实现 io.Writer 但**不保存原文**,只跟踪给定 marker 字串是否出现过。
+// 配合 io.MultiWriter 给 WS 路径用 — 让 master 既能透传字节给前端,又能扫到升级脚本的
+// 最后一条 echo "Binary replaced",维持跟 HTTP 路径一致的 verify 判断口径。
+//
+// 跨写入边界的处理:保留上一次写入的最后 len(marker)-1 字节,与本次拼接后再扫,
+// 避免单次 buf 切到 "Binary replac" + "ed" 时漏报。
+type markerWriter struct {
+	marker  []byte
+	matched bool
+	tail    []byte // 上次留下来的尾巴(长度 ≤ len(marker)-1)
+}
+
+func (m *markerWriter) Write(p []byte) (int, error) {
+	if m.matched {
+		return len(p), nil
+	}
+	combined := append(m.tail, p...)
+	if bytes.Contains(combined, m.marker) {
+		m.matched = true
+		m.tail = nil
+		return len(p), nil
+	}
+	overlap := len(m.marker) - 1
+	if len(combined) > overlap {
+		m.tail = append(m.tail[:0], combined[len(combined)-overlap:]...)
+	} else {
+		m.tail = combined
+	}
+	return len(p), nil
 }
 
 // probeAgentVersion GET 一次 system-info 取 agent_version,失败返回空字符串。

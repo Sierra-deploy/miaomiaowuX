@@ -73,6 +73,9 @@ type AgentCapabilities struct {
 	// RPC 表示 agent 实现了 WSMsgTypeRPCCall handler — master 可以用 WS 通道
 	// 替代反向 HTTP 调用 /api/child/* 系列 endpoint。
 	RPC bool `json:"rpc,omitempty"`
+	// Stream 表示 agent 实现了 rpc_call (Stream=true) → rpc_stream_data ... → rpc_reply 流式协议。
+	// master 可以用 WS 通道替代 /api/child/xxx-stream 这类 SSE endpoint(install / remove / upgrade)。
+	Stream bool `json:"stream,omitempty"`
 }
 
 // WSAuthResultPayload 表示身份验证结果消息负载
@@ -250,6 +253,7 @@ type RemoteWSHandler struct {
 	stealSelfDeployer func(ctx context.Context, serverID int64) error
 	pendingProbes     sync.Map // 详见上下文
 	pendingRPC        sync.Map // map[requestID]chan WSRPCReplyPayload — WS RPC 反向调用响应路由,详见 ws_rpc.go
+	pendingStream     sync.Map // map[requestID]chan wsStreamFrame — 流式 RPC (SSE 替代)
 	limiterPusher     *LimiterConfigPusher
 	licenseManager    *license.Manager
 	crypto            *CryptoConfig
@@ -429,10 +433,16 @@ func (h *RemoteWSHandler) handleConnection(conn *websocket.Conn, remoteAddr stri
 			conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
 
 		case WSMsgTypeRPCReply:
-			// 反向 RPC 响应:按 RequestID 路由回 CallAgent 的等待 channel。
+			// 反向 RPC 响应(也是流式 RPC 的 end 帧):按 RequestID 路由回等待 channel。
 			// 不需要 authenticated 限制 — RequestID 唯一性已经保证只能匹配本次 connection
-			// 通过 master 主动发起的 pending 调用。
+			// 通过 master 主动发起的 pending 调用。routeRPCReply 内部先查 pendingStream(end 帧),
+			// 没命中再查 pendingRPC(普通 reply)。
 			h.routeRPCReply(msg.Payload)
+			conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+
+		case WSMsgTypeRPCStreamData:
+			// 流式中间数据帧 — push 到 pendingStream 对应 channel。
+			h.routeRPCStreamData(msg.Payload)
 			conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
 
 		case WSMsgTypeScanResult:
