@@ -450,7 +450,7 @@ export function TemplateUploadDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
-      <DialogContent className="sm:max-w-[700px] max-h-[85vh] overflow-y-auto">
+      <DialogContent className="sm:max-w-[900px] w-full max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{t('upload.title')}</DialogTitle>
           <DialogDescription>{t('upload.description')}</DialogDescription>
@@ -511,7 +511,9 @@ export function TemplateUploadDialog({
                 value={pasteContent}
                 onChange={(e) => setPasteContent(e.target.value)}
                 placeholder={t('upload.pasteYamlPlaceholder')}
-                className="min-h-[200px] font-mono text-sm"
+                // 覆盖 base 的 field-sizing-content(否则粘贴长 yaml 会撑出 dialog 横向滚动条)。
+                // 强制 wrap + break-all 让没有空格的长 URL 也能换行。
+                className="min-h-[200px] font-mono text-sm [field-sizing:fixed] !w-full whitespace-pre-wrap break-all"
               />
             </div>
           </TabsContent>
@@ -559,7 +561,7 @@ export function TemplateUploadDialog({
             {urlPreview && (
               <div className="space-y-2">
                 <Label>{t('upload.contentPreview')}</Label>
-                <Textarea value={urlPreview} readOnly className="min-h-[200px] font-mono text-xs" />
+                <Textarea value={urlPreview} readOnly className="min-h-[200px] font-mono text-xs [field-sizing:fixed] !w-full whitespace-pre-wrap break-all" />
               </div>
             )}
 
@@ -663,7 +665,7 @@ export function TemplateUploadDialog({
             {analysisPreview && (
               <div className="space-y-2">
                 <Label>{t('upload.analysisPreview')}</Label>
-                <Textarea value={analysisPreview} readOnly className="min-h-[200px] font-mono text-xs" />
+                <Textarea value={analysisPreview} readOnly className="min-h-[200px] font-mono text-xs [field-sizing:fixed] !w-full whitespace-pre-wrap break-all" />
               </div>
             )}
 
