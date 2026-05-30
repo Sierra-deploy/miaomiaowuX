@@ -100,7 +100,10 @@ function PackagesPage() {
   })
 
   const { data: templatesData } = useQuery({
-    queryKey: ['rule-templates'],
+    // 用独立 key,避免跟模板管理页(routes/templates.index.tsx)的 ['rule-templates'] 串缓存 ——
+    // 那边期望 templates:string[],这里是 {name, filename}[],缓存共享后会让模板管理页把对象直接
+    // 渲染成 React children,触发 #31 "Objects are not valid as a React child"。
+    queryKey: ['template-v3-list'],
     queryFn: async () => {
       const response = await api.get('/api/admin/template-v3')
       return response.data as { templates?: RuleTemplateEntry[] }
