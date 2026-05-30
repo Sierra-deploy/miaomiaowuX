@@ -158,6 +158,17 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.1.6 (2026-05-30)
+- 🌈优化主控使用CDN情况下的Agent互联
+- 🛠️ fix:dialog溢出屏幕问题
+- 🛠️ fix:docker开启https后无法访问
+- 🛠️ fix:代理集合接口查询404
+- 🛠️ fix:偶发Agent上报ipv6
+- 🛠️ fix:恢复doh使用IP
+- 🛠️ fix:模板dns配置不可用的覆盖补丁
+- 🛠️ fix:点击模板管理报错缓存读取失败
+- 🛠️ fix:订阅管理流量显示错误
+- 🛠️ fix:许可证限制错误的应用在外部节点上
 ### v0.1.5 (2026-05-29)
 - 🛠️ fix:dns配置错误
 - 🛠️ fix:模板越权问题
