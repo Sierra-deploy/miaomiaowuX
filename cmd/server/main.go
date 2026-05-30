@@ -868,10 +868,13 @@ func main() {
 
 	allowedOrigins := getAllowedOrigins()
 	handlerWithCORS := withCORS(handlerWithSilentMode, allowedOrigins)
+	// HTTPS 启用后,应用层拦截非合法 Host 的请求(IP+端口直连等)→ 308 重定向到正确域名。
+	// 跟 bind host 解耦,Docker / 跨机反代 / 裸机都能正确工作。详见 host_enforcement.go。
+	handlerWithHostEnforce := handler.EnforceHTTPSHost(handlerWithCORS, repo)
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           handlerWithCORS,
+		Handler:           handlerWithHostEnforce,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -934,12 +937,18 @@ func getAddr(config *ServerConfig, repo *storage.TrafficRepository) string {
 		port = envPort
 	}
 
-	// HTTPS 已启用时仅监听本机，外部流量由 nginx 代理
-	if masterURL, _ := repo.GetSystemSetting(context.Background(), "master_url"); strings.HasPrefix(masterURL, "https://") {
-		log.Printf("[Main] HTTPS enabled, binding to 127.0.0.1:%s", port)
-		return "127.0.0.1:" + port
+	// 默认绑 0.0.0.0,通用所有部署形态(裸机 / Docker / 跨机反代)。
+	// 以前在 https 启用时强绑 127.0.0.1 是为了"禁止 IP+端口直连",但这套物理层拦截
+	// 在 Docker 容器内会让 -p 端口映射失效(容器内 lo 跟 host 端口隔绝)。
+	// 改用应用层 host 中间件(internal/handler/host_enforcement.go)做"直连拦截",
+	// 跟 bind host 解耦。BIND_HOST env 留给高级场景显式覆盖。
+	host := "0.0.0.0"
+	if v := strings.TrimSpace(os.Getenv("BIND_HOST")); v != "" {
+		host = v
 	}
-	return "0.0.0.0:" + port
+	log.Printf("[Main] HTTP server binding to %s:%s", host, port)
+	_ = repo // 保留参数:其它 host enforcement 在 main.go 主流程里包裹
+	return host + ":" + port
 }
 
 // 检查字符串是否仅包含字母数字字符

@@ -88,6 +88,13 @@ RUN chown -R appuser:appuser /app/server /app/rule_templates
 # Volume for persistent data
 VOLUME ["/app/data", "/app/subscribes"]
 
+# Bind 0.0.0.0 by default — Docker port mapping requires the server to listen on
+# all interfaces inside the container. The application-layer host enforcement
+# (internal/handler/host_enforcement.go) still blocks direct IP+port access when
+# HTTPS is configured, so security parity with the bare-metal "bind loopback" mode
+# is preserved.
+ENV BIND_HOST=0.0.0.0
+
 # Expose port
 EXPOSE 12889
 
