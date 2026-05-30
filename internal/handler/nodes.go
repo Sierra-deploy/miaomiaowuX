@@ -380,18 +380,8 @@ func (h *nodesHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.licenseManager != nil {
-		status := h.licenseManager.GetStatus()
-		maxNodes := 20
-		if status.Plan != nil {
-			maxNodes = status.Plan.MaxNodes
-		}
-		count, err := h.repo.CountNodes(r.Context())
-		if err == nil && count >= int64(maxNodes) {
-			writeJSONError(w, http.StatusForbidden, fmt.Sprintf("已达到节点数量上限 (%d/%d)，请升级许可证", count, maxNodes))
-			return
-		}
-	}
+	// 用户手动导入的节点 (node_type='physical') 不占 license 配额 — license 只统计 admin
+	// 平台创建的 routed 出站节点。详见 storage.CountLicensedNodes 注释。
 
 	var req nodeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -487,18 +477,7 @@ func (h *nodesHandler) handleBatchCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if h.licenseManager != nil {
-		status := h.licenseManager.GetStatus()
-		maxNodes := 20
-		if status.Plan != nil {
-			maxNodes = status.Plan.MaxNodes
-		}
-		count, err := h.repo.CountNodes(r.Context())
-		if err == nil && count+int64(len(req.Nodes)) > int64(maxNodes) {
-			writeJSONError(w, http.StatusForbidden, fmt.Sprintf("批量创建将超出节点上限 (%d+%d > %d)，请升级许可证", count, len(req.Nodes), maxNodes))
-			return
-		}
-	}
+	// 同 handleCreate:批量导入也是用户手动添加 physical 节点,不占 license 配额。
 
 	nodes := make([]storage.Node, 0, len(req.Nodes))
 	for _, n := range req.Nodes {

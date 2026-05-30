@@ -404,7 +404,9 @@ func main() {
 	mux.Handle("/api/admin/nodes/", auth.RequireToken(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler, licenseManager)))
 
 	// 路由出站(routed node)管理:给物理节点挂多个虚拟出站节点
-	mux.Handle("/api/admin/routed-outbound", auth.RequireAdmin(tokenStore, userRepo, handler.NewRoutedOutboundHandler(repo, remoteManageHandler)))
+	routedOutboundHandler := handler.NewRoutedOutboundHandler(repo, remoteManageHandler)
+	routedOutboundHandler.SetLicenseManager(licenseManager) // 这里是 license max_nodes 唯一生效点
+	mux.Handle("/api/admin/routed-outbound", auth.RequireAdmin(tokenStore, userRepo, routedOutboundHandler))
 	// 用户私有路由出站(routed_owner='user'):普通用户为自己创建/删除/查询专属出站
 	mux.Handle("/api/user/routed-outbound", auth.RequireToken(tokenStore, userRepo, handler.NewUserRoutedOutboundHandler(repo, remoteManageHandler)))
 

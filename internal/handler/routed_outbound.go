@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
 )
 
@@ -41,12 +42,19 @@ func acquireRoutingMutateLock(serverID int64) *sync.Mutex {
 //
 // 删除时反向:agent 移除 rule + outbound + 占位 client,DB 删 routed node(级联清子账号)。
 type RoutedOutboundHandler struct {
-	repo         *storage.TrafficRepository
-	remoteManage *RemoteManageHandler
+	repo           *storage.TrafficRepository
+	remoteManage   *RemoteManageHandler
+	licenseManager *license.Manager // 用 setter 注入,见 SetLicenseManager
 }
 
 func NewRoutedOutboundHandler(repo *storage.TrafficRepository, rm *RemoteManageHandler) *RoutedOutboundHandler {
 	return &RoutedOutboundHandler{repo: repo, remoteManage: rm}
+}
+
+// SetLicenseManager 注入 license 管理器供 create() 做配额检查。
+// nil = 不检查(开发 / 自托管无许可证场景);跟 nodes.go 同款 pattern。
+func (h *RoutedOutboundHandler) SetLicenseManager(mgr *license.Manager) {
+	h.licenseManager = mgr
 }
 
 func (h *RoutedOutboundHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -89,6 +97,21 @@ type createRoutedOutboundReq struct {
 // POST /api/admin/nodes/routed-outbound
 func (h *RoutedOutboundHandler) create(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	// 用 license 限 routed 出站节点总数 — 这是真正占 server xray 资源的"节点"。
+	// 同一 inbound 下 N 个 routed outbound 算 N 个,符合"路由出站节点是多个,只有一个入站,也算多个"。
+	if h.licenseManager != nil {
+		status := h.licenseManager.GetStatus()
+		maxNodes := 20
+		if status.Plan != nil {
+			maxNodes = status.Plan.MaxNodes
+		}
+		if count, cerr := h.repo.CountLicensedNodes(ctx); cerr == nil && count >= int64(maxNodes) {
+			writeJSONError(w, http.StatusForbidden, fmt.Sprintf("已达到路由出站节点数量上限 (%d/%d)，请升级许可证", count, maxNodes))
+			return
+		}
+	}
+
 	var req createRoutedOutboundReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid request body")

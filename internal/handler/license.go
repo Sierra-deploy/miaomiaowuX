@@ -85,7 +85,9 @@ func (h *LicenseHandler) GetUsage(w http.ResponseWriter, r *http.Request) {
 	status := h.manager.GetStatus()
 
 	serverCount, _ := h.repo.CountRemoteServers(ctx)
-	nodeCount, _ := h.repo.CountNodes(ctx)
+	// 跟实际限制点(routed_outbound.go)一致 — 只计 admin 平台创建的 routed 出站节点。
+	// 用户手动导入 / 外部订阅 / 用户私有路由出站都不计 license 配额。
+	nodeCount, _ := h.repo.CountLicensedNodes(ctx)
 	userCount, _ := h.repo.CountUsers(ctx)
 
 	maxServers, maxNodes, maxUsers := 5, 20, 10

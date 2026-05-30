@@ -127,6 +127,29 @@ func (r *TrafficRepository) CountNodes(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
+// CountLicensedNodes 只统计"占用 license 配额"的节点 — 即 admin 通过 mmwx 平台创建/同步出来的
+// 路由出站节点。
+//
+// 不计入:
+//   - node_type='physical'(用户手动导入 / 外部订阅同步,只是记录别人的节点,不占 server 资源)
+//   - routed + routed_owner='user'(普通用户的私有路由出站,有自己的 quota 系统在 user_permissions)
+//
+// 计入:
+//   - node_type='routed' + routed_owner='shared'(admin 在出站管理里创建 + 同步入站自动识别的 routed)
+//     这些都是 master 在 server 上实际拉过 xray 配置(加 outbound / routing rule)、占用真实资源的节点。
+func (r *TrafficRepository) CountLicensedNodes(ctx context.Context) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	var count int64
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM nodes WHERE node_type = 'routed' AND COALESCE(routed_owner, 'shared') = 'shared'`,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count licensed nodes: %w", err)
+	}
+	return count, nil
+}
+
 // 返回管理员用户的所有节点。
 func (r *TrafficRepository) ListAllNodes(ctx context.Context) ([]Node, error) {
 	if r == nil || r.db == nil {
