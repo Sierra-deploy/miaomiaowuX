@@ -150,7 +150,7 @@ function mihomo(proxy: Proxy, _type?: string, opts: ProduceOptions = {}): string
                                 ],
                             nameserver: opts?.nameserver ||
                                 proxy._nameserver || [
-                                    'https://doh.pub/dns-query',
+                                    'https://120.53.53.53/dns-query',
                                     'https://dns.alidns.com/dns-query',
                                     'https://doh-pure.onedns.net/dns-query',
                                 ],

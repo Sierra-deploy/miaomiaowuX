@@ -119,7 +119,7 @@ func (p *ShadowrocketTemplateProducer) generateGeneral(opts *ProduceOptions) str
 		sb.WriteString(strings.Join(dnsServers, ","))
 		sb.WriteString("\n")
 	} else {
-		sb.WriteString("dns-server = https://doh.pub/dns-query,https://dns.alidns.com/dns-query,223.5.5.5,119.29.29.29\n")
+		sb.WriteString("dns-server = https://120.53.53.53/dns-query,https://dns.alidns.com/dns-query,223.5.5.5,119.29.29.29\n")
 	}
 
 	// IPv6 配置

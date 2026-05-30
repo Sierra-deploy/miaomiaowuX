@@ -34,7 +34,7 @@ export const DEFAULT_CLASH_CONFIG = {
       ],
       'geosite:geolocation-!cn': [
         'https://dns.cloudflare.com/dns-query',
-        'https://dns.google/dns-query',
+        'https://8.8.8.8/dns-query',
       ],
     },
   },

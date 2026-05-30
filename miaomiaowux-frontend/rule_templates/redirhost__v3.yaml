@@ -3,14 +3,14 @@ dns:
   enable: true
   enhanced-mode: redir-host
   nameserver:
-    - https://dns.google/dns-query/dns-query#🚀 节点选择
+    - https://8.8.8.8/dns-query/dns-query#🚀 节点选择
   direct-nameserver:
-    - https://doh.pub/dns-query
+    - https://120.53.53.53/dns-query
   nameserver-policy:
     geosite:cn,apple,private,steam,onedrive,category-games@cn:
-      - https://doh.pub/dns-query
+      - https://120.53.53.53/dns-query
   proxy-server-nameserver:
-    - https://doh.pub/dns-query
+    - https://120.53.53.53/dns-query
   ipv6: false
   listen: 0.0.0.0:7874
   default-nameserver:

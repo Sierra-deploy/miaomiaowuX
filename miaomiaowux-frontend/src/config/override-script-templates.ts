@@ -6,7 +6,7 @@ export const OVERRIDE_SCRIPT_TEMPLATES = {
   // 修改 DNS 配置
   if (!config.dns) config.dns = {};
   config.dns.enable = true;
-  config.dns.nameserver = ['https://doh.pub/dns-query', '223.5.5.5'];
+  config.dns.nameserver = ['https://120.53.53.53/dns-query', '223.5.5.5'];
 
   // 添加自定义规则（插入到最前面）
   if (!config.rules) config.rules = [];

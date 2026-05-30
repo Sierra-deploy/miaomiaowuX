@@ -408,7 +408,7 @@ export function createBlankTemplate(): string {
       'enhanced-mode': 'redir-host',
       nameserver: [
         'https://dns.alidns.com/dns-query',
-        'https://doh.pub/dns-query',
+        'https://120.53.53.53/dns-query',
       ],
     },
     proxies: [],

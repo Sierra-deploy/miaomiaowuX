@@ -366,7 +366,7 @@ export function TemplateUploadDialog({
       lines.push('  enable: true')
       lines.push('  enhanced-mode: fake-ip')
       lines.push('  nameserver:')
-      lines.push('    - https://doh.pub/dns-query')
+      lines.push('    - https://120.53.53.53/dns-query')
       lines.push('  ipv6: false')
     }
 
