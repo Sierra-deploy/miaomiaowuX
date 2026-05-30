@@ -22,6 +22,7 @@ import (
 
 	"miaomiaowux/internal/auth"
 	"miaomiaowux/internal/event"
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/securechan"
 	"miaomiaowux/internal/storage"
 	"miaomiaowux/internal/version"
@@ -38,6 +39,13 @@ type RemoteManageHandler struct {
 	pullSessions      sync.Map // serverID (int64) → *securechan.Session
 	fedSessions       sync.Map // serverID (int64) → *securechan.Session (联邦:消费方↔拥有方)
 	stealSelfDeployer func(ctx context.Context, serverID int64) error
+	licenseManager    *license.Manager // 同步入站时检查 routed 节点 license 上限,setter 注入
+}
+
+// SetLicenseManager 注入 license 管理器供 syncInboundsToNodes 做节点数量上限检查。
+// nil = 不检查(开发场景),跟 nodes / routed_outbound 同款 pattern。
+func (h *RemoteManageHandler) SetLicenseManager(mgr *license.Manager) {
+	h.licenseManager = mgr
 }
 
 // 创建一个新的远程管理处理程序
@@ -2075,6 +2083,23 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 		return response
 	}
 
+	// 计算本次同步允许新建 routed 节点的余额 — 防止用户绕过 RoutedOutbound.create() 走"同步入站"
+	// 路径无限新建 routed 节点。budget < 0 表示禁用限制(开发场景 / 无 license)。
+	routedBudget := -1
+	if h.licenseManager != nil {
+		status := h.licenseManager.GetStatus()
+		maxNodes := 20
+		if status.Plan != nil {
+			maxNodes = status.Plan.MaxNodes
+		}
+		if cur, cerr := h.repo.CountLicensedNodes(ctx); cerr == nil {
+			routedBudget = maxNodes - int(cur)
+			if routedBudget < 0 {
+				routedBudget = 0
+			}
+		}
+	}
+
 	// 调用方显式 override > Domain > 非私有 PullAddress > IPAddress
 	serverHost := strings.TrimSpace(serverHostOverride)
 	if serverHost == "" {
@@ -2651,6 +2676,13 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 					proxy["cipher"] = cipher
 				}
 				nodeName := fmt.Sprintf("[%s] %s · %s", server.Name, inboundTagStr, email)
+				// license 余额检查 — budget < 0 表示禁用限制,>= 0 时为本次同步还能新建的 routed 节点数
+				if routedBudget == 0 {
+					response.SkippedCount++
+					response.Errors = append(response.Errors, fmt.Sprintf("已达 license 节点上限,跳过新建 routed: %s", nodeName))
+					log.Printf("[Remote Manage] license budget exhausted, skip auto-create routed: %s", nodeName)
+					continue
+				}
 				proxy["name"] = nodeName
 				cfgJSON, err := json.Marshal(proxy)
 				if err != nil {
@@ -2685,6 +2717,9 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 				if err := h.repo.MarkNodeAsRouted(ctx, created.ID, outTag, master); err != nil {
 					log.Printf("[Remote Manage] auto-create: MarkNodeAsRouted id=%d failed: %v", created.ID, err)
 				}
+				if routedBudget > 0 {
+					routedBudget--
+				}
 				existingRoutedTriple[inboundTagStr+":"+outTag] = true
 				response.SyncedCount++
 				response.CreatedCount++
@@ -2718,6 +2753,41 @@ func normalizeProtocol(s string) string {
 
 // 同样的等价判断,也给 NodeSyncListener / 别处用。在 event 包里也有 tryClaim,
 // 那边自己也保留一份语义一致的判断;此处不导出避免跨包耦合。
+
+// MatchRemoteServerByNodeHost 给定一个 clash 配置(JSON),如果它的 server 字段命中
+// 任一已注册 remote_server 的 IPAddress/Domain/PullAddress,返回那台 server。
+// 用于"导入节点时识别它是否指向 mmwx 已管理的 server",从而走 license 配额检查 + 自动 claim。
+// 找不到返回 (nil, nil)。
+func (h *RemoteManageHandler) MatchRemoteServerByNodeHost(ctx context.Context, clashConfigJSON string) (*storage.RemoteServer, error) {
+	if strings.TrimSpace(clashConfigJSON) == "" {
+		return nil, nil
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal([]byte(clashConfigJSON), &cfg); err != nil {
+		return nil, nil
+	}
+	srv, _ := cfg["server"].(string)
+	srv = strings.TrimSpace(srv)
+	if srv == "" {
+		return nil, nil
+	}
+	servers, err := h.repo.ListRemoteServers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range servers {
+		s := &servers[i]
+		for _, host := range []string{s.IPAddress, s.Domain, s.PullAddress} {
+			if strings.TrimSpace(host) == "" {
+				continue
+			}
+			if strings.EqualFold(host, srv) {
+				return s, nil
+			}
+		}
+	}
+	return nil, nil
+}
 
 // tryClaimExternalNodeForSync 在 sync inbounds → nodes 流程里,扫"外部节点"
 // (original_server='' AND inbound_tag=''),按 server 地址(IP/Domain/PullAddress 任一)+ port + protocol

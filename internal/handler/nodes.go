@@ -296,6 +296,48 @@ func (h *nodesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// enforceLicenseIfNodeHostMatchesServer 防绕过 — 用户手动导入 / 批量导入节点时,
+// 如果节点的 server 字段命中已注册 remote_server 的 IP/Domain/PullAddress:
+//
+//	license 已满 → 返回拒绝消息,ok=false(调用方应返 403)
+//	license 未满 → 把 node.OriginalServer 直接填上(自动 claim),ok=true
+//	节点 server 跟任何 remote_server 都不匹配(真外部 vps)→ ok=true,不动 node
+//
+// 不命中 / 没有 RemoteManageHandler / 没有 LicenseManager 时一律放行。
+// 跟 routed_outbound.create 共用同一份 CountLicensedNodes 口径,语义闭环。
+func (h *nodesHandler) enforceLicenseIfNodeHostMatchesServer(ctx context.Context, node *storage.Node) (string, bool) {
+	if h.remoteManage == nil || node == nil {
+		return "", true
+	}
+	// 优先 ClashConfig(从 yaml 转过来的标准结构,server 字段稳定),fallback ParsedConfig。
+	configJSON := node.ClashConfig
+	if strings.TrimSpace(configJSON) == "" {
+		configJSON = node.ParsedConfig
+	}
+	srv, err := h.remoteManage.MatchRemoteServerByNodeHost(ctx, configJSON)
+	if err != nil || srv == nil {
+		return "", true
+	}
+
+	// 命中 → 检查 license 配额
+	if h.licenseManager != nil {
+		status := h.licenseManager.GetStatus()
+		maxNodes := 20
+		if status.Plan != nil {
+			maxNodes = status.Plan.MaxNodes
+		}
+		if count, cerr := h.repo.CountLicensedNodes(ctx); cerr == nil && count >= int64(maxNodes) {
+			return fmt.Sprintf("该节点指向已注册服务器 %q,需占用 license 配额,但已达上限 (%d/%d)，请升级许可证", srv.Name, count, maxNodes), false
+		}
+	}
+	// 配额内 → 自动 claim
+	node.OriginalServer = srv.Name
+	if strings.TrimSpace(node.Tag) == "" {
+		node.Tag = fmt.Sprintf("远程:%s", srv.Name)
+	}
+	return "", true
+}
+
 // buildUserCredMapForCreator 给某个用户构造 (server_name, inbound_tag) → credential_json 映射,
 // 给 applyUserCredentials 用。从 user_inbound_configs 表拉,跟 PackageSubscribeHandler.buildUserCredentialMap 同源。
 //
@@ -380,8 +422,12 @@ func (h *nodesHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 用户手动导入的节点 (node_type='physical') 不占 license 配额 — license 只统计 admin
-	// 平台创建的 routed 出站节点。详见 storage.CountLicensedNodes 注释。
+	// 用户手动导入的节点 (node_type='physical') 默认不占 license 配额。
+	// 但若节点 server 字段命中已注册 remote_server 的 host —— 视为"伪装的 routed",
+	// 这一路径在 enrichNodeWithRemoteServerClaim() 里做:
+	//   1. license 配额满 → 拒绝
+	//   2. license 未满 → 放行 + 自动设置 OriginalServer,后续 CountLicensedNodes 会自动算上
+	// 详见 storage.CountLicensedNodes 注释。
 
 	var req nodeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -440,6 +486,12 @@ func (h *nodesHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		Tag:          req.Tag,
 		InboundTag:       req.InboundTag,
 		ChainProxyNodeID: req.ChainProxyNodeID,
+	}
+
+	// 防绕过:节点 server 指向已注册的 remote_server → 计入 license 配额
+	if rejectMsg, ok := h.enforceLicenseIfNodeHostMatchesServer(r.Context(), &node); !ok {
+		writeJSONError(w, http.StatusForbidden, rejectMsg)
+		return
 	}
 
 	created, err := h.repo.CreateNode(r.Context(), node)
@@ -501,6 +553,14 @@ func (h *nodesHandler) handleBatchCreate(w http.ResponseWriter, r *http.Request)
 	if len(nodes) == 0 {
 		writeBadRequest(w, "没有有效的节点可以保存")
 		return
+	}
+
+	// 防绕过:批量里如果有 server 指向已注册 remote_server 的节点,每个都按 license 配额逐一检查。
+	for i := range nodes {
+		if rejectMsg, ok := h.enforceLicenseIfNodeHostMatchesServer(r.Context(), &nodes[i]); !ok {
+			writeJSONError(w, http.StatusForbidden, rejectMsg)
+			return
+		}
 	}
 
 	created, err := h.repo.BatchCreateNodes(r.Context(), nodes)

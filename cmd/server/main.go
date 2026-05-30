@@ -367,6 +367,7 @@ func main() {
 	// 远程服务器管理代理（将命令转发到子服务器）
 	remoteManageHandler := handler.NewRemoteManageHandler(repo, remoteWSHandler)
 	remoteManageHandler.SetCrypto(cryptoConfig)
+	remoteManageHandler.SetLicenseManager(licenseManager) // syncInboundsToNodes 路径里 license budget 检查需要
 	xrayServerHandler.SetRemoteManager(remoteManageHandler)
 	xrayServerHandler.SetWSHandler(remoteWSHandler)
 

@@ -127,24 +127,29 @@ func (r *TrafficRepository) CountNodes(ctx context.Context) (int64, error) {
 	return count, nil
 }
 
-// CountLicensedNodes 只统计"占用 license 配额"的节点 — 即 admin 通过 mmwx 平台创建/同步出来的
-// 路由出站节点。
-//
-// 不计入:
-//   - node_type='physical'(用户手动导入 / 外部订阅同步,只是记录别人的节点,不占 server 资源)
-//   - routed + routed_owner='user'(普通用户的私有路由出站,有自己的 quota 系统在 user_permissions)
+// CountLicensedNodes 统计"占用 license 配额"的节点 — 任何指向 mmwx 已管理 server 的节点。
 //
 // 计入:
-//   - node_type='routed' + routed_owner='shared'(admin 在出站管理里创建 + 同步入站自动识别的 routed)
-//     这些都是 master 在 server 上实际拉过 xray 配置(加 outbound / routing rule)、占用真实资源的节点。
+//   - routed + routed_owner='shared'(admin 在出站管理里创建 + 同步入站自动识别)— 占用 server 上实际 xray 资源
+//   - physical + original_server != ''(节点已 claim 到某台已注册 server)— 用户手动导入或外部订阅
+//     指向 mmwx 管理的 server 时,handleCreate 会自动 claim 并把 original_server 填上,等于"伪装的 routed"
+//
+// 不计入:
+//   - physical + original_server = ''(指向真外部 vps,跟 mmwx 资源无关)
+//   - routed + routed_owner='user'(普通用户私有路由出站,有 user_permissions quota)
+//
+// 这套语义堵了"用户通过手动导入 vless:// 绕过 license"的口子 — 只要节点 server 指向已注册 server,
+// 创建时就被 claim,后续计数自动覆盖。
 func (r *TrafficRepository) CountLicensedNodes(ctx context.Context) (int64, error) {
 	if r == nil || r.db == nil {
 		return 0, errors.New("traffic repository not initialized")
 	}
 	var count int64
-	if err := r.db.QueryRowContext(ctx,
-		`SELECT COUNT(1) FROM nodes WHERE node_type = 'routed' AND COALESCE(routed_owner, 'shared') = 'shared'`,
-	).Scan(&count); err != nil {
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(1) FROM nodes
+		WHERE (node_type = 'routed'   AND COALESCE(routed_owner, 'shared') = 'shared')
+		   OR (node_type = 'physical' AND COALESCE(original_server, '') != '')
+	`).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count licensed nodes: %w", err)
 	}
 	return count, nil
