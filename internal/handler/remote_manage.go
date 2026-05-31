@@ -40,12 +40,18 @@ type RemoteManageHandler struct {
 	fedSessions       sync.Map // serverID (int64) → *securechan.Session (联邦:消费方↔拥有方)
 	stealSelfDeployer func(ctx context.Context, serverID int64) error
 	licenseManager    *license.Manager // 同步入站时检查 routed 节点 license 上限,setter 注入
+	inboundCache      *InboundCache    // 从 xray config snapshot 派生,套餐绑/换绑 cred 计算用,setter 注入
 }
 
 // SetLicenseManager 注入 license 管理器供 syncInboundsToNodes 做节点数量上限检查。
 // nil = 不检查(开发场景),跟 nodes / routed_outbound 同款 pattern。
 func (h *RemoteManageHandler) SetLicenseManager(mgr *license.Manager) {
 	h.licenseManager = mgr
+}
+
+// SetInboundCache 注入 inbound cache。nil = 不启用 cache(套餐绑回退到逐节点 GET inbounds 老路径)。
+func (h *RemoteManageHandler) SetInboundCache(c *InboundCache) {
+	h.inboundCache = c
 }
 
 // 创建一个新的远程管理处理程序
@@ -399,6 +405,39 @@ func (h *RemoteManageHandler) HandleXrayConfig(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(result)
+}
+
+// HandleXrayTestConfig 把前端的 xray 配置预检请求转发到 agent。
+// 前端在 dialog 点"保存"前先调一次本接口,失败则不下发,直接 toast 错误内容。
+// agent 端不论 embedded/external 都会用 xray-core 库或 xray cli 验证 (见 ManageHandler.HandleXrayTestConfig)。
+func (h *RemoteManageHandler) HandleXrayTestConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		remoteWriteError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	serverID := r.URL.Query().Get("server_id")
+	if serverID == "" {
+		remoteWriteError(w, http.StatusBadRequest, "server_id required")
+		return
+	}
+	id, err := strconv.ParseInt(serverID, 10, 64)
+	if err != nil {
+		remoteWriteError(w, http.StatusBadRequest, "invalid server_id")
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		remoteWriteError(w, http.StatusBadRequest, "failed to read body")
+		return
+	}
+	result, err := h.forwardToRemoteServer(r.Context(), id, http.MethodPost, "/api/child/xray/test-config", body)
+	if err != nil {
+		remoteWriteError(w, http.StatusBadGateway, err.Error())
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write(result)
@@ -1070,7 +1109,15 @@ func isSessionInvalidErr(err error) bool {
 		strings.Contains(s, "decrypt")
 }
 
-func (h *RemoteManageHandler) forwardToRemoteServer(ctx context.Context, serverID int64, method, path string, body []byte) ([]byte, error) {
+func (h *RemoteManageHandler) forwardToRemoteServer(ctx context.Context, serverID int64, method, path string, body []byte) (respBody []byte, err error) {
+	// 写操作成功 + path 命中 xray 配置修改清单 → 异步 refresh snapshot
+	// (用 defer + named return 统一处理所有 return 分支,无需在每个 return 点重复)
+	defer func() {
+		if err == nil && shouldRefreshXraySnapshotAfter(method, path) {
+			go h.refreshXraySnapshot(serverID)
+		}
+	}()
+
 	// 联邦(分享)服务器:不直连 agent,改走拥有方主控的 /api/federation/manage
 	if fed, ferr := h.repo.GetFederatedServer(ctx, serverID); ferr == nil {
 		return h.doFederationRequest(ctx, fed, method, path, body)
@@ -1127,7 +1174,7 @@ func (h *RemoteManageHandler) forwardToRemoteServer(ctx context.Context, serverI
 	}
 
 	session := sessionVal.(*securechan.Session)
-	respBody, err := h.doEncryptedPullRequest(ctx, method, childURL, server.Token, body, session)
+	respBody, err = h.doEncryptedPullRequest(ctx, method, childURL, server.Token, body, session)
 	if isSessionInvalidErr(err) {
 		h.pullSessions.Delete(serverID)
 		log.Printf("[Remote Manage] Pull session invalid for server %d (%v), re-negotiating", serverID, err)
@@ -3074,16 +3121,14 @@ func (h *RemoteManageHandler) inboundToClashProxy(inbound map[string]interface{}
 		if method, ok := settings["method"].(string); ok {
 			proxy["cipher"] = method
 		}
-		// Shadowsocks 2022 密码处理
+		// SS2022:这里只存 inbound master password(settings.password)。
+		// 客户端 password 由订阅生成时(package_subscribe.go appendUserCredentialOverride)用
+		// 当前用户的 cred 拼接成完整双段 "master:userPass"。
+		//
+		// 历史 BUG:这里曾经拼 master + firstClient.password — 绑套餐路径再叠加 userPass 会
+		// 产生三段 "master:firstClient:userPass",客户端按 SS2022 协议解析失败。
 		if password, ok := settings["password"].(string); ok {
-			if client != nil {
-				if clientPassword, ok := client["password"].(string); ok {
-					// 对于 SS2022, 拼接服务器密码和客户端密码
-					proxy["password"] = password + ":" + clientPassword
-				}
-			} else {
-				proxy["password"] = password
-			}
+			proxy["password"] = password
 		}
 
 	case "hysteria":

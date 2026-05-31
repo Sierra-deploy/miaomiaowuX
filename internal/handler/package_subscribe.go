@@ -371,7 +371,16 @@ func applyUserCredentials(proxy map[string]any, node storage.Node, credMap map[c
 	case "ss", "shadowsocks":
 		if userPass, ok := cred["password"].(string); ok && userPass != "" {
 			if nodePass, ok := proxy["password"].(string); ok && nodePass != "" {
-				proxy["password"] = nodePass + ":" + userPass
+				// 仅 SS2022 需要 "master:userPass" 双段拼接(老 SS 单段密码不该改)。
+				cipher, _ := proxy["cipher"].(string)
+				if strings.HasPrefix(cipher, "2022-") {
+					// 兜底:存量 node.ClashConfig 可能还是老格式 "master:firstClient" — 剥掉冒号后段,
+					// 只保留 master,再拼当前用户密码,得到正确的两段。新节点直接 nodePass 就是 master 一段。
+					if idx := strings.Index(nodePass, ":"); idx >= 0 {
+						nodePass = nodePass[:idx]
+					}
+					proxy["password"] = nodePass + ":" + userPass
+				}
 			}
 		}
 	case "trojan":
