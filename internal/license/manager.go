@@ -270,6 +270,9 @@ func (m *Manager) heartbeat(ctx context.Context) {
 		"key":        m.key,
 		"machine_id": m.machineID,
 		"nonce":      nonce,
+		// client_fp 给 license server 做"同 license 多 fp"的破解版传播识别。
+		// fp 本身没强 enforcement(fork 主控能伪造),只做运营层指纹收集。
+		"client_fp": collectFingerprint(),
 	}
 	m.mu.RLock()
 	usage := m.usage

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
 	"miaomiaowux/internal/version"
 )
@@ -16,6 +17,15 @@ import (
 // 拥有方那一跳依赖 HTTPS;后续可叠加 securechan 端到端加密。
 
 const federationPollInterval = 5 * time.Second
+
+// federationLicense 联邦轮询的 license 引用(由 main wire 时 SetFederationLicense 注入)。
+// 散布校验:消费方拉取被分享 server 信息也是 server_share PRO 功能的运行时路径。
+var federationLicense *license.Manager
+
+// SetFederationLicense 注入联邦校验所需的 license 管理器。
+func SetFederationLicense(lic *license.Manager) {
+	federationLicense = lic
+}
 
 func StartFederationPoller(ctx context.Context, repo *storage.TrafficRepository) {
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -32,6 +42,10 @@ func StartFederationPoller(ctx context.Context, repo *storage.TrafficRepository)
 }
 
 func pollFederatedServers(ctx context.Context, repo *storage.TrafficRepository, client *http.Client) {
+	// 散布验签:无 license 直接跳过整轮 ticker。
+	if federationLicense != nil && !federationLicense.HasFeature("server_share") {
+		return
+	}
 	feds, err := repo.ListFederatedServers(ctx)
 	if err != nil {
 		return

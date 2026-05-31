@@ -705,8 +705,13 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 	}
 
 	// embedded 模式：认证成功后推送限速配置
+	// 散布验签:WS auth 路径上再校验一次 embedded license。即便 Step A 入口被绕过、
+	// DB 里有 embedded server,连接成功推限速前再拦截一道(limiterPusher 内部 PushToServer
+	// 也会 gate,这里提前 return 避免无效 goroutine)。
 	if server.XrayMode == "embedded" && h.limiterPusher != nil {
-		go h.limiterPusher.PushToServer(context.Background(), server.ID)
+		if h.licenseManager == nil || (h.licenseManager.HasFeature("embedded") && h.licenseManager.HasFeature("limiter")) {
+			go h.limiterPusher.PushToServer(context.Background(), server.ID)
+		}
 	}
 
 	// xray 配置 snapshot 同步: server.Status 在 UpdateRemoteServerHeartbeat 之前抓取的就是上次状态

@@ -367,6 +367,7 @@ func main() {
 
 	// 限速配置推送器
 	limiterPusher := handler.NewLimiterConfigPusher(repo, remoteWSHandler)
+	limiterPusher.SetLicenseManager(licenseManager)
 	remoteWSHandler.SetLimiterPusher(limiterPusher)
 	remoteWSHandler.SetLicenseManager(licenseManager)
 	xrayServerHandler.SetLimiterPusher(limiterPusher)
@@ -409,6 +410,7 @@ func main() {
 	// 服务器分享(PRO):拥有方生成/管理分享令牌
 	mux.Handle("/api/admin/server-share/", auth.RequireAdmin(tokenStore, userRepo, handler.NewServerShareHandler(repo, licenseManager)))
 	speedTesterWS := handler.NewSpeedTesterWSHandler(repo)
+	speedTesterWS.SetLicenseManager(licenseManager)
 	mux.Handle("/api/speedtest/tester/ws", speedTesterWS) // 家用测速端反向连入(token 认证,无 JWT)
 	speedTestHandler := handler.NewSpeedTestHandler(repo, licenseManager)
 	speedTestHandler.SetTesterWS(speedTesterWS)
@@ -939,6 +941,7 @@ func main() {
 	// 启动通知调度器
 	go handler.StartNotifyScheduler(collectorCtx, repo)
 	// 启动分享服务器(联邦)状态/流量轮询（每 30 秒从拥有方拉取）
+	handler.SetFederationLicense(licenseManager)
 	go handler.StartFederationPoller(collectorCtx, repo)
 	// 启动证书自动续订检查程序（每 24 小时检查一次是否有 30 天内过期的证书）
 	certHandler.StartRenewalChecker(collectorCtx)

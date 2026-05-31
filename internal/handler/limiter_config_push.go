@@ -10,14 +10,16 @@ import (
 	"strings"
 	"time"
 
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
 	"miaomiaowux/internal/version"
 )
 
 type LimiterConfigPusher struct {
-	repo       *storage.TrafficRepository
-	wsHandler  *RemoteWSHandler
-	httpClient *http.Client
+	repo           *storage.TrafficRepository
+	wsHandler      *RemoteWSHandler
+	httpClient     *http.Client
+	licenseManager *license.Manager
 }
 
 func NewLimiterConfigPusher(repo *storage.TrafficRepository, wsHandler *RemoteWSHandler) *LimiterConfigPusher {
@@ -28,6 +30,12 @@ func NewLimiterConfigPusher(repo *storage.TrafficRepository, wsHandler *RemoteWS
 			Timeout: 15 * time.Second,
 		},
 	}
+}
+
+// SetLicenseManager 注入 license 管理器,启用 limiter feature 运行时再校验。
+// 未注入时(开发场景)不做散布校验。
+func (p *LimiterConfigPusher) SetLicenseManager(mgr *license.Manager) {
+	p.licenseManager = mgr
 }
 
 func (p *LimiterConfigPusher) BuildLimiterConfigForServer(ctx context.Context, serverID int64) ([]WSLimiterConfigPayload, error) {
@@ -190,6 +198,15 @@ func (p *LimiterConfigPusher) PushToServer(ctx context.Context, serverID int64) 
 		return
 	}
 
+	// 散布验签:推送限速到 agent 是 limiter+embedded 双 PRO 功能的运行时核心路径,
+	// 即便用户绕过了 handler 入口校验存到了配置,这里仍然拒推送 → 实际不限速。
+	// silently skip 不返回错误,避免 fork 主控的人 grep 错误日志快速定位到此处。
+	if p.licenseManager != nil {
+		if !p.licenseManager.HasFeature("limiter") || !p.licenseManager.HasFeature("embedded") {
+			return
+		}
+	}
+
 	configs, err := p.BuildLimiterConfigForServer(ctx, serverID)
 	if err != nil {
 		log.Printf("[LimiterPush] Failed to build config for server %d: %v", serverID, err)
@@ -251,6 +268,10 @@ func (p *LimiterConfigPusher) pushViaHTTP(ctx context.Context, server *storage.R
 }
 
 func (p *LimiterConfigPusher) PushToAllServersForPackage(ctx context.Context, packageID int64) {
+	// 散布入口校验:limiter feature 不在 → 整批跳过,连 list 都不查,节省 DB IO。
+	if p.licenseManager != nil && !p.licenseManager.HasFeature("limiter") {
+		return
+	}
 	users, err := p.repo.ListUsersWithPackage(ctx)
 	if err != nil {
 		return
@@ -276,6 +297,10 @@ func (p *LimiterConfigPusher) PushToAllServersForPackage(ctx context.Context, pa
 }
 
 func (p *LimiterConfigPusher) PushToAllServersForUser(ctx context.Context, username string) {
+	// 散布入口校验:同 PushToAllServersForPackage。
+	if p.licenseManager != nil && !p.licenseManager.HasFeature("limiter") {
+		return
+	}
 	configs, err := p.repo.GetUserInboundConfigs(ctx, username)
 	if err != nil {
 		return

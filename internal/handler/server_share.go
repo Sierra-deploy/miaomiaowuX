@@ -37,8 +37,8 @@ func (h *ServerShareHandler) proEnabled() bool {
 	if h.license == nil {
 		return false
 	}
-	st := h.license.GetStatus()
-	return st.HasFeature(featureServerShare)
+	// 同 federation.go:同名方法但用 Manager.HasFeature 走完整验签。
+	return h.license.HasFeature(featureServerShare)
 }
 
 func (h *ServerShareHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

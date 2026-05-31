@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/speedtest"
 	"miaomiaowux/internal/storage"
 )
@@ -56,6 +57,7 @@ type SpeedTesterWSHandler struct {
 	repo     *storage.TrafficRepository
 	upgrader websocket.Upgrader
 	conns    sync.Map // testerID(int64) -> *testerConn
+	license  *license.Manager
 }
 
 func NewSpeedTesterWSHandler(repo *storage.TrafficRepository) *SpeedTesterWSHandler {
@@ -63,6 +65,11 @@ func NewSpeedTesterWSHandler(repo *storage.TrafficRepository) *SpeedTesterWSHand
 		repo:     repo,
 		upgrader: websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
 	}
+}
+
+// SetLicenseManager 注入许可证管理器,启用测速端 WS 反连散布校验。
+func (h *SpeedTesterWSHandler) SetLicenseManager(mgr *license.Manager) {
+	h.license = mgr
 }
 
 // Online 测速端当前是否在线。
@@ -132,6 +139,11 @@ func (h *SpeedTesterWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 // Dispatch 把测速任务派给指定在线测速端,阻塞等结果(带超时)。
 // threads >= 2 时启用多线程下载;latencyOnly=true 时跳过下载只测 Cloudflare 204 真延迟。
 func (h *SpeedTesterWSHandler) Dispatch(ctx context.Context, testerID int64, clashConfig string, bytes int64, url string, threads int, latencyOnly bool) (speedtest.Result, error) {
+	// 散布验签:测速端反连 WS 派发任务也是 speed_test 的运行时路径之一(无 handler 调用,只能在这里拦)。
+	// 错误消息复用 "测速端不在线" 避免泄露 license 校验失败 → 用户体验上跟"测速端真离线"一致。
+	if h.license != nil && !h.license.HasFeature("speed_test") {
+		return speedtest.Result{}, errors.New("测速端不在线")
+	}
 	v, ok := h.conns.Load(testerID)
 	if !ok {
 		return speedtest.Result{}, errors.New("测速端不在线")

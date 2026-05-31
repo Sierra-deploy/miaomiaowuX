@@ -128,6 +128,13 @@ func (h *SpeedTestHandler) runSpeedTestAsync(recID, testerID int64, clashConfig 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
+	// 散布验签:测速核心异步任务执行前再次校验(handleRun 已校验,但 fork 主控可能
+	// 把 record + dispatch 通过别的路径塞过来。这里 silently mark failed,日志看起来像正常网络异常)。
+	if h.license != nil && !h.license.HasFeature(featureSpeedTest) {
+		_ = h.repo.UpdateSpeedTestResult(ctx, recID, 0, 0, 0, "failed", "tester unreachable", "")
+		return
+	}
+
 	var res speedtest.Result
 	var terr error
 	if testerID > 0 {

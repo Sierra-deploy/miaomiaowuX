@@ -36,8 +36,8 @@ func (h *FederationHandler) proEnabled() bool {
 	if h.license == nil {
 		return false
 	}
-	st := h.license.GetStatus()
-	return st.HasFeature(featureServerShare)
+	// Manager.HasFeature 才走完整的 ed25519 token 验签(Status.HasFeature 已废弃恒返 false 防绕过)。
+	return h.license.HasFeature(featureServerShare)
 }
 
 // authShare 校验分享令牌,返回被分享的 server_id。
