@@ -11,10 +11,20 @@ import (
 )
 
 // 许可证响应验签:许可证服务用 ed25519 私钥对响应签名,这里用内置公钥验签,
-// 防止用户用假许可证服务/MITM 伪造 valid=true + PRO features。
-// 公钥对应许可证服务器上 /opt/mmwx-license/sign_ed25519.key 的私钥。
+// 防止 (a) 假许可证服务/MITM 伪造 valid=true + PRO features;(b) 用户 fork 源码自编译。
+//
+// 公钥**编译时**通过 ldflags 注入(参见仓库 build.sh)。源码里默认空 →
+// 任何"git clone 后直接 go build"产出的二进制都没有有效公钥 → 所有许可证响应验签失败 →
+// 进入 grace period 后 status 失效 → PRO 功能不可用。
+//
+// 注:本机制对个人客户场景(fork 改源码后自编译)有效;对反编译释出公钥的攻击不防御
+// (反编译能拿到二进制里的公钥再用 -ldflags 自己注入,但这超出个人客户技术门槛)。
+//
+// 发布流程:
+//   go build -ldflags "-X 'miaomiaowux/internal/license.licenseSignPubKeyB64=$LICENSE_PUB_KEY'" ./cmd/server
+// LICENSE_PUB_KEY 从 build 环境获取,不进 git。
 
-const licenseSignPubKeyB64 = "1mOqVQuZPyeioJVLzG66z+Xdh3AdpdL0JsTmZ2nlEEA="
+var licenseSignPubKeyB64 = ""
 
 var licenseSignPubKey ed25519.PublicKey
 
@@ -56,4 +66,24 @@ func verifyLicenseSig(nonce, machineID string, valid bool, maxServers int, expir
 		return false
 	}
 	return ed25519.Verify(licenseSignPubKey, licenseSignCanonical(nonce, valid, machineID, maxServers, expiresAt, features), sig)
+}
+
+// featureTokenCanonical 与 license server 端 license_sign.go 完全一致。
+// 不含 nonce — feature token 长期复用,license 有效期内每次心跳都相同。
+func featureTokenCanonical(licenseKey, machineID, featureName, expiresAt string) []byte {
+	return []byte("mmwxfeat-v1\n" + licenseKey + "\n" + machineID + "\n" + featureName + "\n" + expiresAt)
+}
+
+// VerifyFeatureToken 校验单 feature token。失败 fail-closed。
+// 这是 HasFeature 的真正校验路径 — fork 主控的人改 PlanInfo.FeatureTokens 也无效,
+// 因为没有 ed25519 私钥签不出有效 token,验签会失败。
+func VerifyFeatureToken(licenseKey, machineID, featureName, expiresAt, tokenB64 string) bool {
+	if licenseSignPubKey == nil || tokenB64 == "" {
+		return false
+	}
+	sig, err := base64.StdEncoding.DecodeString(tokenB64)
+	if err != nil {
+		return false
+	}
+	return ed25519.Verify(licenseSignPubKey, featureTokenCanonical(licenseKey, machineID, featureName, expiresAt), sig)
 }

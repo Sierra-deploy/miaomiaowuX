@@ -19,6 +19,10 @@ type PlanInfo struct {
 	MaxNodes    int      `json:"max_nodes"`
 	MaxUsers    int      `json:"max_users"`
 	Features    []string `json:"features"`
+	// FeatureTokens 每个 feature 单独的 ed25519 签名 token,由 license server 签发。
+	// Manager.HasFeature 用对应 token + VerifyFeatureToken 校验,fork 主控的人改 Features 数组也无效。
+	// 老 license server 不返回此字段时 → 所有 PRO feature 都不可用(强制升级 license server)。
+	FeatureTokens map[string]string `json:"feature_tokens,omitempty"`
 }
 
 type Status struct {
@@ -35,27 +39,22 @@ type Status struct {
 	HardRevoked bool `json:"hard_revoked,omitempty"`
 }
 
-func (s *Status) HasFeature(name string) bool {
-	if s.Plan == nil {
-		return false
-	}
-	for _, f := range s.Plan.Features {
-		if f == name {
-			return true
-		}
-	}
+// Status.HasFeature 已废弃 — Status 没有 license key / machine_id,无法验签。
+// 调用方应使用 Manager.HasFeature(name)。本函数保留只为不破坏外部依赖,**永远返回 false**。
+// 这是有意为之:fork 主控的人如果只看 Status.Features 数组绕过 Manager.HasFeature,得到的是 false。
+func (s *Status) HasFeature(_ string) bool {
 	return false
 }
 
 var defaultStatus = Status{
 	Valid:      true,
-	MaxServers: 5,
+	MaxServers: 1,
 	Plan: &PlanInfo{
 		Name:        "TRIAL",
 		DisplayName: "试用版",
-		MaxServers:  5,
-		MaxNodes:    20,
-		MaxUsers:    10,
+		MaxServers:  1,
+		MaxNodes:    5,
+		MaxUsers:    3,
 		Features:    nil,
 	},
 }
@@ -148,10 +147,29 @@ func (m *Manager) IsValid() bool {
 	return true
 }
 
+// HasFeature 校验当前 license 是否启用某 PRO feature。
+// 不仅看名称在 Features 列表(可被 fork 主控伪造),还要用 license server 签发的
+// per-feature ed25519 token 验签 → 没私钥就签不出有效 token。
+// IsValid 失败 / 没 FeatureTokens / token 验签失败 → 一律 false (fail-closed)。
 func (m *Manager) HasFeature(name string) bool {
+	if !m.IsValid() {
+		return false
+	}
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.status.HasFeature(name)
+	plan := m.status.Plan
+	expiresAt := m.status.ExpiresAt
+	licenseKey := m.key
+	machineID := m.machineID
+	m.mu.RUnlock()
+
+	if plan == nil || plan.FeatureTokens == nil {
+		return false
+	}
+	tokenB64, ok := plan.FeatureTokens[name]
+	if !ok || tokenB64 == "" {
+		return false
+	}
+	return VerifyFeatureToken(licenseKey, machineID, name, expiresAt, tokenB64)
 }
 
 func (m *Manager) Refresh(ctx context.Context) {

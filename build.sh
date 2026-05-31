@@ -11,6 +11,18 @@ BUILD_DIR="build"
 FRONTEND_DIR="miaomiaowux-frontend"
 OUTPUT_DIR="${BUILD_DIR}/release"
 
+# 许可证响应验签公钥 — 从环境变量取,源码里默认空(防 fork 自编译能验签)。
+# 正式发布前 export LICENSE_PUB_KEY="base64 公钥" 再 ./build.sh
+# 没设时 build 仍能成功,但 release 出来的二进制 PRO 功能用不了(所有许可证响应都验签失败)
+if [ -z "$LICENSE_PUB_KEY" ]; then
+    echo "⚠ 警告: 未设置 LICENSE_PUB_KEY 环境变量"
+    echo "  构建出的二进制将无法验证许可证响应,PRO 功能不可用。"
+    echo "  正式发布请先: export LICENSE_PUB_KEY=\"...\""
+    echo ""
+fi
+LICENSE_PKG="miaomiaowux/internal/license"
+LDFLAGS="-s -w -X '${LICENSE_PKG}.licenseSignPubKeyB64=${LICENSE_PUB_KEY}'"
+
 # 0. 同步版本号
 echo ""
 echo "[0/3] 同步版本号..."
@@ -40,13 +52,13 @@ echo "前端构建完成 ✓"
 # 2. 构建 Go 后端 (Linux)
 echo ""
 echo "[2/3] 构建 Linux 版本后端..."
-GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "${BUILD_DIR}/mmwx-linux-amd64" cmd/server/main.go cmd/server/cors.go
+GOOS=linux GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o "${BUILD_DIR}/mmwx-linux-amd64" cmd/server/main.go cmd/server/cors.go
 echo "Linux 后端构建完成 ✓"
 
 # 3. 构建 Go 后端 (Windows)
 echo ""
 echo "[3/3] 构建 Windows 版本后端..."
-GOOS=windows GOARCH=amd64 go build -ldflags="-s -w" -o "${BUILD_DIR}/mmwx-windows-amd64.exe" cmd/server/main.go cmd/server/cors.go
+GOOS=windows GOARCH=amd64 go build -ldflags="${LDFLAGS}" -o "${BUILD_DIR}/mmwx-windows-amd64.exe" cmd/server/main.go cmd/server/cors.go
 echo "Windows 后端构建完成 ✓"
 
 # 4. 准备发布文件

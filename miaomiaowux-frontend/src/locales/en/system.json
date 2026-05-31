@@ -124,7 +124,7 @@
     "permanent": "Permanent",
     "trial": "Trial",
     "updated": "License settings updated",
-    "trialHint": "You are on a trial license. PRO features (rate limiter, node speed test, etc.) are not available. Register and claim your MiaomiaowuX launch commemorative license (includes PRO features, with more coming...) at:"
+    "trialHint": "You are on a trial license. PRO features (rate limiter, node speed test, etc.) are not available. Register and claim your license (includes PRO features, with more coming...) at:"
   },
   "configUpdated": "Settings updated",
   "configUpdateFailed": "Failed to update settings"

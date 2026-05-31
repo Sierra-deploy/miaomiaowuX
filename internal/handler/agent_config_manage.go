@@ -351,6 +351,13 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 	if xrayMode != "embedded" {
 		xrayMode = "external"
 	}
+	// embedded 是 PRO feature — 没有许可证拒收。等价于 "external" 不受限。
+	if xrayMode == "embedded" && h.licenseManager != nil && !h.licenseManager.HasFeature("embedded") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(stdhttp.StatusForbidden)
+		json.NewEncoder(w).Encode(RemoteServerResponse{Success: false, Message: "内嵌 Xray 是 PRO 功能,需要许可证"})
+		return
+	}
 
 	// Agent 监听端口:有效范围 1024-65535;0 表示用 agent 内置默认 23889
 	listenPort := req.ListenPort
@@ -624,6 +631,14 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 			Success: false,
 			Message: msg,
 		})
+		return
+	}
+
+	// embedded 是 PRO feature — update 路径也要拦,防止用户先 external 创建再 update 提权。
+	if req.XrayMode == "embedded" && oldServer.XrayMode != "embedded" && h.licenseManager != nil && !h.licenseManager.HasFeature("embedded") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(stdhttp.StatusForbidden)
+		json.NewEncoder(w).Encode(RemoteServerResponse{Success: false, Message: "内嵌 Xray 是 PRO 功能,需要许可证"})
 		return
 	}
 

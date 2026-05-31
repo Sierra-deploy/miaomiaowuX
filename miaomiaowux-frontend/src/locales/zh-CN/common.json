@@ -164,7 +164,7 @@
     "maxNodes": "最大节点数",
     "maxUsers": "最大用户数",
     "expiresAt": "到期时间",
-    "trialHint": "当前为试用许可证，PRO 功能不可用。注册获取纪念许可证："
+    "trialHint": "当前为试用许可证，PRO 功能不可用。注册获取许可证："
   },
   "noData": "暂无数据",
   "cardView": "卡片视图",

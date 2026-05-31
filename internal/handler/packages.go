@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
 	"miaomiaowux/internal/substore"
 
@@ -50,11 +51,17 @@ func (h *PackageListHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // PackageCreateHandler 处理创建新的包模板
 type PackageCreateHandler struct {
-	repo *storage.TrafficRepository
+	repo           *storage.TrafficRepository
+	licenseManager *license.Manager
 }
 
 func NewPackageCreateHandler(repo *storage.TrafficRepository) *PackageCreateHandler {
 	return &PackageCreateHandler{repo: repo}
+}
+
+// SetLicenseManager 注入许可证管理器 — limiter PRO feature gate 需要。
+func (h *PackageCreateHandler) SetLicenseManager(mgr *license.Manager) {
+	h.licenseManager = mgr
 }
 
 type createPackageRequest struct {
@@ -111,6 +118,12 @@ func (h *PackageCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 	if req.TrafficLimitGB <= 0 {
 		http.Error(w, "Traffic limit must be greater than 0", http.StatusBadRequest)
+		return
+	}
+
+	// limiter 是 PRO feature — SpeedLimitMbps > 0 / AutoSpeedRules 非空 都视为启用限速。
+	if (req.SpeedLimitMbps > 0 || len(req.AutoSpeedRules) > 0) && h.licenseManager != nil && !h.licenseManager.HasFeature("limiter") {
+		http.Error(w, "限速器是 PRO 功能,需要许可证", http.StatusForbidden)
 		return
 	}
 
@@ -176,9 +189,15 @@ func (h *PackageCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 // PackageUpdateHandler 处理更新现有包模板
 type PackageUpdateHandler struct {
-	repo         *storage.TrafficRepository
-	remoteManage *RemoteManageHandler
-	pusher       *LimiterConfigPusher
+	repo           *storage.TrafficRepository
+	remoteManage   *RemoteManageHandler
+	pusher         *LimiterConfigPusher
+	licenseManager *license.Manager
+}
+
+// SetLicenseManager 注入许可证管理器 — limiter PRO feature gate 需要。
+func (h *PackageUpdateHandler) SetLicenseManager(mgr *license.Manager) {
+	h.licenseManager = mgr
 }
 
 func NewPackageUpdateHandler(repo *storage.TrafficRepository, remoteManage *RemoteManageHandler, pusher *LimiterConfigPusher) *PackageUpdateHandler {
@@ -226,6 +245,12 @@ func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 	if req.TrafficLimitGB <= 0 {
 		http.Error(w, "Traffic limit must be greater than 0", http.StatusBadRequest)
+		return
+	}
+
+	// limiter 是 PRO feature — SpeedLimitMbps > 0 / AutoSpeedRules 非空 都视为启用限速。
+	if (req.SpeedLimitMbps > 0 || len(req.AutoSpeedRules) > 0) && h.licenseManager != nil && !h.licenseManager.HasFeature("limiter") {
+		http.Error(w, "限速器是 PRO 功能,需要许可证", http.StatusForbidden)
 		return
 	}
 

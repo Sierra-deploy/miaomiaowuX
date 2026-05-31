@@ -708,7 +708,7 @@ func NewUserUpdateEmailHandler(repo *storage.TrafficRepository) http.Handler {
 	})
 }
 
-func NewUserLimitsHandler(repo *storage.TrafficRepository, pusher *LimiterConfigPusher) http.Handler {
+func NewUserLimitsHandler(repo *storage.TrafficRepository, pusher *LimiterConfigPusher, licenseManager *license.Manager) http.Handler {
 	type req struct {
 		Username            string   `json:"username"`
 		SpeedLimitOverride  *float64 `json:"speed_limit_override"`
@@ -729,6 +729,13 @@ func NewUserLimitsHandler(repo *storage.TrafficRepository, pusher *LimiterConfig
 
 		if strings.TrimSpace(body.Username) == "" {
 			writeError(w, http.StatusBadRequest, errors.New("username is required"))
+			return
+		}
+
+		// limiter 是 PRO feature — 设置非空 SpeedLimitOverride 才走 gate。
+		// DeviceLimit 不算 limiter 范围(那是 socket 数限制,跟限速逻辑不同)。
+		if body.SpeedLimitOverride != nil && *body.SpeedLimitOverride > 0 && licenseManager != nil && !licenseManager.HasFeature("limiter") {
+			http.Error(w, "限速器是 PRO 功能,需要许可证", http.StatusForbidden)
 			return
 		}
 

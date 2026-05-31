@@ -274,7 +274,9 @@ func main() {
 
 	// 包管理端点（仅限管理员）— list/create 不依赖 limiterPusher;delete 需解绑用户,延后到 remoteManageHandler/limiterPusher 创建后注册
 	mux.Handle("/api/admin/packages", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageListHandler(repo)))
-	mux.Handle("/api/admin/packages/create", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageCreateHandler(repo)))
+	packageCreateHandler := handler.NewPackageCreateHandler(repo)
+	packageCreateHandler.SetLicenseManager(licenseManager)
+	mux.Handle("/api/admin/packages/create", auth.RequireAdmin(tokenStore, userRepo, packageCreateHandler))
 
 	// 用户端点（所有经过身份验证的用户）
 	mux.Handle("/api/proxy-groups", auth.RequireToken(tokenStore, userRepo, handler.NewProxyGroupsHandler(proxyGroupsStore)))
@@ -397,7 +399,9 @@ func main() {
 	xrayServerHandler.SetWSHandler(remoteWSHandler)
 
 	// 依赖 limiterPusher 的端点
-	mux.Handle("/api/admin/packages/update", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageUpdateHandler(repo, remoteManageHandler, limiterPusher)))
+	packageUpdateHandler := handler.NewPackageUpdateHandler(repo, remoteManageHandler, limiterPusher)
+	packageUpdateHandler.SetLicenseManager(licenseManager)
+	mux.Handle("/api/admin/packages/update", auth.RequireAdmin(tokenStore, userRepo, packageUpdateHandler))
 	mux.Handle("/api/admin/packages/assign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageAssignHandler(repo, remoteManageHandler, limiterPusher)))
 	mux.Handle("/api/admin/packages/unassign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageUnassignHandler(repo, remoteManageHandler, limiterPusher)))
 	// 删除套餐:解绑所有绑定用户(移除入站凭据/清 package_id/删套餐订阅)后再删,故依赖 remoteManageHandler/limiterPusher
@@ -415,7 +419,7 @@ func main() {
 	federationHandler := handler.NewFederationHandler(repo, remoteManageHandler, licenseManager)
 	mux.Handle("/api/federation/manage", federationHandler)
 	mux.Handle("/api/federation/server-info", federationHandler)
-	mux.Handle("/api/admin/users/limits", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserLimitsHandler(repo, limiterPusher)))
+	mux.Handle("/api/admin/users/limits", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserLimitsHandler(repo, limiterPusher, licenseManager)))
 	mux.Handle("/api/admin/users/delete", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserDeleteHandler(repo, remoteManageHandler, limiterPusher)))
 	mux.Handle("/api/admin/users/status", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserStatusHandler(repo, remoteManageHandler, limiterPusher)))
 
