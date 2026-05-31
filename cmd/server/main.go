@@ -214,7 +214,13 @@ func main() {
 	mux.Handle("/api/setup/init", handler.NewInitialSetupHandler(repo))
 	mux.Handle("/api/setup/verify-domain", handler.NewVerifyDomainHandler())
 	mux.Handle("/api/setup/restore-backup", handler.NewSetupRestoreBackupHandler(repo))
-	loginRateLimiter := handler.NewLoginRateLimiter()
+
+	// 从 system_settings 读 3 个安全限流器的自定义阈值(KV 缺失 → fallback hardcoded 默认值)。
+	// 同一份配置后面给 brute_force + subscription_rate 构造时复用。
+	secCfg := handler.LoadSecuritySettings(context.Background(), repo)
+	loginRateLimiter := handler.NewLoginRateLimiterWithConfig(
+		secCfg.LoginRateMaxAttempts, secCfg.LoginRateWindowMinutes, secCfg.LoginRateLockMinutes,
+	)
 	twoFactorStore := auth.NewTwoFactorPendingStore(5 * time.Minute)
 	mux.Handle("/api/login", handler.NewLoginHandler(authManager, tokenStore, repo, loginRateLimiter, twoFactorStore))
 	mux.Handle("/api/login/2fa", handler.NewTwoFactorLoginHandler(tokenStore, repo, twoFactorStore))
@@ -623,6 +629,8 @@ func main() {
 	if encVal, _ := repo.GetSystemSetting(context.Background(), "require_encryption"); encVal == "true" {
 		cryptoConfig.SetRequireEncryption(true)
 	}
+	// 自定义安全阈值(登录/暴力防护/订阅频率)— 写入后 handler 内部热更新 3 个 limiter 单例,无需重启
+	mux.Handle("/api/admin/security-settings", auth.RequireAdmin(tokenStore, userRepo, handler.NewSecuritySettingsHandler(repo)))
 	mux.Handle("/api/admin/system-settings/api-token", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(systemSettingsHandler.GetAPIToken)))
 	mux.Handle("/api/admin/system-settings/api-token/regenerate", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(systemSettingsHandler.RegenerateAPIToken)))
 	mux.Handle("/api/admin/system-settings/master-url", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -821,10 +829,15 @@ func main() {
 	// /t/{id} 路径路由到临时订阅处理程序
 	// 所有其他路径都转到 Web 处理程序
 	shortLinkHandler := handler.NewShortLinkHandler(repo, subscriptionHandler, packageSubscribeHandler)
-	bruteForceProtector := handler.NewBruteForceProtector()
-	// 订阅获取频率限制(每 IP 每 2 小时 30 次),覆盖 /x/ 短链接与 /t/ 临时订阅,防枚举/抓取滥用。
-	// 同步自 mmw v0.7.3 #89(收紧窗口降低被暴力枚举短码的速率)。
-	subRateLimiter := handler.NewSubscriptionRateLimiter(30, 2*time.Hour)
+	// 暴力防护 / 订阅频率限制 用前面 LoadSecuritySettings 拿到的同一份 secCfg 构造,
+	// system_settings 里有自定义阈值就用它们,没有就 fallback 到 hardcoded 默认值(24h/24h/30 次/2h)。
+	bruteForceProtector := handler.NewBruteForceProtectorWithConfig(
+		secCfg.BruteForceEnabled, secCfg.BruteForceMaxFailures,
+		secCfg.BruteForceWindowMinutes, secCfg.BruteForceBlockMinutes,
+	)
+	subRateLimiter := handler.NewSubscriptionRateLimiterWithConfig(
+		secCfg.SubRateEnabled, secCfg.SubRateLimit, secCfg.SubRateWindowMinutes,
+	)
 	go subRateLimiter.StartCleanup(context.Background())
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.Trim(r.URL.Path, "/")

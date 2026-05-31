@@ -8,6 +8,12 @@ import (
 	"miaomiaowux/internal/logger"
 )
 
+var globalSubscriptionRateLimiter *SubscriptionRateLimiter
+
+func GetSubscriptionRateLimiter() *SubscriptionRateLimiter {
+	return globalSubscriptionRateLimiter
+}
+
 // SubscriptionRateLimiter 对"获取订阅"类请求(短链接 /x/、临时订阅 /t/、/api/clash/subscribe 等)
 // 做每 IP 频率限制,防止枚举/抓取滥用。固定窗口计数。
 type subRateRecord struct {
@@ -16,10 +22,11 @@ type subRateRecord struct {
 }
 
 type SubscriptionRateLimiter struct {
-	mu     sync.Mutex
-	ips    map[string]*subRateRecord
-	limit  int
-	window time.Duration
+	mu      sync.Mutex
+	ips     map[string]*subRateRecord
+	enabled bool
+	limit   int
+	window  time.Duration
 }
 
 // NewSubscriptionRateLimiter limit=窗口内最大请求数,window=窗口时长。
@@ -30,10 +37,44 @@ func NewSubscriptionRateLimiter(limit int, window time.Duration) *SubscriptionRa
 	if window <= 0 {
 		window = time.Minute
 	}
-	return &SubscriptionRateLimiter{
-		ips:    make(map[string]*subRateRecord),
-		limit:  limit,
-		window: window,
+	l := &SubscriptionRateLimiter{
+		ips:     make(map[string]*subRateRecord),
+		enabled: true,
+		limit:   limit,
+		window:  window,
+	}
+	globalSubscriptionRateLimiter = l
+	return l
+}
+
+// NewSubscriptionRateLimiterWithConfig 用 system_settings 自定义阈值构造。
+func NewSubscriptionRateLimiterWithConfig(enabled bool, limit, windowMinutes int) *SubscriptionRateLimiter {
+	if limit <= 0 {
+		limit = 60
+	}
+	if windowMinutes <= 0 {
+		windowMinutes = 1
+	}
+	l := &SubscriptionRateLimiter{
+		ips:     make(map[string]*subRateRecord),
+		enabled: enabled,
+		limit:   limit,
+		window:  time.Duration(windowMinutes) * time.Minute,
+	}
+	globalSubscriptionRateLimiter = l
+	return l
+}
+
+// UpdateConfig 热更新参数 — security_settings handler PUT 后调用。
+func (l *SubscriptionRateLimiter) UpdateConfig(enabled bool, limit, windowMinutes int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.enabled = enabled
+	if limit > 0 {
+		l.limit = limit
+	}
+	if windowMinutes > 0 {
+		l.window = time.Duration(windowMinutes) * time.Minute
 	}
 }
 
@@ -45,6 +86,10 @@ func (l *SubscriptionRateLimiter) Allow(ip string) bool {
 	now := time.Now()
 	l.mu.Lock()
 	defer l.mu.Unlock()
+
+	if !l.enabled {
+		return true
+	}
 
 	rec, ok := l.ips[ip]
 	if !ok || now.Sub(rec.windowStart) > l.window {

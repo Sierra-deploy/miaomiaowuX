@@ -10,6 +10,12 @@ import (
 
 var ErrRateLimited = errors.New("rate limit exceeded")
 
+var globalLoginRateLimiter *LoginRateLimiter
+
+func GetLoginRateLimiter() *LoginRateLimiter {
+	return globalLoginRateLimiter
+}
+
 type attemptInfo struct {
 	count     int
 	firstTime time.Time
@@ -17,6 +23,7 @@ type attemptInfo struct {
 }
 
 type LoginRateLimiter struct {
+	mu              sync.RWMutex
 	ipAttempts      sync.Map // IP -> *attemptInfo
 	accountAttempts sync.Map // username -> *attemptInfo
 	maxAttempts     int
@@ -24,12 +31,42 @@ type LoginRateLimiter struct {
 	lockDuration    time.Duration
 }
 
+// NewLoginRateLimiter 默认值构造:5 次失败 / 1 小时窗口 / 1 小时锁定。
+// 登录限流没有 enabled 开关(登录路径必须有基本防护)。
 func NewLoginRateLimiter() *LoginRateLimiter {
-	return &LoginRateLimiter{
+	l := &LoginRateLimiter{
 		maxAttempts:    5,
 		windowDuration: time.Hour,
 		lockDuration:   time.Hour,
 	}
+	globalLoginRateLimiter = l
+	return l
+}
+
+// NewLoginRateLimiterWithConfig 用 system_settings 自定义阈值构造。
+func NewLoginRateLimiterWithConfig(maxAttempts, windowMinutes, lockMinutes int) *LoginRateLimiter {
+	l := &LoginRateLimiter{
+		maxAttempts:    maxAttempts,
+		windowDuration: time.Duration(windowMinutes) * time.Minute,
+		lockDuration:   time.Duration(lockMinutes) * time.Minute,
+	}
+	globalLoginRateLimiter = l
+	return l
+}
+
+// UpdateConfig 热更新参数 — security_settings handler PUT 后调用。
+func (l *LoginRateLimiter) UpdateConfig(maxAttempts, windowMinutes, lockMinutes int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.maxAttempts = maxAttempts
+	l.windowDuration = time.Duration(windowMinutes) * time.Minute
+	l.lockDuration = time.Duration(lockMinutes) * time.Minute
+}
+
+func (l *LoginRateLimiter) getConfig() (int, time.Duration, time.Duration) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.maxAttempts, l.windowDuration, l.lockDuration
 }
 
 func (l *LoginRateLimiter) Check(ip, username string) error {
@@ -57,6 +94,8 @@ func (l *LoginRateLimiter) Check(ip, username string) error {
 }
 
 func (l *LoginRateLimiter) checkAttempts(store *sync.Map, key string, now time.Time) error {
+	maxAttempts, windowDuration, lockDuration := l.getConfig()
+
 	val, _ := store.Load(key)
 	if val == nil {
 		return nil
@@ -73,13 +112,13 @@ func (l *LoginRateLimiter) checkAttempts(store *sync.Map, key string, now time.T
 		return nil
 	}
 
-	if now.Sub(info.firstTime) > l.windowDuration {
+	if now.Sub(info.firstTime) > windowDuration {
 		store.Delete(key)
 		return nil
 	}
 
-	if info.count >= l.maxAttempts {
-		info.lockUntil = now.Add(l.lockDuration)
+	if info.count >= maxAttempts {
+		info.lockUntil = now.Add(lockDuration)
 		return ErrRateLimited
 	}
 
@@ -96,6 +135,8 @@ func (l *LoginRateLimiter) RecordFailure(ip, username string) {
 }
 
 func (l *LoginRateLimiter) recordAttempt(store *sync.Map, key string, now time.Time) {
+	_, windowDuration, _ := l.getConfig()
+
 	val, loaded := store.Load(key)
 	if !loaded {
 		store.Store(key, &attemptInfo{
@@ -107,7 +148,7 @@ func (l *LoginRateLimiter) recordAttempt(store *sync.Map, key string, now time.T
 
 	info := val.(*attemptInfo)
 
-	if now.Sub(info.firstTime) > l.windowDuration {
+	if now.Sub(info.firstTime) > windowDuration {
 		store.Store(key, &attemptInfo{
 			count:     1,
 			firstTime: now,

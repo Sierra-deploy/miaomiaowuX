@@ -449,6 +449,58 @@ function SystemSettingsPage() {
     updateNotifyMutation.mutate(newConfig)
   }
 
+  // 自定义安全阈值(登录限流/暴力防护/订阅频率限制),后端 PUT 后自动热更新限流器,无需重启主控。
+  type SecurityConfig = {
+    login_rate_max_attempts: number
+    login_rate_window_minutes: number
+    login_rate_lock_minutes: number
+    brute_force_enabled: boolean
+    brute_force_max_failures: number
+    brute_force_window_minutes: number
+    brute_force_block_minutes: number
+    sub_rate_enabled: boolean
+    sub_rate_limit: number
+    sub_rate_window_minutes: number
+  }
+  const [securityConfig, setSecurityConfig] = useState<SecurityConfig>({
+    login_rate_max_attempts: 5,
+    login_rate_window_minutes: 60,
+    login_rate_lock_minutes: 60,
+    brute_force_enabled: true,
+    brute_force_max_failures: 5,
+    brute_force_window_minutes: 1440,
+    brute_force_block_minutes: 1440,
+    sub_rate_enabled: true,
+    sub_rate_limit: 60,
+    sub_rate_window_minutes: 1,
+  })
+  const { data: securityData } = useQuery({
+    queryKey: ['security-settings'],
+    queryFn: async () => {
+      const response = await api.get('/api/admin/security-settings')
+      return response.data as SecurityConfig
+    },
+    enabled: Boolean(auth.accessToken),
+    staleTime: 5 * 60 * 1000,
+  })
+  useEffect(() => {
+    if (securityData) setSecurityConfig(securityData)
+  }, [securityData])
+  const updateSecurityMutation = useMutation({
+    mutationFn: async (data: SecurityConfig) => {
+      await api.put('/api/admin/security-settings', data)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['security-settings'] })
+    },
+    onError: handleServerError,
+  })
+  const saveSecurityConfig = (updates: Partial<SecurityConfig>) => {
+    const newConfig = { ...securityConfig, ...updates }
+    setSecurityConfig(newConfig)
+    updateSecurityMutation.mutate(newConfig)
+  }
+
   const { data: userConfig, isLoading: _loadingConfig } = useQuery({
     queryKey: ['user-config'],
     queryFn: async () => {
@@ -1209,6 +1261,149 @@ function SystemSettingsPage() {
                   {t('encryption.warning')}
                 </p>
               )}
+            </CardContent>
+          </Card>
+
+          {/* 自定义安全阈值:登录限流 / 暴力防护 / 订阅频率限制。每个 input onBlur 即时保存,后端热更新限流器无需重启 */}
+          <Card>
+            <CardHeader className='pb-4'>
+              <CardTitle>自定义安全阈值</CardTitle>
+              <CardDescription>
+                调整登录限流、订阅暴力防护、订阅频率限制的阈值。修改后立即生效,无需重启主控。
+              </CardDescription>
+            </CardHeader>
+            <CardContent className='space-y-6'>
+              {/* 登录限流 */}
+              <div className='space-y-3'>
+                <div className='font-semibold text-sm'>登录限流</div>
+                <p className='text-xs text-muted-foreground'>失败次数达上限后,IP/账户在锁定时长内禁止登录。</p>
+                <div className='grid grid-cols-1 sm:grid-cols-3 gap-3'>
+                  <div className='space-y-1'>
+                    <Label htmlFor='login-rate-max-attempts' className='text-xs'>最大尝试次数</Label>
+                    <Input
+                      id='login-rate-max-attempts'
+                      type='number'
+                      min={1}
+                      value={securityConfig.login_rate_max_attempts}
+                      onChange={(e) => setSecurityConfig({ ...securityConfig, login_rate_max_attempts: Number(e.target.value) })}
+                      onBlur={() => saveSecurityConfig({ login_rate_max_attempts: securityConfig.login_rate_max_attempts })}
+                    />
+                  </div>
+                  <div className='space-y-1'>
+                    <Label htmlFor='login-rate-window' className='text-xs'>统计窗口(分钟)</Label>
+                    <Input
+                      id='login-rate-window'
+                      type='number'
+                      min={1}
+                      value={securityConfig.login_rate_window_minutes}
+                      onChange={(e) => setSecurityConfig({ ...securityConfig, login_rate_window_minutes: Number(e.target.value) })}
+                      onBlur={() => saveSecurityConfig({ login_rate_window_minutes: securityConfig.login_rate_window_minutes })}
+                    />
+                  </div>
+                  <div className='space-y-1'>
+                    <Label htmlFor='login-rate-lock' className='text-xs'>锁定时长(分钟)</Label>
+                    <Input
+                      id='login-rate-lock'
+                      type='number'
+                      min={1}
+                      value={securityConfig.login_rate_lock_minutes}
+                      onChange={(e) => setSecurityConfig({ ...securityConfig, login_rate_lock_minutes: Number(e.target.value) })}
+                      onBlur={() => saveSecurityConfig({ login_rate_lock_minutes: securityConfig.login_rate_lock_minutes })}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* 订阅暴力防护 */}
+              <div className='space-y-3 pt-4 border-t'>
+                <div className='flex items-center justify-between'>
+                  <div>
+                    <div className='font-semibold text-sm'>订阅暴力防护</div>
+                    <p className='text-xs text-muted-foreground mt-1'>短链接 /x/ 与临时订阅 /t/ 访问失败次数达上限 → 封禁 IP,并发 Telegram 通知。</p>
+                  </div>
+                  <Switch
+                    checked={securityConfig.brute_force_enabled}
+                    onCheckedChange={(checked) => saveSecurityConfig({ brute_force_enabled: checked })}
+                  />
+                </div>
+                {securityConfig.brute_force_enabled && (
+                  <div className='grid grid-cols-1 sm:grid-cols-3 gap-3'>
+                    <div className='space-y-1'>
+                      <Label htmlFor='brute-force-max-failures' className='text-xs'>最大失败次数</Label>
+                      <Input
+                        id='brute-force-max-failures'
+                        type='number'
+                        min={1}
+                        value={securityConfig.brute_force_max_failures}
+                        onChange={(e) => setSecurityConfig({ ...securityConfig, brute_force_max_failures: Number(e.target.value) })}
+                        onBlur={() => saveSecurityConfig({ brute_force_max_failures: securityConfig.brute_force_max_failures })}
+                      />
+                    </div>
+                    <div className='space-y-1'>
+                      <Label htmlFor='brute-force-window' className='text-xs'>统计窗口(分钟)</Label>
+                      <Input
+                        id='brute-force-window'
+                        type='number'
+                        min={1}
+                        value={securityConfig.brute_force_window_minutes}
+                        onChange={(e) => setSecurityConfig({ ...securityConfig, brute_force_window_minutes: Number(e.target.value) })}
+                        onBlur={() => saveSecurityConfig({ brute_force_window_minutes: securityConfig.brute_force_window_minutes })}
+                      />
+                    </div>
+                    <div className='space-y-1'>
+                      <Label htmlFor='brute-force-block' className='text-xs'>封禁时长(分钟)</Label>
+                      <Input
+                        id='brute-force-block'
+                        type='number'
+                        min={1}
+                        value={securityConfig.brute_force_block_minutes}
+                        onChange={(e) => setSecurityConfig({ ...securityConfig, brute_force_block_minutes: Number(e.target.value) })}
+                        onBlur={() => saveSecurityConfig({ brute_force_block_minutes: securityConfig.brute_force_block_minutes })}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* 订阅频率限制 */}
+              <div className='space-y-3 pt-4 border-t'>
+                <div className='flex items-center justify-between'>
+                  <div>
+                    <div className='font-semibold text-sm'>订阅频率限制</div>
+                    <p className='text-xs text-muted-foreground mt-1'>同一 IP 在窗口内最多访问订阅的次数,超出返回 429,防机器抓取。</p>
+                  </div>
+                  <Switch
+                    checked={securityConfig.sub_rate_enabled}
+                    onCheckedChange={(checked) => saveSecurityConfig({ sub_rate_enabled: checked })}
+                  />
+                </div>
+                {securityConfig.sub_rate_enabled && (
+                  <div className='grid grid-cols-1 sm:grid-cols-2 gap-3'>
+                    <div className='space-y-1'>
+                      <Label htmlFor='sub-rate-limit' className='text-xs'>最大请求数</Label>
+                      <Input
+                        id='sub-rate-limit'
+                        type='number'
+                        min={1}
+                        value={securityConfig.sub_rate_limit}
+                        onChange={(e) => setSecurityConfig({ ...securityConfig, sub_rate_limit: Number(e.target.value) })}
+                        onBlur={() => saveSecurityConfig({ sub_rate_limit: securityConfig.sub_rate_limit })}
+                      />
+                    </div>
+                    <div className='space-y-1'>
+                      <Label htmlFor='sub-rate-window' className='text-xs'>统计窗口(分钟)</Label>
+                      <Input
+                        id='sub-rate-window'
+                        type='number'
+                        min={1}
+                        value={securityConfig.sub_rate_window_minutes}
+                        onChange={(e) => setSecurityConfig({ ...securityConfig, sub_rate_window_minutes: Number(e.target.value) })}
+                        onBlur={() => saveSecurityConfig({ sub_rate_window_minutes: securityConfig.sub_rate_window_minutes })}
+                      />
+                    </div>
+                  </div>
+                )}
+              </div>
             </CardContent>
           </Card>
 
