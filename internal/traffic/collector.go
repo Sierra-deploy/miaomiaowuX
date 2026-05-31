@@ -377,10 +377,19 @@ func (c *Collector) ProcessRemoteMetrics(ctx context.Context, serverID int64, st
 // aggregateAndUpsertUserTraffic 把 stats.User(key=email)里所有归到同一 username 的 cumulative 计数器加总,
 // 然后只对每个 username 调一次 UpsertUserTraffic。cumulative 计数器之和仍是 cumulative(每个组件计数器自身单调
 // 递增),delta 计算照常成立。
+//
+// 同时**并行双写** user_email_traffic — 保留 email 维度,供前端 drilldown 看"用户每个节点的流量"。
+// 老 user_traffic 是套餐扣减热路径,继续按 username 聚合;新表是 email 细分,只用于细粒度展示。
 func aggregateAndUpsertUserTraffic(ctx context.Context, repo userTrafficRepo, serverID int64, userStats map[string]TrafficData) {
 	type sum struct{ uplink, downlink int64 }
 	byUsername := make(map[string]*sum)
 	for emailKey, data := range userStats {
+		// 双写新表 — email 维度原样保留,即使 ResolveUsernameByEmail 解析不到 username 也写
+		// (野 client 也算"该 server 的 email 流量",前端可显示成"未识别节点")
+		if err := repo.UpsertUserEmailTraffic(ctx, serverID, emailKey, data.Uplink, data.Downlink); err != nil {
+			log.Printf("[Traffic Collector] Failed to upsert user email traffic for %s on server %d: %v", emailKey, serverID, err)
+		}
+
 		username := repo.ResolveUsernameByEmail(ctx, emailKey)
 		if username == "" {
 			continue
@@ -399,10 +408,11 @@ func aggregateAndUpsertUserTraffic(ctx context.Context, repo userTrafficRepo, se
 	}
 }
 
-// userTrafficRepo 只取 collector 实际用到的两个方法,避免去 import 整个 storage 接口
+// userTrafficRepo 只取 collector 实际用到的方法,避免去 import 整个 storage 接口
 type userTrafficRepo interface {
 	ResolveUsernameByEmail(ctx context.Context, email string) string
 	UpsertUserTraffic(ctx context.Context, serverID int64, username string, uplink, downlink int64) error
+	UpsertUserEmailTraffic(ctx context.Context, serverID int64, email string, uplink, downlink int64) error
 }
 
 // 为所有服务器创建每日快照

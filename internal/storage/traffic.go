@@ -1720,6 +1720,32 @@ CREATE INDEX IF NOT EXISTS idx_user_traffic_username ON user_traffic(username);
 		return fmt.Errorf("migrate user_traffic: %w", err)
 	}
 
+	// user_email_traffic 跟 user_traffic 字段完全对齐,只是 key 换成 email — 保留 Xray stats 的
+	// per-client 维度。collector 同一次循环里同时 UPSERT user_traffic(按 username 聚合,套餐扣减
+	// 等热路径继续走它)和 user_email_traffic(per-email,前端 drilldown 等细粒度场景用)。
+	const userEmailTrafficSchema = `
+CREATE TABLE IF NOT EXISTS user_email_traffic (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER NOT NULL,
+    email TEXT NOT NULL,
+    uplink INTEGER NOT NULL DEFAULT 0,
+    downlink INTEGER NOT NULL DEFAULT 0,
+    total_uplink INTEGER NOT NULL DEFAULT 0,
+    total_downlink INTEGER NOT NULL DEFAULT 0,
+    last_uplink INTEGER NOT NULL DEFAULT 0,
+    last_downlink INTEGER NOT NULL DEFAULT 0,
+    cycle_start TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(server_id, email),
+    FOREIGN KEY (server_id) REFERENCES xray_servers(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_user_email_traffic_server_id ON user_email_traffic(server_id);
+CREATE INDEX IF NOT EXISTS idx_user_email_traffic_email ON user_email_traffic(email);
+`
+	if _, err := r.db.Exec(userEmailTrafficSchema); err != nil {
+		return fmt.Errorf("migrate user_email_traffic: %w", err)
+	}
+
 	// 流量快照表 - 存储每日流量快照以了解历史趋势
 	const trafficSnapshotsSchema = `
 CREATE TABLE IF NOT EXISTS traffic_snapshots (
@@ -1969,6 +1995,38 @@ CREATE INDEX IF NOT EXISTS idx_subacc_routed ON user_subaccounts(routed_node_id)
 `
 	if _, err := r.db.Exec(userSubaccountsSchema); err != nil {
 		return fmt.Errorf("migrate user_subaccounts: %w", err)
+	}
+
+	// xray 配置快照:主控维护的 agent xray 完整 config.json 版本链,用于
+	//   (1) 跑路兜底 — agent 端 VPS 跑路换机后,从主控下发 current 一键恢复
+	//   (2) 反向兜底 — 主控端跑路新部署后,从 agent 自动拉回 current 反向恢复
+	//   (3) 历史回滚 — 用户配置改错可挑历史 snapshot 下发回滚
+	//   (4) inbound list cache 的 source — 套餐绑/解绑批量算 cred 时,从 current snapshot 派生 inbound protocol/settings
+	// status 状态机:
+	//   - 'current': 每 server 至多 1 行,代表"主控所知 agent 当前实际配置"
+	//   - 'old':     被替换的历史版本,可用于回滚展示
+	//   - 'pending_recovery': agent 之前 status=offline 后重连且 hash 漂移,master 不自动接管,
+	//                        把上报内容写到这个状态等用户在 UI 决策(恢复 current / 接受为新 current)
+	// source 标识:
+	//   - 'agent_report':        首连 / 重连同步时由 agent 上报创建
+	//   - 'master_write':        master 主动写 agent 配置后 refresh 创建
+	//   - 'manual_accept':       用户在 UI 上接受 pending_recovery 升级为 current
+	const xrayConfigSnapshotsSchema = `
+CREATE TABLE IF NOT EXISTS server_xray_config_snapshots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id   INTEGER NOT NULL,
+    config_json TEXT    NOT NULL,
+    config_hash TEXT    NOT NULL,
+    source      TEXT    NOT NULL,
+    status      TEXT    NOT NULL,
+    created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (server_id) REFERENCES remote_servers(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_xray_snap_server_status ON server_xray_config_snapshots(server_id, status);
+CREATE INDEX IF NOT EXISTS idx_xray_snap_server_created ON server_xray_config_snapshots(server_id, created_at DESC);
+`
+	if _, err := r.db.Exec(xrayConfigSnapshotsSchema); err != nil {
+		return fmt.Errorf("migrate server_xray_config_snapshots: %w", err)
 	}
 
 	// 用户路由出站操作日志:记录每条创建/删除,用于每日次数限制。
@@ -6922,6 +6980,11 @@ func (r *TrafficRepository) ResolveUsernameByEmail(ctx context.Context, email st
 	if err == nil && username != "" {
 		return username
 	}
+	// 新格式 inbound 凭据 email = `<username>__<inbound_tag>`(generateCredential 生成);
+	// routed 子账户老格式 `<username>__<id>__<label>` 没命中 user_subaccounts 时也走这里(取首段一致)。
+	if i := strings.Index(email, "__"); i > 0 {
+		return email[:i]
+	}
 	return email
 }
 
@@ -8671,6 +8734,96 @@ func (r *TrafficRepository) UpsertUserTraffic(ctx context.Context, serverID int6
 	}
 
 	return nil
+}
+
+// UserEmailTraffic 跟 UserTraffic 字段对齐,只是 key 换 email。
+type UserEmailTraffic struct {
+	ID            int64
+	ServerID      int64
+	Email         string
+	Uplink        int64
+	Downlink      int64
+	TotalUplink   int64
+	TotalDownlink int64
+	LastUplink    int64
+	LastDownlink  int64
+	CycleStart    time.Time
+	UpdatedAt     time.Time
+}
+
+// UpsertUserEmailTraffic 跟 UpsertUserTraffic 完全一样的 delta/restart 检测逻辑,key 换成 email。
+// collector 同一次循环里跟 UpsertUserTraffic 并行调用,**双写两张表**:user_traffic 按 username
+// 聚合(老路径不变),user_email_traffic 保留 email 细分(新功能用)。
+func (r *TrafficRepository) UpsertUserEmailTraffic(ctx context.Context, serverID int64, email string, uplink, downlink int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if serverID <= 0 {
+		return errors.New("server id is required")
+	}
+	if email == "" {
+		return errors.New("email is required")
+	}
+
+	var existing UserEmailTraffic
+	var exists bool
+	row := r.db.QueryRowContext(ctx, `SELECT id, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink FROM user_email_traffic WHERE server_id = ? AND email = ?`, serverID, email)
+	err := row.Scan(&existing.ID, &existing.Uplink, &existing.Downlink, &existing.TotalUplink, &existing.TotalDownlink, &existing.LastUplink, &existing.LastDownlink)
+	if err == nil {
+		exists = true
+	} else if err != sql.ErrNoRows {
+		return fmt.Errorf("query existing user email traffic: %w", err)
+	}
+
+	if !exists {
+		const insertStmt = `INSERT INTO user_email_traffic (server_id, email, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+		if _, err := r.db.ExecContext(ctx, insertStmt, serverID, email, uplink, downlink, uplink, downlink, uplink, downlink); err != nil {
+			return fmt.Errorf("insert user email traffic: %w", err)
+		}
+		return nil
+	}
+
+	var deltaUplink, deltaDownlink int64
+	var newTotalUplink, newTotalDownlink int64
+	if uplink < existing.LastUplink || downlink < existing.LastDownlink {
+		// Xray 重启 — total 累计旧 last,delta 用新值起算
+		newTotalUplink = existing.TotalUplink + existing.LastUplink
+		newTotalDownlink = existing.TotalDownlink + existing.LastDownlink
+		deltaUplink = uplink
+		deltaDownlink = downlink
+	} else {
+		deltaUplink = uplink - existing.LastUplink
+		deltaDownlink = downlink - existing.LastDownlink
+		newTotalUplink = existing.TotalUplink
+		newTotalDownlink = existing.TotalDownlink
+	}
+
+	const updateStmt = `UPDATE user_email_traffic SET uplink = uplink + ?, downlink = downlink + ?, total_uplink = ?, total_downlink = ?, last_uplink = ?, last_downlink = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+	if _, err := r.db.ExecContext(ctx, updateStmt, deltaUplink, deltaDownlink, newTotalUplink, newTotalDownlink, uplink, downlink, existing.ID); err != nil {
+		return fmt.Errorf("update user email traffic: %w", err)
+	}
+	return nil
+}
+
+// ListUserEmailTraffic 返回所有 (server_id, email) 流量行 — 给 /api/admin/traffic/user-nodes 用。
+func (r *TrafficRepository) ListUserEmailTraffic(ctx context.Context) ([]UserEmailTraffic, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT id, server_id, email, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at FROM user_email_traffic`)
+	if err != nil {
+		return nil, fmt.Errorf("query user email traffic: %w", err)
+	}
+	defer rows.Close()
+	var out []UserEmailTraffic
+	for rows.Next() {
+		var t UserEmailTraffic
+		if err := rows.Scan(&t.ID, &t.ServerID, &t.Email, &t.Uplink, &t.Downlink, &t.TotalUplink, &t.TotalDownlink, &t.LastUplink, &t.LastDownlink, &t.CycleStart, &t.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan user email traffic: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 // 返回服务器的所有用户流量记录。

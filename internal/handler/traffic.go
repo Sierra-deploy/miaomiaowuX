@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -47,9 +48,173 @@ func (h *TrafficHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleNodeSnapshots(w, r)
 	case path == "user-snapshots":
 		h.handleUserSnapshots(w, r)
+	case path == "user-nodes":
+		h.handleUserNodes(w, r)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// handleUserNodes 返回某用户在每个节点上的流量(细分到 routed 子账号 / 普通 inbound),
+// 数据来源: user_email_traffic + user_subaccounts 反查 routed_node_id + user_inbound_configs 反查
+// 该用户在某 server 上的 inbound 节点。
+//
+// GET /api/admin/traffic/user-nodes?username=share
+//
+// 响应: { items: [ { node_id, node_name, server_name, uplink, downlink, last_uplink, last_downlink } ] }
+func (h *TrafficHandler) handleUserNodes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	username := strings.TrimSpace(r.URL.Query().Get("username"))
+	if username == "" {
+		http.Error(w, "username is required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+
+	// 1. routed 子账号 email → routed_node_id(只算 is_active)
+	subaccounts, err := h.repo.ListUserSubaccounts(ctx, username)
+	if err != nil {
+		log.Printf("[Traffic API] user-nodes: list subaccounts failed: %v", err)
+		h.writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "list subaccounts failed"})
+		return
+	}
+	emailToRoutedNodeID := make(map[string]int64, len(subaccounts))
+	for _, sa := range subaccounts {
+		if sa.IsActive {
+			emailToRoutedNodeID[sa.Email] = sa.RoutedNodeID
+		}
+	}
+
+	// 2. 用户在每台 server 上的 inbound 配置(用于把"email=username"那行映射到对应 inbound 节点)
+	inbConfigs, err := h.repo.GetUserInboundConfigs(ctx, username)
+	if err != nil {
+		log.Printf("[Traffic API] user-nodes: list inbound configs failed: %v", err)
+		inbConfigs = nil
+	}
+	// (server_id) → []inbound_tag — 通常一 server 一 inbound,多 inbound 也存
+	serverToInboundTags := make(map[int64][]string)
+	for _, c := range inbConfigs {
+		serverToInboundTags[c.ServerID] = append(serverToInboundTags[c.ServerID], c.InboundTag)
+	}
+
+	// 3. 节点表反查:routed_node_id → Node;(server_name, inbound_tag) → Node
+	allNodes, err := h.repo.ListAllNodes(ctx)
+	if err != nil {
+		log.Printf("[Traffic API] user-nodes: list nodes failed: %v", err)
+		h.writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "list nodes failed"})
+		return
+	}
+	routedNodeByID := make(map[int64]storage.Node)
+	inboundNodeByKey := make(map[string]storage.Node) // "serverName::tag"
+	for _, n := range allNodes {
+		if n.NodeType == "routed" {
+			routedNodeByID[n.ID] = n
+		} else if n.InboundTag != "" {
+			inboundNodeByKey[n.OriginalServer+"::"+n.InboundTag] = n
+		}
+	}
+
+	// 4. server_id → server_name 映射(给 inbound 反查 + 输出标注)
+	servers, err := h.repo.ListRemoteServers(ctx)
+	if err != nil {
+		log.Printf("[Traffic API] user-nodes: list servers failed: %v", err)
+	}
+	serverNameByID := make(map[int64]string, len(servers))
+	for _, s := range servers {
+		serverNameByID[s.ID] = s.Name
+	}
+
+	// 5. 拉所有 user_email_traffic,过滤命中本 username 的行
+	allEmailTraffic, err := h.repo.ListUserEmailTraffic(ctx)
+	if err != nil {
+		log.Printf("[Traffic API] user-nodes: list user_email_traffic failed: %v", err)
+		h.writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "list email traffic failed"})
+		return
+	}
+
+	type item struct {
+		NodeID       int64  `json:"node_id"`
+		NodeName     string `json:"node_name"`
+		ServerName   string `json:"server_name"`
+		Uplink       int64  `json:"uplink"`
+		Downlink     int64  `json:"downlink"`
+		LastUplink   int64  `json:"last_uplink"`
+		LastDownlink int64  `json:"last_downlink"`
+	}
+	byNode := make(map[int64]*item)
+
+	addToNode := func(n storage.Node, srvName string, uet storage.UserEmailTraffic) {
+		if existing, ok := byNode[n.ID]; ok {
+			existing.Uplink += uet.Uplink
+			existing.Downlink += uet.Downlink
+			existing.LastUplink += uet.LastUplink
+			existing.LastDownlink += uet.LastDownlink
+			return
+		}
+		byNode[n.ID] = &item{
+			NodeID:       n.ID,
+			NodeName:     n.NodeName,
+			ServerName:   srvName,
+			Uplink:       uet.Uplink,
+			Downlink:     uet.Downlink,
+			LastUplink:   uet.LastUplink,
+			LastDownlink: uet.LastDownlink,
+		}
+	}
+
+	for _, uet := range allEmailTraffic {
+		// 优先 routed 路径:email 命中本 user 的子账号
+		if rid, ok := emailToRoutedNodeID[uet.Email]; ok {
+			if n, ok := routedNodeByID[rid]; ok {
+				srvName := serverNameByID[uet.ServerID]
+				if srvName == "" {
+					srvName = n.OriginalServer
+				}
+				addToNode(n, srvName, uet)
+			}
+			continue
+		}
+		// 普通 inbound 路径:email == username 且本 user 在该 server 有 inbound 配置
+		if uet.Email != username {
+			// 是别的 user 的 email,过滤掉
+			if h.repo.ResolveUsernameByEmail(ctx, uet.Email) != username {
+				continue
+			}
+		}
+		tags := serverToInboundTags[uet.ServerID]
+		if len(tags) == 0 {
+			continue
+		}
+		srvName := serverNameByID[uet.ServerID]
+		// 一般一 server 一个 inbound;若多 inbound,流量平均分(Xray stats 上 user 维度本身就是 across inbounds 的合计,没法精确拆)
+		share := uet
+		if len(tags) > 1 {
+			share.Uplink = uet.Uplink / int64(len(tags))
+			share.Downlink = uet.Downlink / int64(len(tags))
+			share.LastUplink = uet.LastUplink / int64(len(tags))
+			share.LastDownlink = uet.LastDownlink / int64(len(tags))
+		}
+		for _, tag := range tags {
+			if n, ok := inboundNodeByKey[srvName+"::"+tag]; ok {
+				addToNode(n, srvName, share)
+			}
+		}
+	}
+
+	out := make([]item, 0, len(byNode))
+	for _, it := range byNode {
+		out = append(out, *it)
+	}
+	// 按总流量降序
+	sort.Slice(out, func(i, j int) bool {
+		return (out[i].Uplink + out[i].Downlink) > (out[j].Uplink + out[j].Downlink)
+	})
+
+	h.writeJSON(w, http.StatusOK, map[string]any{"success": true, "items": out})
 }
 
 // ServerTrafficResponse 表示服务器的流量数据

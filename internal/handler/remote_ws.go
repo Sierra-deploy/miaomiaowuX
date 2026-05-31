@@ -258,6 +258,9 @@ type RemoteWSHandler struct {
 	licenseManager    *license.Manager
 	crypto            *CryptoConfig
 	userSpeedCache    sync.Map // key: "serverID:email" -> int64 (Bytes/s)
+	// xrayConfigSyncCallback 在 auth 成功后异步触发(args: serverID + 上次 server.status),
+	// 实现见 RemoteManageHandler.SyncXrayConfigOnReconnect — 跨 handler 用 callback 注入避免循环依赖。
+	xrayConfigSyncCallback func(ctx context.Context, serverID int64, prevStatus string)
 }
 
 // 创建一个新的 WebSocket 处理程序
@@ -285,6 +288,12 @@ func (h *RemoteWSHandler) SetLimiterPusher(p *LimiterConfigPusher) {
 
 func (h *RemoteWSHandler) SetCrypto(cc *CryptoConfig) {
 	h.crypto = cc
+}
+
+// SetXrayConfigSyncCallback 注册 agent WS auth 成功后的 xray 配置同步回调。
+// 由 RemoteManageHandler 在 main wire 时注入,避免 ws ↔ manage 互引导致的循环依赖。
+func (h *RemoteWSHandler) SetXrayConfigSyncCallback(cb func(ctx context.Context, serverID int64, prevStatus string)) {
+	h.xrayConfigSyncCallback = cb
 }
 
 // 处理 WebSocket 升级和连接
@@ -698,6 +707,13 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 	// embedded 模式：认证成功后推送限速配置
 	if server.XrayMode == "embedded" && h.limiterPusher != nil {
 		go h.limiterPusher.PushToServer(context.Background(), server.ID)
+	}
+
+	// xray 配置 snapshot 同步: server.Status 在 UpdateRemoteServerHeartbeat 之前抓取的就是上次状态
+	// (上面 644 行 update 实际是异步,但 server 这个对象是 GetRemoteServerByToken 拿到的快照,字段不会被改写)。
+	// prevStatus == "offline" → 写 pending_recovery(VPS 跑路换机场景);其它 → upsert current(SSH 修复 / 首连)
+	if h.xrayConfigSyncCallback != nil {
+		go h.xrayConfigSyncCallback(context.Background(), server.ID, server.Status)
 	}
 
 	// 在第一次连接时自动部署窃取配置（服务器处于挂起状态）

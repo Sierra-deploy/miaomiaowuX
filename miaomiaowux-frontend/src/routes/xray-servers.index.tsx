@@ -4,7 +4,9 @@ import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/rea
 import { useState, useRef, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { Plus, RefreshCw, Search, Trash2, Download, Cog, ChevronDown, Terminal, Play, Square, RotateCcw, Copy, Pencil, X, Settings, Wifi, Radio, Eye, ArrowUpCircle, Globe, CheckCircle, XCircle, Loader2, AlertTriangle, Lock, LockOpen, Share2, GripVertical, Bug } from 'lucide-react'
+import { Plus, RefreshCw, Search, Trash2, Download, Cog, ChevronDown, Terminal, Play, Square, RotateCcw, Copy, Pencil, X, Settings, Wifi, Radio, Eye, ArrowUpCircle, Globe, CheckCircle, XCircle, Loader2, AlertTriangle, Lock, LockOpen, Share2, GripVertical, Bug, History } from 'lucide-react'
+import { XraySnapshotHistoryDialog } from '@/components/xray/xray-snapshot-history-dialog'
+import { RecoveryStatusBanner } from '@/components/xray/recovery-status-banner'
 import { DndContext, PointerSensor, TouchSensor, KeyboardSensor, useSensor, useSensors, closestCenter, type DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove, sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
@@ -192,6 +194,12 @@ function XrayServersPage() {
   const [xrayRawConfigLoading, setXrayRawConfigLoading] = useState(false)
   const [xrayRawConfigServerId, setXrayRawConfigServerId] = useState<number | null>(null)
   const [xrayRawConfigServerName, setXrayRawConfigServerName] = useState('')
+  // xray 配置历史 Dialog
+  const [historyDialogOpen, setHistoryDialogOpen] = useState(false)
+  const [historyServerId, setHistoryServerId] = useState<number | null>(null)
+  const [historyServerName, setHistoryServerName] = useState('')
+  const [historyPreviewId, setHistoryPreviewId] = useState<number | null>(null)
+  const [historyPreviewConfig, setHistoryPreviewConfig] = useState('')
   const [isTerminalDialogOpen, setIsTerminalDialogOpen] = useState(false)
   const [terminalTitle, setTerminalTitle] = useState('')
   const [terminalOutput, setTerminalOutput] = useState('')
@@ -379,12 +387,27 @@ function XrayServersPage() {
   }
 
   const saveXrayRawConfigMutation = useMutation({
+    // 保存前先调 agent test-config 预检 — 失败直接 toast,不下发到 agent 写盘,
+    // 杜绝坏配置覆盖正常 config 引发 xray 重启失败的事故。
+    // agent 端 setXrayConfig 仍有第二道 test 兜底(force=false 默认),双保险。
     mutationFn: async ({ serverId, config }: { serverId: number; config: string }) => {
+      const testResp = await api.post(`/api/admin/remote/xray/test-config?server_id=${serverId}`, { config })
+      const testData = testResp.data as { ok?: boolean; error?: string; output?: string; method?: string }
+      if (!testData?.ok) {
+        const detail = [testData?.error, testData?.output].filter(Boolean).join(' | ')
+        throw new Error(`${t('servers.xrayConfigTestFailed') || 'xray config 测试未通过'} (${testData?.method || 'xray'}): ${detail || 'unknown'}`)
+      }
       const response = await api.post(`/api/admin/remote/xray/config?server_id=${serverId}`, { config })
       return response.data
     },
     onSuccess: (data) => { data.success ? toast.success(t('servers.xrayConfigSaved')) : toast.error(data.message || t('servers.saveFailed')) },
-    onError: handleServerError,
+    onError: (err: any) => {
+      if (err?.message && !err?.response) {
+        toast.error(err.message)
+        return
+      }
+      handleServerError(err)
+    },
   })
 
   const createRemoteServerMutation = useMutation({
@@ -1215,6 +1238,7 @@ function XrayServersPage() {
                         </button>
                         <div className={cn("w-3 h-3 rounded-full flex-shrink-0", server.status === 'connected' ? "bg-green-500" : server.status === 'pending' ? "bg-yellow-500" : "bg-red-500")} title={server.status === 'connected' ? t('servers.online') : server.status === 'pending' ? t('servers.pending') : t('servers.offline')} />
                         <CardTitle className="text-lg truncate min-w-0"><Twemoji>{server.name}</Twemoji></CardTitle>
+                        {!server.is_federated && (<RecoveryStatusBanner serverId={server.id} serverName={server.name} serverStatus={server.status} />)}
                       </div>
                       <Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); handleDeleteRemoteServer(server.id) }} className="h-8 w-8 shrink-0 text-red-500 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-950" title={t('servers.deleteServer')}><X className="h-4 w-4" /></Button>
                     </div>
@@ -1253,6 +1277,55 @@ function XrayServersPage() {
                         {server.is_federated && (<Badge variant="outline" className="text-xs shrink-0 border-purple-300 text-purple-700 dark:border-purple-700 dark:text-purple-400">分享</Badge>)}
                         {!server.is_federated && (<Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); setShareServer({ id: server.id, name: server.name }) }} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title="分享服务器（PRO）"><Share2 className="h-4 w-4" /></Button>)}
                         {server.status === 'connected' && (<Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); remoteScanMutation.mutate(server.id) }} disabled={remoteScanMutation.isPending} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title={t('servers.scan')}><Search className={cn("h-4 w-4", remoteScanMutation.isPending && "animate-spin")} /></Button>)}
+                        {!server.is_federated && server.status !== 'connected' && (
+                          <Popover>
+                            <PopoverTrigger asChild>
+                              <Button
+                                variant="ghost"
+                                size="icon"
+                                onClick={(e) => {
+                                  e.stopPropagation()
+                                  // 用户打开 Popover 即视为意图恢复 → 标记 expect_recovery,agent 一连上就自动下发 current snapshot
+                                  api.post(`/api/admin/xray-snapshots/expect-recovery?server_id=${server.id}`).catch(handleServerError)
+                                }}
+                                className="h-8 w-8 text-muted-foreground hover:text-amber-600 hover:bg-muted"
+                                title="恢复到新服务器"
+                              >
+                                <RotateCcw className="h-4 w-4" />
+                              </Button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-[420px] p-4" align="end" onClick={(e) => e.stopPropagation()}>
+                              <div className="space-y-3">
+                                <div className="text-sm font-semibold">恢复到新服务器</div>
+                                <p className="text-xs text-muted-foreground leading-relaxed">
+                                  原服务器已离线。在新 VPS 上以 root 执行下面命令安装 Agent。Agent 连上主控后,会自动下发最后一次成功的 xray 配置,无需手动恢复。
+                                </p>
+                                <div className="flex gap-2">
+                                  <Input
+                                    value={`curl -fsSL '${masterOrigin}/api/remote/install.sh?token=${server.token}' | bash`}
+                                    readOnly
+                                    className="font-mono text-xs"
+                                  />
+                                  <Button
+                                    variant="outline"
+                                    size="icon"
+                                    className="shrink-0"
+                                    onClick={() => copyToClipboard(`curl -fsSL '${masterOrigin}/api/remote/install.sh?token=${server.token}' | bash`, '安装命令')}
+                                  >
+                                    <Copy className="h-4 w-4" />
+                                  </Button>
+                                </div>
+                                <div className="flex items-center justify-between pt-1 border-t">
+                                  <div className="flex items-center gap-2">
+                                    <Switch checked disabled />
+                                    <Label className="text-sm cursor-default">自动下发备份配置</Label>
+                                  </div>
+                                  <span className="text-xs text-muted-foreground">默认开启,不可关闭</span>
+                                </div>
+                              </div>
+                            </PopoverContent>
+                          </Popover>
+                        )}
                         {!server.is_federated && (<Button variant="ghost" size="icon" onClick={(e) => { e.stopPropagation(); handleEditRemoteServer(server) }} className="h-8 w-8 text-muted-foreground hover:text-primary hover:bg-muted" title={t('servers.editServer')}><Pencil className="h-4 w-4" /></Button>)}
                       </div>
                     </div>
@@ -1370,7 +1443,18 @@ function XrayServersPage() {
                           <DropdownMenuTrigger asChild><Button variant="outline" size="sm" className="flex-1 min-w-0" title={t('servers.agentManagement')}><Settings className="mr-1 h-3.5 w-3.5 shrink-0" /><span className="truncate">Agent</span></Button></DropdownMenuTrigger>
                           <DropdownMenuContent align="start">
                             <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setSyncingServerId(server.id); setSyncServerHost(server.ip_address || ''); setIsSyncNodesDialogOpen(true) }}><RefreshCw className="mr-2 h-4 w-4" />{t('servers.syncNodes')}</DropdownMenuItem>
-                            {server.domain && (<><DropdownMenuSeparator /><DropdownMenuItem onClick={(e) => { e.stopPropagation(); deployStealSelfMutation.mutate(server.id) }} disabled={deployStealSelfMutation.isPending}><Download className="mr-2 h-4 w-4" />{deployStealSelfMutation.isPending ? t('servers.deploying') : t('servers.deployConfig')}</DropdownMenuItem></>)}
+                            <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setHistoryServerId(server.id); setHistoryServerName(server.name); setHistoryPreviewId(null); setHistoryPreviewConfig(''); setHistoryDialogOpen(true) }}><History className="mr-2 h-4 w-4" />配置历史</DropdownMenuItem>
+                            <DropdownMenuSeparator />
+                            <DropdownMenuItem
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                if (!confirm(`确定要把默认配置下发到 ${server.name} 吗?\n会覆盖 Agent 当前的 xray 配置并重启 xray。`)) return
+                                deployStealSelfMutation.mutate(server.id)
+                              }}
+                              disabled={deployStealSelfMutation.isPending}
+                            >
+                              <Download className="mr-2 h-4 w-4" />{deployStealSelfMutation.isPending ? '下发中...' : '下发默认配置'}
+                            </DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setAddWebsiteServerId(server.id); setIsAddWebsiteDialogOpen(true) }}><Globe className="mr-2 h-4 w-4" />{t('servers.addWebsite')}</DropdownMenuItem>
                             <DropdownMenuSeparator />
@@ -1530,7 +1614,17 @@ function XrayServersPage() {
                                 <DropdownMenuTrigger asChild><Button variant="outline" size="icon" className="h-7 w-7 p-0" title={t('servers.agentManagement')}><Settings className="h-3.5 w-3.5" /></Button></DropdownMenuTrigger>
                                 <DropdownMenuContent>
                                   <DropdownMenuItem onClick={() => { setSyncingServerId(server.id); setSyncServerHost(server.ip_address || ''); setIsSyncNodesDialogOpen(true) }}><RefreshCw className="mr-2 h-4 w-4" />{t('servers.syncNodes')}</DropdownMenuItem>
-                                  {server.domain && (<><DropdownMenuSeparator /><DropdownMenuItem onClick={() => deployStealSelfMutation.mutate(server.id)} disabled={deployStealSelfMutation.isPending}><Download className="mr-2 h-4 w-4" />{deployStealSelfMutation.isPending ? t('servers.deploying') : t('servers.deployConfig')}</DropdownMenuItem></>)}
+                                  <DropdownMenuItem onClick={() => { setHistoryServerId(server.id); setHistoryServerName(server.name); setHistoryPreviewId(null); setHistoryPreviewConfig(''); setHistoryDialogOpen(true) }}><History className="mr-2 h-4 w-4" />配置历史</DropdownMenuItem>
+                                  <DropdownMenuSeparator />
+                                  <DropdownMenuItem
+                                    onClick={() => {
+                                      if (!confirm(`确定要把默认配置下发到 ${server.name} 吗?\n会覆盖 Agent 当前的 xray 配置并重启 xray。`)) return
+                                      deployStealSelfMutation.mutate(server.id)
+                                    }}
+                                    disabled={deployStealSelfMutation.isPending}
+                                  >
+                                    <Download className="mr-2 h-4 w-4" />{deployStealSelfMutation.isPending ? '下发中...' : '下发默认配置'}
+                                  </DropdownMenuItem>
                                   <DropdownMenuSeparator />
                                   <DropdownMenuItem onClick={() => { setAddWebsiteServerId(server.id); setIsAddWebsiteDialogOpen(true) }}><Globe className="mr-2 h-4 w-4" />{t('servers.addWebsite')}</DropdownMenuItem>
                                   <DropdownMenuSeparator />
@@ -1949,6 +2043,16 @@ function XrayServersPage() {
       </Dialog>
 
       <ShareServerDialog server={shareServer} onClose={() => setShareServer(null)} />
+
+      <XraySnapshotHistoryDialog
+        open={historyDialogOpen}
+        onOpenChange={(o) => { setHistoryDialogOpen(o); if (!o) { setHistoryPreviewId(null); setHistoryPreviewConfig('') } }}
+        serverId={historyServerId}
+        serverName={historyServerName}
+        previewId={historyPreviewId}
+        previewConfig={historyPreviewConfig}
+        onPreview={(id, cfg) => { setHistoryPreviewId(id); setHistoryPreviewConfig(cfg) }}
+      />
     </div>
   )
 }

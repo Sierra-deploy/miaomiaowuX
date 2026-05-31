@@ -368,6 +368,25 @@ func main() {
 	remoteManageHandler := handler.NewRemoteManageHandler(repo, remoteWSHandler)
 	remoteManageHandler.SetCrypto(cryptoConfig)
 	remoteManageHandler.SetLicenseManager(licenseManager) // syncInboundsToNodes 路径里 license budget 检查需要
+	// inbound cache: 套餐绑/换绑时 in-memory 算 cred 用,从 xray config snapshot 派生。
+	inboundCache := handler.NewInboundCache()
+	remoteManageHandler.SetInboundCache(inboundCache)
+	// 启动时预热(异步,不阻塞 main):从 DB current snapshot 把每台 server 的 inbound 索引拉进 cache。
+	// 新 agent 第一次连上来前,套餐绑套餐如果选了这个 server 的 inbound,有 DB snapshot 就立即 cache hit。
+	go func() {
+		ctx := context.Background()
+		servers, err := repo.ListRemoteServers(ctx)
+		if err != nil {
+			log.Printf("[InboundCache] warmup list servers failed: %v", err)
+			return
+		}
+		for _, s := range servers {
+			inboundCache.WarmupFromDB(ctx, repo, s.ID)
+		}
+		log.Printf("[InboundCache] warmup done for %d servers", len(servers))
+	}()
+	// agent 重连后异步同步 xray config snapshot(双向兜底 — agent/master 跑路换机都能恢复)。
+	remoteWSHandler.SetXrayConfigSyncCallback(remoteManageHandler.SyncXrayConfigOnReconnect)
 	xrayServerHandler.SetRemoteManager(remoteManageHandler)
 	xrayServerHandler.SetWSHandler(remoteWSHandler)
 
@@ -433,6 +452,7 @@ func main() {
 	mux.Handle("/api/admin/remote/xray/install", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleXrayInstall)))
 	mux.Handle("/api/admin/remote/xray/remove", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleXrayRemove)))
 	mux.Handle("/api/admin/remote/xray/config", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleXrayConfig)))
+	mux.Handle("/api/admin/remote/xray/test-config", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleXrayTestConfig)))
 	mux.Handle("/api/admin/remote/xray/config/files", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleXrayConfigFiles)))
 	mux.Handle("/api/admin/remote/nginx/install", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleNginxInstall)))
 	mux.Handle("/api/admin/remote/nginx/remove", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleNginxRemove)))
@@ -464,6 +484,10 @@ func main() {
 	mux.Handle("/api/admin/remote/website/validate", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleValidateSite)))
 	mux.Handle("/api/admin/remote/user-speeds", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleUserSpeeds)))
 	// 令牌重置端点
+	// xray 配置 snapshot / 跑路恢复 / 历史回滚
+	xraySnapshotHandler := handler.NewXraySnapshotHandler(repo, remoteManageHandler)
+	mux.Handle("/api/admin/xray-snapshots/", auth.RequireAdmin(tokenStore, userRepo, xraySnapshotHandler))
+
 	mux.Handle("/api/admin/remote-servers/reset-server-token", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleResetServerToken)))
 	mux.Handle("/api/admin/remote-servers/reset-agent-token", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleResetAgentToken)))
 	mux.Handle("/api/admin/remote-servers/reset-all-tokens", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleResetAllTokens)))

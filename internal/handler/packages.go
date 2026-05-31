@@ -349,8 +349,16 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 	// 由 agent 走 HandlerService 热更新,运行态立即生效。同步路径上每台少 ~3s。
 	var mu sync.Mutex
 	restartNeeded := map[int64]bool{}
-	// per-server 收集 routed 节点的 batch items(addedNodes 路径),阶段二 per-server 一次性提交。
+	// per-server 收集 routed batch items + inbound add-client items,阶段二 per-server 一次 batch-apply 提交。
 	routedBatch := map[int64][]routedBatchItem{}
+	inboundBatch := map[int64][]InboundClientAddItem{}
+	type inboundFallbackItem struct {
+		Username   string
+		ServerID   int64
+		InboundTag string
+		NodeName   string
+	}
+	var inboundFallbacks []inboundFallbackItem
 	// 用户间互不影响 + 节点间互不影响 → 全部并发跑。
 	// agent 端 inboundsMu 自动同服务器顺序化,master 这边不需要 per-server 锁。
 	var bindWg sync.WaitGroup
@@ -390,9 +398,18 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 					log.Printf("[PackageUpdate] Failed to find server %s: %v", node.OriginalServer, err)
 					return
 				}
-				if err := addUserToInbound(ctx, h.remoteManage, h.repo, user, server.ID, node.InboundTag); err != nil {
-					log.Printf("[PackageUpdate] Failed to add user %s to inbound %s on server %d: %v",
-						user.Username, node.InboundTag, server.ID, err)
+				// 阶段一:从 InboundCache 算 cred,收集成 batch item;cache miss / 续费 → fallback 逐项。
+				item, collected, cerr := collectInboundClientAddItem(ctx, h.remoteManage.inboundCache, h.repo, user, server.ID, node.InboundTag)
+				if cerr != nil {
+					mu.Lock()
+					inboundFallbacks = append(inboundFallbacks, inboundFallbackItem{Username: user.Username, ServerID: server.ID, InboundTag: node.InboundTag, NodeName: node.NodeName})
+					mu.Unlock()
+					return
+				}
+				if collected && item != nil {
+					mu.Lock()
+					inboundBatch[item.ServerID] = append(inboundBatch[item.ServerID], *item)
+					mu.Unlock()
 				}
 			}(user, nodeID)
 		}
@@ -437,7 +454,7 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 	}
 	bindWg.Wait()
 
-	// 阶段二 — per-server 并行调 batch-apply(新 agent 1 次 round-trip / 老 agent fallback)。
+	// 阶段二 — per-server 并行调 batch-apply。routed + inbound 各自一批,跨 server 并行。
 	var routeWg sync.WaitGroup
 	for serverID, items := range routedBatch {
 		routeWg.Add(1)
@@ -446,7 +463,32 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 			_ = applyRoutedBatchOrFallback(ctx, h.remoteManage, h.repo, sid, list, "PackageUpdate")
 		}(serverID, items)
 	}
+	for serverID, items := range inboundBatch {
+		routeWg.Add(1)
+		go func(sid int64, list []InboundClientAddItem) {
+			defer routeWg.Done()
+			_ = applyInboundBatchOrFallback(ctx, h.remoteManage, h.repo, sid, list, "PackageUpdate")
+		}(serverID, items)
+	}
 	routeWg.Wait()
+
+	// 阶段三 — cache miss 类 fallback:并发跑逐项 addUserToInbound(老路径)。
+	if len(inboundFallbacks) > 0 {
+		log.Printf("[PackageUpdate] %d inbound items fell back to per-item add (cache miss / no batch)", len(inboundFallbacks))
+		var fbWg sync.WaitGroup
+		for _, fb := range inboundFallbacks {
+			fbWg.Add(1)
+			go func(fb inboundFallbackItem) {
+				defer fbWg.Done()
+				user := storage.User{Username: fb.Username}
+				if err := addUserToInbound(ctx, h.remoteManage, h.repo, user, fb.ServerID, fb.InboundTag); err != nil {
+					log.Printf("[PackageUpdate] fallback addUserToInbound user=%s server=%d tag=%s: %v",
+						fb.Username, fb.ServerID, fb.InboundTag, err)
+				}
+			}(fb)
+		}
+		fbWg.Wait()
+	}
 
 	// limiter push 后台异步,不阻塞响应
 	if h.pusher != nil {
@@ -785,13 +827,20 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			//   - 非 routed 节点:add-client 已由 agent 走 HandlerService 热更新(replaceRuntimeInbound)→ 不需要重启
 			// 早先的版本无差别对所有受影响服务器重启,跨 5 台机器串行能多花 15s。
 			restartNeeded := map[int64]bool{}
-			// per-server 收集 routed 节点的 batch items。
+			// per-server 收集 routed 节点的 batch items + 普通 inbound 加 client items。
 			// 新 agent 支持 /api/child/batch-apply → 同 server 所有 client + routing 改动一次 round-trip;
-			// 老 agent 不支持 → applyRoutedBatchOrFallback 内部退到 prepareRoutedNodeForUser + applyRoutingAdditionsBatch。
+			// 老 agent 不支持 → applyRoutedBatchOrFallback / applyInboundBatchOrFallback 内部 fallback 逐项。
 			routedBatch := map[int64][]routedBatchItem{}
+			inboundBatch := map[int64][]InboundClientAddItem{}
+			// 普通 inbound 节点 cache miss / 续费跳过时,fallback 直接走逐项 addUserToInbound。
+			type inboundFallbackItem struct {
+				ServerID   int64
+				InboundTag string
+				NodeName   string
+			}
+			var inboundFallbacks []inboundFallbackItem
 
-			// 节点绑定并发跑 — 普通 inbound 节点 agent 锁内并发安全;routed 节点这里只算 cred,
-			// 不调 agent / 不写 DB,真正提交放在阶段二(per-server batch)。
+			// 节点绑定并发跑 — routed / inbound 都只在阶段一收集,阶段二 per-server batch 一次性提交。
 			var bindWg sync.WaitGroup
 			for _, nodeID := range pkg.Nodes {
 				bindWg.Add(1)
@@ -831,18 +880,25 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 						log.Printf("[PackageAssign] Failed to find server %s: %v", node.OriginalServer, err)
 						return
 					}
-					if err := addUserToInbound(ctx, h.remoteManage, h.repo, user, server.ID, node.InboundTag); err != nil {
-						log.Printf("[PackageAssign] Failed to add user %s to inbound %s on server %d: %v",
-							req.Username, node.InboundTag, server.ID, err)
+					// 阶段一:从 InboundCache 算 cred,收集成 batch item;cache miss / 续费 → fallback 逐项。
+					item, collected, cerr := collectInboundClientAddItem(ctx, h.remoteManage.inboundCache, h.repo, user, server.ID, node.InboundTag)
+					if cerr != nil {
 						mu.Lock()
-						warnings = append(warnings, fmt.Sprintf("节点 %s 添加用户失败", node.NodeName))
+						inboundFallbacks = append(inboundFallbacks, inboundFallbackItem{ServerID: server.ID, InboundTag: node.InboundTag, NodeName: node.NodeName})
+						mu.Unlock()
+						return
+					}
+					if collected && item != nil {
+						mu.Lock()
+						inboundBatch[item.ServerID] = append(inboundBatch[item.ServerID], *item)
 						mu.Unlock()
 					}
 				}(nodeID)
 			}
 			bindWg.Wait()
 
-			// 阶段二 — per-server 并行调 batch-apply(新 agent 1 次 round-trip / 老 agent fallback)。
+			// 阶段二 — per-server 并行调 batch-apply。
+			// routed + inbound 各自一批,跨 server 并行;同 server 内 inbound 与 routed 分别一次 round-trip(不合并避免 routed 重启把 inbound 加 client 也"等"上)。
 			var routeWg sync.WaitGroup
 			for serverID, items := range routedBatch {
 				routeWg.Add(1)
@@ -856,7 +912,39 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 					}
 				}(serverID, items)
 			}
+			for serverID, items := range inboundBatch {
+				routeWg.Add(1)
+				go func(sid int64, list []InboundClientAddItem) {
+					defer routeWg.Done()
+					ws := applyInboundBatchOrFallback(ctx, h.remoteManage, h.repo, sid, list, "PackageAssign")
+					if len(ws) > 0 {
+						mu.Lock()
+						warnings = append(warnings, ws...)
+						mu.Unlock()
+					}
+				}(serverID, items)
+			}
 			routeWg.Wait()
+
+			// 阶段三 — cache miss 类 fallback:并发跑逐项 addUserToInbound(老路径)。
+			if len(inboundFallbacks) > 0 {
+				log.Printf("[PackageAssign] %d inbound items fell back to per-item add (cache miss / no batch)", len(inboundFallbacks))
+				var fbWg sync.WaitGroup
+				for _, fb := range inboundFallbacks {
+					fbWg.Add(1)
+					go func(fb inboundFallbackItem) {
+						defer fbWg.Done()
+						if err := addUserToInbound(ctx, h.remoteManage, h.repo, user, fb.ServerID, fb.InboundTag); err != nil {
+							log.Printf("[PackageAssign] fallback addUserToInbound user=%s server=%d tag=%s: %v",
+								req.Username, fb.ServerID, fb.InboundTag, err)
+							mu.Lock()
+							warnings = append(warnings, fmt.Sprintf("节点 %s 添加用户失败", fb.NodeName))
+							mu.Unlock()
+						}
+					}(fb)
+				}
+				fbWg.Wait()
+			}
 
 			restartXrayInParallel(ctx, h.remoteManage, restartNeeded, "PackageAssign")
 			if len(warnings) > 0 {
@@ -1059,7 +1147,7 @@ func addUserToInbound(ctx context.Context, rm *RemoteManageHandler, repo *storag
 			method, _ = settings["method"].(string)
 		}
 		var err error
-		credential, credJSON, err = generateCredential(protocol, user, method)
+		credential, credJSON, err = generateCredential(protocol, user, method, inboundTag)
 		if err != nil {
 			return fmt.Errorf("generate credential: %w", err)
 		}
@@ -1144,12 +1232,14 @@ func shadowsocksKeyLength(method string) int {
 //	2022-blake3-chacha20-poly1305     → 32 bytes
 //
 // 老 SS / 非 2022 method → 任意长度都接受,默认给 16 bytes 即可。
-func generateCredential(protocol string, user storage.User, method string) (map[string]interface{}, string, error) {
+//
+// email 强制使用 `<username>__<inboundTag>` 格式,保证同一 user 在同一 server 多 inbound 时
+// 每条 client 的 email 唯一 — Xray stats 才能按 inbound 拆开 per-user 流量,前端 drilldown
+// 无需"多 inbound 平均分"近似。反查走 ResolveUsernameByEmail 的 `__` split 规则,
+// 跟 routed 子账户 `<username>__<id>__<label>` 命名兼容(都取首段当 username)。
+func generateCredential(protocol string, user storage.User, method, inboundTag string) (map[string]interface{}, string, error) {
 	cred := make(map[string]interface{})
-	email := user.Email
-	if email == "" {
-		email = user.Username
-	}
+	email := user.Username + "__" + inboundTag
 
 	switch strings.ToLower(protocol) {
 	case "vless", "vmess":

@@ -778,9 +778,22 @@ function AdminDashboard() {
       return mult === 1 ? u : { ...u, cycle_uplink: u.cycle_uplink * mult, cycle_downlink: u.cycle_downlink * mult }
     }), [userTrafficList, multiplierByUser])
 
+  // type='user' 时拉新接口 /api/admin/traffic/user-nodes:精确的"用户每节点流量"。
+  // 走 user_email_traffic + user_subaccounts/user_inbound_configs 反查,数据准确不重复。
+  const { data: userNodesData } = useQuery({
+    queryKey: ['admin-traffic-user-nodes', drilldown?.type === 'user' ? drilldown.key : null],
+    queryFn: async () => {
+      const resp = await api.get(`/api/admin/traffic/user-nodes?username=${encodeURIComponent(drilldown!.key)}`)
+      return resp.data as { items?: Array<{ node_id: number; node_name: string; server_name: string; uplink: number; downlink: number; last_uplink: number; last_downlink: number }> }
+    },
+    enabled: drilldown?.type === 'user',
+    staleTime: 10 * 1000,
+  })
+
   const drilldownData = useMemo<DrilldownItem[]>(() => {
-    if (!drilldown || !trafficData?.servers) return []
+    if (!drilldown) return []
     if (drilldown.type === 'node') {
+      if (!trafficData?.servers) return []
       const userMap = new Map<string, DrilldownItem>()
       for (const server of trafficData.servers) {
         const hasTag = (server.inbounds ?? []).some((ib: any) => ib.tag === drilldown.key)
@@ -792,20 +805,16 @@ function AdminDashboard() {
         }
       }
       return [...userMap.values()].sort((a, b) => (b.uplink + b.downlink) - (a.uplink + a.downlink))
-    } else {
-      const items: DrilldownItem[] = []
-      for (const server of trafficData.servers) {
-        const hasUser = (server.users ?? []).some((u: any) => u.username === drilldown.key)
-        if (hasUser) {
-          for (const ib of server.inbounds ?? []) {
-            if (!nodeNameMap.has(ib.tag)) continue
-            items.push({ label: nodeNameMap.get(ib.tag)!, uplink: ib.uplink ?? 0, downlink: ib.downlink ?? 0, last_uplink: ib.last_uplink ?? 0, last_downlink: ib.last_downlink ?? 0 })
-          }
-        }
-      }
-      return items.sort((a, b) => (b.uplink + b.downlink) - (a.uplink + a.downlink))
     }
-  }, [drilldown, trafficData, nodeNameMap])
+    // type === 'user' — 直接用接口返回(后端已按总流量降序)
+    return (userNodesData?.items ?? []).map(it => ({
+      label: it.node_name,
+      uplink: it.uplink,
+      downlink: it.downlink,
+      last_uplink: it.last_uplink,
+      last_downlink: it.last_downlink,
+    }))
+  }, [drilldown, trafficData, userNodesData])
 
   const metrics = useMemo(() => data?.metrics ?? {}, [data?.metrics])
 
