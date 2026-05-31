@@ -106,6 +106,24 @@ function getTrafficPercent(used: number, limit: number): number {
   return (used / limit) * 100
 }
 
+// buildRemoteInstallCommand 按当前 server 字段组装 install URL。
+//
+// 必须带上 xray_mode / steal_self 等参数 — 不带会让 install.sh 默认装 external xray + 不装 nginx,
+// 跟用户在创建 dialog 里选的偷自己/embedded 等配置漂移,典型表现是 agent 起来后 status=offline、
+// scan_result=xray_running=false。详情 Dialog 和恢复 Popover 之前都只带了 token,被踩坑过。
+function buildRemoteInstallCommand(server: { token: string; xray_mode?: string; steal_mode?: string; listen_port?: number }, masterOrigin: string): string {
+  const qs = new URLSearchParams()
+  qs.set('token', server.token)
+  if (server.xray_mode === 'embedded') qs.set('xray_mode', 'embedded')
+  // steal_mode in (tunnel, fallback) 视为开了"偷自己" — install.sh 收到 steal_self=1 才装 nginx
+  if (server.steal_mode === 'tunnel' || server.steal_mode === 'fallback') {
+    qs.set('steal_self', '1')
+    qs.set('front_service', 'xray')
+  }
+  if (server.listen_port && server.listen_port > 0) qs.set('listen_port', String(server.listen_port))
+  return `curl -fsSL '${masterOrigin}/api/remote/install.sh?${qs.toString()}' | bash`
+}
+
 // SortableServerCard / SortableServerRow:dnd-kit 包装层。把当前迭代项变成可拖动的 sortable,
 // 通过 render prop 把拖动把手 props 传给消费方,消费方决定把 GripVertical 按钮挂哪里。
 // 注意 TouchSensor + touch-none 必须同时存在,iPad / 手机长按拖动才能生效。
@@ -208,6 +226,9 @@ function XrayServersPage() {
   const [remoteServerName, setRemoteServerName] = useState('')
   const [generatedToken, setGeneratedToken] = useState('')
   const [installCommand, setInstallCommand] = useState('')
+  // 添加 server 后,用 server.id 在 remoteServersData 里查它的 status。一旦变成 connected,
+  // 自动关闭 add dialog — 用户就不需要手动点"完成"了,且明确知道安装成功。
+  const [createdServerId, setCreatedServerId] = useState<number | null>(null)
   const [isGeneratingToken, setIsGeneratingToken] = useState(false)
   const [pullAddress, setPullAddress] = useState('')
   const [pullPort, setPullPort] = useState('23889')
@@ -420,6 +441,7 @@ function XrayServersPage() {
         setGeneratedToken(data.server?.token || '')
         setPullToken(data.server?.pull_token || '')
         setInstallCommand(data.install_command || '')
+        if (data.server?.id) setCreatedServerId(data.server.id)
         queryClient.invalidateQueries({ queryKey: ['remote-servers'] })
         if (data.is_local) {
           toast.success(t('servers.localServerDetected'))
@@ -852,10 +874,24 @@ function XrayServersPage() {
   const copyToClipboard = (text: string, label: string) => clipboardCopy(text, { success: t('servers.copied', { label }), failure: t('servers.copyFailed') })
 
   const resetAddDialog = () => {
-    setRemoteServerName(''); setGeneratedToken(''); setInstallCommand(''); setIsGeneratingToken(false)
+    setRemoteServerName(''); setGeneratedToken(''); setInstallCommand(''); setIsGeneratingToken(false); setCreatedServerId(null)
     setPullAddress(''); setPullPort('23889'); setPullToken(''); setCreateStealSelf(false); setCreateFrontService('xray'); setCreateStealMode('tunnel'); setCreateUse443(false); setCreateDomain(''); setDomainAutoFilled(false); setCreateSiteType('static'); setCreateSiteValue(''); setCreateXrayMode('external'); setCreateTrafficStatsMode('both')
     setFormData({ ...formData, traffic_limit_gb: '', traffic_used_gb: '', traffic_reset_day: '1' })
   }
+
+  // dialog 打开 + 已生成 token 后,轮询 remoteServers(每 3s,跟现有 query 共享)。
+  // 新 server 一旦 status=connected,自动关 dialog + toast 提示 — 用户安装脚本跑完
+  // 不用手动点"完成"。
+  useEffect(() => {
+    if (!isAddDialogOpen || createdServerId === null) return
+    const servers = (remoteServersData?.servers ?? []) as RemoteServer[]
+    const target = servers.find((s) => s.id === createdServerId)
+    if (target && target.status === 'connected') {
+      toast.success(`服务器「${target.name}」已连接`)
+      setIsAddDialogOpen(false)
+      resetAddDialog()
+    }
+  }, [isAddDialogOpen, createdServerId, remoteServersData])
 
   const handleDeleteRemoteServer = (id: number) => { setDeletingRemoteServerId(id); setIsDeleteRemoteServerDialogOpen(true) }
   const confirmDeleteRemoteServer = () => { if (deletingRemoteServerId !== null) deleteRemoteServerMutation.mutate(deletingRemoteServerId); setIsDeleteRemoteServerDialogOpen(false); setDeletingRemoteServerId(null) }
@@ -1120,6 +1156,18 @@ function XrayServersPage() {
                   <Button onClick={handleGenerateToken} disabled={!remoteServerName.trim() || isGeneratingToken || !!generatedToken}>{isGeneratingToken ? t('servers.generating') : t('servers.generateToken')}</Button>
                 </div>
               </div>
+              {/* 安装命令置顶 — 用户填表填到一半看不到底部命令,容易关掉 dialog 后重打开从详情页拿
+                  不带参数的命令而踩坑(只带 token → 装 external xray + 不装 nginx) */}
+              {generatedToken && (
+                <div className="grid gap-2 p-4 border-2 border-primary/40 bg-primary/5 rounded-lg">
+                  <Label htmlFor="install-command-top" className="text-sm font-semibold">{t('servers.installCommand')}</Label>
+                  <div className="flex gap-2 min-w-0">
+                    <Textarea id="install-command-top" value={installCommand} readOnly className="font-mono text-xs h-[80px] resize-none min-w-0" />
+                    <Button variant="outline" size="icon" className="shrink-0" onClick={() => copyToClipboard(installCommand, t('servers.installCommand'))}><Copy className="h-4 w-4" /></Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">{t('servers.tokenDesc')}</p>
+                </div>
+              )}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 p-4 bg-muted/50 rounded-lg">
                 <div className="grid gap-2"><Label htmlFor="pull-address">{t('servers.serverAddress')}</Label><Input id="pull-address" value={pullAddress} onChange={(e) => setPullAddress(e.target.value)} onBlur={(e) => { if (createStealSelf) checkSameIP(e.target.value) }} placeholder={t('servers.serverAddressPlaceholder')} disabled={!!generatedToken} /></div>
                 <div className="grid gap-2"><Label htmlFor="pull-port">{t('servers.agentPort')}</Label><Input id="pull-port" type="number" value={pullPort} onChange={(e) => setPullPort(e.target.value)} placeholder="23889" disabled={!!generatedToken} /></div>
@@ -1200,9 +1248,6 @@ function XrayServersPage() {
                   </>
                 )}
               </div>
-              {generatedToken && (
-                <div className="grid gap-2"><Label htmlFor="install-command">{t('servers.installCommand')}</Label><div className="flex gap-2 min-w-0"><Textarea id="install-command" value={installCommand} readOnly className="font-mono text-xs h-[80px] resize-none min-w-0" /><Button variant="outline" size="icon" className="shrink-0" onClick={() => copyToClipboard(installCommand, t('servers.installCommand'))}><Copy className="h-4 w-4" /></Button></div><p className="text-xs text-muted-foreground">{t('servers.tokenDesc')}</p></div>
-              )}
             </div>
             <DialogFooter><Button variant="outline" onClick={() => { setIsAddDialogOpen(false); resetAddDialog() }}>{generatedToken ? t('servers.complete') : tc('actions.cancel')}</Button></DialogFooter>
           </DialogContent>
@@ -1302,7 +1347,7 @@ function XrayServersPage() {
                                 </p>
                                 <div className="flex gap-2">
                                   <Input
-                                    value={`curl -fsSL '${masterOrigin}/api/remote/install.sh?token=${server.token}' | bash`}
+                                    value={buildRemoteInstallCommand(server, masterOrigin)}
                                     readOnly
                                     className="font-mono text-xs"
                                   />
@@ -1310,7 +1355,7 @@ function XrayServersPage() {
                                     variant="outline"
                                     size="icon"
                                     className="shrink-0"
-                                    onClick={() => copyToClipboard(`curl -fsSL '${masterOrigin}/api/remote/install.sh?token=${server.token}' | bash`, '安装命令')}
+                                    onClick={() => copyToClipboard(buildRemoteInstallCommand(server, masterOrigin), '安装命令')}
                                   >
                                     <Copy className="h-4 w-4" />
                                   </Button>
@@ -1812,7 +1857,7 @@ function XrayServersPage() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="detail-install-command">{selectedRemoteServer.status === 'offline' ? t('servers.reinstallCommand') : t('servers.oneClickInstall')}</Label>
-                <div className="flex gap-2"><Input id="detail-install-command" value={`curl -fsSL '${masterOrigin}/api/remote/install.sh?token=${selectedRemoteServer.token}' | bash`} readOnly className="font-mono text-xs" /><Button variant="outline" size="icon" onClick={() => copyToClipboard(`curl -fsSL '${masterOrigin}/api/remote/install.sh?token=${selectedRemoteServer.token}' | bash`, t('servers.installCommand'))}><Copy className="h-4 w-4" /></Button></div>
+                <div className="flex gap-2"><Input id="detail-install-command" value={buildRemoteInstallCommand(selectedRemoteServer, masterOrigin)} readOnly className="font-mono text-xs" /><Button variant="outline" size="icon" onClick={() => copyToClipboard(buildRemoteInstallCommand(selectedRemoteServer, masterOrigin), t('servers.installCommand'))}><Copy className="h-4 w-4" /></Button></div>
                 <p className="text-xs text-muted-foreground">{selectedRemoteServer.status === 'offline' ? t('servers.offlineReinstallHint') : t('servers.onlineInstallHint')}</p>
               </div>
               <div className="space-y-2">
