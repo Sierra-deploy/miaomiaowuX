@@ -158,6 +158,11 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.1.7 (2026-05-31)
+- 🌈增加自定义安全管控配置
+- 🛠️ fix:ss2022多用户密码拼接错误
+- 🛠️ fix:添加服务器的安装命令丢失参数
+- 🛠️ fix:用户流量统计聚合逻辑错误
 ### v0.1.6 (2026-05-30)
 - 🌈优化主控使用CDN情况下的Agent互联
 - 🛠️ fix:dialog溢出屏幕问题
