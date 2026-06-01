@@ -146,7 +146,27 @@ export function extractTemplateVariables(content: string): Record<string, string
 
 export function regexToKeywords(regex: string): string {
   if (!regex) return ''
-  return regex.split('|').join(', ')
+  // 按 | 分割,但识别 \X 转义对(\| / \. 等)— 转义里的 | 是字面字符,不能当分隔符。
+  // 之前直接 split('|') 把用户的 `\|`(匹配文字管道符)切成 ["\\", ""],
+  // 渲染回 keywords 后再保存,转义 `\` 被进一步丢失,等同把过滤条件改成了空。
+  const parts: string[] = []
+  let current = ''
+  for (let i = 0; i < regex.length; i++) {
+    const ch = regex[i]
+    if (ch === '\\' && i + 1 < regex.length) {
+      current += ch + regex[i + 1]
+      i++
+      continue
+    }
+    if (ch === '|') {
+      parts.push(current)
+      current = ''
+      continue
+    }
+    current += ch
+  }
+  parts.push(current)
+  return parts.join(', ')
 }
 
 export function createDefaultFormState(name = i18n.t('templates:v3.defaultGroupName')): ProxyGroupFormState {

@@ -30,6 +30,7 @@ import { Badge } from '@/components/ui/badge'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { api } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
 import { type Balancer, normalizeBalancers } from '@/lib/xray-balancer'
@@ -81,8 +82,8 @@ function outboundBadgeVariant(tag: string) {
   return 'secondary' as const
 }
 
-function SortableRuleItem({ rule, index, isSelected, onClick, t, quickRules }: {
-  rule: RoutingRule; index: number; isSelected: boolean; onClick: () => void; t: (key: string) => string; quickRules: any
+function SortableRuleItem({ rule, index, isSelected, onClick, t, quickRules, isMmwxManaged }: {
+  rule: RoutingRule; index: number; isSelected: boolean; onClick: () => void; t: (key: string) => string; quickRules: any; isMmwxManaged?: boolean
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: `rule-${index}` })
   const style = { transform: CSS.Transform.toString(transform), transition, opacity: isDragging ? 0.5 : 1 }
@@ -91,13 +92,21 @@ function SortableRuleItem({ rule, index, isSelected, onClick, t, quickRules }: {
   return (
     <div
       ref={setNodeRef} style={style}
-      className={`flex items-center gap-1.5 py-2 px-2 rounded-md border text-sm cursor-pointer transition-colors ${isSelected ? 'border-primary bg-primary/5' : 'bg-card hover:bg-accent/50'}`}
+      className={`flex items-center gap-1.5 py-2 px-2 rounded-md border text-sm cursor-pointer transition-colors ${isSelected ? 'border-primary bg-primary/5' : 'bg-card hover:bg-accent/50'} ${isMmwxManaged ? 'border-l-4 border-l-primary/70' : ''}`}
       onClick={onClick}
     >
       <button className='shrink-0 cursor-grab active:cursor-grabbing touch-none text-muted-foreground hover:text-foreground' {...attributes} {...listeners}>
         <GripVertical className='size-3.5' />
       </button>
       <Badge variant='outline' className='shrink-0 text-xs'>{ruleType}</Badge>
+      {isMmwxManaged && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <Badge variant='secondary' className='shrink-0 text-[10px] px-1 py-0 bg-primary/10 text-primary border-primary/30'>妙妙屋X</Badge>
+          </TooltipTrigger>
+          <TooltipContent><div className='text-xs max-w-xs'>此规则由妙妙屋X路由出站功能自动添加和管理,请勿在此手动编辑或删除</div></TooltipContent>
+        </Tooltip>
+      )}
       <span className='flex-1 min-w-0 truncate text-xs' title={matchCondition}>
         {friendlyName ? <span className='font-medium'>{friendlyName}: </span> : null}
         {matchCondition || '-'}
@@ -215,12 +224,31 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
     return out
   }, [nodesData])
 
+  // 妙妙屋 X routed 节点产生的 outboundTag 集合 — routing rule 的 outboundTag 命中即视为系统管理,
+  // 不允许用户编辑/删除(改了会让套餐分配 / 路由出站子账号失效)。
+  const mmwxRoutedTags = useMemo(() => {
+    const set = new Set<string>()
+    for (const n of nodesData?.nodes || []) {
+      if (n.node_type === 'routed' && n.routed_outbound_tag) {
+        set.add(n.routed_outbound_tag)
+      }
+    }
+    return set
+  }, [nodesData])
+  const isMmwxManagedRule = (r: RoutingRule) =>
+    !!r.outboundTag && mmwxRoutedTags.has(r.outboundTag)
+
   const rawRules: RoutingRule[] = useMemo(() => {
     if (isRemote) return routingData?.routing?.rules || []
     return routingData?.rules || []
   }, [routingData, isRemote])
 
-  const rules = useMemo(() => rawRules.filter(r => r.outboundTag !== 'api' && !r.inboundTag?.includes('api')), [rawRules])
+  // 基础设施路由:api(主控管理通道) + tunnel-in(steal-self 模式的伪装隧道入站)。
+  // 这俩规则不由用户配置、用户改了会破坏 agent 通信 / 偷自己功能 → UI 里完全不显示也不允许编辑。
+  // reorder 路径(reorderMutation)也得把它们原样保留 prepend 回去。
+  const isPreservedRule = (r: RoutingRule) =>
+    r.outboundTag === 'api' || r.inboundTag?.includes('api') || r.inboundTag?.includes('tunnel-in')
+  const rules = useMemo(() => rawRules.filter(r => !isPreservedRule(r)), [rawRules])
 
   const outbounds = useMemo(() => {
     if (isRemote) return outboundsData?.outbounds || []
@@ -294,8 +322,8 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
   const reorderMutation = useMutation({
     mutationFn: async (newRules: RoutingRule[]) => {
       if (!isRemote) return { success: false, message: t('routing.localSortNotSupported') }
-      const apiRules = rawRules.filter(r => r.outboundTag === 'api' || r.inboundTag?.includes('api'))
-      return (await api.post(`/api/admin/remote/routing?server_id=${serverId}`, { action: 'set', routing: { ...routingData?.routing, rules: [...apiRules, ...newRules] } })).data
+      const preservedRules = rawRules.filter(isPreservedRule)
+      return (await api.post(`/api/admin/remote/routing?server_id=${serverId}`, { action: 'set', routing: { ...routingData?.routing, rules: [...preservedRules, ...newRules] } })).data
     },
     onSuccess: async (data) => {
       queryClient.invalidateQueries({ queryKey: routingQueryKey })
@@ -493,7 +521,7 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
               <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
                 <SortableContext items={sortableIds} strategy={verticalListSortingStrategy}>
                   {rules.map((rule, i) => (
-                    <SortableRuleItem key={`rule-${i}`} rule={rule} index={i} isSelected={selectedIndex === i} onClick={() => setSelectedIndex(i)} t={t} quickRules={QUICK_RULES} />
+                    <SortableRuleItem key={`rule-${i}`} rule={rule} index={i} isSelected={selectedIndex === i} onClick={() => setSelectedIndex(i)} t={t} quickRules={QUICK_RULES} isMmwxManaged={isMmwxManagedRule(rule)} />
                   ))}
                 </SortableContext>
               </DndContext>
@@ -502,16 +530,28 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
               {selectedRule ? (
                 <div className='space-y-4'>
                   <div className='flex items-center justify-between'>
-                    <h4 className='font-medium text-sm'>{getFriendlyName(selectedRule) || t('routing.rule', { index: selectedIndex! + 1 })}</h4>
-                    <div className='flex gap-2'>
-                      <Button variant='outline' size='sm' className='h-7 text-xs' onClick={() => openEditDialog(selectedIndex!)}>
-                        <Pencil className='size-3 mr-1' />{tc('actions.edit')}
-                      </Button>
-                      <Button variant='outline' size='sm' className='h-7 text-xs text-red-600 hover:text-red-700' onClick={() => setDeletingIndex(selectedIndex)}>
-                        <Trash2 className='size-3 mr-1' />{tc('actions.delete')}
-                      </Button>
-                    </div>
+                    <h4 className='font-medium text-sm flex items-center gap-2'>
+                      {getFriendlyName(selectedRule) || t('routing.rule', { index: selectedIndex! + 1 })}
+                      {isMmwxManagedRule(selectedRule) && (
+                        <Badge variant='secondary' className='text-[10px] px-1.5 py-0 bg-primary/10 text-primary border-primary/30'>妙妙屋X 管理</Badge>
+                      )}
+                    </h4>
+                    {!isMmwxManagedRule(selectedRule) && (
+                      <div className='flex gap-2'>
+                        <Button variant='outline' size='sm' className='h-7 text-xs' onClick={() => openEditDialog(selectedIndex!)}>
+                          <Pencil className='size-3 mr-1' />{tc('actions.edit')}
+                        </Button>
+                        <Button variant='outline' size='sm' className='h-7 text-xs text-red-600 hover:text-red-700' onClick={() => setDeletingIndex(selectedIndex)}>
+                          <Trash2 className='size-3 mr-1' />{tc('actions.delete')}
+                        </Button>
+                      </div>
+                    )}
                   </div>
+                  {isMmwxManagedRule(selectedRule) && (
+                    <div className='rounded-md bg-primary/5 border border-primary/20 px-3 py-2 text-xs text-muted-foreground'>
+                      此规则由妙妙屋X路由出站功能添加和管理。要修改请去节点管理页面操作对应的路由出站节点;要删除请先在节点管理里删除使用此 outbound 的 routed 节点。
+                    </div>
+                  )}
                   <div className='space-y-2 text-sm'>
                     {selectedRule.domain?.length && <div><span className='text-muted-foreground'>domain: </span><span className='break-all'>{selectedRule.domain.join(', ')}</span></div>}
                     {selectedRule.ip?.length && <div><span className='text-muted-foreground'>ip: </span><span className='break-all'>{selectedRule.ip.join(', ')}</span></div>}
@@ -560,7 +600,9 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
 
       {/* Custom Rule */}
       <Dialog open={isCustomRuleDialogOpen} onOpenChange={(open) => { setIsCustomRuleDialogOpen(open); if (!open) { setEditingIndex(null); resetCustomForm() } }}>
-        <DialogContent className='max-w-lg max-h-[85vh] flex flex-col'>
+        {/* placeholder 整体调淡 + 斜体 — 之前 muted-foreground 在某些主题下跟用户输入字符颜色接近,
+            打开编辑/添加路由时分不清是空 placeholder 还是已有内容 */}
+        <DialogContent className='max-w-lg max-h-[85vh] flex flex-col [&_input::placeholder]:text-muted-foreground/50 [&_textarea::placeholder]:text-muted-foreground/50 [&_input::placeholder]:italic [&_textarea::placeholder]:italic'>
           <DialogHeader><DialogTitle>{editingIndex !== null ? t('routing.editRule') : t('routing.addCustomRule')}</DialogTitle><DialogDescription>{t('routing.customRuleDesc')}</DialogDescription></DialogHeader>
           <div className='flex-1 overflow-y-auto space-y-3 py-2'>
             <div className='grid grid-cols-2 gap-3'>

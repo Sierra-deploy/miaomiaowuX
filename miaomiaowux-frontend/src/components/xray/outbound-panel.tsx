@@ -15,6 +15,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import { Badge } from '@/components/ui/badge'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { api } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
 import type { XrayOutbound } from '@/lib/xray-presets'
@@ -57,6 +58,23 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
       }
     },
   })
+
+  // 共享 nodes query(routing-panel 也用同 key,react-query 自动 dedup)。
+  // 用于识别 outbound 是否被妙妙屋X路由出站功能引用 → 卡片打标 + 禁用删除。
+  const { data: nodesData } = useQuery({
+    queryKey: ['nodes'],
+    queryFn: async () => (await api.get('/api/admin/nodes')).data as { nodes: any[] },
+  })
+  const mmwxRoutedTags = useMemo(() => {
+    const set = new Set<string>()
+    for (const n of nodesData?.nodes || []) {
+      if (n.node_type === 'routed' && n.routed_outbound_tag) {
+        set.add(n.routed_outbound_tag)
+      }
+    }
+    return set
+  }, [nodesData])
+  const isMmwxManagedOutbound = (tag: string | undefined) => !!tag && mmwxRoutedTags.has(tag)
 
   const remoteUpdateOutboundMutation = useMutation({
     mutationFn: async ({ outbound }: { outbound: XrayOutbound }) => {
@@ -217,11 +235,22 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
           {filteredOutbounds.map((item: OutboundItem) => {
             const outbound = item.outbound
             const { address, port } = getOutboundAddress(outbound)
+            const mmwxManaged = isMmwxManagedOutbound(outbound.tag)
             return (
-              <Card key={`${item.server_id}-${outbound.tag}`}>
+              <Card key={`${item.server_id}-${outbound.tag}`} className={mmwxManaged ? 'border-l-4 border-l-primary/70' : ''}>
                 <CardHeader className="pb-2">
                   <div className="flex items-start justify-between gap-2">
-                    <CardTitle className="text-base truncate">{outbound.tag}</CardTitle>
+                    <CardTitle className="text-base truncate flex items-center gap-1.5">
+                      {outbound.tag}
+                      {mmwxManaged && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Badge variant='secondary' className='text-[10px] px-1 py-0 bg-primary/10 text-primary border-primary/30'>妙妙屋X</Badge>
+                          </TooltipTrigger>
+                          <TooltipContent><div className='text-xs max-w-xs'>此出站由妙妙屋X路由出站功能添加和管理,请勿手动删除 — 删除会让对应 routed 节点 + 用户子账号失效。要清理请去节点管理删除使用此 outbound 的 routed 节点。</div></TooltipContent>
+                        </Tooltip>
+                      )}
+                    </CardTitle>
                     <Badge variant="secondary" className="text-xs">{outbound.protocol}</Badge>
                   </div>
                 </CardHeader>
@@ -246,7 +275,7 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
                     <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => handleEditFreedom(item)}><Edit2 className="h-3 w-3 mr-1" />{tc('actions.edit')}</Button>
                   )}
                   <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setViewingOutbound(outbound)}><Eye className="h-3 w-3 mr-1" />{tc('actions.view')}</Button>
-                  {!isSimpleOutbound(outbound.protocol) && (
+                  {!isSimpleOutbound(outbound.protocol) && !mmwxManaged && (
                     <Button variant="outline" size="sm" className="h-7 text-xs text-red-600 hover:text-red-700" onClick={() => handleDelete(item)}><Trash2 className="h-3 w-3 mr-1" />{tc('actions.delete')}</Button>
                   )}
                 </CardFooter>

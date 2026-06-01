@@ -10,8 +10,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/google/uuid"
-
 	"miaomiaowux/internal/auth"
 	"miaomiaowux/internal/storage"
 )
@@ -189,12 +187,12 @@ func (h *UserRoutedOutboundHandler) create(w http.ResponseWriter, r *http.Reques
 	}
 
 	// ====== 执行 ======
-	// 用户子账号 email = `<username>__<short>__<label>`
+	// 用户子账号 email = `<username>__<short>__<label>`,cred 按父 inbound 协议正确生成主字段(参见 generateRoutedClientCred)
 	userEmail := fmt.Sprintf("%s__%s__%s", username, shortID, labelSlug)
-	credUUID := uuid.New().String()
-	userCred := map[string]interface{}{
-		"id":    credUUID,
-		"email": userEmail,
+	userCred, _, err := generateRoutedClientCred(parent.Protocol, "", userEmail)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("生成 client 凭据失败: %v", err))
+		return
 	}
 	// VLESS Reality 需要继承父 inbound 第一个 client 的 flow
 	flow, err := h.peekInboundFirstClientFlow(ctx, serverID, parent.InboundTag)
@@ -213,9 +211,10 @@ func (h *UserRoutedOutboundHandler) create(w http.ResponseWriter, r *http.Reques
 	// === Step 1: 加用户子账号 client(幂等,没有 admin 占位)===
 	// 同 routed_outbound.go Step 1:agent matchClientCredential 现在只看 primary key,
 	// 同 email 不同 uuid 不再被去重 → 重复 add 后 xray "User already exists" 启动失败。
+	pkField := primaryKeyFieldForProtocol(parent.Protocol)
 	if existingUUID, existingFlow, perr := peekInboundClientByEmail(ctx, h.remoteManage, serverID, parent.InboundTag, userEmail); perr == nil && existingUUID != "" {
-		log.Printf("[UserRoutedCreate] inbound %s already has client email=%s uuid=%s — reusing", parent.InboundTag, userEmail, existingUUID)
-		userCred["id"] = existingUUID
+		log.Printf("[UserRoutedCreate] inbound %s already has client email=%s pk=%s — reusing", parent.InboundTag, userEmail, existingUUID)
+		userCred[pkField] = existingUUID
 		if existingFlow != "" {
 			userCred["flow"] = existingFlow
 		}

@@ -902,6 +902,14 @@ func (h *SubscriptionHandler) generateFromTemplate(ctx context.Context, subscrib
 		nodes = allNodes
 	}
 
+	// 按订阅创建者的 nodeOrder 重排 nodes — 影响 __PROXY_NODES__ 占位符展开顺序、
+	// 也直接决定订阅顶层 proxies 数组顺序。
+	// 之前漏掉了这一步,模板订阅生成后节点按 created_at(ListAllNodes 默认 DESC)
+	// 或 pkg.Nodes 数组顺序,跟用户在节点管理里拖好的顺序对不上。
+	if creator != "" {
+		nodes = orderNodesByUserOrder(ctx, h.repo, creator, nodes)
+	}
+
 	selectedTagsMap := make(map[string]bool)
 	for _, tag := range subscribeFile.SelectedTags {
 		selectedTagsMap[tag] = true
@@ -1890,6 +1898,50 @@ func reorderProxyGroupFields(groupNode *yaml.Node) {
 
 	// 替换原来的内容
 	groupNode.Content = newContent
+}
+
+// orderNodesByUserOrder 按用户 nodeOrder 重排 storage.Node 数组,顺序逻辑跟
+// PackageSubscribeHandler.orderPackageNodes 一致:user.NodeOrder 非空按其位置排;
+// 空时 fallback admin 顺序;不在 nodeOrder 里的(新节点)按原 nodes 顺序追加末尾。
+// 用于模板订阅生成路径,影响 __PROXY_NODES__ 占位符展开顺序 + 顶层 proxies 顺序。
+func orderNodesByUserOrder(ctx context.Context, repo *storage.TrafficRepository, username string, nodes []storage.Node) []storage.Node {
+	if len(nodes) == 0 || username == "" {
+		return nodes
+	}
+	var nodeOrder []int64
+	if settings, err := repo.GetUserSettings(ctx, username); err == nil {
+		nodeOrder = settings.NodeOrder
+	}
+	if len(nodeOrder) == 0 {
+		nodeOrder = computeFallbackNodeOrder(ctx, repo, username)
+	}
+	if len(nodeOrder) == 0 {
+		return nodes
+	}
+
+	byID := make(map[int64]storage.Node, len(nodes))
+	for _, n := range nodes {
+		byID[n.ID] = n
+	}
+	orderPos := make(map[int64]int, len(nodeOrder))
+	for i, id := range nodeOrder {
+		orderPos[id] = i
+	}
+
+	ordered := make([]storage.Node, 0, len(nodes))
+	// 在 nodeOrder 里的节点按位置排
+	for _, id := range nodeOrder {
+		if n, ok := byID[id]; ok {
+			ordered = append(ordered, n)
+		}
+	}
+	// 不在 nodeOrder 里的节点(管理员新加的)按 nodes 原顺序追加末尾
+	for _, n := range nodes {
+		if _, inOrder := orderPos[n.ID]; !inOrder {
+			ordered = append(ordered, n)
+		}
+	}
+	return ordered
 }
 
 // sortProxiesByNodeOrder 根据用户配置的节点顺序对 proxies 进行排序

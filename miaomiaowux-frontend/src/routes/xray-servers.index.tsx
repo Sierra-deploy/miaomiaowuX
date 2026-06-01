@@ -260,6 +260,12 @@ function XrayServersPage() {
   const [upgradeAllRunning, setUpgradeAllRunning] = useState(false)
   const [isDeleteRemoteServerDialogOpen, setIsDeleteRemoteServerDialogOpen] = useState(false)
   const [deletingRemoteServerId, setDeletingRemoteServerId] = useState<number | null>(null)
+  // 安装/卸载服务 dialog — 替代原 InstallPopover,从 Agent 下拉里触发,卡片底部不再有第三个按钮
+  // 让所有卡片 footer 维持 2 按钮(Xray 配置 + Agent),高度统一。
+  // Dialog inline 渲染,state 必须放 page 顶层 — 之前抽成 InstallServiceDialog 组件定义在 page 函数内部,
+  // 每次父组件 re-render 都是新函数引用 → React 视为新组件 → unmount/remount → 一 hover 就闪烁循环开/关。
+  const [installDialogServerId, setInstallDialogServerId] = useState<number | null>(null)
+  const [installWithNginx, setInstallWithNginx] = useState('yes')
   const [selectedRemoteServer, setSelectedRemoteServer] = useState<RemoteServer | null>(null)
   const [isRemoteServerDetailDialogOpen, setIsRemoteServerDetailDialogOpen] = useState(false)
   const [isRemoteManageDialogOpen, setIsRemoteManageDialogOpen] = useState(false)
@@ -1014,9 +1020,6 @@ function XrayServersPage() {
         <TooltipTrigger asChild>
           <button
             type='button'
-            // 始终可点 — 主控的 GitHub latest 缓存可能延迟,即使 UI 显示"已是最新",
-            // 实际 GitHub 可能已经有新 release。点击会从 GitHub /releases/latest/download
-            // 直拉,主控缓存只影响 chip 文案,不影响升级动作本身。
             onClick={() => handleAgentUpgrade(serverId)}
             className={cn(
               'relative flex items-center gap-1.5 text-xs px-2 py-1 rounded transition-colors cursor-pointer',
@@ -1026,7 +1029,7 @@ function XrayServersPage() {
             )}
           >
             <ArrowUpCircle className='w-3 h-3' />
-            Agent {label}
+            {label}
             {upgradeAvailable && (
               <span className='absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-red-500 ring-1 ring-background' />
             )}
@@ -1311,8 +1314,8 @@ function XrayServersPage() {
             return (
               <SortableServerCard key={`remote-${server.id}`} id={server.id}>
               {(dragHandle) => (
-              <Card className={cn('min-w-0 overflow-hidden', server.status !== 'connected' ? 'cursor-pointer hover:border-primary/50 transition-colors' : '')} onClick={() => { if (server.status !== 'connected') { setSelectedRemoteServer(server); setIsRemoteServerDetailDialogOpen(true) } }}>
-                <CardHeader className="pb-3 min-w-0">
+              <Card className={cn('min-w-0 overflow-hidden h-full flex flex-col', server.status !== 'connected' ? 'cursor-pointer hover:border-primary/50 transition-colors' : '')} onClick={() => { if (server.status !== 'connected') { setSelectedRemoteServer(server); setIsRemoteServerDetailDialogOpen(true) } }}>
+                <CardHeader className="pb-3 min-w-0 flex-1">
                   <div className="flex flex-col gap-1.5 min-w-0">
                     <div className="flex items-center justify-between gap-2 min-w-0">
                       <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -1516,15 +1519,25 @@ function XrayServersPage() {
                     )}
                   </div>
                 </CardHeader>
-                <CardFooter className="flex flex-wrap gap-2 pt-3">
+                <CardFooter className="flex flex-wrap gap-2 pt-3 mt-auto">
                   {server.status === 'connected' && (
                     <>
-                      {!server.is_federated && (<InstallPopover serverId={server.id} isEmbedded={server.xray_mode === 'embedded'} />)}
+                      {/* InstallPopover 已合并进 Agent 下拉:外置 xray 时显示"安装/卸载服务"菜单项 */}
+                      {server.xray_mode !== 'embedded' && !server.is_federated && !(remoteStatus?.xray?.installed) && (
+                        // 新装机:还没装过 xray 又是外置模式 → Agent 下拉不显示,这里给一个安装按钮 fallback
+                        <Button variant="outline" size="sm" className="flex-1 min-w-0" onClick={(e) => { e.stopPropagation(); setInstallDialogServerId(server.id) }}><Download className="mr-1 h-3.5 w-3.5 shrink-0" /><span className="truncate">{t('servers.install')}</span></Button>
+                      )}
                       {(remoteStatus?.xray?.installed || server.xray_mode === 'embedded') && (<Button variant="outline" size="sm" className="flex-1 min-w-0" onClick={(e) => { e.stopPropagation(); handleOpenRemoteXrayConfig(server) }}><Cog className="h-4 w-4 mr-1" />{t('servers.xrayConfig')}</Button>)}
                       {!server.is_federated && (remoteStatus?.xray?.installed || server.xray_mode === 'embedded') && (
                         <DropdownMenu>
                           <DropdownMenuTrigger asChild><Button variant="outline" size="sm" className="flex-1 min-w-0" title={t('servers.agentManagement')}><Settings className="mr-1 h-3.5 w-3.5 shrink-0" /><span className="truncate">Agent</span></Button></DropdownMenuTrigger>
                           <DropdownMenuContent align="start">
+                            {server.xray_mode !== 'embedded' && (
+                              <>
+                                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setInstallDialogServerId(server.id) }}><Download className="mr-2 h-4 w-4" />{t('servers.installService')}</DropdownMenuItem>
+                                <DropdownMenuSeparator />
+                              </>
+                            )}
                             <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setSyncingServerId(server.id); setSyncServerHost(server.ip_address || ''); setIsSyncNodesDialogOpen(true) }}><RefreshCw className="mr-2 h-4 w-4" />{t('servers.syncNodes')}</DropdownMenuItem>
                             <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setHistoryServerId(server.id); setHistoryServerName(server.name); setHistoryPreviewId(null); setHistoryPreviewConfig(''); setHistoryDialogOpen(true) }}><History className="mr-2 h-4 w-4" />配置历史</DropdownMenuItem>
                             <DropdownMenuSeparator />
@@ -1690,12 +1703,21 @@ function XrayServersPage() {
                       <div className="flex justify-end gap-1">
                         {server.status === 'connected' && (
                           <>
-                            {!server.is_federated && (<InstallPopover serverId={server.id} compact isEmbedded={server.xray_mode === 'embedded'} />)}
+                            {/* 同 card view:外置 xray 还没装时给安装按钮 fallback,装好后入口挪到 Agent 下拉 */}
+                            {server.xray_mode !== 'embedded' && !server.is_federated && !(remoteStatus?.xray?.installed) && (
+                              <Button variant="outline" size="icon" className="h-7 w-7 p-0" onClick={() => setInstallDialogServerId(server.id)} title={t('servers.install')}><Download className="h-3.5 w-3.5" /></Button>
+                            )}
                             {(remoteStatus?.xray?.installed || server.xray_mode === 'embedded') && (<Button variant="outline" size="icon" className="h-7 w-7 p-0" onClick={() => handleOpenRemoteXrayConfig(server)} title={t('servers.xrayConfig')}><img src="/images/xray.svg" alt="Xray" className="h-4 w-4 dark:invert" /></Button>)}
                             {!server.is_federated && (remoteStatus?.xray?.installed || server.xray_mode === 'embedded') && (
                               <DropdownMenu>
                                 <DropdownMenuTrigger asChild><Button variant="outline" size="icon" className="h-7 w-7 p-0" title={t('servers.agentManagement')}><Settings className="h-3.5 w-3.5" /></Button></DropdownMenuTrigger>
                                 <DropdownMenuContent>
+                                  {server.xray_mode !== 'embedded' && (
+                                    <>
+                                      <DropdownMenuItem onClick={() => setInstallDialogServerId(server.id)}><Download className="mr-2 h-4 w-4" />{t('servers.installService')}</DropdownMenuItem>
+                                      <DropdownMenuSeparator />
+                                    </>
+                                  )}
                                   <DropdownMenuItem onClick={() => { setSyncingServerId(server.id); setSyncServerHost(server.ip_address || ''); setIsSyncNodesDialogOpen(true) }}><RefreshCw className="mr-2 h-4 w-4" />{t('servers.syncNodes')}</DropdownMenuItem>
                                   <DropdownMenuItem onClick={() => { setHistoryServerId(server.id); setHistoryServerName(server.name); setHistoryPreviewId(null); setHistoryPreviewConfig(''); setHistoryDialogOpen(true) }}><History className="mr-2 h-4 w-4" />配置历史</DropdownMenuItem>
                                   <DropdownMenuSeparator />
@@ -2059,6 +2081,49 @@ function XrayServersPage() {
               {upgradeAllRunning ? t('servers.upgradeAllRunning') : tc('actions.close')}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 安装/卸载服务 dialog(Agent 下拉触发,替代原 InstallPopover) — inline 渲染避免重复挂载 */}
+      <Dialog open={installDialogServerId !== null} onOpenChange={(o) => { if (!o) { setInstallDialogServerId(null); setInstallWithNginx('yes') } }}>
+        <DialogContent className="max-w-sm">
+          {(() => {
+            const sid = installDialogServerId
+            if (sid === null) return null
+            const status = remoteServicesStatusMap[sid]
+            const xrayInstalled = status?.xray?.installed
+            const nginxInstalled = status?.nginx?.installed
+            const bothInstalled = xrayInstalled && nginxInstalled
+            const srv = remoteServers.find(s => s.id === sid)
+            const desc = installWithNginx === 'yes'
+              ? (!xrayInstalled && !nginxInstalled ? t('servers.willInstallBoth')
+                : (xrayInstalled && !nginxInstalled) ? t('servers.willInstallNginx')
+                : (!xrayInstalled && nginxInstalled) ? t('servers.willInstallXray')
+                : t('servers.bothInstalled'))
+              : (!xrayInstalled ? t('servers.willInstallXray') : t('servers.xrayInstalled'))
+            const canInstall = installWithNginx === 'yes' ? !bothInstalled : !xrayInstalled
+            const canUninstall = xrayInstalled || nginxInstalled
+            const close = () => { setInstallDialogServerId(null); setInstallWithNginx('yes') }
+            return (
+              <>
+                <DialogHeader>
+                  <DialogTitle>{t('servers.installService')}{srv ? ` — ${srv.name}` : ''}</DialogTitle>
+                </DialogHeader>
+                <div className="space-y-3 py-2">
+                  <RadioGroup value={installWithNginx} onValueChange={setInstallWithNginx}>
+                    <div className="flex items-center gap-2"><RadioGroupItem value="yes" id={`dlg-nginx-yes-${sid}`} /><Label htmlFor={`dlg-nginx-yes-${sid}`} className="text-sm cursor-pointer">{t('servers.iWantStealSelf')}</Label></div>
+                    <div className="flex items-center gap-2"><RadioGroupItem value="no" id={`dlg-nginx-no-${sid}`} /><Label htmlFor={`dlg-nginx-no-${sid}`} className="text-sm cursor-pointer">{t('servers.xrayOnly')}</Label></div>
+                  </RadioGroup>
+                  <div className="text-xs text-muted-foreground">{desc}</div>
+                </div>
+                <DialogFooter>
+                  {canUninstall && (<Button variant="outline" size="sm" className="text-red-600 hover:text-red-700" disabled={terminalRunning} onClick={() => { close(); handleSmartUninstall(sid) }}><Trash2 className="h-3.5 w-3.5 mr-1" />{t('servers.uninstall')}</Button>)}
+                  <Button variant="outline" onClick={close}>{tc('actions.cancel')}</Button>
+                  <Button disabled={terminalRunning || !canInstall} onClick={() => { close(); handleSmartInstall(sid, installWithNginx === 'yes') }}><Download className="h-3.5 w-3.5 mr-1" />{t('servers.install')}</Button>
+                </DialogFooter>
+              </>
+            )
+          })()}
         </DialogContent>
       </Dialog>
 

@@ -12,8 +12,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/google/uuid"
-
 	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
 )
@@ -167,10 +165,14 @@ func (h *RoutedOutboundHandler) create(w http.ResponseWriter, r *http.Request) {
 	outboundCopy := cloneMap(req.Outbound)
 	outboundCopy["tag"] = outboundTag
 
-	// 准备 admin client 凭据:复用父 inbound 第一个 client 的 flow(VLESS Reality 必需)
-	adminCred := map[string]interface{}{
-		"id":    uuid.New().String(),
-		"email": adminEmail,
+	// 准备 admin client 凭据。按 parent.Protocol 走 generateCredential 选对字段(vless=id / trojan=password
+	// / hy=auth / ss=password+method 长度),然后把 email 覆盖成 _admin__ 占位。
+	// 之前这里直接硬编码 {id: uuid},导致 trojan/ss/hy routed 节点的 admin 占位 client 字段名错位,
+	// xray reload 失败 + 客户端连不上。
+	adminCred, _, err := generateRoutedClientCred(parent.Protocol, "", adminEmail)
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("生成 admin client 凭据失败: %v", err))
+		return
 	}
 	inboundFlow, err := h.peekInboundFirstClientFlow(ctx, serverID, parent.InboundTag)
 	if err != nil {
@@ -183,10 +185,11 @@ func (h *RoutedOutboundHandler) create(w http.ResponseWriter, r *http.Request) {
 
 	// === Step 1: 给 agent inbound 加 admin client(幂等) ===
 	// 先 peek 看 agent 端是否已有同 email 的 client(历史残留 / 同 label 重试 / 主控 DB 被清但 agent 没清),
-	// 命中 → 复用其 uuid + flow,避免 xray "User already exists" 启动失败。
+	// 命中 → 复用其 primary key + flow,避免 xray "User already exists" 启动失败。
+	pkField := primaryKeyFieldForProtocol(parent.Protocol)
 	if existingUUID, existingFlow, perr := peekInboundClientByEmail(ctx, h.remoteManage, serverID, parent.InboundTag, adminEmail); perr == nil && existingUUID != "" {
-		log.Printf("[RoutedCreate] inbound %s already has admin client email=%s uuid=%s — reusing", parent.InboundTag, adminEmail, existingUUID)
-		adminCred["id"] = existingUUID
+		log.Printf("[RoutedCreate] inbound %s already has admin client email=%s pk=%s — reusing", parent.InboundTag, adminEmail, existingUUID)
+		adminCred[pkField] = existingUUID
 		if existingFlow != "" {
 			adminCred["flow"] = existingFlow
 		}
@@ -441,6 +444,37 @@ func peekInboundFirstClientFlow(ctx context.Context, rm *RemoteManageHandler, se
 	return "", fmt.Errorf("inbound %s not found", inboundTag)
 }
 
+// primaryKeyFieldForProtocol 返回该协议的"主认证字段名",routed cred 复用 / peek 后回写主字段时用。
+// 之前 routed_outbound.go 硬编码 `id`,trojan 节点的 admin / 用户子账号 cred 也被写成 {"id":...},
+// 但 xray trojan 协议需要 `password` 字段 → 客户端连不上 + xray reload 失败。
+func primaryKeyFieldForProtocol(protocol string) string {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "vless", "vmess":
+		return "id"
+	case "trojan", "shadowsocks", "ss":
+		return "password"
+	case "hysteria", "hysteria2", "hy2":
+		return "auth"
+	}
+	return "id"
+}
+
+// generateRoutedClientCred 用 generateCredential 按 protocol 选对字段名 + 长度(SS 按 method),
+// 然后覆盖 email 为 routed 路径自己的命名规则。
+// 替代 routed_outbound.go / user_routed_outbound.go 之前手写 `{id: uuid.New()}` 的硬编码。
+func generateRoutedClientCred(protocol, method, email string) (map[string]interface{}, string, error) {
+	cred, _, err := generateCredential(protocol, storage.User{Username: "routed"}, method, "")
+	if err != nil {
+		return nil, "", err
+	}
+	cred["email"] = email
+	b, err := json.Marshal(cred)
+	if err != nil {
+		return cred, "", err
+	}
+	return cred, string(b), nil
+}
+
 // peekInboundClientByEmail 在 agent 上的某 inbound 里按 email 查现存 client。
 // 命中返回该 client 的 uuid + flow;不存在返回空字符串(err==nil)。
 // 用途:routed 创建 Step 1 add admin client 之前做幂等检查 —
@@ -611,10 +645,13 @@ func computeRoutedNodeUserCred(ctx context.Context, rm *RemoteManageHandler, rep
 		credJSON = existing.CredentialJSON
 		userEmail = existing.Email // saved 优先,避免命名规则变动导致 email 漂移
 	} else {
-		credential = map[string]interface{}{
-			"id":    uuid.New().String(),
-			"email": userEmail,
+		// 用 generateRoutedClientCred 按 routed 节点继承的 protocol 选对字段(vless=id / trojan=password / ...)
+		newCred, newCredJSON, gerr := generateRoutedClientCred(routed.Protocol, "", userEmail)
+		if gerr != nil {
+			return nil, fmt.Errorf("generate routed user cred: %w", gerr)
 		}
+		credential = newCred
+		credJSON = newCredJSON
 		// flow 优先取 admin credential;auto-detected 没存 → 从 inbound 第一个 client 反查
 		var flow string
 		if routed.RoutedAdminCredential != "" {
@@ -632,9 +669,9 @@ func computeRoutedNodeUserCred(ctx context.Context, rm *RemoteManageHandler, rep
 		}
 		if flow != "" {
 			credential["flow"] = flow
-		}
-		if b, err := json.Marshal(credential); err == nil {
-			credJSON = string(b)
+			if b, err := json.Marshal(credential); err == nil {
+				credJSON = string(b)
+			}
 		}
 	}
 
