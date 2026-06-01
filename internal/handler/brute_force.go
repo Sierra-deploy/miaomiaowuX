@@ -26,6 +26,9 @@ type BruteForceProtector struct {
 	maxFailures   int
 	window        time.Duration
 	blockDuration time.Duration
+	// skipLocalIP 命中 loopback/私有/link-local 网段时跳过记账与封禁,
+	// 防反代/docker 未正确转发 XFF 时一封封死所有用户。默认 true。
+	skipLocalIP bool
 }
 
 // NewBruteForceProtector 用 hardcoded 默认值构造。
@@ -37,6 +40,7 @@ func NewBruteForceProtector() *BruteForceProtector {
 		maxFailures:   5,
 		window:        24 * time.Hour,
 		blockDuration: 24 * time.Hour,
+		skipLocalIP:   true,
 	}
 	globalBruteForceProtector = p
 	return p
@@ -50,9 +54,26 @@ func NewBruteForceProtectorWithConfig(enabled bool, maxFailures, windowMinutes, 
 		maxFailures:   maxFailures,
 		window:        time.Duration(windowMinutes) * time.Minute,
 		blockDuration: time.Duration(blockMinutes) * time.Minute,
+		skipLocalIP:   true,
 	}
 	globalBruteForceProtector = p
 	return p
+}
+
+// SetSkipLocalIP 切换"是否跳过本地/私有 IP"。
+// security_settings handler 启动初始化 + PUT 热更新时调用。
+func (p *BruteForceProtector) SetSkipLocalIP(skip bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.skipLocalIP = skip
+}
+
+// shouldSkip 返回是否应跳过该 IP — 当 skipLocalIP 开启且 IP 落在本地/私有网段。
+func (p *BruteForceProtector) shouldSkip(ip string) bool {
+	p.mu.RLock()
+	skip := p.skipLocalIP
+	p.mu.RUnlock()
+	return skip && IsLocalOrPrivateIP(ip)
 }
 
 // UpdateConfig 热更新参数 — security_settings handler 收到 PUT 后调用,无需重启主控。
@@ -78,6 +99,9 @@ func GetBruteForceProtector() *BruteForceProtector {
 func (p *BruteForceProtector) IsBlocked(ip, path string) bool {
 	enabled, _, _, _ := p.getConfig()
 	if !enabled {
+		return false
+	}
+	if p.shouldSkip(ip) {
 		return false
 	}
 
@@ -110,6 +134,9 @@ func (p *BruteForceProtector) IsBlocked(ip, path string) bool {
 func (p *BruteForceProtector) RecordFailure(ip, path string) {
 	enabled, maxFailures, window, blockDuration := p.getConfig()
 	if !enabled {
+		return
+	}
+	if p.shouldSkip(ip) {
 		return
 	}
 

@@ -32,6 +32,9 @@ type securitySettingsResponse struct {
 	SubRateEnabled          bool `json:"sub_rate_enabled"`
 	SubRateLimit            int  `json:"sub_rate_limit"`
 	SubRateWindowMinutes    int  `json:"sub_rate_window_minutes"`
+	// SkipLocalIP 命中本地/私有/loopback IP 时,跳过封禁与频率限制,
+	// 防反代/docker 未传 XFF 时一次封禁打死所有真实用户。
+	SkipLocalIP bool `json:"skip_local_ip"`
 }
 
 // 默认值 — 跟 NewXxxProtector hardcoded 默认值一致,KV 缺失时返回这套。
@@ -46,6 +49,7 @@ var securityDefaults = securitySettingsResponse{
 	SubRateEnabled:          true,
 	SubRateLimit:            60,
 	SubRateWindowMinutes:    1,
+	SkipLocalIP:             true,
 }
 
 type SecuritySettingsHandler struct {
@@ -99,10 +103,21 @@ func (h *SecuritySettingsHandler) handlePut(w http.ResponseWriter, r *http.Reque
 	if srl := GetSubscriptionRateLimiter(); srl != nil {
 		srl.UpdateConfig(payload.SubRateEnabled, payload.SubRateLimit, payload.SubRateWindowMinutes)
 	}
-	log.Printf("[SecuritySettings] thresholds updated: login=%d/%dmin/%dmin brute=%v/%d/%dmin/%dmin sub=%v/%d/%dmin",
+	// skip_local_ip 单独走 Set 接口,避免 3 个 UpdateConfig 签名扩散
+	if rl := GetLoginRateLimiter(); rl != nil {
+		rl.SetSkipLocalIP(payload.SkipLocalIP)
+	}
+	if bfp := GetBruteForceProtector(); bfp != nil {
+		bfp.SetSkipLocalIP(payload.SkipLocalIP)
+	}
+	if srl := GetSubscriptionRateLimiter(); srl != nil {
+		srl.SetSkipLocalIP(payload.SkipLocalIP)
+	}
+	log.Printf("[SecuritySettings] thresholds updated: login=%d/%dmin/%dmin brute=%v/%d/%dmin/%dmin sub=%v/%d/%dmin skip_local_ip=%v",
 		payload.LoginRateMaxAttempts, payload.LoginRateWindowMinutes, payload.LoginRateLockMinutes,
 		payload.BruteForceEnabled, payload.BruteForceMaxFailures, payload.BruteForceWindowMinutes, payload.BruteForceBlockMinutes,
-		payload.SubRateEnabled, payload.SubRateLimit, payload.SubRateWindowMinutes)
+		payload.SubRateEnabled, payload.SubRateLimit, payload.SubRateWindowMinutes,
+		payload.SkipLocalIP)
 
 	respondJSON(w, http.StatusOK, payload)
 }
@@ -144,6 +159,7 @@ func LoadSecuritySettings(ctx context.Context, repo *storage.TrafficRepository) 
 	resp.SubRateEnabled = readBoolSetting(ctx, repo, "sub_rate_enabled", resp.SubRateEnabled)
 	resp.SubRateLimit = readIntSetting(ctx, repo, "sub_rate_limit", resp.SubRateLimit)
 	resp.SubRateWindowMinutes = readIntSetting(ctx, repo, "sub_rate_window_minutes", resp.SubRateWindowMinutes)
+	resp.SkipLocalIP = readBoolSetting(ctx, repo, "skip_local_ip", resp.SkipLocalIP)
 	return resp
 }
 
@@ -159,6 +175,7 @@ func writeSecurityKVs(ctx context.Context, repo *storage.TrafficRepository, p *s
 		"sub_rate_enabled":           strconv.FormatBool(p.SubRateEnabled),
 		"sub_rate_limit":             strconv.Itoa(p.SubRateLimit),
 		"sub_rate_window_minutes":    strconv.Itoa(p.SubRateWindowMinutes),
+		"skip_local_ip":              strconv.FormatBool(p.SkipLocalIP),
 	}
 	for k, v := range pairs {
 		if err := repo.SetSystemSetting(ctx, k, v); err != nil {

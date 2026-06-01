@@ -461,6 +461,7 @@ function SystemSettingsPage() {
     sub_rate_enabled: boolean
     sub_rate_limit: number
     sub_rate_window_minutes: number
+    skip_local_ip: boolean
   }
   const [securityConfig, setSecurityConfig] = useState<SecurityConfig>({
     login_rate_max_attempts: 5,
@@ -473,6 +474,7 @@ function SystemSettingsPage() {
     sub_rate_enabled: true,
     sub_rate_limit: 60,
     sub_rate_window_minutes: 1,
+    skip_local_ip: true,
   })
   const { data: securityData } = useQuery({
     queryKey: ['security-settings'],
@@ -1273,8 +1275,25 @@ function SystemSettingsPage() {
               </CardDescription>
             </CardHeader>
             <CardContent className='space-y-6'>
+              {/* 全局:跳过本地/私有 IP — 反代或 Docker 场景下,若上游未正确传 X-Forwarded-For,
+                  主控会拿到 127.0.0.1 / 内网网关,一次封禁会让所有真实用户都连不上。
+                  开启后,命中本地/私有网段的 IP 跳过封禁与频率限制(登录账户维度仍生效)。 */}
+              <div className='flex items-start justify-between gap-4'>
+                <div className='flex-1'>
+                  <div className='font-semibold text-sm'>不封禁本地 IP</div>
+                  <p className='text-xs text-muted-foreground mt-1'>
+                    反代/Docker 场景下,若上游未传 X-Forwarded-For,主控可能将所有用户视作同一本机 IP — 一次封禁会让所有人连不上。
+                    开启后,loopback / 内网 / 私有网段 IP 跳过封禁与频率限制(登录账户维度仍生效)。
+                  </p>
+                </div>
+                <Switch
+                  checked={securityConfig.skip_local_ip}
+                  onCheckedChange={(checked) => saveSecurityConfig({ skip_local_ip: checked })}
+                />
+              </div>
+
               {/* 登录限流 */}
-              <div className='space-y-3'>
+              <div className='space-y-3 pt-4 border-t'>
                 <div className='font-semibold text-sm'>登录限流</div>
                 <p className='text-xs text-muted-foreground'>失败次数达上限后,IP/账户在锁定时长内禁止登录。</p>
                 <div className='grid grid-cols-1 sm:grid-cols-3 gap-3'>

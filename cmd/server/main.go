@@ -221,6 +221,7 @@ func main() {
 	loginRateLimiter := handler.NewLoginRateLimiterWithConfig(
 		secCfg.LoginRateMaxAttempts, secCfg.LoginRateWindowMinutes, secCfg.LoginRateLockMinutes,
 	)
+	loginRateLimiter.SetSkipLocalIP(secCfg.SkipLocalIP)
 	twoFactorStore := auth.NewTwoFactorPendingStore(5 * time.Minute)
 	mux.Handle("/api/login", handler.NewLoginHandler(authManager, tokenStore, repo, loginRateLimiter, twoFactorStore))
 	mux.Handle("/api/login/2fa", handler.NewTwoFactorLoginHandler(tokenStore, repo, twoFactorStore))
@@ -841,9 +842,11 @@ func main() {
 		secCfg.BruteForceEnabled, secCfg.BruteForceMaxFailures,
 		secCfg.BruteForceWindowMinutes, secCfg.BruteForceBlockMinutes,
 	)
+	bruteForceProtector.SetSkipLocalIP(secCfg.SkipLocalIP)
 	subRateLimiter := handler.NewSubscriptionRateLimiterWithConfig(
 		secCfg.SubRateEnabled, secCfg.SubRateLimit, secCfg.SubRateWindowMinutes,
 	)
+	subRateLimiter.SetSkipLocalIP(secCfg.SkipLocalIP)
 	go subRateLimiter.StartCleanup(context.Background())
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.Trim(r.URL.Path, "/")

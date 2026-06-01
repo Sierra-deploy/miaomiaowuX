@@ -27,6 +27,9 @@ type SubscriptionRateLimiter struct {
 	enabled bool
 	limit   int
 	window  time.Duration
+	// skipLocalIP 命中本地/私有 IP 时直接 Allow,
+	// 防反代未传 XFF 时全员共享一个内网 IP 一起被 429。默认 true。
+	skipLocalIP bool
 }
 
 // NewSubscriptionRateLimiter limit=窗口内最大请求数,window=窗口时长。
@@ -38,10 +41,11 @@ func NewSubscriptionRateLimiter(limit int, window time.Duration) *SubscriptionRa
 		window = time.Minute
 	}
 	l := &SubscriptionRateLimiter{
-		ips:     make(map[string]*subRateRecord),
-		enabled: true,
-		limit:   limit,
-		window:  window,
+		ips:         make(map[string]*subRateRecord),
+		enabled:     true,
+		limit:       limit,
+		window:      window,
+		skipLocalIP: true,
 	}
 	globalSubscriptionRateLimiter = l
 	return l
@@ -56,13 +60,21 @@ func NewSubscriptionRateLimiterWithConfig(enabled bool, limit, windowMinutes int
 		windowMinutes = 1
 	}
 	l := &SubscriptionRateLimiter{
-		ips:     make(map[string]*subRateRecord),
-		enabled: enabled,
-		limit:   limit,
-		window:  time.Duration(windowMinutes) * time.Minute,
+		ips:         make(map[string]*subRateRecord),
+		enabled:     enabled,
+		limit:       limit,
+		window:      time.Duration(windowMinutes) * time.Minute,
+		skipLocalIP: true,
 	}
 	globalSubscriptionRateLimiter = l
 	return l
+}
+
+// SetSkipLocalIP 切换"是否跳过本地/私有 IP 的频率限制"。
+func (l *SubscriptionRateLimiter) SetSkipLocalIP(skip bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.skipLocalIP = skip
 }
 
 // UpdateConfig 热更新参数 — security_settings handler PUT 后调用。
@@ -88,6 +100,9 @@ func (l *SubscriptionRateLimiter) Allow(ip string) bool {
 	defer l.mu.Unlock()
 
 	if !l.enabled {
+		return true
+	}
+	if l.skipLocalIP && IsLocalOrPrivateIP(ip) {
 		return true
 	}
 

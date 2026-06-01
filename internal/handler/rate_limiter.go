@@ -29,6 +29,9 @@ type LoginRateLimiter struct {
 	maxAttempts     int
 	windowDuration  time.Duration
 	lockDuration    time.Duration
+	// skipLocalIP 命中本地/私有 IP 时,跳过 IP 维度限流;账户维度仍生效。
+	// 防反代未传 XFF 时所有真实用户共享同一个内网 IP 一起被锁。
+	skipLocalIP bool
 }
 
 // NewLoginRateLimiter 默认值构造:5 次失败 / 1 小时窗口 / 1 小时锁定。
@@ -38,6 +41,7 @@ func NewLoginRateLimiter() *LoginRateLimiter {
 		maxAttempts:    5,
 		windowDuration: time.Hour,
 		lockDuration:   time.Hour,
+		skipLocalIP:    true,
 	}
 	globalLoginRateLimiter = l
 	return l
@@ -49,9 +53,24 @@ func NewLoginRateLimiterWithConfig(maxAttempts, windowMinutes, lockMinutes int) 
 		maxAttempts:    maxAttempts,
 		windowDuration: time.Duration(windowMinutes) * time.Minute,
 		lockDuration:   time.Duration(lockMinutes) * time.Minute,
+		skipLocalIP:    true,
 	}
 	globalLoginRateLimiter = l
 	return l
+}
+
+// SetSkipLocalIP 切换"是否跳过本地/私有 IP 的 IP 维度限流"。账户维度始终生效。
+func (l *LoginRateLimiter) SetSkipLocalIP(skip bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.skipLocalIP = skip
+}
+
+func (l *LoginRateLimiter) shouldSkipIP(ip string) bool {
+	l.mu.RLock()
+	skip := l.skipLocalIP
+	l.mu.RUnlock()
+	return skip && IsLocalOrPrivateIP(ip)
 }
 
 // UpdateConfig 热更新参数 — security_settings handler PUT 后调用。
@@ -72,12 +91,14 @@ func (l *LoginRateLimiter) getConfig() (int, time.Duration, time.Duration) {
 func (l *LoginRateLimiter) Check(ip, username string) error {
 	now := time.Now()
 
-	if err := l.checkAttempts(&l.ipAttempts, ip, now); err != nil {
-		logger.Warn("🚫🚫🚫 [RATE_LIMIT] 登录被限制（IP）",
-			"ip", ip,
-			"username", username,
-		)
-		return err
+	if !l.shouldSkipIP(ip) {
+		if err := l.checkAttempts(&l.ipAttempts, ip, now); err != nil {
+			logger.Warn("🚫🚫🚫 [RATE_LIMIT] 登录被限制（IP）",
+				"ip", ip,
+				"username", username,
+			)
+			return err
+		}
 	}
 
 	if username != "" {
@@ -128,7 +149,9 @@ func (l *LoginRateLimiter) checkAttempts(store *sync.Map, key string, now time.T
 func (l *LoginRateLimiter) RecordFailure(ip, username string) {
 	now := time.Now()
 
-	l.recordAttempt(&l.ipAttempts, ip, now)
+	if !l.shouldSkipIP(ip) {
+		l.recordAttempt(&l.ipAttempts, ip, now)
+	}
 	if username != "" {
 		l.recordAttempt(&l.accountAttempts, username, now)
 	}
