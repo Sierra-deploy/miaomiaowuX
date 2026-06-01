@@ -3118,17 +3118,28 @@ func (h *RemoteManageHandler) inboundToClashProxy(inbound map[string]interface{}
 
 	case "shadowsocks":
 		proxy["type"] = "ss"
-		if method, ok := settings["method"].(string); ok {
+		method, _ := settings["method"].(string)
+		if method != "" {
 			proxy["cipher"] = method
 		}
-		// SS2022:这里只存 inbound master password(settings.password)。
-		// 客户端 password 由订阅生成时(package_subscribe.go appendUserCredentialOverride)用
-		// 当前用户的 cred 拼接成完整双段 "master:userPass"。
-		//
-		// 历史 BUG:这里曾经拼 master + firstClient.password — 绑套餐路径再叠加 userPass 会
-		// 产生三段 "master:firstClient:userPass",客户端按 SS2022 协议解析失败。
-		if password, ok := settings["password"].(string); ok {
-			proxy["password"] = password
+		// SS2022(method 以 "2022-" 开头)需要 `master:userPass` 双段密码。
+		// 节点 clash_config 是 admin 视角(也用作直接订阅 / routed 出站模板):
+		//   - 有 client → 拼 `master:firstClient.password`(jimlee 等 admin 自用此节点能直接订阅)
+		//   - 无 client → 只放 master(空 inbound,后续 user override 时再拼)
+		// 订阅生成时 appendUserCredentialOverride 会兜底剥掉冒号后段重拼当前用户密码,所以多用户场景不会三段叠加。
+		// 老 SS(非 2022)单段密码,直接 master 就够,client password 跟 master 必须相同 → 不拼。
+		nodePass, _ := settings["password"].(string)
+		if strings.HasPrefix(method, "2022-") {
+			if clients, ok := settings["clients"].([]interface{}); ok && len(clients) > 0 {
+				if first, ok := clients[0].(map[string]interface{}); ok {
+					if clientPass, ok := first["password"].(string); ok && clientPass != "" {
+						nodePass = nodePass + ":" + clientPass
+					}
+				}
+			}
+		}
+		if nodePass != "" {
+			proxy["password"] = nodePass
 		}
 
 	case "hysteria":

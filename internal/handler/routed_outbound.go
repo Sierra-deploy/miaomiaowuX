@@ -1063,9 +1063,14 @@ func cloneClashWithCredential(parentClash, protocol string, newCred map[string]i
 			pc["password"] = id
 		}
 	case "shadowsocks", "ss":
-		// SS2022 user password 拼到节点 password 后面 `nodePass:userPass`
+		// SS2022 user password 拼到节点 master password 后面 `master:userPass`。
+		// 父 clash_config 可能已经是 `master:firstClient`(node 创建时拼好的 admin 视角默认值),
+		// 也可能只 master(空 inbound),统一剥到只剩 master 再拼,避免三段叠加。
 		if userPass, ok := newCred["password"].(string); ok && userPass != "" {
 			if nodePass, ok := pc["password"].(string); ok && nodePass != "" {
+				if idx := strings.Index(nodePass, ":"); idx >= 0 {
+					nodePass = nodePass[:idx]
+				}
 				pc["password"] = nodePass + ":" + userPass
 			} else {
 				pc["password"] = userPass
