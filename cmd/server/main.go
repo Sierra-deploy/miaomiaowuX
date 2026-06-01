@@ -400,6 +400,10 @@ func main() {
 	xrayServerHandler.SetRemoteManager(remoteManageHandler)
 	xrayServerHandler.SetWSHandler(remoteWSHandler)
 
+	// 一次性老格式凭据 email 迁移(ae60947 漏回填存量)。
+	// 启动延迟 60s — 等 agent WS 重连。失败的行下次启动重试,全部成功才写 done 标记。
+	handler.NewCredentialEmailMigrator(repo, remoteManageHandler).Start(context.Background(), 60*time.Second)
+
 	// 依赖 limiterPusher 的端点
 	packageUpdateHandler := handler.NewPackageUpdateHandler(repo, remoteManageHandler, limiterPusher)
 	packageUpdateHandler.SetLicenseManager(licenseManager)

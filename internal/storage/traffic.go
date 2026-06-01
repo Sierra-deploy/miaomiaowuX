@@ -803,6 +803,12 @@ CREATE TABLE IF NOT EXISTS users (
 		return err
 	}
 
+	// users.email 反查索引 — ResolveUsernameByEmail 在 collector 每个 tick 对每个 email 都查一次,
+	// 用户量上百时全表扫累积可观。email 字段允许 NULL,索引会忽略 NULL 行,体积小。
+	if _, err := r.db.Exec(`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`); err != nil {
+		return fmt.Errorf("create idx_users_email: %w", err)
+	}
+
 	if err := r.ensureUserColumn("nickname", "TEXT"); err != nil {
 		return err
 	}
@@ -2062,7 +2068,77 @@ CREATE TABLE IF NOT EXISTS traffic_threshold_notified (
 		return fmt.Errorf("migrate federated_servers: %w", err)
 	}
 
+	// 一次性数据修复:旧 ResolveUsernameByEmail 不识别 users.email 作为主账号 inbound 的 client.email,
+	// 把流量记到 username=email 的孤行(如 user_traffic.username='share@2ha.me' 而不是 'share')。
+	// 修复后需把孤行 merge 回 username 行 — last_uplink/downlink 必须相加(下一轮 collector 会按合并后
+	// 的 cumulative 算 delta,基线必须包含两个旧客户端的累计)。
+	if err := r.mergeOrphanEmailTrafficRows(context.Background()); err != nil {
+		return fmt.Errorf("migrate user_traffic email merge: %w", err)
+	}
+
 	return nil
+}
+
+// mergeOrphanEmailTrafficRows 一次性数据修复(幂等):
+//
+// 把 user_traffic 中 username 等于某个 users.email 的"孤行"合并到对应 username 行,
+// last_*/total_* 相加(基线累计),然后删除孤行。同样处理 user_email_traffic.email 的展示一致性
+// 不需要 — user_email_traffic 本就 by email,无需迁移。
+//
+// 幂等标记写入 system_settings,key='_migrate_merge_email_traffic_done'。下次启动检测到就跳过。
+func (r *TrafficRepository) mergeOrphanEmailTrafficRows(ctx context.Context) error {
+	const doneKey = "_migrate_merge_email_traffic_done"
+	var done string
+	_ = r.db.QueryRowContext(ctx, `SELECT value FROM system_settings WHERE key = ?`, doneKey).Scan(&done)
+	if done == "1" {
+		return nil
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// 合并 — ON CONFLICT 时 total_*/last_* 相加,保留下一轮 delta 计算的基线正确。
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO user_traffic (server_id, username, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at)
+SELECT src.server_id, u.username,
+       src.uplink, src.downlink,
+       src.total_uplink, src.total_downlink,
+       src.last_uplink, src.last_downlink,
+       src.cycle_start, src.updated_at
+FROM user_traffic src
+JOIN users u ON u.email = src.username
+WHERE u.email IS NOT NULL AND u.email != '' AND u.username != u.email
+ON CONFLICT(server_id, username) DO UPDATE SET
+    total_uplink   = user_traffic.total_uplink   + excluded.total_uplink,
+    total_downlink = user_traffic.total_downlink + excluded.total_downlink,
+    last_uplink    = user_traffic.last_uplink    + excluded.last_uplink,
+    last_downlink  = user_traffic.last_downlink  + excluded.last_downlink,
+    updated_at     = CURRENT_TIMESTAMP
+`); err != nil {
+		return fmt.Errorf("merge orphan rows: %w", err)
+	}
+
+	// 删除已合并的孤行。
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM user_traffic
+WHERE username IN (
+    SELECT email FROM users WHERE email IS NOT NULL AND email != '' AND username != email
+)
+`); err != nil {
+		return fmt.Errorf("delete merged rows: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO system_settings (key, value) VALUES (?, '1')
+ON CONFLICT(key) DO UPDATE SET value = '1'
+`, doneKey); err != nil {
+		return fmt.Errorf("mark migration done: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 // 返回按创建顺序排列的所有已配置订阅链接。
@@ -6678,6 +6754,38 @@ func (r *TrafficRepository) DeleteUserInboundConfigs(ctx context.Context, userna
 	return err
 }
 
+// ListAllUserInboundConfigs 全量返回所有用户的 inbound 凭据。
+// 用于 credential_email_migrator 一次性扫描老格式 email 凭据。规模 = 用户数 × 套餐 inbound 数,
+// 个人项目级别预计 < 千行,无需分页。
+func (r *TrafficRepository) ListAllUserInboundConfigs(ctx context.Context) ([]UserInboundConfig, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, username, server_id, inbound_tag, protocol, credential_json, created_at FROM user_inbound_configs`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var configs []UserInboundConfig
+	for rows.Next() {
+		var c UserInboundConfig
+		if err := rows.Scan(&c.ID, &c.Username, &c.ServerID, &c.InboundTag, &c.Protocol, &c.CredentialJSON, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		configs = append(configs, c)
+	}
+	return configs, rows.Err()
+}
+
+// UpdateUserInboundCredentialJSONByID 按 user_inbound_configs.id 原地更新 credential_json。
+// 用 id 而非 (username, server_id, inbound_tag) 三元组 — 该三元组不是 UNIQUE,
+// 同 user 在同一 inbound 上可以有多条 client(EnsureAdminInboundClient 引入的 mmw 迁移 client、
+// 历史多 client 测试等),按三元组更新会一次性把多行变成同一 credential_json。
+func (r *TrafficRepository) UpdateUserInboundCredentialJSONByID(ctx context.Context, id int64, credJSON string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE user_inbound_configs SET credential_json = ? WHERE id = ?`,
+		credJSON, id)
+	return err
+}
+
 func (r *TrafficRepository) DeleteUserInboundConfig(ctx context.Context, username string, serverID int64, inboundTag string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM user_inbound_configs WHERE username = ? AND server_id = ? AND inbound_tag = ?`, username, serverID, inboundTag)
 	return err
@@ -6977,6 +7085,15 @@ func (r *TrafficRepository) ResolveUsernameByEmail(ctx context.Context, email st
 	var username string
 	err := r.db.QueryRowContext(ctx,
 		`SELECT username FROM user_subaccounts WHERE email = ? LIMIT 1`, email).Scan(&username)
+	if err == nil && username != "" {
+		return username
+	}
+	// 用户直接 inbound 凭据有时把 client.email 设成主账号 email(如 share@2ha.me) —
+	// 既不符合 `<username>__<tag>` 新格式,也不在 user_subaccounts,
+	// fallback `return email` 会把流量记到 username=email 的孤行,管理员页按 username 查不到。
+	// 这里反查 users.email → username,把这类流量归回主账号。
+	err = r.db.QueryRowContext(ctx,
+		`SELECT username FROM users WHERE email = ? LIMIT 1`, email).Scan(&username)
 	if err == nil && username != "" {
 		return username
 	}
