@@ -81,12 +81,16 @@ func (h *TrafficSummaryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	isAdmin := haveUser && user.Role == storage.RoleAdmin
 
 	var totalLimit, totalUsed, unlimitedUsed int64
+	// serverListOK 跟踪 ListRemoteServers 是否成功 — 后面 recordSnapshot 用它兜底,
+	// 防止"DB 临时报错 → 全 0 → ON CONFLICT 覆盖正确历史"事故(实际 2026-05-31 已发生)。
+	serverListOK := false
 
 	if isAdmin {
 		// 管理员:汇总所有服务器(含主控本机,它也是 remote_servers 一行)。
 		// 限流服务器(traffic_limit>0)计入 已用/限额;不限流量服务器(=0)的已用单独汇总,
 		// 前端在"已用流量"旁用图标 hover 展示,不计入百分比(否则分母没有限额会失真)。
 		if servers, err := h.repo.ListRemoteServers(ctx); err == nil {
+			serverListOK = true
 			for _, s := range servers {
 				aggregated, _ := h.repo.GetServerTrafficUsed(ctx, s.ID)
 				used := aggregated + s.TrafficUsedOffset
@@ -97,6 +101,8 @@ func (h *TrafficSummaryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 					unlimitedUsed += used
 				}
 			}
+		} else {
+			logger.Warn("[流量] ListRemoteServers 失败,跳过本次快照避免覆盖历史", "error", err)
 		}
 		// 外部订阅流量:仅当系统级"外部订阅同步"开关开启时并入。
 		if enabled, _ := h.repo.IsSyncTrafficEnabled(ctx); enabled {
@@ -127,8 +133,20 @@ func (h *TrafficSummaryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 	}
 
 	if isAdmin {
-		if err := h.recordSnapshot(ctx, totalLimit, totalUsed, totalRemaining); err != nil {
-			logger.Info("[流量] 记录快照失败", "error", err)
+		// 两道守卫,任一命中都跳过 record — 避免污染 traffic_records:
+		//   1. serverListOK=false:ListRemoteServers 出错,totalLimit/totalUsed 全 0 是假象不是真实状态
+		//   2. totalLimit==0 && totalUsed==0:理论上正常环境不可能(必有 server 配置 traffic_limit),
+		//      出现 = 数据异常,写进去会被 ON CONFLICT(date) DO UPDATE 覆盖正确历史
+		//      → 前端 loadHistory delta = today - 0 ≈ 全部历史累计,首页图表出 1.9TB 这种诡异数字
+		switch {
+		case !serverListOK:
+			logger.Warn("[流量] 跳过快照: ListRemoteServers 失败,无法判断当前流量")
+		case totalLimit == 0 && totalUsed == 0:
+			logger.Warn("[流量] 跳过快照: totalLimit/totalUsed 全 0,可能 DB 临时异常")
+		default:
+			if err := h.recordSnapshot(ctx, totalLimit, totalUsed, totalRemaining); err != nil {
+				logger.Info("[流量] 记录快照失败", "error", err)
+			}
 		}
 	} else if haveUser {
 		if err := h.repo.RecordUserDaily(ctx, username, time.Now(), totalLimit, totalUsed, totalRemaining); err != nil {

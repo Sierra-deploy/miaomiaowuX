@@ -65,11 +65,36 @@ func (m *CredentialEmailMigrator) runOnce(ctx context.Context) {
 		return
 	}
 
-	var legacy []storage.UserInboundConfig
-	for _, c := range configs {
-		if isLegacyCredentialEmail(c) {
-			legacy = append(legacy, c)
+	// 兜底:只迁移**老 generateCredential 生成**的 email(== user.Email 或 user.Username)。
+	// 任何其他 email(wtt / hkbn25 / iluobei-XXX 这种 admin 手工添加的语义化 email)都保留不动 —
+	// 它们往往跟 xray routing rule user[] 配套(改 email 会让 routed 出站规则全失效)。
+	// 先一次性拉所有用户的 (username, email),省去每行查表的开销。
+	userEmailByName := map[string]string{}
+	if users, err := m.repo.ListUsers(ctx, 10000); err == nil {
+		for _, u := range users {
+			userEmailByName[u.Username] = u.Email
 		}
+	} else {
+		log.Printf("[CredEmailMigrate] list users failed (will skip all rows for safety): %v", err)
+		return
+	}
+
+	var legacy []storage.UserInboundConfig
+	var skipped int
+	for _, c := range configs {
+		verdict := classifyCredentialEmail(c, userEmailByName)
+		switch verdict {
+		case credEmailLegacy:
+			legacy = append(legacy, c)
+		case credEmailCustom:
+			skipped++
+			log.Printf("[CredEmailMigrate] skip custom email row id=%d user=%s server=%d tag=%s (not generateCredential-generated)",
+				c.ID, c.Username, c.ServerID, c.InboundTag)
+		}
+		// credEmailAlreadyNew / credEmailNoEmail: 静默跳过
+	}
+	if skipped > 0 {
+		log.Printf("[CredEmailMigrate] skipped %d custom-email row(s) — they stay as-is", skipped)
 	}
 	if len(legacy) == 0 {
 		log.Printf("[CredEmailMigrate] no legacy credentials, marking done")
@@ -97,20 +122,46 @@ func (m *CredentialEmailMigrator) runOnce(ctx context.Context) {
 	// failed > 0 → 不标记 done,下次启动重试这批
 }
 
-// isLegacyCredentialEmail 判定该行是否需要迁移:
-// credential_json.email 不等于 `<username>__<inbound_tag>` 即视为老格式。
-// 没有 email 字段(socks/http)/无法解析的行跳过(不算 legacy)。
-func isLegacyCredentialEmail(c storage.UserInboundConfig) bool {
+// credEmailVerdict 对单行 user_inbound_configs 的 email 字段分类。
+type credEmailVerdict int
+
+const (
+	credEmailNoEmail    credEmailVerdict = iota // 凭据没 email 字段(socks/http)或解析失败,静默跳过
+	credEmailAlreadyNew                         // email 已经是 `<username>__<inbound_tag>` 新格式,静默跳过
+	credEmailLegacy                             // 老 generateCredential 生成的(== user.Email 或 user.Username),需要迁移
+	credEmailCustom                             // 自定义 email(admin 手工添加 / 跟 routing rule 配套),保留不动
+)
+
+// classifyCredentialEmail 判定该行是否需要迁移,并区分"自定义 email"(必须保留)
+// 与"老 generateCredential 生成的 email"(可以安全迁移)。
+//
+// 老 generateCredential(ae60947 之前)规则:
+//
+//	email := user.Email; if email == "" { email = user.Username }
+//
+// 所以**只有** email 等于该用户的注册邮箱或用户名时,才认为是 generateCredential 老逻辑产物。
+// 其他值 — 比如 `wtt` / `hkbn25` / `iluobei-XXX` 这种语义化 email —
+// 是 admin 手工添加的 routed 入口 client,跟 xray routing rule `user[]` 数组精确对应。
+// 改这种 email 会让 routed 出站规则全失效(实际事故:2026-06-01 jimlee 8 个 routed 入口被误迁)。
+func classifyCredentialEmail(c storage.UserInboundConfig, userEmailByName map[string]string) credEmailVerdict {
 	var cred map[string]interface{}
 	if err := json.Unmarshal([]byte(c.CredentialJSON), &cred); err != nil {
-		return false
+		return credEmailNoEmail
 	}
 	email, _ := cred["email"].(string)
 	if email == "" {
-		return false
+		return credEmailNoEmail
 	}
-	expected := c.Username + "__" + c.InboundTag
-	return email != expected
+	if email == c.Username+"__"+c.InboundTag {
+		return credEmailAlreadyNew
+	}
+	if email == c.Username {
+		return credEmailLegacy
+	}
+	if regEmail, ok := userEmailByName[c.Username]; ok && regEmail != "" && email == regEmail {
+		return credEmailLegacy
+	}
+	return credEmailCustom
 }
 
 // migrateOne 切换单条凭据的 email。失败原子:任一步失败就 abort,不更新 DB。

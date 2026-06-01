@@ -860,6 +860,23 @@ function XrayServersPage() {
 
   const remoteServers: RemoteServer[] = remoteServersData?.servers || []
 
+  // 快速筛选:'all' 全部 / 'online' 仅 connected / 'offline' 非 connected(含 pending/disconnected)。
+  // pending 归到"离线"侧 — 用户视角"还没连上 = 离线"。
+  const [statusFilter, setStatusFilter] = useState<'all' | 'online' | 'offline'>('all')
+  const { onlineCount, offlineCount } = useMemo(() => {
+    let on = 0, off = 0
+    for (const s of remoteServers) {
+      if (s.status === 'connected') on++
+      else off++
+    }
+    return { onlineCount: on, offlineCount: off }
+  }, [remoteServers])
+  const filteredServers = useMemo(() => {
+    if (statusFilter === 'online') return remoteServers.filter((s) => s.status === 'connected')
+    if (statusFilter === 'offline') return remoteServers.filter((s) => s.status !== 'connected')
+    return remoteServers
+  }, [remoteServers, statusFilter])
+
   const handleGenerateToken = () => {
     if (!remoteServerName.trim()) { toast.error(t('servers.enterServerName')); return }
     if (createUse443 && !createDomain.trim()) { toast.error(t('servers.use443NeedsDomain')); return }
@@ -1257,6 +1274,27 @@ function XrayServersPage() {
           {upgradeAllRunning ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowUpCircle className="mr-2 h-4 w-4" />}
           {t('servers.upgradeAllAgents')}
         </Button>
+        {/* 快速筛选 — ml-auto 推到行尾右对齐;点击当前激活的按钮再切回 'all' */}
+        <div className="ml-auto flex items-center gap-2">
+          <Button
+            variant={statusFilter === 'online' ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => setStatusFilter(statusFilter === 'online' ? 'all' : 'online')}
+          >
+            <span className="w-2 h-2 rounded-full bg-green-500 mr-1.5" />
+            {t('servers.online')}
+            <Badge variant="secondary" className="ml-1.5 px-1.5 py-0 h-5 text-xs">{onlineCount}</Badge>
+          </Button>
+          <Button
+            variant={statusFilter === 'offline' ? 'default' : 'outline'}
+            size="sm"
+            onClick={() => setStatusFilter(statusFilter === 'offline' ? 'all' : 'offline')}
+          >
+            <span className="w-2 h-2 rounded-full bg-red-500 mr-1.5" />
+            {t('servers.offline')}
+            <Badge variant="secondary" className="ml-1.5 px-1.5 py-0 h-5 text-xs">{offlineCount}</Badge>
+          </Button>
+        </div>
       </div>
 
       {/* --- VIEWS --- */}
@@ -1266,9 +1304,9 @@ function XrayServersPage() {
         <EmptyStateCard title={t('servers.noServers')} description={t('servers.noServersDesc')} />
       ) : viewMode === 'card' ? (
         <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleServerDragEnd}>
-          <SortableContext items={remoteServers.map((s: RemoteServer) => s.id)} strategy={verticalListSortingStrategy}>
+          <SortableContext items={filteredServers.map((s: RemoteServer) => s.id)} strategy={verticalListSortingStrategy}>
         <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-          {remoteServers.map((server: RemoteServer) => {
+          {filteredServers.map((server: RemoteServer) => {
             const remoteStatus = remoteServicesStatusMap[server.id]
             return (
               <SortableServerCard key={`remote-${server.id}`} id={server.id}>
@@ -1536,8 +1574,8 @@ function XrayServersPage() {
             </TableHeader>
             <TableBody>
               <DndContext sensors={dndSensors} collisionDetection={closestCenter} onDragEnd={handleServerDragEnd}>
-                <SortableContext items={remoteServers.map((s: RemoteServer) => s.id)} strategy={verticalListSortingStrategy}>
-              {remoteServers.map((server: RemoteServer) => {
+                <SortableContext items={filteredServers.map((s: RemoteServer) => s.id)} strategy={verticalListSortingStrategy}>
+              {filteredServers.map((server: RemoteServer) => {
                 const remoteStatus = remoteServicesStatusMap[server.id]
                 return (
                   <SortableServerRow key={`remote-${server.id}`} id={server.id}>
