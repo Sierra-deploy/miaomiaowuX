@@ -65,9 +65,15 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	// Build user credential lookup for per-user proxy configs
 	credMap := h.buildUserCredentialMap(r, username)
 
+	// 按用户 node_order 重排 pkg.Nodes。
+	// 用户拖过节点顺序 → settings.NodeOrder 非空 → 按其位置排;
+	// 没拖过 → fallback 用 admin 的顺序(过滤掉用户没绑的节点) — 跟 /api/user/config GET 一致。
+	// nodeOrder 中没有的节点(套餐里新加的)排到最末,保持 pkg.Nodes 原顺序。
+	orderedNodeIDs := orderPackageNodes(r.Context(), h.repo, username, pkg.Nodes)
+
 	// Load nodes from package
 	var proxies []map[string]any
-	for _, nodeID := range pkg.Nodes {
+	for _, nodeID := range orderedNodeIDs {
 		node, err := h.repo.GetNodeByID(r.Context(), nodeID)
 		if err != nil || !node.Enabled {
 			continue
@@ -152,6 +158,54 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	h.writeTrafficHeader(r.Context(), w, user, pkg)
 	w.Write(converted)
+}
+
+// orderPackageNodes 按用户 node_order 重排套餐节点 ID 列表。
+//   - settings.NodeOrder 非空 → 按其位置排;不在 NodeOrder 里的(新加节点)排到末尾
+//   - settings.NodeOrder 空 → fallback admin 顺序(跟 /api/user/config GET 一致)
+//   - 仍空 → 直接返回 pkg.Nodes 原顺序
+//
+// 套餐里有但 NodeOrder 里没有的节点(管理员后加的)按 pkg.Nodes 原顺序追加在末尾。
+func orderPackageNodes(ctx context.Context, repo *storage.TrafficRepository, username string, pkgNodes []int64) []int64 {
+	if len(pkgNodes) == 0 {
+		return pkgNodes
+	}
+	var nodeOrder []int64
+	if settings, err := repo.GetUserSettings(ctx, username); err == nil {
+		nodeOrder = settings.NodeOrder
+	}
+	if len(nodeOrder) == 0 {
+		nodeOrder = computeFallbackNodeOrder(ctx, repo, username)
+	}
+	if len(nodeOrder) == 0 {
+		return pkgNodes
+	}
+
+	pkgSet := make(map[int64]bool, len(pkgNodes))
+	for _, id := range pkgNodes {
+		pkgSet[id] = true
+	}
+	orderPos := make(map[int64]int, len(nodeOrder))
+	for i, id := range nodeOrder {
+		orderPos[id] = i
+	}
+
+	ordered := make([]int64, 0, len(pkgNodes))
+	var trailing []int64
+	for _, id := range pkgNodes {
+		if _, ok := orderPos[id]; !ok {
+			trailing = append(trailing, id)
+		}
+	}
+	// 在 nodeOrder 里的节点按位置排
+	for _, id := range nodeOrder {
+		if pkgSet[id] {
+			ordered = append(ordered, id)
+		}
+	}
+	// 不在 nodeOrder 里的(套餐新加,用户还没拖过)按 pkg.Nodes 原顺序追加
+	ordered = append(ordered, trailing...)
+	return ordered
 }
 
 // loadTemplate 优先级:套餐绑的模板 → 系统默认模板 → rule_templates 目录第一个 yaml。

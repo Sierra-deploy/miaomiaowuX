@@ -3,7 +3,7 @@ import { useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { RefreshCw, Trash2, Plus, ChevronDown, GripVertical, Scale } from 'lucide-react'
+import { RefreshCw, Trash2, Plus, ChevronDown, GripVertical, Scale, Pencil } from 'lucide-react'
 import {
   DndContext, PointerSensor, useSensor, useSensors, closestCenter, type DragEndEvent,
 } from '@dnd-kit/core'
@@ -122,6 +122,8 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
   const [pendingRule, setPendingRule] = useState<{ rule: any } | null>(null)
   const [selectedOutbound, setSelectedOutbound] = useState('')
   const [isCustomRuleDialogOpen, setIsCustomRuleDialogOpen] = useState(false)
+  // editingIndex: null=添加模式,number=编辑模式(rules 数组中的索引)
+  const [editingIndex, setEditingIndex] = useState<number | null>(null)
   const [customDomain, setCustomDomain] = useState('')
   const [customIp, setCustomIp] = useState('')
   const [customProtocol, setCustomProtocol] = useState('')
@@ -256,6 +258,25 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
     onError: handleServerError,
   })
 
+  // 编辑模式:复用 'set' action 把整个 rules 数组发回去,只替换 editingIndex 那条
+  // (没有 update_rule action,这是最稳的实现 — agent 端不用改)
+  const updateRuleMutation = useMutation({
+    mutationFn: async ({ index, rule }: { index: number; rule: RoutingRule }) => {
+      const rawIdx = findRawIndex(index)
+      if (rawIdx < 0) throw new Error(t('routing.ruleNotFound'))
+      const newRawRules = [...rawRules]
+      newRawRules[rawIdx] = rule
+      if (isRemote) return (await api.post(`/api/admin/remote/routing?server_id=${serverId}`, { action: 'set', routing: { ...routingData?.routing, rules: newRawRules } })).data
+      return (await api.post('/api/admin/xray-servers/routing', { action: 'set', server_id: localServerId, rules: newRawRules })).data
+    },
+    onSuccess: async (data) => {
+      queryClient.invalidateQueries({ queryKey: routingQueryKey })
+      if (data?.success !== false) { await restartXray(); toast.success(t('routing.ruleUpdated')) }
+      else toast.error(data.message || t('routing.updateFailed'))
+    },
+    onError: handleServerError,
+  })
+
   const removeRuleMutation = useMutation({
     mutationFn: async ({ index, rule }: { index: number; rule: RoutingRule }) => {
       if (isRemote) return (await api.post(`/api/admin/remote/routing?server_id=${serverId}`, { action: 'remove_rule', index: findRawIndex(index) })).data
@@ -316,6 +337,28 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
     setCustomDomain(''); setCustomIp(''); setCustomProtocol(''); setCustomPort('')
     setCustomSourcePort(''); setCustomNetwork(''); setCustomSource(''); setCustomUser('')
     setCustomInboundTag([]); setCustomInboundTagInput(''); setCustomAttrs(''); setCustomOutbound(''); setCustomMarktag('')
+  }
+
+  // 预填表单 = 把一条 rule 反向回填到 dialog 各字段。编辑入口调用。
+  const openEditDialog = (idx: number) => {
+    const rule = rules[idx]
+    if (!rule) return
+    setEditingIndex(idx)
+    setCustomDomain((rule.domain || []).join(', '))
+    setCustomIp((rule.ip || []).join(', '))
+    setCustomProtocol((rule.protocol || []).join(', '))
+    setCustomPort(rule.port ? String(rule.port) : '')
+    setCustomSourcePort(rule.sourcePort ? String(rule.sourcePort) : '')
+    setCustomNetwork(rule.network || '')
+    setCustomSource((rule.source || []).join(', '))
+    setCustomUser((rule.user || []).join(', '))
+    setCustomInboundTag(rule.inboundTag || [])
+    setCustomInboundTagInput('')
+    setCustomAttrs(rule.attrs || '')
+    setCustomMarktag(rule.marktag || '')
+    // 编辑时 customOutbound 是已 resolve 的 tag(node:/balancer: 前缀只在添加流程里有,编辑回填用 plain tag)
+    setCustomOutbound(rule.balancerTag ? `balancer:${rule.balancerTag}` : (rule.outboundTag || ''))
+    setIsCustomRuleDialogOpen(true)
   }
 
   // customOutbound 三种取值:
@@ -390,8 +433,12 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
     if (!rule.domain && !rule.ip && !rule.protocol && !rule.port && !rule.sourcePort && !rule.network && !rule.source && !rule.user && !rule.inboundTag && !rule.attrs) {
       toast.error(t('routing.fillAtLeastOne')); return
     }
-    addRuleMutation.mutate(rule)
-    setIsCustomRuleDialogOpen(false); resetCustomForm()
+    if (editingIndex !== null) {
+      updateRuleMutation.mutate({ index: editingIndex, rule })
+    } else {
+      addRuleMutation.mutate(rule)
+    }
+    setIsCustomRuleDialogOpen(false); resetCustomForm(); setEditingIndex(null)
   }
 
   const isLoading = routingLoading || outboundsLoading
@@ -456,9 +503,14 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
                 <div className='space-y-4'>
                   <div className='flex items-center justify-between'>
                     <h4 className='font-medium text-sm'>{getFriendlyName(selectedRule) || t('routing.rule', { index: selectedIndex! + 1 })}</h4>
-                    <Button variant='outline' size='sm' className='h-7 text-xs text-red-600 hover:text-red-700' onClick={() => setDeletingIndex(selectedIndex)}>
-                      <Trash2 className='size-3 mr-1' />{tc('actions.delete')}
-                    </Button>
+                    <div className='flex gap-2'>
+                      <Button variant='outline' size='sm' className='h-7 text-xs' onClick={() => openEditDialog(selectedIndex!)}>
+                        <Pencil className='size-3 mr-1' />{tc('actions.edit')}
+                      </Button>
+                      <Button variant='outline' size='sm' className='h-7 text-xs text-red-600 hover:text-red-700' onClick={() => setDeletingIndex(selectedIndex)}>
+                        <Trash2 className='size-3 mr-1' />{tc('actions.delete')}
+                      </Button>
+                    </div>
                   </div>
                   <div className='space-y-2 text-sm'>
                     {selectedRule.domain?.length && <div><span className='text-muted-foreground'>domain: </span><span className='break-all'>{selectedRule.domain.join(', ')}</span></div>}
@@ -507,9 +559,9 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
       </Dialog>
 
       {/* Custom Rule */}
-      <Dialog open={isCustomRuleDialogOpen} onOpenChange={setIsCustomRuleDialogOpen}>
+      <Dialog open={isCustomRuleDialogOpen} onOpenChange={(open) => { setIsCustomRuleDialogOpen(open); if (!open) { setEditingIndex(null); resetCustomForm() } }}>
         <DialogContent className='max-w-lg max-h-[85vh] flex flex-col'>
-          <DialogHeader><DialogTitle>{t('routing.addCustomRule')}</DialogTitle><DialogDescription>{t('routing.customRuleDesc')}</DialogDescription></DialogHeader>
+          <DialogHeader><DialogTitle>{editingIndex !== null ? t('routing.editRule') : t('routing.addCustomRule')}</DialogTitle><DialogDescription>{t('routing.customRuleDesc')}</DialogDescription></DialogHeader>
           <div className='flex-1 overflow-y-auto space-y-3 py-2'>
             <div className='grid grid-cols-2 gap-3'>
               <div className='space-y-1'>
@@ -638,8 +690,8 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
             </div>
           </div>
           <DialogFooter>
-            <Button variant='outline' onClick={() => setIsCustomRuleDialogOpen(false)}>{tc('actions.cancel')}</Button>
-            <Button onClick={handleAddCustomRule} disabled={!customOutbound}>{t('routing.addBtn')}</Button>
+            <Button variant='outline' onClick={() => { setIsCustomRuleDialogOpen(false); setEditingIndex(null); resetCustomForm() }}>{tc('actions.cancel')}</Button>
+            <Button onClick={handleAddCustomRule} disabled={!customOutbound}>{editingIndex !== null ? tc('actions.save') : t('routing.addBtn')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
