@@ -206,6 +206,10 @@ type RemoteWSConnection struct {
 	// Capabilities 从 auth payload 读到的 agent 能力位。RPC=true 时 forwardToRemoteServer 走 WS RPC,
 	// 否则走 HTTP(老 agent 兼容)。
 	Capabilities AgentCapabilities
+	// IPAddress 本连接 auth 时刻确定的 agent IP(PublicIPv4 优先,fallback RemoteAddr)。
+	// 留作 cleanup 时离线通知用 — agent 换 IP 重连时,DB.ip_address 已被新 conn 改成新 IP,
+	// 但旧 conn 自己记得旧 IP,用 wsConn.IPAddress 才能让"离线通知=旧 IP, 上线通知=新 IP"。
+	IPAddress string
 }
 
 // upgradeWindows 记录每台 server 的"升级抑制窗口"截止时间。
@@ -487,14 +491,17 @@ func (h *RemoteWSHandler) handleConnection(conn *websocket.Conn, remoteAddr stri
 			// 函数返回后 ctx 取消会把 telegram HTTP 请求一起 abort,通知发不出去。
 			dbCtx, dbCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer dbCancel()
-			if prev, name, ip, err := h.repo.MarkRemoteServerOfflineByID(dbCtx, wsConn.ServerID); err != nil {
+			if prev, name, _, err := h.repo.MarkRemoteServerOfflineByID(dbCtx, wsConn.ServerID); err != nil {
 				log.Printf("[Remote WS] mark offline on disconnect failed for %s: %v", wsConn.ServerName, err)
 			} else if prev == storage.RemoteServerStatusConnected {
 				if IsServerUpgrading(wsConn.ServerID) {
 					log.Printf("[Remote WS] %s disconnected during upgrade window — suppressing offline notification", name)
 				} else {
-					log.Printf("[Remote WS] %s disconnected: marked offline, sending notification", name)
-					go SendServerOfflineNotification(context.Background(), name, ip)
+					// 用 wsConn.IPAddress(本 conn auth 时刻的 IP)而不是 DB 里的 ip — 防 agent 换 IP 重连场景下,
+					// agent 已通过新 IP successful auth 把 DB.ip_address 改成新值,旧 conn cleanup 拿到 DB 拿到的就是新 IP,
+					// 导致"离线通知 IP=新 IP"。conn-local IP 保证离线通知永远是这条 conn 当时连上来的 IP。
+					log.Printf("[Remote WS] %s disconnected: marked offline, sending notification (ip=%s)", name, wsConn.IPAddress)
+					go SendServerOfflineNotification(context.Background(), name, wsConn.IPAddress)
 				}
 			}
 		} else {
@@ -620,23 +627,7 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 		return nil, false
 	}
 
-	// 创建新连接，继承密钥交换阶段的 session
-	wsConn := &RemoteWSConnection{
-		ServerID:     server.ID,
-		ServerName:   server.Name,
-		Token:        authPayload.Token,
-		Conn:         conn,
-		LastPing:     time.Now(),
-		Capabilities: authPayload.Capabilities,
-	}
-	if preAuthConn != nil && preAuthConn.session != nil {
-		wsConn.session = preAuthConn.session
-		wsConn.Encrypted = true
-	}
-
-	h.conns.Store(authPayload.Token, wsConn)
-
-	// 将服务器状态更新为已连接
+	// 提前解析 IP — wsConn 要带它,cleanup 时离线通知用 conn 自己的 IP 而不是 DB 里(可能已被新 conn 覆盖)。
 	// 从远程地址提取IP（删除端口）
 	ip := remoteAddr
 	if idx := strings.LastIndex(ip, ":"); idx != -1 {
@@ -649,6 +640,23 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 	if reported := strings.TrimSpace(authPayload.PublicIPv4); reported != "" {
 		ip = reported
 	}
+
+	// 创建新连接，继承密钥交换阶段的 session
+	wsConn := &RemoteWSConnection{
+		ServerID:     server.ID,
+		ServerName:   server.Name,
+		Token:        authPayload.Token,
+		Conn:         conn,
+		LastPing:     time.Now(),
+		Capabilities: authPayload.Capabilities,
+		IPAddress:    ip,
+	}
+	if preAuthConn != nil && preAuthConn.session != nil {
+		wsConn.session = preAuthConn.session
+		wsConn.Encrypted = true
+	}
+
+	h.conns.Store(authPayload.Token, wsConn)
 
 	updateCtx, updateCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer updateCancel()
