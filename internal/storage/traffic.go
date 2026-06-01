@@ -8150,8 +8150,10 @@ func (r *TrafficRepository) UpdateRemoteServerConfig(ctx context.Context, id int
 		return errors.New("remote server id is required")
 	}
 
-	// 验证连接模式
-	if connectionMode != "" && connectionMode != ConnectionModePush && connectionMode != ConnectionModePull && connectionMode != ConnectionModeWebSocket {
+	// 验证连接模式 — push/pull/websocket/auto 都合法。
+	// 漏 "auto" 历史 bug:add server 路径写入 connection_mode='auto',update 时这里
+	// 报"invalid connection mode",handler 吞错只 log → 前端看到 success 实际 pull_address 没更新。
+	if connectionMode != "" && connectionMode != ConnectionModePush && connectionMode != ConnectionModePull && connectionMode != ConnectionModeWebSocket && connectionMode != ConnectionModeAuto {
 		return errors.New("invalid connection mode")
 	}
 

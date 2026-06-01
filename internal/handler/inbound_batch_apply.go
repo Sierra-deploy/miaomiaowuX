@@ -40,6 +40,25 @@ func collectInboundClientAddItem(ctx context.Context, cache *InboundCache, repo 
 	if err != nil {
 		return nil, false, fmt.Errorf("generate credential: %w", err)
 	}
+
+	// VLESS Reality 必须有 flow=xtls-rprx-vision,否则客户端连不上。
+	// 跟 addUserToInbound line 1181-1195 同款继承逻辑 — batch 路径之前漏了这一段,
+	// 套餐加节点给已有用户分发时新生成的 client 全部丢 flow 字段(用户报的 bug)。
+	if strings.EqualFold(ib.Protocol, "vless") {
+		if _, hasFlow := credential["flow"]; !hasFlow && ib.Settings != nil {
+			if clients, ok := ib.Settings["clients"].([]interface{}); ok && len(clients) > 0 {
+				if first, ok := clients[0].(map[string]interface{}); ok {
+					if flow, ok := first["flow"].(string); ok && flow != "" {
+						credential["flow"] = flow
+						if b, err := json.Marshal(credential); err == nil {
+							credJSON = string(b)
+						}
+					}
+				}
+			}
+		}
+	}
+
 	return &InboundClientAddItem{
 		Username:       user.Username,
 		ServerID:       serverID,

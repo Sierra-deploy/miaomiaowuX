@@ -663,6 +663,14 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		}
 		if err := h.repo.UpdateRemoteServerConfig(ctx, req.ID, connMode, req.PullAddress, req.PullPort, req.PullToken); err != nil {
 			log.Printf("[Remote Server] Failed to update pull config for server %d: %v", req.ID, err)
+			// 之前这里只 log 不返 error,导致用户看到 success 但 pull_address 没真更新;
+			// 现在向前端透出错误,起码用户能感知失败并 retry。
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(RemoteServerResponse{
+				Success: false,
+				Message: fmt.Sprintf("更新拉取配置失败: %s", err.Error()),
+			})
+			return
 		}
 	}
 

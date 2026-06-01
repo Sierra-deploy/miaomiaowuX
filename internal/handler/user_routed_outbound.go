@@ -210,8 +210,16 @@ func (h *UserRoutedOutboundHandler) create(w http.ResponseWriter, r *http.Reques
 	outboundCopy := cloneMap(req.Outbound)
 	outboundCopy["tag"] = outboundTag
 
-	// === Step 1: 加用户子账号 client(没有 admin 占位)===
-	if err := addClientToInbound(ctx, h.remoteManage, serverID, parent.InboundTag, userCred); err != nil {
+	// === Step 1: 加用户子账号 client(幂等,没有 admin 占位)===
+	// 同 routed_outbound.go Step 1:agent matchClientCredential 现在只看 primary key,
+	// 同 email 不同 uuid 不再被去重 → 重复 add 后 xray "User already exists" 启动失败。
+	if existingUUID, existingFlow, perr := peekInboundClientByEmail(ctx, h.remoteManage, serverID, parent.InboundTag, userEmail); perr == nil && existingUUID != "" {
+		log.Printf("[UserRoutedCreate] inbound %s already has client email=%s uuid=%s — reusing", parent.InboundTag, userEmail, existingUUID)
+		userCred["id"] = existingUUID
+		if existingFlow != "" {
+			userCred["flow"] = existingFlow
+		}
+	} else if err := addClientToInbound(ctx, h.remoteManage, serverID, parent.InboundTag, userCred); err != nil {
 		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("加 client 失败: %v", err))
 		return
 	}

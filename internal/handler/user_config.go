@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -82,7 +83,7 @@ func handleGetUserConfig(w http.ResponseWriter, r *http.Request, repo *storage.T
 	settings, err := repo.GetUserSettings(r.Context(), username)
 	if err != nil {
 		if errors.Is(err, storage.ErrUserSettingsNotFound) {
-			// 如果找不到则返回默认设置
+			// 如果找不到则返回默认设置(NodeOrder 用 admin 排序作 fallback)
 			resp := userConfigResponse{
 				ForceSyncExternal:       false,
 				MatchRule:               "node_name",
@@ -96,7 +97,7 @@ func handleGetUserConfig(w http.ResponseWriter, r *http.Request, repo *storage.T
 				EnableShortLink:         false,
 				UseNewTemplateSystem:    true, // 默认使用新模板系统
 				EnableProxyProvider:     false,
-				NodeOrder:               []int64{},
+				NodeOrder:               computeFallbackNodeOrder(r.Context(), repo, username),
 				ProxyGroupsSourceURL:    systemConfig.ProxyGroupsSourceURL,
 				ClientCompatibilityMode: systemConfig.ClientCompatibilityMode,
 			}
@@ -107,6 +108,13 @@ func handleGetUserConfig(w http.ResponseWriter, r *http.Request, repo *storage.T
 		}
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+
+	// NodeOrder 空时:沿用最早 admin 用户的排序,过滤掉当前用户看不见的节点 ID。
+	// 用户首次进节点管理页面就能看到跟管理员一致的顺序,而不是"按 created_at desc 一锅乱"。
+	nodeOrder := settings.NodeOrder
+	if len(nodeOrder) == 0 {
+		nodeOrder = computeFallbackNodeOrder(r.Context(), repo, username)
 	}
 
 	resp := userConfigResponse{
@@ -122,7 +130,7 @@ func handleGetUserConfig(w http.ResponseWriter, r *http.Request, repo *storage.T
 		EnableShortLink:         settings.EnableShortLink,
 		UseNewTemplateSystem:    settings.UseNewTemplateSystem,
 		EnableProxyProvider:     settings.EnableProxyProvider,
-		NodeOrder:               settings.NodeOrder,
+		NodeOrder:               nodeOrder,
 		ProxyGroupsSourceURL:    systemConfig.ProxyGroupsSourceURL,
 		ClientCompatibilityMode: systemConfig.ClientCompatibilityMode,
 	}
@@ -130,6 +138,68 @@ func handleGetUserConfig(w http.ResponseWriter, r *http.Request, repo *storage.T
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// computeFallbackNodeOrder 返回最早 admin 用户的 NodeOrder 经过"当前 user 可见节点"过滤的结果。
+// 用于普通用户第一次进节点管理 / 未自定义排序时,沿用 admin 已调好的顺序,而不是按 created_at 的杂乱顺序。
+// 返回空数组的情况:用户自己就是 admin / 找不到 admin / admin 自己也没排过 / 没有可见节点。
+func computeFallbackNodeOrder(ctx context.Context, repo *storage.TrafficRepository, username string) []int64 {
+	empty := []int64{}
+	if repo == nil || username == "" {
+		return empty
+	}
+	// 找最早创建的 admin 用户(ListUsers ORDER BY created_at ASC)
+	users, err := repo.ListUsers(ctx, 1000)
+	if err != nil {
+		return empty
+	}
+	var adminUsername string
+	for _, u := range users {
+		if u.Role == storage.RoleAdmin && u.Username != username {
+			adminUsername = u.Username
+			break
+		}
+	}
+	if adminUsername == "" {
+		return empty
+	}
+	// 拿 admin 的 NodeOrder
+	adminSettings, err := repo.GetUserSettings(ctx, adminUsername)
+	if err != nil || len(adminSettings.NodeOrder) == 0 {
+		return empty
+	}
+	// 当前用户可见节点 ID 集合
+	visible := gatherUserVisibleNodeIDs(ctx, repo, username)
+	if len(visible) == 0 {
+		return empty
+	}
+	// 按 admin 顺序过滤
+	filtered := make([]int64, 0, len(adminSettings.NodeOrder))
+	for _, id := range adminSettings.NodeOrder {
+		if visible[id] {
+			filtered = append(filtered, id)
+		}
+	}
+	return filtered
+}
+
+// gatherUserVisibleNodeIDs 返回 user 能在节点管理里看到的所有节点 ID 集合 = 自己导入 + 绑定套餐节点。
+// 跟 nodesHandler.handleList 普通用户分支保持一致;权限收敛点,排序 fallback 也要复用同一口径。
+func gatherUserVisibleNodeIDs(ctx context.Context, repo *storage.TrafficRepository, username string) map[int64]bool {
+	set := make(map[int64]bool)
+	if nodes, err := repo.ListNodes(ctx, username); err == nil {
+		for _, n := range nodes {
+			set[n.ID] = true
+		}
+	}
+	if user, err := repo.GetUser(ctx, username); err == nil && user.PackageID > 0 {
+		if pkg, err := repo.GetPackage(ctx, user.PackageID); err == nil && pkg != nil {
+			for _, nid := range pkg.Nodes {
+				set[nid] = true
+			}
+		}
+	}
+	return set
 }
 
 func handleUpdateUserConfig(w http.ResponseWriter, r *http.Request, repo *storage.TrafficRepository, username string) {

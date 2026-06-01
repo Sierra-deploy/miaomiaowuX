@@ -181,8 +181,16 @@ func (h *RoutedOutboundHandler) create(w http.ResponseWriter, r *http.Request) {
 		adminCred["flow"] = inboundFlow
 	}
 
-	// === Step 1: 给 agent inbound 加 admin client ===
-	if err := addClientToInbound(ctx, h.remoteManage, serverID, parent.InboundTag, adminCred); err != nil {
+	// === Step 1: 给 agent inbound 加 admin client(幂等) ===
+	// 先 peek 看 agent 端是否已有同 email 的 client(历史残留 / 同 label 重试 / 主控 DB 被清但 agent 没清),
+	// 命中 → 复用其 uuid + flow,避免 xray "User already exists" 启动失败。
+	if existingUUID, existingFlow, perr := peekInboundClientByEmail(ctx, h.remoteManage, serverID, parent.InboundTag, adminEmail); perr == nil && existingUUID != "" {
+		log.Printf("[RoutedCreate] inbound %s already has admin client email=%s uuid=%s — reusing", parent.InboundTag, adminEmail, existingUUID)
+		adminCred["id"] = existingUUID
+		if existingFlow != "" {
+			adminCred["flow"] = existingFlow
+		}
+	} else if err := addClientToInbound(ctx, h.remoteManage, serverID, parent.InboundTag, adminCred); err != nil {
 		writeJSONError(w, http.StatusBadGateway, fmt.Sprintf("加 admin client 失败: %v", err))
 		return
 	}
@@ -431,6 +439,52 @@ func peekInboundFirstClientFlow(ctx context.Context, rm *RemoteManageHandler, se
 		return flow, nil
 	}
 	return "", fmt.Errorf("inbound %s not found", inboundTag)
+}
+
+// peekInboundClientByEmail 在 agent 上的某 inbound 里按 email 查现存 client。
+// 命中返回该 client 的 uuid + flow;不存在返回空字符串(err==nil)。
+// 用途:routed 创建 Step 1 add admin client 之前做幂等检查 —
+// agent matchClientCredential 现在只看 primary key(id),不再 fallback email,
+// 直接 add 同 email 不同 uuid 的 client 会被 agent 接受,但 xray 实际启动时会拒绝
+// "User already exists" 导致 routing 改完但 xray 无法 restart。
+func peekInboundClientByEmail(ctx context.Context, rm *RemoteManageHandler, serverID int64, inboundTag, email string) (uuid, flow string, err error) {
+	result, ferr := rm.forwardToRemoteServer(ctx, serverID, "GET", "/api/child/inbounds", nil)
+	if ferr != nil {
+		return "", "", ferr
+	}
+	var resp struct {
+		Success  bool                     `json:"success"`
+		Inbounds []map[string]interface{} `json:"inbounds"`
+	}
+	if jerr := json.Unmarshal(result, &resp); jerr != nil {
+		return "", "", jerr
+	}
+	for _, ib := range resp.Inbounds {
+		if tag, _ := ib["tag"].(string); tag != inboundTag {
+			continue
+		}
+		settings, _ := ib["settings"].(map[string]interface{})
+		if settings == nil {
+			return "", "", nil
+		}
+		clients, _ := settings["clients"].([]interface{})
+		for _, c := range clients {
+			cm, _ := c.(map[string]interface{})
+			if cm == nil {
+				continue
+			}
+			if e, _ := cm["email"].(string); e == email {
+				id, _ := cm["id"].(string)
+				if id == "" {
+					id, _ = cm["password"].(string) // trojan/ss fallback
+				}
+				fl, _ := cm["flow"].(string)
+				return id, fl, nil
+			}
+		}
+		return "", "", nil // inbound found, email 不在
+	}
+	return "", "", fmt.Errorf("inbound %s not found", inboundTag)
 }
 
 // 给目标 inbound 加一个 client — 走 agent 原子 add-client,在 inboundsMu 锁内完成 read-modify-write。

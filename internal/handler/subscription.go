@@ -1903,11 +1903,16 @@ func sortProxiesByNodeOrder(ctx context.Context, repo *storage.TrafficRepository
 		return nil
 	}
 
-	// 获取用户的所有节点信息
-	nodes, err := repo.ListNodes(ctx, username)
+	// 拿全节点的 name→ID 映射:
+	// 老逻辑 ListNodes(username) 只返该 username 名下的节点 — 普通用户(share 等)自己没创建节点,
+	// 套餐节点是 admin 创建的(username=admin),share 名下查到 0 行 → nodeNameToID 空 →
+	// 每个 proxy.name 在排序时找不到 ID,position 全 -1,nodeOrder 完全不生效。
+	// 用 ListAllNodes:name→ID 映射跟权限无关,nodeOrder 里的 ID 都能查到,排序正确。
+	nodes, err := repo.ListAllNodes(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to list nodes: %w", err)
 	}
+	_ = username
 
 	// 创建节点名称 -> 节点ID 的映射
 	nodeNameToID := make(map[string]int64)

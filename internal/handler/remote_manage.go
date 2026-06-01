@@ -3548,38 +3548,52 @@ func (h *RemoteManageHandler) HandleResetAllTokens(w http.ResponseWriter, r *htt
 }
 
 func (h *RemoteManageHandler) restartXrayWithRecovery(ctx context.Context, serverID int64, logPrefix string) error {
-	restartAndVerify := func(waitSec int) error {
+	// restartAndVerify 改成 polling — 之前固定 sleep N 秒固然简单但显著拖慢套餐绑定/批量操作:
+	// 主控对每条 server restart 都等满 sleep 时长,套餐里多 routed 节点跨多台 server 时
+	// total wait ≈ 最慢 server 的 sleep 时长。xray 实际重启通常 < 500ms,polling 能把
+	// 多数情况从 sleep 2s 砍到 ~200ms,batch 绑定/解绑直接感知"立刻完成"。
+	restartAndVerify := func(maxWait time.Duration) error {
 		if _, err := h.forwardToRemoteServer(ctx, serverID, http.MethodPost, "/api/child/services/control", []byte(`{"service":"xray","action":"restart"}`)); err != nil {
 			return err
 		}
-		time.Sleep(time.Duration(waitSec) * time.Second)
-		statusResult, err := h.forwardToRemoteServer(ctx, serverID, http.MethodGet, "/api/child/services/status", nil)
-		if err != nil {
-			return fmt.Errorf("failed to check xray status: %v", err)
+		// 先给 100ms 让 service 退出再 polling,避免恰好 catch 到老进程残留 running 状态。
+		time.Sleep(100 * time.Millisecond)
+		deadline := time.Now().Add(maxWait)
+		var lastErr error
+		for {
+			statusResult, err := h.forwardToRemoteServer(ctx, serverID, http.MethodGet, "/api/child/services/status", nil)
+			if err == nil {
+				var statusResp struct {
+					Xray *struct {
+						Running bool `json:"running"`
+					} `json:"xray"`
+				}
+				if jerr := json.Unmarshal(statusResult, &statusResp); jerr == nil && statusResp.Xray != nil && statusResp.Xray.Running {
+					return nil
+				}
+				lastErr = fmt.Errorf("xray not yet running")
+			} else {
+				lastErr = fmt.Errorf("failed to check xray status: %v", err)
+			}
+			if time.Now().After(deadline) {
+				if lastErr == nil {
+					return fmt.Errorf("xray process exited after restart (likely port conflict)")
+				}
+				return lastErr
+			}
+			time.Sleep(150 * time.Millisecond)
 		}
-		var statusResp struct {
-			Xray *struct {
-				Running bool `json:"running"`
-			} `json:"xray"`
-		}
-		if err := json.Unmarshal(statusResult, &statusResp); err != nil {
-			return fmt.Errorf("failed to parse status response: %v", err)
-		}
-		if statusResp.Xray == nil || !statusResp.Xray.Running {
-			return fmt.Errorf("xray process exited after restart (likely port conflict)")
-		}
-		return nil
 	}
 
-	// 第一轮：直接重启，等 2 秒验证
-	if err := restartAndVerify(2); err == nil {
+	// 第一轮:polling 最多 2 秒 — 正常 xray 启动通常 < 500ms
+	if err := restartAndVerify(2 * time.Second); err == nil {
 		return nil
 	} else {
 		log.Printf("[%s] Xray restart attempt 1 failed on server %d: %v", logPrefix, serverID, err)
 	}
 
-	// 第二轮：可能只是启动慢，等久一点再验证
-	if err := restartAndVerify(4); err == nil {
+	// 第二轮:可能只是启动慢,polling 久一点
+	if err := restartAndVerify(5 * time.Second); err == nil {
 		log.Printf("[%s] Xray restarted on server %d after longer wait", logPrefix, serverID)
 		return nil
 	} else {
@@ -3596,7 +3610,7 @@ func (h *RemoteManageHandler) restartXrayWithRecovery(ctx context.Context, serve
 		json.Unmarshal(clearResult, &clearResp)
 		if clearResp.Removed > 0 {
 			log.Printf("[%s] Removed %d stream config(s) on server %d, retrying", logPrefix, clearResp.Removed, serverID)
-			if err := restartAndVerify(3); err == nil {
+			if err := restartAndVerify(3 * time.Second); err == nil {
 				log.Printf("[%s] Xray restarted after stream cleanup on server %d", logPrefix, serverID)
 				return nil
 			}
@@ -3610,7 +3624,7 @@ func (h *RemoteManageHandler) restartXrayWithRecovery(ctx context.Context, serve
 	h.forwardToRemoteServer(ctx, serverID, http.MethodPost, "/api/child/services/control", []byte(`{"service":"nginx","action":"stop"}`))
 	time.Sleep(1 * time.Second)
 
-	if err := restartAndVerify(3); err != nil {
+	if err := restartAndVerify(3 * time.Second); err != nil {
 		// xray 还是起不来，把 nginx 恢复
 		h.forwardToRemoteServer(ctx, serverID, http.MethodPost, "/api/child/services/control", []byte(`{"service":"nginx","action":"start"}`))
 		log.Printf("[%s] Xray restart failed even after stopping nginx on server %d: %v", logPrefix, serverID, err)
