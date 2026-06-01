@@ -158,6 +158,12 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.1.8 (2026-06-01)
+- 🌈增加服务在线离线筛选
+- 🌈增加自定义安全管控配置
+- 🛠️ fix:历史版本使用user@email的流量未统计补丁
+- 🛠️ fix:安全规则无法识别docker与反代环境的真实IP
+- 🛠️ fix:离线通知IP错误
 ### v0.1.7 (2026-05-31)
 - 🌈增加自定义安全管控配置
 - 🛠️ fix:ss2022多用户密码拼接错误
