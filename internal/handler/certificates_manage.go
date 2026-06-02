@@ -153,6 +153,11 @@ func (h *CertificateHandler) requireAdmin(r *http.Request) bool {
 	if username == "" {
 		return false
 	}
+	// 全局 API token 走 auth.RequireToken 之后会得到 "api-token-admin" 虚拟用户名,
+	// 该虚拟用户不在 db 里,GetUser 会失败 → 必须短路放行,跟 auth.RequireAdmin 同款行为。
+	if username == "api-token-admin" {
+		return true
+	}
 	user, err := h.repo.GetUser(r.Context(), username)
 	if err != nil {
 		return false
@@ -1177,7 +1182,11 @@ func (h *CertificateHandler) DeleteDNSProvider(w http.ResponseWriter, r *http.Re
 
 // UploadCertificate 处理手动上传证书（UI 和 API Token 均可调用）。
 // POST /api/admin/certificates/upload
-// 参数: domain, cert_pem (base64), key_pem (base64)
+// 参数: domain, cert_pem, key_pem
+//   - cert_pem / key_pem 兼容两种格式:
+//     1. 裸 PEM 文本(以 "-----BEGIN" 开头,Certimate 等 webhook 直接发的格式)
+//     2. base64 编码后的 PEM(原 UI 上传路径)
+//   仅按首字符判别,base64 编码后的 PEM 不会以 "-----BEGIN" 开头(对应 base64 是 "LS0tLS1CRUdJTi"),不会冲突。
 func (h *CertificateHandler) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		respondJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "message": "Method not allowed"})
@@ -1204,14 +1213,26 @@ func (h *CertificateHandler) UploadCertificate(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	certBytes, err := base64.StdEncoding.DecodeString(req.CertPEM)
+	decodePEMOrBase64 := func(input, label string) ([]byte, error) {
+		s := strings.TrimSpace(input)
+		if strings.HasPrefix(s, "-----BEGIN") {
+			return []byte(s), nil
+		}
+		decoded, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			return nil, fmt.Errorf("%s 不是合法的 PEM 文本或 base64 编码: %v", label, err)
+		}
+		return decoded, nil
+	}
+
+	certBytes, err := decodePEMOrBase64(req.CertPEM, "cert_pem")
 	if err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "cert_pem base64 解码失败"})
+		respondJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": err.Error()})
 		return
 	}
-	keyBytes, err := base64.StdEncoding.DecodeString(req.KeyPEM)
+	keyBytes, err := decodePEMOrBase64(req.KeyPEM, "key_pem")
 	if err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "key_pem base64 解码失败"})
+		respondJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": err.Error()})
 		return
 	}
 
