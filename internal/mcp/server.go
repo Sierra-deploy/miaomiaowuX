@@ -14,8 +14,12 @@ func NewHandler(mux http.Handler) http.Handler {
 	s := server.NewMCPServer("miaomiaowux", "0.1.0")
 	b := &bridge{mux: mux}
 
-	registerReadTools(s, b)
-	registerWriteTools(s, b)
+	registerNodeTools(s, b)
+	registerServerTools(s, b)
+	registerSubscribeTools(s, b)
+	registerUserPackageTools(s, b)
+	registerTemplateRuleTools(s, b)
+	registerMiscTools(s, b)
 
 	return server.NewStreamableHTTPServer(s,
 		server.WithStateLess(true), // 无状态:每次请求独立,适配无会话的 agent 调用

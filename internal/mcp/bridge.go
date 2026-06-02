@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 
 	mcpgo "github.com/mark3labs/mcp-go/mcp"
 )
@@ -63,6 +64,47 @@ func result(code int, body []byte) (*mcpgo.CallToolResult, error) {
 }
 
 func (b *bridge) get(ctx context.Context, path string) (*mcpgo.CallToolResult, error) {
+	code, body := b.call(ctx, http.MethodGet, path, nil)
+	return result(code, body)
+}
+
+// getWithQuery 把 argsBody 当 querystring 拼到 path 后,适配 mmwx 大量 query-style GET endpoint
+// (例如 /api/admin/remote/inbounds?server_id=...)。基础类型(string/number/bool)直接 Set,
+// 复杂类型(map/array)JSON 序列化后 Set。omit 用来跳过控制字段(如 confirm)和已经在 path 里的字段。
+func (b *bridge) getWithQuery(ctx context.Context, path string, args map[string]any, omit ...string) (*mcpgo.CallToolResult, error) {
+	if len(args) > 0 {
+		q := url.Values{}
+		skip := map[string]bool{"confirm": true}
+		for _, o := range omit {
+			skip[o] = true
+		}
+		for k, v := range args {
+			if skip[k] {
+				continue
+			}
+			switch val := v.(type) {
+			case string:
+				if val != "" {
+					q.Set(k, val)
+				}
+			case bool:
+				q.Set(k, fmt.Sprintf("%t", val))
+			case float64, float32, int, int64:
+				q.Set(k, fmt.Sprintf("%v", val))
+			default:
+				if buf, err := json.Marshal(v); err == nil {
+					q.Set(k, string(buf))
+				}
+			}
+		}
+		if encoded := q.Encode(); encoded != "" {
+			sep := "?"
+			if strings.Contains(path, "?") {
+				sep = "&"
+			}
+			path = path + sep + encoded
+		}
+	}
 	code, body := b.call(ctx, http.MethodGet, path, nil)
 	return result(code, body)
 }
