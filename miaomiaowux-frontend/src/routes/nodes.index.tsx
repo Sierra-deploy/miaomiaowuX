@@ -3726,7 +3726,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                     className='size-7 text-[#d97757] hover:text-[#c66647] shrink-0'
                                   />
                                   )}
-                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (isAdmin || userRoutedEnabled) && (
+                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (isAdmin || userRoutedEnabled) && node.dbNode.node_type !== 'routed' && (
                                     <Button
                                       variant='ghost'
                                       size='icon'
@@ -4023,7 +4023,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                     <Pencil className='size-4' />
                                   </Button>
                                   )}
-                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (isAdmin || userRoutedEnabled) && (
+                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (isAdmin || userRoutedEnabled) && node.dbNode.node_type !== 'routed' && (
                                     <Button
                                       variant='ghost'
                                       size='icon'
