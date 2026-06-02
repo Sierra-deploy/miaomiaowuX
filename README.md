@@ -158,6 +158,12 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.1.9 (2026-06-02)
+- 🌈Xray管理路由规则管理优化
+- 🌈支持AnyTLS
+- 🌈证书上传功能优化
+- 🛠️ fix:ss节点配置错误
+- 🛠️ fix:前端UI功能优化
 ### v0.1.8 (2026-06-01)
 - 🌈增加服务在线离线筛选
 - 🌈增加自定义安全管控配置
