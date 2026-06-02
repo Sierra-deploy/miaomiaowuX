@@ -25,9 +25,11 @@ interface OutboundWizardProps {
   selectedServerIds: number[]
   onCancel: () => void
   onSubmit: (serverIds: number[], outbound: any, tag: string) => Promise<void>
+  /** 多选导入回调:NodeSelectDialog 多选确认 → 调此回调一次性提交所有节点,wizard 表单不参与 */
+  onBulkImport?: (items: Array<{ node: any; clashConfig: any }>) => void
 }
 
-export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit }: OutboundWizardProps) {
+export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit, onBulkImport }: OutboundWizardProps) {
   const { t } = useTranslation('xray')
   const { t: tc } = useTranslation('common')
   const [selectedProtocol, setSelectedProtocol] = useState<string>('')
@@ -410,7 +412,17 @@ export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit 
         open={isNodeSelectOpen}
         onOpenChange={setIsNodeSelectOpen}
         onSelect={handleNodeImport}
-        protocolFilter={['vless', 'vmess', 'trojan', 'ss', 'socks5', 'http']}
+        multiple={!!onBulkImport}
+        onConfirm={(items) => {
+          if (items.length === 1 || !onBulkImport) {
+            // 单选 or 没传批量回调:沿用表单填充
+            handleNodeImport(items[0].node, items[0].clashConfig)
+          } else {
+            // 多选 + 有批量回调:跳过 wizard 表单,直接批量提交
+            onBulkImport(items)
+          }
+        }}
+        protocolFilter={['vless', 'vmess', 'trojan', 'ss', 'shadowsocks', 'socks5', 'http']}
       />
 
       {/* Tunnel 二次确认:导入的节点 server:port 同时也是某 tunnel 的 target,问用户走哪条路径 */}

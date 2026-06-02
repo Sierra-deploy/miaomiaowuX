@@ -33,7 +33,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { api } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
-import { type Balancer, normalizeBalancers } from '@/lib/xray-balancer'
+import { type Balancer, normalizeBalancers, balancerStrategyLabel } from '@/lib/xray-balancer'
 import { clashConfigToOutbound, matchNodeToExistingOutbound } from '@/lib/xray-config-generator'
 import { X as XIcon } from 'lucide-react'
 import { BalancerManagerDialog } from './balancer-manager-dialog'
@@ -518,6 +518,35 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
         ) : (
           <div className='flex gap-3' style={{ minHeight: 300 }}>
             <div className='w-[40%] shrink-0 space-y-1.5 overflow-y-auto max-h-[60vh] pr-1'>
+              {/* 负载均衡器:上方独立段,只读展示。详细管理走 LB Manager Dialog。 */}
+              {balancers.length > 0 && (
+                <div className='mb-2 pb-2 border-b'>
+                  <div className='text-[10px] uppercase tracking-wide text-muted-foreground mb-1 px-1 flex items-center gap-1'>
+                    <Scale className='size-3' /> {t('routing.balancer')} ({balancers.length})
+                  </div>
+                  <div className='space-y-1'>
+                    {balancers.map((b) => (
+                      <div
+                        key={`bal-${b.tag}`}
+                        className='rounded-md border bg-muted/30 px-2 py-1 text-xs cursor-default'
+                        onClick={() => setIsBalancerDialogOpen(true)}
+                        title={t('routing.balancer') + ': ' + b.tag}
+                      >
+                        <div className='flex items-center justify-between gap-2'>
+                          <span className='font-medium truncate'>⚖ {b.tag}</span>
+                          <Badge variant='outline' className='text-[9px] px-1 py-0 shrink-0' title={balancerStrategyLabel(t, b.strategy)}>{b.strategy}</Badge>
+                        </div>
+                        <div className='text-muted-foreground text-[10px] truncate'>
+                          {(b.selector || []).join(', ')}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className='text-[10px] uppercase tracking-wide text-muted-foreground mt-2 mb-1 px-1'>
+                    {t('routing.title')}
+                  </div>
+                </div>
+              )}
               <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
                 <SortableContext items={sortableIds} strategy={verticalListSortingStrategy}>
                   {rules.map((rule, i) => (

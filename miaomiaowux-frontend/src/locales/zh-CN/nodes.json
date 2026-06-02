@@ -1,7 +1,7 @@
 {
   "page": {
     "title": "节点管理",
-    "description": "输入代理节点信息，每行一个节点，支持 VMess、VLESS、Trojan、Shadowsocks、Hysteria、Socks、TUIC、AnyTLS、WireGuard、Snell 协议。"
+    "description": "输入代理节点信息，每行一个节点，支持 VMess、VLESS、Trojan、Shadowsocks、Hysteria、Socks、AnyTLS、TUIC(仅导入)、WireGuard(仅导入)、Snell(仅导入) 协议。"
   },
   "importCard": {
     "title": "导入外部节点",
@@ -229,6 +229,9 @@
     "createFailed": "创建失败",
     "landingConfigSuccess": "落地节点配置成功（出站+路由已添加）",
     "landingConfigFailed": "配置落地节点失败",
+    "landingBalancerSuccess": "负载均衡器路由已绑定到入站",
+    "landingBalancerFailed": "负载均衡器路由绑定失败",
+    "balancerTagRequired": "请选择负载均衡器",
     "sourceNodeNoServer": "源节点未关联远程服务器，无法配置出站路由",
     "sourceNodeNoInboundTag": "源节点缺少 inbound_tag，无法配置路由",
     "landingTargetParseError": "落地节点配置解析失败",
@@ -380,6 +383,11 @@
       "addLandingDesc": "为 \"{{name}}\" 选择落地节点或服务器",
       "tabNodes": "选择落地节点",
       "tabServers": "选择服务器",
+      "tabBalancer": "选择负载均衡器",
+      "balancerHint": "在源服务器添加一条路由规则:入站 → 负载均衡器(不创建出站,不创建节点)",
+      "noBalancers": "源服务器未配置负载均衡器,请先在「Xray 管理 → 路由 → 负载均衡器」中创建",
+      "confirmBalancerLanding": "确认绑定",
+      "landingBalancerSelected": "已选 LB",
       "searchPlaceholder": "搜索节点名称、协议或标签...",
       "excludeHint": "自动排除链式代理节点和源节点自身",
       "noMatchingNodes": "未找到匹配的节点",

@@ -19,6 +19,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { api } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
 import type { XrayOutbound } from '@/lib/xray-presets'
+import { clashConfigToOutbound } from '@/lib/xray-config-generator'
 
 interface OutboundItem {
   server_id: number
@@ -167,6 +168,42 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
     } catch {}
   }
 
+  // 批量从节点导入:NodeSelectDialog 多选确认 → 跳过 wizard 表单,逐个生成 outbound + POST
+  // 失败不影响其他;统一 toast 汇总结果
+  const handleBulkOutboundImport = async (items: Array<{ node: any; clashConfig: any }>) => {
+    let ok = 0
+    const failed: string[] = []
+    for (const { node, clashConfig } of items) {
+      const tag = (clashConfig?.name || node.node_name || '').trim()
+      if (!tag) { failed.push(`${node.node_name}: ${t('outbounds.fillTag')}`); continue }
+      try {
+        const outbound = clashConfigToOutbound(clashConfig, tag)
+        const res = await api.post(`/api/admin/remote/outbounds?server_id=${serverId}`, {
+          action: 'add', outbound,
+        })
+        if (res.data?.success) ok++
+        else failed.push(`${node.node_name}: ${res.data?.message || '失败'}`)
+      } catch (e: any) {
+        failed.push(`${node.node_name}: ${e?.response?.data?.message || e?.message || '失败'}`)
+      }
+    }
+    queryClient.invalidateQueries({ queryKey: ['remote-outbounds', serverId] })
+    if (ok > 0 && failed.length === 0) {
+      toast.success(t('outbounds.bulkImportSuccess', { defaultValue: '批量导入成功 {{count}} 个出站', count: ok }))
+    } else if (ok > 0 && failed.length > 0) {
+      toast.error(
+        t('outbounds.bulkImportPartial', { defaultValue: '成功 {{ok}} 个 / 失败 {{fail}} 个', ok, fail: failed.length }) +
+        ': ' + failed.slice(0, 3).join('; ') + (failed.length > 3 ? ' …' : ''),
+      )
+    } else {
+      toast.error(
+        t('outbounds.bulkImportFailed', { defaultValue: '批量导入失败' }) +
+        ': ' + failed.slice(0, 3).join('; ') + (failed.length > 3 ? ' …' : ''),
+      )
+    }
+    setIsWizardDialogOpen(false)
+  }
+
   const outbounds = outboundsData?.outbounds || []
   const filteredOutbounds = useMemo(() => {
     if (!hideDefaultOutbounds) return outbounds
@@ -214,12 +251,9 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
           >
             {hideDefaultOutbounds ? t('outbounds.showDefault') : t('outbounds.hideDefault')}
           </Button>
-          {/* 添加出站按钮暂时隐藏 */}
-          {false && (
-            <Button size="sm" onClick={() => setIsWizardDialogOpen(true)}>
-              <Plus className="h-4 w-4 mr-1" />{t('outbounds.addOutbound')}
-            </Button>
-          )}
+          <Button size="sm" onClick={() => setIsWizardDialogOpen(true)}>
+            <Plus className="h-4 w-4 mr-1" />{t('outbounds.addOutbound')}
+          </Button>
         </div>
       </div>
 
@@ -337,13 +371,13 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
 
       {/* Add Outbound Wizard Dialog */}
       <Dialog open={isWizardDialogOpen} onOpenChange={setIsWizardDialogOpen}>
-        <DialogContent className="w-[95vw] !max-w-none md:w-[90vw] lg:w-[80vw] max-h-[90vh] overflow-hidden sm:max-w-none flex flex-col">
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
           <DialogHeader>
             <DialogTitle>{t('outbounds.addOutboundWizard')}</DialogTitle>
             <DialogDescription>{t('outbounds.addOutboundWizardDescShort')}</DialogDescription>
           </DialogHeader>
           <div className="flex-1 overflow-y-auto">
-            <OutboundWizard servers={[]} selectedServerIds={[]} onCancel={() => setIsWizardDialogOpen(false)} onSubmit={handleOutboundSubmit} />
+            <OutboundWizard servers={[]} selectedServerIds={[]} onCancel={() => setIsWizardDialogOpen(false)} onSubmit={handleOutboundSubmit} onBulkImport={handleBulkOutboundImport} />
           </div>
         </DialogContent>
       </Dialog>

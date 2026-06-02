@@ -337,12 +337,8 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 				}
 			}
 		}
-		if effectiveTemplate == "" && h.repo != nil {
-			if cfg, cerr := h.repo.GetSystemConfig(r.Context()); cerr == nil && cfg.DefaultTemplateFilename != "" {
-				effectiveTemplate = cfg.DefaultTemplateFilename
-				logger.Info("[Subscription] 订阅未绑定模板，使用系统默认模板", "template", effectiveTemplate)
-			}
-		}
+		// 注意:不再回退到系统默认模板。订阅没绑模板 + 套餐也没模板 → 直接读原始文件,
+		// 避免用户精心配的原始 YAML 被系统默认模板"自动套上"覆盖。
 		if effectiveTemplate != "" {
 			stepStart = time.Now()
 			sfForGen := subscribeFile

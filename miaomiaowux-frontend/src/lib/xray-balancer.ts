@@ -14,6 +14,19 @@ export interface Balancer {
 export const DEFAULT_PROBE_URL = 'https://www.gstatic.com/generate_204'
 export const DEFAULT_PROBE_INTERVAL = '10s'
 
+// 策略本地化:给定 t 函数(xray 命名空间)+ 策略 key,返回当前语言下的策略文案;
+// 兜底返回 strategy 原值,避免老/未知策略显示空白。
+export function balancerStrategyLabel(t: (key: string) => string, strategy: string | undefined): string {
+  const s = (strategy || 'random') as Balancer['strategy']
+  const map: Record<Balancer['strategy'], string> = {
+    random: 'balancerStrategyRandom',
+    roundRobin: 'balancerStrategyRoundRobin',
+    leastPing: 'balancerStrategyLeastPing',
+    leastLoad: 'balancerStrategyLeastLoad',
+  }
+  return map[s] ? t(`routing.${map[s]}`) : s
+}
+
 // normalizeBalancers: 把 xray 原生 balancers(strategy 为对象 {type}) 归一化成 UI 形态(strategy 字符串)。
 export function normalizeBalancers(raw: any): Balancer[] {
   return (raw || []).map((b: any) => ({

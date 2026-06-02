@@ -42,16 +42,20 @@ interface NodeSelectDialogProps {
   onSelect: (node: ParsedNode, clashConfig: any) => void
   /** Filter nodes by protocol, e.g., ['vless', 'vmess', 'trojan'] */
   protocolFilter?: string[]
+  /** 启用多选;调用方应提供 onConfirm 接收批量结果,onSelect 仅在退化时用 */
+  multiple?: boolean
+  /** 多选模式确认回调;传入则覆盖单选 onSelect 的"单条"语义,选 1/多 都走它 */
+  onConfirm?: (items: Array<{ node: ParsedNode; clashConfig: any }>) => void
 }
 
-export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter }: NodeSelectDialogProps) {
+export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter, multiple = false, onConfirm }: NodeSelectDialogProps) {
   const { t } = useTranslation('xray')
   const { t: tc } = useTranslation('common')
   const [nodes, setNodes] = useState<ParsedNode[]>([])
   const [nodeOrder, setNodeOrder] = useState<number[]>([])
   const [tunnels, setTunnels] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
-  const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null)
+  const [selectedNodeIds, setSelectedNodeIds] = useState<Set<number>>(new Set())
   const [searchTerm, setSearchTerm] = useState('')
   const [tagFilter, setTagFilter] = useState<string>('all')
 
@@ -59,7 +63,7 @@ export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter 
   useEffect(() => {
     if (open) {
       loadAll()
-      setSelectedNodeId(null)
+      setSelectedNodeIds(new Set())
       setSearchTerm('')
       setTagFilter('all')
     }
@@ -99,7 +103,17 @@ export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter 
   }, [tunnels])
 
   const handleSelectNode = (nodeId: number) => {
-    setSelectedNodeId(nodeId === selectedNodeId ? null : nodeId)
+    setSelectedNodeIds((prev) => {
+      const next = new Set(prev)
+      if (multiple) {
+        next.has(nodeId) ? next.delete(nodeId) : next.add(nodeId)
+      } else {
+        // 单选:点已选 → 取消,点新的 → 替换
+        next.clear()
+        if (!prev.has(nodeId)) next.add(nodeId)
+      }
+      return next
+    })
   }
 
   // Get unique tags
@@ -116,9 +130,6 @@ export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter 
   // Filter nodes + 按 user_config.node_order 排序(节点列表里用户调过的顺序)
   const filteredNodes = useMemo(() => {
     let filtered = nodes
-
-    // Filter by enabled status
-    filtered = filtered.filter((node) => node.enabled)
 
     // 隐藏路由出站节点 — 已经是某条 outbound 的"客户端视图",不应作为新出站的来源
     filtered = filtered.filter((node) => node.node_type !== 'routed')
@@ -159,18 +170,36 @@ export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter 
   }, [nodes, protocolFilter, tagFilter, searchTerm, nodeOrder])
 
   const handleConfirm = () => {
-    if (!selectedNodeId) return
-
-    const selectedNode = nodes.find((n) => n.id === selectedNodeId)
-    if (!selectedNode) return
-
-    try {
-      const clashConfig = JSON.parse(selectedNode.clash_config)
-      onSelect(selectedNode, clashConfig)
-      onOpenChange(false)
-    } catch (error) {
-      toast.error(t('nodeSelect.parseFailed'))
+    if (selectedNodeIds.size === 0) return
+    const items: Array<{ node: ParsedNode; clashConfig: any }> = []
+    for (const id of selectedNodeIds) {
+      const node = nodes.find((n) => n.id === id)
+      if (!node) continue
+      try {
+        items.push({ node, clashConfig: JSON.parse(node.clash_config) })
+      } catch {
+        toast.error(`${t('nodeSelect.parseFailed')}: ${node.node_name}`)
+      }
     }
+    if (items.length === 0) return
+    if (onConfirm) {
+      onConfirm(items)
+    } else {
+      // 旧 API 兼容:只回单条
+      onSelect(items[0].node, items[0].clashConfig)
+    }
+    onOpenChange(false)
+  }
+
+  // 当前过滤后的可选节点(在 filteredNodes useMemo 之后才能用,这里通过函数延迟绑定);
+  // 全选:勾上当前 filter 内所有节点;清空:清掉当前 filter 范围内的勾选
+  const toggleSelectAllFiltered = (filteredIds: number[], allFilteredChecked: boolean) => {
+    setSelectedNodeIds((prev) => {
+      const next = new Set(prev)
+      if (allFilteredChecked) filteredIds.forEach((id) => next.delete(id))
+      else filteredIds.forEach((id) => next.add(id))
+      return next
+    })
   }
 
   return (
@@ -215,6 +244,27 @@ export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter 
             </div>
           )}
 
+          {/* 多选工具栏:全选当前过滤范围 / 清空当前过滤范围 */}
+          {multiple && filteredNodes.length > 0 && (() => {
+            const filteredIds = filteredNodes.map((n) => n.id)
+            const allChecked = filteredIds.every((id) => selectedNodeIds.has(id))
+            return (
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">
+                  {t('nodeSelect.selectedCount', { defaultValue: '已选' })}: {selectedNodeIds.size} / {filteredNodes.length}
+                </span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 text-xs"
+                  onClick={() => toggleSelectAllFiltered(filteredIds, allChecked)}
+                >
+                  {allChecked ? t('nodeSelect.clearSelection', { defaultValue: '清空选择' }) : t('nodeSelect.selectAll', { defaultValue: '全选当前列表' })}
+                </Button>
+              </div>
+            )
+          })()}
+
           {/* Node list */}
           <div className="flex-1 overflow-y-auto border rounded-lg p-4">
             {loading ? (
@@ -240,12 +290,12 @@ export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter 
                     <div
                       key={node.id}
                       className={`flex items-center gap-2 p-2 border rounded hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer transition-colors ${
-                        selectedNodeId === node.id ? 'bg-primary/10 border-primary' : ''
+                        selectedNodeIds.has(node.id) ? 'bg-primary/10 border-primary' : ''
                       }`}
                       onClick={() => handleSelectNode(node.id)}
                     >
                       <Checkbox
-                        checked={selectedNodeId === node.id}
+                        checked={selectedNodeIds.has(node.id)}
                         onCheckedChange={() => handleSelectNode(node.id)}
                       />
                       {/* 节点信息单行显示:协议 + 节点名 + tunnel 标记 + 标签 + 地址 */}
@@ -297,7 +347,11 @@ export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter 
           </div>
 
           <div className="text-sm text-muted-foreground">
-            {selectedNodeId ? t('nodeSelect.selected') : t('nodeSelect.selectNode')}
+            {multiple
+              ? (selectedNodeIds.size > 0
+                  ? `${t('nodeSelect.selectedCount', { defaultValue: '已选' })} ${selectedNodeIds.size} ${t('nodeSelect.itemUnit', { defaultValue: '个节点' })}`
+                  : t('nodeSelect.selectNode'))
+              : (selectedNodeIds.size > 0 ? t('nodeSelect.selected') : t('nodeSelect.selectNode'))}
           </div>
         </div>
 
@@ -305,8 +359,10 @@ export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter 
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             {tc('actions.cancel')}
           </Button>
-          <Button onClick={handleConfirm} disabled={!selectedNodeId}>
-            {t('nodeSelect.confirmImport')}
+          <Button onClick={handleConfirm} disabled={selectedNodeIds.size === 0}>
+            {multiple && selectedNodeIds.size > 1
+              ? `${t('nodeSelect.confirmImport')} (${selectedNodeIds.size})`
+              : t('nodeSelect.confirmImport')}
           </Button>
         </DialogFooter>
       </DialogContent>

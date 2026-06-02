@@ -13,7 +13,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { api } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
-import { type Balancer, DEFAULT_PROBE_URL, DEFAULT_PROBE_INTERVAL, normalizeBalancers, toXrayBalancers, buildObservatory } from '@/lib/xray-balancer'
+import { type Balancer, DEFAULT_PROBE_URL, DEFAULT_PROBE_INTERVAL, normalizeBalancers, toXrayBalancers, buildObservatory, balancerStrategyLabel } from '@/lib/xray-balancer'
 
 interface BalancerManagerDialogProps {
   open: boolean
@@ -63,7 +63,7 @@ export function BalancerManagerDialog({ open, onOpenChange, serverId, routing, o
     const tg = tag.trim()
     if (!tg) { toast.error(t('routing.balancerTagRequired')); return }
     if (balancers.some(b => b.tag === tg)) { toast.error(t('routing.balancerTagDup')); return }
-    if (selector.length < 2) { toast.error(t('routing.balancerSelectorMin')); return }
+    if (selector.length < 1) { toast.error(t('routing.balancerSelectorMin')); return }
     const b: Balancer = { tag: tg, selector, strategy }
     if (fallback) b.fallbackTag = fallback
     if (strategy === 'leastPing' || strategy === 'leastLoad') {
@@ -91,7 +91,7 @@ export function BalancerManagerDialog({ open, onOpenChange, serverId, routing, o
               <div key={b.tag} className='flex items-center justify-between rounded-md border px-3 py-1.5 text-xs'>
                 <div className='min-w-0'>
                   <span className='font-medium'>⚖ {b.tag}</span>
-                  <span className='text-muted-foreground'> · {b.strategy} · {(b.selector || []).join(', ')}</span>
+                  <span className='text-muted-foreground'> · {balancerStrategyLabel(t, b.strategy)} · {(b.selector || []).join(', ')}</span>
                 </div>
                 <Button variant='ghost' size='sm' className='h-6 text-red-600 hover:text-red-700 shrink-0' onClick={() => handleDelete(b.tag)} disabled={saveMutation.isPending}>
                   <Trash2 className='size-3.5' />
@@ -112,10 +112,10 @@ export function BalancerManagerDialog({ open, onOpenChange, serverId, routing, o
                 <Select value={strategy} onValueChange={v => setStrategy(v as Balancer['strategy'])}>
                   <SelectTrigger className='text-xs'><SelectValue /></SelectTrigger>
                   <SelectContent>
-                    <SelectItem value='random'>random</SelectItem>
-                    <SelectItem value='roundRobin'>roundRobin</SelectItem>
-                    <SelectItem value='leastPing'>leastPing</SelectItem>
-                    <SelectItem value='leastLoad'>leastLoad</SelectItem>
+                    <SelectItem value='random'>{balancerStrategyLabel(t, 'random')}</SelectItem>
+                    <SelectItem value='roundRobin'>{balancerStrategyLabel(t, 'roundRobin')}</SelectItem>
+                    <SelectItem value='leastPing'>{balancerStrategyLabel(t, 'leastPing')}</SelectItem>
+                    <SelectItem value='leastLoad'>{balancerStrategyLabel(t, 'leastLoad')}</SelectItem>
                   </SelectContent>
                 </Select>
               </div>

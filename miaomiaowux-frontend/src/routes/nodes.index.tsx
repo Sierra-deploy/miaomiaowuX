@@ -27,7 +27,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { parseProxyUrl, toClashProxy, type ProxyNode, type ClashProxy } from '@/lib/proxy-parser'
-import { Check, Pencil, X, Undo2, Activity, Eye, Copy, ChevronDown, Link2, Flag, GripVertical, Zap, CheckCircle2, Loader2, Route as RouteIcon, Trash2, Cable } from 'lucide-react'
+import { Check, Pencil, X, Undo2, Activity, Eye, Copy, ChevronDown, Link2, Flag, GripVertical, Zap, CheckCircle2, Loader2, Route as RouteIcon, Trash2, Cable, Scale } from 'lucide-react'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import IpIcon from '@/assets/icons/ip.svg'
 import ExchangeIcon from '@/assets/icons/exchange.svg'
@@ -44,6 +44,7 @@ import { SpeedTestDialog } from '@/components/speedtest-dialog'
 import { useLicenseFeature } from '@/hooks/use-license'
 import { Gauge } from 'lucide-react'
 import { clashConfigToOutbound } from '@/lib/xray-config-generator'
+import { balancerStrategyLabel } from '@/lib/xray-balancer'
 import {
   DndContext,
   closestCenter,
@@ -367,6 +368,7 @@ function getStoredSelectedIds(): Set<number> {
 
 function NodesPage() {
   const { t } = useTranslation('nodes')
+  const { t: txr } = useTranslation('xray')
   const { auth } = useAuthStore()
   const queryClient = useQueryClient()
 
@@ -432,10 +434,12 @@ function NodesPage() {
     directAddress: string
     directPort: number
   }>(null)
-  const [landingTab, setLandingTab] = useState<'nodes' | 'servers'>('nodes')
+  const [landingTab, setLandingTab] = useState<'nodes' | 'servers' | 'balancer'>('nodes')
   const [landingStep, setLandingStep] = useState<'select' | 'create-inbound'>('select')
   const [landingServerId, setLandingServerId] = useState<number | null>(null)
   const [landingLoading, setLandingLoading] = useState(false)
+  // 落地目标=负载均衡器:选中后只在源服务器下一条 routing rule {inboundTag, balancerTag},不建出站不建节点
+  const [landingBalancerTag, setLandingBalancerTag] = useState<string>('')
 
   const [chainProxyDialogOpen, setChainProxyDialogOpen] = useState(false)
   const [sourceNodeForChainProxy, setSourceNodeForChainProxy] = useState<ParsedNode | null>(null)
@@ -1926,6 +1930,71 @@ function NodesPage() {
     },
     onError: (error: any) => {
       toast.error(error.response?.data?.error || error.response?.data?.message || error.message || t('toast.landingConfigFailed'))
+    },
+  })
+
+  // 落地 dialog "选择负载均衡器" tab 用:拉源服务器的 balancers
+  const landingSourceServerId = useMemo(() => {
+    if (!sourceNodeForLanding) return null
+    let serverName = sourceNodeForLanding.original_server
+    if (!serverName && sourceNodeForLanding.tag?.startsWith('远程:')) serverName = sourceNodeForLanding.tag.slice(3)
+    return remoteServers.find(s => s.name === serverName)?.id ?? null
+  }, [sourceNodeForLanding, remoteServers])
+  const landingBalancersQuery = useQuery({
+    queryKey: ['landing-balancers', landingSourceServerId],
+    queryFn: async () => {
+      const res = await api.get(`/api/admin/remote/routing?server_id=${landingSourceServerId}`)
+      return (res.data?.routing?.balancers || []) as Array<{ tag: string; selector?: string[]; strategy?: string }>
+    },
+    enabled: isAdmin && landingDialogOpen && landingTab === 'balancer' && landingScope === 'all' && !!landingSourceServerId,
+  })
+
+  // 落地目标=负载均衡器:在源服务器添加一条 routing rule {inboundTag:[源inbound], balancerTag},不建出站不建节点
+  // 同一源 inbound 只保留一条"落地规则" — 不论目标是 node-landing(outboundTag landing-*)还是 balancer
+  const addBalancerLandingMutation = useMutation({
+    mutationFn: async ({ sourceNode, balancerTag }: { sourceNode: ParsedNode; balancerTag: string }) => {
+      let serverName = sourceNode.original_server
+      if (!serverName && sourceNode.tag?.startsWith('远程:')) serverName = sourceNode.tag.slice(3)
+      const sourceServer = remoteServers.find(s => s.name === serverName)
+      if (!sourceServer) throw new Error(t('toast.sourceNodeNoServer'))
+      if (!sourceNode.inbound_tag) throw new Error(t('toast.sourceNodeNoInboundTag'))
+      if (!balancerTag) throw new Error(t('toast.balancerTagRequired'))
+
+      const sourceInbound = sourceNode.inbound_tag
+      const landingPrefix = `landing-${sourceInbound}-`
+      const existingRouting = await api.get(`/api/admin/remote/routing?server_id=${sourceServer.id}`)
+      const existingRules = existingRouting.data?.routing?.rules || []
+      const staleOutboundTags = new Set<string>()
+      for (let i = existingRules.length - 1; i >= 0; i--) {
+        const ru = existingRules[i] || {}
+        if (!Array.isArray(ru.inboundTag) || !ru.inboundTag.includes(sourceInbound)) continue
+        const outTag = String(ru.outboundTag || '')
+        const hasBalancer = !!ru.balancerTag
+        if (outTag.startsWith(landingPrefix) || hasBalancer) {
+          await api.post(`/api/admin/remote/routing?server_id=${sourceServer.id}`, { action: 'remove_rule', index: i })
+          if (outTag.startsWith(landingPrefix)) staleOutboundTags.add(outTag)
+        }
+      }
+      for (const tag of staleOutboundTags) {
+        try { await api.post(`/api/admin/remote/outbounds?server_id=${sourceServer.id}`, { action: 'remove', tag }) } catch {}
+      }
+
+      const routeRes = await api.post(`/api/admin/remote/routing?server_id=${sourceServer.id}`, {
+        action: 'add_rule',
+        rule: { type: 'field', inboundTag: [sourceInbound], balancerTag },
+      })
+      if (!routeRes.data.success) throw new Error(routeRes.data.message || t('toast.addRoutingRuleFailed'))
+      return { balancerTag }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['nodes'] })
+      toast.success(t('toast.landingBalancerSuccess'))
+      setLandingDialogOpen(false)
+      setSourceNodeForLanding(null)
+      setLandingBalancerTag('')
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.error || error.response?.data?.message || error.message || t('toast.landingBalancerFailed'))
     },
   })
 
@@ -4641,6 +4710,8 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
           setLandingScope('all')
           setLandingRoutedLabel('')
           setRoutedTargetNode(null)
+          setLandingTab('nodes')
+          setLandingBalancerTag('')
         }
       }}>
         <DialogContent className={landingStep === 'create-inbound' ? 'max-w-[95vw] sm:max-w-[95vw] max-h-[90vh] overflow-y-auto' : 'max-w-2xl sm:max-w-2xl max-h-[80vh] overflow-y-auto'}>
@@ -4743,11 +4814,14 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                   </div>
                 )}
               </div>
-            <Tabs value={landingTab} onValueChange={(v) => setLandingTab(v as 'nodes' | 'servers')}>
+            <Tabs value={landingTab} onValueChange={(v) => setLandingTab(v as 'nodes' | 'servers' | 'balancer')}>
               {isAdmin && (
                 <TabsList className='w-full'>
                   <TabsTrigger value='nodes' className='flex-1'>{t('dialog.landing.tabNodes')}</TabsTrigger>
                   <TabsTrigger value='servers' className='flex-1'>{t('dialog.landing.tabServers')}</TabsTrigger>
+                  {landingScope === 'all' && (
+                    <TabsTrigger value='balancer' className='flex-1'>{t('dialog.landing.tabBalancer')}</TabsTrigger>
+                  )}
                 </TabsList>
               )}
 
@@ -4762,7 +4836,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                 {(() => {
                   const tags = Array.from(new Set(
                     savedNodes
-                      .filter((n: any) => n.id !== sourceNodeForLanding?.id && !n.protocol.includes('⇋') && n.tag)
+                      .filter((n: any) => n.id !== sourceNodeForLanding?.id && !n.protocol.includes('⇋') && n.tag && n.node_type !== 'routed')
                       .map((n: any) => n.tag.trim())
                       .filter(Boolean),
                   )).sort()
@@ -4781,6 +4855,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                   const filtered = savedNodes
                     .filter(n => n.id !== sourceNodeForLanding?.id)
                     .filter(n => !n.protocol.includes('⇋'))
+                    .filter(n => n.node_type !== 'routed')
                     .filter(n => landingTagFilter === 'all' || n.tag === landingTagFilter)
                     .filter(n => {
                       if (!landingFilterText.trim()) return true
@@ -4935,6 +5010,59 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                     <div className='text-center text-sm text-muted-foreground py-8'>{t('dialog.landing.noOtherServers')}</div>
                   )
                 })()}
+              </TabsContent>}
+
+              {isAdmin && landingScope === 'all' && <TabsContent value='balancer' className='space-y-3 pt-2'>
+                <p className='text-xs text-muted-foreground'>{t('dialog.landing.balancerHint')}</p>
+                {landingBalancersQuery.isLoading ? (
+                  <div className='flex items-center justify-center gap-2 py-8 text-muted-foreground text-sm'>
+                    <Loader2 className='h-4 w-4 animate-spin' />
+                    {t('dialog.landing.configuringLanding')}
+                  </div>
+                ) : (landingBalancersQuery.data || []).length === 0 ? (
+                  <div className='text-center text-sm text-muted-foreground py-8'>{t('dialog.landing.noBalancers')}</div>
+                ) : (
+                  <div className={cn('space-y-2', landingBalancerTag && 'pb-20')}>
+                    {(landingBalancersQuery.data || []).map((b) => (
+                      <Button
+                        key={b.tag}
+                        variant='outline'
+                        className={cn('w-full justify-start text-left h-auto py-3',
+                          landingBalancerTag === b.tag && 'border-primary bg-primary/10 ring-1 ring-primary')}
+                        onClick={() => setLandingBalancerTag(b.tag)}
+                        disabled={addBalancerLandingMutation.isPending}
+                      >
+                        <div className='flex flex-col gap-1 w-full items-start'>
+                          <div className='flex items-center gap-2 w-full flex-wrap'>
+                            <Scale className='h-3.5 w-3.5' />
+                            <span className='font-medium'>{b.tag}</span>
+                            <Badge variant='secondary' className='text-xs' title={balancerStrategyLabel(txr, b.strategy)}>{b.strategy || 'random'}</Badge>
+                          </div>
+                          <span className='text-xs text-muted-foreground truncate'>{(b.selector || []).join(', ') || '—'}</span>
+                        </div>
+                      </Button>
+                    ))}
+                  </div>
+                )}
+                {landingBalancerTag && (
+                  <div className='flex items-center justify-between gap-2 p-2 rounded-md bg-primary/5 border border-primary/40 text-xs sticky bottom-0 shadow-lg backdrop-blur-sm'>
+                    <div className='min-w-0'>
+                      <div className='font-medium truncate'>{t('dialog.landing.landingBalancerSelected')}: ⚖ {landingBalancerTag}</div>
+                      <div className='text-muted-foreground truncate'>inbound: {sourceNodeForLanding?.inbound_tag}</div>
+                    </div>
+                    <Button
+                      size='sm'
+                      className='shrink-0'
+                      onClick={() => {
+                        if (!sourceNodeForLanding || !landingBalancerTag) return
+                        addBalancerLandingMutation.mutate({ sourceNode: sourceNodeForLanding, balancerTag: landingBalancerTag })
+                      }}
+                      disabled={addBalancerLandingMutation.isPending}
+                    >
+                      {addBalancerLandingMutation.isPending ? '绑定中...' : t('dialog.landing.confirmBalancerLanding')}
+                    </Button>
+                  </div>
+                )}
               </TabsContent>}
             </Tabs>
             </>

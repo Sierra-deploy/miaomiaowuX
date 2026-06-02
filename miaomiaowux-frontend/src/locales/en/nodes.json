@@ -1,7 +1,7 @@
 {
   "page": {
     "title": "Node Management",
-    "description": "Enter proxy node information, one node per line. Supports VMess, VLESS, Trojan, Shadowsocks, Hysteria, Socks, TUIC, AnyTLS, and WireGuard protocols."
+    "description": "Enter proxy node information, one node per line. Supports VMess, VLESS, Trojan, Shadowsocks, Hysteria, Socks, AnyTLS, Snell(Only Import),TUIC(Only Import), and WireGuard(Only Import) protocols."
   },
   "importCard": {
     "title": "Import External Nodes",
@@ -229,6 +229,9 @@
     "createFailed": "Creation failed",
     "landingConfigSuccess": "Landing node configured (outbound + route added)",
     "landingConfigFailed": "Failed to configure landing node",
+    "landingBalancerSuccess": "Balancer route bound to inbound",
+    "landingBalancerFailed": "Failed to bind balancer route",
+    "balancerTagRequired": "Select a balancer",
     "sourceNodeNoServer": "Source node not linked to remote server, cannot configure outbound routing",
     "sourceNodeNoInboundTag": "Source node missing inbound_tag, cannot configure routing",
     "landingTargetParseError": "Failed to parse landing node config",
@@ -380,6 +383,11 @@
       "addLandingDesc": "Select landing node or server for \"{{name}}\"",
       "tabNodes": "Select Landing Node",
       "tabServers": "Select Server",
+      "tabBalancer": "Select Balancer",
+      "balancerHint": "Adds one routing rule on the source server: inbound → balancer (no outbound, no node)",
+      "noBalancers": "No balancers on source server. Create one in 'Xray Management → Routing → Balancers' first.",
+      "confirmBalancerLanding": "Confirm Bind",
+      "landingBalancerSelected": "Selected LB",
       "searchPlaceholder": "Search node name, protocol, or tag...",
       "excludeHint": "Automatically excludes chain proxy nodes and the source node itself",
       "noMatchingNodes": "No matching nodes found",
