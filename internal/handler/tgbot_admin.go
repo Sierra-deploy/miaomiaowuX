@@ -1,0 +1,573 @@
+package handler
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/storage"
+
+	"golang.org/x/crypto/bcrypt"
+)
+
+// TGBotAPIHandler 统一服务 /api/admin/tgbot/* 子路径。
+//
+// 邀请码 CRUD(admin web UI 用):
+//
+//	GET    /api/admin/tgbot/invites               列出
+//	POST   /api/admin/tgbot/invites                创建
+//	POST   /api/admin/tgbot/invites/revoke         撤销
+//
+// 独立 mmwX-tgbot 调用(用 admin token):
+//
+//	POST   /api/admin/tgbot/bind                   一次性入口:kind=new 创建+绑+消费,kind=bind 绑已有+消费
+//	POST   /api/admin/tgbot/unbind                 反查 username 后解绑
+//	GET    /api/admin/tgbot/user-by-tg?tg_id=      TG ID → username 反查
+//	GET    /api/admin/tgbot/user-summary?username= username/role/套餐/到期/本周期流量
+//	GET    /api/admin/tgbot/user-subscriptions?username=  订阅列表 + short_code
+//	GET    /api/admin/tgbot/user-nodes?username=   套餐节点 + 服务器在线状态
+type TGBotAPIHandler struct {
+	repo *storage.TrafficRepository
+}
+
+func NewTGBotAPIHandler(repo *storage.TrafficRepository) *TGBotAPIHandler {
+	return &TGBotAPIHandler{repo: repo}
+}
+
+// 向后兼容旧名字
+func NewTGBotInviteHandler(repo *storage.TrafficRepository) *TGBotAPIHandler {
+	return NewTGBotAPIHandler(repo)
+}
+
+func (h *TGBotAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/api/admin/tgbot")
+	path = strings.Trim(path, "/")
+
+	switch {
+	// 邀请码 CRUD
+	case path == "invites" && r.Method == http.MethodGet:
+		h.listInvites(w, r)
+	case path == "invites" && r.Method == http.MethodPost:
+		h.createInvite(w, r)
+	case path == "invites/revoke" && r.Method == http.MethodPost:
+		h.revokeInvite(w, r)
+	// 独立 bot 用
+	case path == "bind" && r.Method == http.MethodPost:
+		h.bind(w, r)
+	case path == "unbind" && r.Method == http.MethodPost:
+		h.unbind(w, r)
+	case path == "user-by-tg" && r.Method == http.MethodGet:
+		h.userByTG(w, r)
+	case path == "user-summary" && r.Method == http.MethodGet:
+		h.userSummary(w, r)
+	case path == "user-subscriptions" && r.Method == http.MethodGet:
+		h.userSubscriptions(w, r)
+	case path == "user-nodes" && r.Method == http.MethodGet:
+		h.userNodes(w, r)
+	default:
+		http.Error(w, "not found", http.StatusNotFound)
+	}
+}
+
+// ============ 邀请码 CRUD ============
+
+type inviteOut struct {
+	Code         string `json:"code"`
+	Kind         string `json:"kind"`
+	BindUsername string `json:"bind_username,omitempty"`
+	CreatedBy    string `json:"created_by"`
+	PackageID    *int64 `json:"package_id,omitempty"`
+	MaxUses      int    `json:"max_uses"`
+	UsedCount    int    `json:"used_count"`
+	ExpiresAt    string `json:"expires_at,omitempty"`
+	Revoked      bool   `json:"revoked"`
+	Remark       string `json:"remark,omitempty"`
+	CreatedAt    string `json:"created_at"`
+	Usable       bool   `json:"usable"`
+}
+
+func toInviteOut(ic storage.InviteCode) inviteOut {
+	out := inviteOut{
+		Code: ic.Code, Kind: ic.Kind, BindUsername: ic.BindUsername,
+		CreatedBy: ic.CreatedBy, PackageID: ic.PackageID,
+		MaxUses: ic.MaxUses, UsedCount: ic.UsedCount,
+		Revoked: ic.Revoked, Remark: ic.Remark,
+		CreatedAt: ic.CreatedAt.Format(time.RFC3339),
+		Usable:    ic.IsUsable(),
+	}
+	if ic.ExpiresAt != nil {
+		out.ExpiresAt = ic.ExpiresAt.Format(time.RFC3339)
+	}
+	return out
+}
+
+func (h *TGBotAPIHandler) listInvites(w http.ResponseWriter, r *http.Request) {
+	createdBy := r.URL.Query().Get("created_by")
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	items, err := h.repo.ListInviteCodes(r.Context(), createdBy, limit)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "list failed: "+err.Error())
+		return
+	}
+	out := make([]inviteOut, 0, len(items))
+	for _, ic := range items {
+		out = append(out, toInviteOut(ic))
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "items": out})
+}
+
+func (h *TGBotAPIHandler) createInvite(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Kind         string `json:"kind"`
+		BindUsername string `json:"bind_username"`
+		PackageID    *int64 `json:"package_id"`
+		MaxUses      int    `json:"max_uses"`
+		ExpiresAt    string `json:"expires_at"`
+		Remark       string `json:"remark"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if body.Kind != "new" && body.Kind != "bind" {
+		writeJSONError(w, http.StatusBadRequest, "kind 必须是 new 或 bind")
+		return
+	}
+	if body.Kind == "bind" && strings.TrimSpace(body.BindUsername) == "" {
+		writeJSONError(w, http.StatusBadRequest, "kind=bind 时 bind_username 必填")
+		return
+	}
+	if body.MaxUses <= 0 {
+		body.MaxUses = 1
+	}
+
+	ic := storage.InviteCode{
+		Kind:         body.Kind,
+		BindUsername: strings.TrimSpace(body.BindUsername),
+		CreatedBy:    auth.UsernameFromContext(r.Context()),
+		PackageID:    body.PackageID,
+		MaxUses:      body.MaxUses,
+		Remark:       body.Remark,
+	}
+	if strings.TrimSpace(body.ExpiresAt) != "" {
+		t, err := time.Parse(time.RFC3339, body.ExpiresAt)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "expires_at 必须是 RFC3339")
+			return
+		}
+		ic.ExpiresAt = &t
+	}
+
+	code, err := h.repo.CreateInviteCode(r.Context(), ic)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "create failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "code": code})
+}
+
+func (h *TGBotAPIHandler) revokeInvite(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if strings.TrimSpace(body.Code) == "" {
+		writeJSONError(w, http.StatusBadRequest, "code 必填")
+		return
+	}
+	if err := h.repo.RevokeInviteCode(r.Context(), body.Code); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+// ============ /bind 一次性入口 ============
+
+var usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{3,20}$`)
+
+func (h *TGBotAPIHandler) bind(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Code           string `json:"code"`
+		TelegramID     int64  `json:"telegram_id"`
+		TelegramHandle string `json:"telegram_handle"`
+		Username       string `json:"username"` // kind=new 时由 bot 收集
+		Email          string `json:"email"`    // kind=new 可选
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if body.Code == "" || body.TelegramID == 0 {
+		writeJSONError(w, http.StatusBadRequest, "code 和 telegram_id 必填")
+		return
+	}
+	ctx := r.Context()
+
+	// 同 tg_id 已绑 → 拒(防多账号)
+	if existing, ok := h.repo.GetUsernameByTelegramID(ctx, body.TelegramID); ok {
+		writeJSONError(w, http.StatusConflict, fmt.Sprintf("该 TG 已绑定到 %s,请先解绑", existing))
+		return
+	}
+
+	ic, ok := h.repo.GetInviteCode(ctx, body.Code)
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, "邀请码不存在")
+		return
+	}
+	if !ic.IsUsable() {
+		writeJSONError(w, http.StatusBadRequest, "邀请码不可用(已撤销/已用尽/已过期)")
+		return
+	}
+
+	switch ic.Kind {
+	case "bind":
+		h.bindExisting(ctx, w, body.TelegramID, body.TelegramHandle, ic)
+	case "new":
+		h.bindNew(ctx, w, body.TelegramID, body.TelegramHandle, body.Username, body.Email, ic)
+	default:
+		writeJSONError(w, http.StatusInternalServerError, "未知邀请码 kind: "+ic.Kind)
+	}
+}
+
+func (h *TGBotAPIHandler) bindExisting(ctx context.Context, w http.ResponseWriter,
+	tgID int64, tgHandle string, ic storage.InviteCode) {
+
+	user, err := h.repo.GetUser(ctx, ic.BindUsername)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "目标账号不存在: "+ic.BindUsername)
+		return
+	}
+	if !user.IsActive {
+		writeJSONError(w, http.StatusForbidden, "目标账号已停用")
+		return
+	}
+	if err := h.repo.ConsumeInviteCode(ctx, ic.Code, user.Username, tgID); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "消耗邀请码失败: "+err.Error())
+		return
+	}
+	if err := h.repo.BindTelegram(ctx, user.Username, tgID, tgHandle); err != nil {
+		writeJSONError(w, http.StatusInternalServerError,
+			"绑定失败: "+err.Error()+" (邀请码已消耗,请联系管理员)")
+		return
+	}
+	_ = h.repo.WriteTGAudit(ctx, storage.TGAudit{
+		TGID: tgID, Username: user.Username,
+		Action: "bind", Detail: "invite_code=" + ic.Code,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":  true,
+		"username": user.Username,
+		"kind":     "bind",
+	})
+}
+
+func (h *TGBotAPIHandler) bindNew(ctx context.Context, w http.ResponseWriter,
+	tgID int64, tgHandle, requestedUsername, email string, ic storage.InviteCode) {
+
+	requestedUsername = strings.TrimSpace(requestedUsername)
+	if !usernameRe.MatchString(requestedUsername) {
+		writeJSONError(w, http.StatusBadRequest, "username 不合法(3-20 字符 字母数字 _ -)")
+		return
+	}
+	if _, err := h.repo.GetUser(ctx, requestedUsername); err == nil {
+		writeJSONError(w, http.StatusConflict, "用户名已被占用")
+		return
+	}
+
+	// 随机初始密码
+	pwBuf := make([]byte, 8)
+	if _, err := rand.Read(pwBuf); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "rand: "+err.Error())
+		return
+	}
+	plainPw := hex.EncodeToString(pwBuf)
+	hash, err := bcrypt.GenerateFromPassword([]byte(plainPw), bcrypt.DefaultCost)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "bcrypt: "+err.Error())
+		return
+	}
+
+	if err := h.repo.ConsumeInviteCode(ctx, ic.Code, requestedUsername, tgID); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "消耗邀请码失败: "+err.Error())
+		return
+	}
+	if err := h.repo.CreateUser(ctx, requestedUsername, email, "", string(hash), "user", "TG 注册"); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "创建账号失败: "+err.Error())
+		return
+	}
+
+	pkgInfo := map[string]any{}
+	if ic.PackageID != nil {
+		if pkg, perr := h.repo.GetPackage(ctx, *ic.PackageID); perr == nil && pkg != nil {
+			start := time.Now()
+			end := start.AddDate(0, 0, pkg.CycleDays)
+			if aerr := h.repo.AssignPackageToUser(ctx, requestedUsername, pkg.ID, start, end,
+				pkg.IsReset, pkg.ResetDay); aerr == nil {
+				pkgInfo = map[string]any{
+					"package_name":     pkg.Name,
+					"traffic_limit_gb": pkg.TrafficLimitGB,
+					"cycle_days":       pkg.CycleDays,
+					"end_date":         end.Format("2006-01-02"),
+				}
+			}
+		}
+	}
+
+	if err := h.repo.BindTelegram(ctx, requestedUsername, tgID, tgHandle); err != nil {
+		writeJSONError(w, http.StatusInternalServerError,
+			"TG 绑定失败: "+err.Error()+" (账号已创建,请联系管理员手动绑)")
+		return
+	}
+	_ = h.repo.WriteTGAudit(ctx, storage.TGAudit{
+		TGID: tgID, Username: requestedUsername,
+		Action: "register", Detail: "invite_code=" + ic.Code,
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":          true,
+		"username":         requestedUsername,
+		"kind":             "new",
+		"initial_password": plainPw,
+		"package":          pkgInfo,
+	})
+}
+
+// ============ /unbind ============
+
+func (h *TGBotAPIHandler) unbind(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		TelegramID int64 `json:"telegram_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if body.TelegramID == 0 {
+		writeJSONError(w, http.StatusBadRequest, "telegram_id 必填")
+		return
+	}
+	username, ok := h.repo.GetUsernameByTelegramID(r.Context(), body.TelegramID)
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, "TG 未绑定任何账号")
+		return
+	}
+	if err := h.repo.UnbindTelegram(r.Context(), username); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = h.repo.WriteTGAudit(r.Context(), storage.TGAudit{
+		TGID: body.TelegramID, Username: username,
+		Action: "unbind", Detail: "via tgbot client",
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "username": username})
+}
+
+// ============ /user-by-tg ============
+
+func (h *TGBotAPIHandler) userByTG(w http.ResponseWriter, r *http.Request) {
+	tgIDStr := r.URL.Query().Get("tg_id")
+	tgID, err := strconv.ParseInt(tgIDStr, 10, 64)
+	if err != nil || tgID == 0 {
+		writeJSONError(w, http.StatusBadRequest, "tg_id 必填且为整数")
+		return
+	}
+	username, ok := h.repo.GetUsernameByTelegramID(r.Context(), tgID)
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "bound": false})
+		return
+	}
+	user, err := h.repo.GetUser(r.Context(), username)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":   true,
+		"bound":     true,
+		"username":  username,
+		"role":      user.Role,
+		"is_active": user.IsActive,
+	})
+}
+
+// ============ /user-summary ============
+
+func (h *TGBotAPIHandler) userSummary(w http.ResponseWriter, r *http.Request) {
+	username := strings.TrimSpace(r.URL.Query().Get("username"))
+	if username == "" {
+		writeJSONError(w, http.StatusBadRequest, "username 必填")
+		return
+	}
+	user, err := h.repo.GetUser(r.Context(), username)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	out := map[string]any{
+		"success":           true,
+		"username":          user.Username,
+		"role":              user.Role,
+		"is_active":         user.IsActive,
+		"email":             user.Email,
+		"telegram_id":       0,
+		"telegram_username": "",
+	}
+	// 套餐
+	if user.PackageID > 0 {
+		pkg, perr := h.repo.GetPackage(r.Context(), user.PackageID)
+		if perr == nil && pkg != nil {
+			limit := pkg.TrafficLimitBytes
+			if limit <= 0 {
+				limit = int64(pkg.TrafficLimitGB * 1024 * 1024 * 1024)
+			}
+			out["package"] = map[string]any{
+				"id":               pkg.ID,
+				"name":             pkg.Name,
+				"traffic_limit":    limit,
+				"traffic_limit_gb": pkg.TrafficLimitGB,
+				"cycle_days":       pkg.CycleDays,
+				"traffic_mode":     pkg.TrafficMode,
+				"speed_limit_mbps": pkg.SpeedLimitMbps,
+				"device_limit":     pkg.DeviceLimit,
+			}
+		}
+	}
+	if user.PackageEndDate != nil {
+		out["package_end_date"] = user.PackageEndDate.Format(time.RFC3339)
+	}
+	// 流量
+	rows, _ := h.repo.GetUserTrafficByUsername(r.Context(), username)
+	var sumUp, sumDown, totalUp, totalDown int64
+	for _, t := range rows {
+		sumUp += t.Uplink
+		sumDown += t.Downlink
+		totalUp += t.TotalUplink
+		totalDown += t.TotalDownlink
+	}
+	out["traffic"] = map[string]any{
+		"cycle_uplink":   sumUp,
+		"cycle_downlink": sumDown,
+		"total_uplink":   totalUp,
+		"total_downlink": totalDown,
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// ============ /user-subscriptions ============
+
+func (h *TGBotAPIHandler) userSubscriptions(w http.ResponseWriter, r *http.Request) {
+	username := strings.TrimSpace(r.URL.Query().Get("username"))
+	if username == "" {
+		writeJSONError(w, http.StatusBadRequest, "username 必填")
+		return
+	}
+	subs, err := h.repo.GetUserSubscriptions(r.Context(), username)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	userShortCode, _ := h.repo.GetEffectiveUserShortCode(r.Context(), username)
+
+	type subOut struct {
+		ID              int64  `json:"id"`
+		Name            string `json:"name"`
+		Description     string `json:"description"`
+		FileShortCode   string `json:"file_short_code,omitempty"`
+		CustomShortCode string `json:"custom_short_code,omitempty"`
+		// CombinedCode 拼好的:有 custom 优先 custom,否则 file + user_short
+		CombinedCode string `json:"combined_code"`
+	}
+	out := make([]subOut, 0, len(subs))
+	for _, sf := range subs {
+		combined := strings.TrimSpace(sf.CustomShortCode)
+		if combined == "" {
+			combined = sf.FileShortCode + userShortCode
+		}
+		out = append(out, subOut{
+			ID: sf.ID, Name: sf.Name, Description: sf.Description,
+			FileShortCode: sf.FileShortCode, CustomShortCode: sf.CustomShortCode,
+			CombinedCode: combined,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":         true,
+		"user_short_code": userShortCode,
+		"subscriptions":   out,
+	})
+}
+
+// ============ /user-nodes ============
+
+func (h *TGBotAPIHandler) userNodes(w http.ResponseWriter, r *http.Request) {
+	username := strings.TrimSpace(r.URL.Query().Get("username"))
+	if username == "" {
+		writeJSONError(w, http.StatusBadRequest, "username 必填")
+		return
+	}
+	user, err := h.repo.GetUser(r.Context(), username)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if user.PackageID == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "nodes": []any{}})
+		return
+	}
+	pkg, err := h.repo.GetPackage(r.Context(), user.PackageID)
+	if err != nil || pkg == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "nodes": []any{}})
+		return
+	}
+
+	// 一次拉所有 server,做 name → status 查找表
+	servers, _ := h.repo.ListRemoteServers(r.Context())
+	serverStatus := make(map[string]string, len(servers))
+	for _, s := range servers {
+		serverStatus[s.Name] = s.Status
+	}
+
+	type nodeOut struct {
+		ID             int64  `json:"id"`
+		Name           string `json:"name"`
+		Protocol       string `json:"protocol"`
+		ServerName     string `json:"server_name"`
+		ServerStatus   string `json:"server_status"`
+		ServerOnline   bool   `json:"server_online"`
+		InboundTag     string `json:"inbound_tag,omitempty"`
+		NodeType       string `json:"node_type,omitempty"`
+		Enabled        bool   `json:"enabled"`
+	}
+	out := make([]nodeOut, 0, len(pkg.Nodes))
+	for _, nid := range pkg.Nodes {
+		n, err := h.repo.GetNodeByID(r.Context(), nid)
+		if err != nil {
+			continue
+		}
+		status := serverStatus[n.OriginalServer]
+		out = append(out, nodeOut{
+			ID: n.ID, Name: n.NodeName, Protocol: n.Protocol,
+			ServerName: n.OriginalServer, ServerStatus: status,
+			ServerOnline: status == "connected",
+			InboundTag:   n.InboundTag, NodeType: n.NodeType,
+			Enabled: n.Enabled,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "nodes": out})
+}
+
+// 占位:避免编译器报错(若未来 storage 没暴露某方法,可在这里 stub)
+var _ = errors.New

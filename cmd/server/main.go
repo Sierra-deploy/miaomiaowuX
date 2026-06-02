@@ -182,6 +182,10 @@ func main() {
 		TrafficThresholdPercent: systemConfig.NotifyTrafficThresholdPercent,
 	})
 
+	// TG bot 已拆为独立项目 ../mmwX-tgbot,通过 /api/admin/tgbot/* HTTP 调主控。
+	// 主控仅保留 admin REST handler + 邀请码 web UI + storage 字段 + notify 裸 HTTP 通知。
+	tgbotAPIHandler := handler.NewTGBotAPIHandler(repo)
+
 	// 从远程拉取配置
 	data, resolvedURL, fetchErr := proxygroups.FetchConfig(systemConfig.ProxyGroupsSourceURL)
 	if fetchErr != nil {
@@ -229,6 +233,11 @@ func main() {
 
 	// 仅限管理端点
 	mux.Handle("/api/admin/credentials", auth.RequireAdmin(tokenStore, userRepo, handler.NewCredentialsHandler(authManager, tokenStore)))
+
+	// TG bot 相关 API(单前缀,handler 内部按 path 分发):
+	//   - invites CRUD(admin web UI 用)
+	//   - bind/unbind/user-by-tg/user-summary/user-subscriptions/user-nodes(独立 mmwX-tgbot 用)
+	mux.Handle("/api/admin/tgbot/", auth.RequireAdmin(tokenStore, userRepo, tgbotAPIHandler))
 	mux.Handle("/api/admin/users", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserListHandler(repo)))
 	userCreateHandler := handler.NewUserCreateHandler(repo)
 	userCreateHandler.SetLicenseManager(licenseManager)

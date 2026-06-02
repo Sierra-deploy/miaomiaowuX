@@ -845,6 +845,81 @@ CREATE TABLE IF NOT EXISTS users (
 		return err
 	}
 
+	// === Telegram bot 相关 ===
+	// users 加 3 列:tg_id / tg_handle / 绑定时间。tg_id 用 INTEGER 是因为 TG userId 是 int64,
+	// 部分唯一索引(WHERE telegram_id IS NOT NULL)允许多用户都 NULL,但已绑必须唯一。
+	if err := r.ensureUserColumn("telegram_id", "INTEGER"); err != nil {
+		return err
+	}
+	if err := r.ensureUserColumn("telegram_username", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := r.ensureUserColumn("telegram_bound_at", "TIMESTAMP"); err != nil {
+		return err
+	}
+	if _, err := r.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id) WHERE telegram_id IS NOT NULL;`); err != nil {
+		return fmt.Errorf("create telegram_id index: %w", err)
+	}
+
+	// invite_codes:邀请码主表。kind=new 创建新账号,kind=bind 绑定到已有账号。
+	// 设计要点:revoked + used_count < max_uses + expires_at(若设)未到 三者都满足才算"可用"。
+	// package_id 仅 kind=new 时有用;kind=bind 必须填 bind_username,锁定到一个具体账号。
+	const inviteCodeSchema = `
+CREATE TABLE IF NOT EXISTS invite_codes (
+    code           TEXT PRIMARY KEY,
+    kind           TEXT NOT NULL CHECK (kind IN ('new', 'bind')),
+    bind_username  TEXT NOT NULL DEFAULT '',
+    created_by     TEXT NOT NULL,
+    package_id     INTEGER,
+    max_uses       INTEGER NOT NULL DEFAULT 1,
+    used_count     INTEGER NOT NULL DEFAULT 0,
+    expires_at     TIMESTAMP,
+    revoked        INTEGER NOT NULL DEFAULT 0,
+    remark         TEXT NOT NULL DEFAULT '',
+    created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_invite_codes_created_by ON invite_codes(created_by);
+CREATE INDEX IF NOT EXISTS idx_invite_codes_kind ON invite_codes(kind);
+`
+	if _, err := r.db.Exec(inviteCodeSchema); err != nil {
+		return fmt.Errorf("migrate invite_codes: %w", err)
+	}
+
+	// invite_code_uses:邀请码使用记录(单次邀请码 max_uses=1 时唯一,但多次邀请码允许多行)。
+	// 主键 (code, username) 防止同一用户重复消耗同一码。
+	const inviteCodeUsesSchema = `
+CREATE TABLE IF NOT EXISTS invite_code_uses (
+    code       TEXT NOT NULL,
+    username   TEXT NOT NULL,
+    tg_id      INTEGER,
+    used_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (code, username)
+);
+CREATE INDEX IF NOT EXISTS idx_invite_code_uses_username ON invite_code_uses(username);
+`
+	if _, err := r.db.Exec(inviteCodeUsesSchema); err != nil {
+		return fmt.Errorf("migrate invite_code_uses: %w", err)
+	}
+
+	// tg_audit:所有 TG 操作审计(注册/绑定/解绑/admin 命令)。
+	// 用于排查"TG 账号被盗后接管"事件;默认 90 天 retention(扫描任务可后续加)。
+	const tgAuditSchema = `
+CREATE TABLE IF NOT EXISTS tg_audit (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_id     INTEGER,
+    username  TEXT NOT NULL DEFAULT '',
+    action    TEXT NOT NULL,
+    detail    TEXT NOT NULL DEFAULT '',
+    at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_tg_audit_tg_id ON tg_audit(tg_id);
+CREATE INDEX IF NOT EXISTS idx_tg_audit_username ON tg_audit(username);
+CREATE INDEX IF NOT EXISTS idx_tg_audit_at ON tg_audit(at);
+`
+	if _, err := r.db.Exec(tgAuditSchema); err != nil {
+		return fmt.Errorf("migrate tg_audit: %w", err)
+	}
+
 	const historySchema = `
 CREATE TABLE IF NOT EXISTS rule_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

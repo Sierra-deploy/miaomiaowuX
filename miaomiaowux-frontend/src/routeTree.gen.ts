@@ -13,6 +13,7 @@ import { Route as XrayServersRouteImport } from './routes/xray-servers'
 import { Route as XrayOutboundsRouteImport } from './routes/xray-outbounds'
 import { Route as XrayInboundsRouteImport } from './routes/xray-inbounds'
 import { Route as UsersRouteImport } from './routes/users'
+import { Route as TgBotInvitesRouteImport } from './routes/tg-bot-invites'
 import { Route as TemplatesRouteImport } from './routes/templates'
 import { Route as SystemSettingsRouteImport } from './routes/system-settings'
 import { Route as SubscriptionRouteImport } from './routes/subscription'
@@ -61,6 +62,11 @@ const XrayInboundsRoute = XrayInboundsRouteImport.update({
 const UsersRoute = UsersRouteImport.update({
   id: '/users',
   path: '/users',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const TgBotInvitesRoute = TgBotInvitesRouteImport.update({
+  id: '/tg-bot-invites',
+  path: '/tg-bot-invites',
   getParentRoute: () => rootRouteImport,
 } as any)
 const TemplatesRoute = TemplatesRouteImport.update({
@@ -226,6 +232,7 @@ export interface FileRoutesByFullPath {
   '/subscription': typeof SubscriptionRouteWithChildren
   '/system-settings': typeof SystemSettingsRoute
   '/templates': typeof TemplatesRouteWithChildren
+  '/tg-bot-invites': typeof TgBotInvitesRoute
   '/users': typeof UsersRoute
   '/xray-inbounds': typeof XrayInboundsRouteWithChildren
   '/xray-outbounds': typeof XrayOutboundsRouteWithChildren
@@ -252,6 +259,7 @@ export interface FileRoutesByTo {
   '/rules': typeof RulesRoute
   '/settings': typeof SettingsRoute
   '/system-settings': typeof SystemSettingsRoute
+  '/tg-bot-invites': typeof TgBotInvitesRoute
   '/users': typeof UsersRoute
   '/subscribe-files/custom': typeof SubscribeFilesCustomRoute
   '/certificates': typeof CertificatesIndexRoute
@@ -285,6 +293,7 @@ export interface FileRoutesById {
   '/subscription': typeof SubscriptionRouteWithChildren
   '/system-settings': typeof SystemSettingsRoute
   '/templates': typeof TemplatesRouteWithChildren
+  '/tg-bot-invites': typeof TgBotInvitesRoute
   '/users': typeof UsersRoute
   '/xray-inbounds': typeof XrayInboundsRouteWithChildren
   '/xray-outbounds': typeof XrayOutboundsRouteWithChildren
@@ -322,6 +331,7 @@ export interface FileRouteTypes {
     | '/subscription'
     | '/system-settings'
     | '/templates'
+    | '/tg-bot-invites'
     | '/users'
     | '/xray-inbounds'
     | '/xray-outbounds'
@@ -348,6 +358,7 @@ export interface FileRouteTypes {
     | '/rules'
     | '/settings'
     | '/system-settings'
+    | '/tg-bot-invites'
     | '/users'
     | '/subscribe-files/custom'
     | '/certificates'
@@ -380,6 +391,7 @@ export interface FileRouteTypes {
     | '/subscription'
     | '/system-settings'
     | '/templates'
+    | '/tg-bot-invites'
     | '/users'
     | '/xray-inbounds'
     | '/xray-outbounds'
@@ -416,6 +428,7 @@ export interface RootRouteChildren {
   SubscriptionRoute: typeof SubscriptionRouteWithChildren
   SystemSettingsRoute: typeof SystemSettingsRoute
   TemplatesRoute: typeof TemplatesRouteWithChildren
+  TgBotInvitesRoute: typeof TgBotInvitesRoute
   UsersRoute: typeof UsersRoute
   XrayInboundsRoute: typeof XrayInboundsRouteWithChildren
   XrayOutboundsRoute: typeof XrayOutboundsRouteWithChildren
@@ -450,6 +463,13 @@ declare module '@tanstack/react-router' {
       path: '/users'
       fullPath: '/users'
       preLoaderRoute: typeof UsersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/tg-bot-invites': {
+      id: '/tg-bot-invites'
+      path: '/tg-bot-invites'
+      fullPath: '/tg-bot-invites'
+      preLoaderRoute: typeof TgBotInvitesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/templates': {
@@ -819,6 +839,7 @@ const rootRouteChildren: RootRouteChildren = {
   SubscriptionRoute: SubscriptionRouteWithChildren,
   SystemSettingsRoute: SystemSettingsRoute,
   TemplatesRoute: TemplatesRouteWithChildren,
+  TgBotInvitesRoute: TgBotInvitesRoute,
   UsersRoute: UsersRoute,
   XrayInboundsRoute: XrayInboundsRouteWithChildren,
   XrayOutboundsRoute: XrayOutboundsRouteWithChildren,
