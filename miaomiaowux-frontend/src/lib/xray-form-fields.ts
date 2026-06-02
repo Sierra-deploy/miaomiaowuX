@@ -459,6 +459,27 @@ export const protocolFields: Record<string, Field[]> = {
   // 该 fork 的 xray-core HY2 不支持 obfs/salamander(HysteriaConfig 无此字段),故无 server 级专属字段。
   // HY2 入站 = clients(auth/email) + TLS 证书(由 security/证书字段处理)。
   Hysteria2: [],
+  // AnyTLS 入站 = users(password/email) + TLS/REALITY 证书 + paddingScheme(inbound 级流量整形)。
+  // paddingScheme 默认值 = PR #5907 自带的 9 行方案,简易/专家模式均预填;清空则 server 走默认。
+  Anytls: [
+    {
+      name: 'paddingScheme',
+      label: 'fields.paddingScheme',
+      type: 'textarea',
+      defaultValue: [
+        'stop=8',
+        '0=30-30',
+        '1=100-400',
+        '2=400-500,c,500-1000,c,500-1000,c,500-1000,c,500-1000',
+        '3=9-9,500-1000',
+        '4=500-1000',
+        '5=500-1000',
+        '6=500-1000',
+        '7=500-1000',
+      ].join('\n'),
+      description: 'fields.paddingSchemeDesc',
+    },
+  ],
   HTTP: [
     {
       name: 'auth',
@@ -740,6 +761,30 @@ export const clientFields: Record<string, Field[]> = {
       required: true,
       placeholder: 'password',
       description: 'fields.authPasswordFieldDesc',
+    },
+    {
+      name: 'email',
+      label: 'fields.email',
+      type: 'text',
+      placeholder: 'user@example.com',
+      description: 'fields.emailDesc',
+    },
+    {
+      name: 'level',
+      label: 'fields.userLevel',
+      type: 'number',
+      defaultValue: 0,
+      min: 0,
+      max: 255,
+    },
+  ],
+  Anytls: [
+    {
+      name: 'password',
+      label: 'fields.password',
+      type: 'password',
+      required: true,
+      placeholder: 'password',
     },
     {
       name: 'email',

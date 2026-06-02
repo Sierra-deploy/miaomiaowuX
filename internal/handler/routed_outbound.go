@@ -451,7 +451,7 @@ func primaryKeyFieldForProtocol(protocol string) string {
 	switch strings.ToLower(strings.TrimSpace(protocol)) {
 	case "vless", "vmess":
 		return "id"
-	case "trojan", "shadowsocks", "ss":
+	case "trojan", "shadowsocks", "ss", "anytls":
 		return "password"
 	case "hysteria", "hysteria2", "hy2":
 		return "auth"

@@ -1276,6 +1276,10 @@ func generateCredential(protocol string, user storage.User, method, inboundTag s
 		cred["password"] = uuid.New().String()
 		cred["email"] = email
 		cred["level"] = 0
+	case "anytls":
+		cred["password"] = uuid.New().String()
+		cred["email"] = email
+		cred["level"] = 0
 	case "hysteria":
 		// HY2 客户端凭据:auth(密码) + email(用于 per-user 流量统计,接入套餐限额)。
 		cred["auth"] = uuid.New().String()
@@ -1320,7 +1324,7 @@ func matchCredential(a, b map[string]interface{}, protocol string) bool {
 	switch strings.ToLower(protocol) {
 	case "vless", "vmess":
 		return fmt.Sprint(a["id"]) == fmt.Sprint(b["id"])
-	case "trojan":
+	case "trojan", "anytls":
 		return fmt.Sprint(a["password"]) == fmt.Sprint(b["password"])
 	case "hysteria":
 		return fmt.Sprint(a["auth"]) == fmt.Sprint(b["auth"])

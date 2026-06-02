@@ -24,6 +24,11 @@ export const XRAY_CONFIG = {
       ],
     },
     { Hysteria2: ['TLS'] },
+    {
+      Anytls: [
+        { TCP: ['TLS', 'REALITY'] },
+      ],
+    },
     { HTTP: ['None'] },
     { Tunnel: ['None'] },
   ],

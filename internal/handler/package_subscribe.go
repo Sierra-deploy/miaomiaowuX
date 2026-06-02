@@ -437,7 +437,7 @@ func applyUserCredentials(proxy map[string]any, node storage.Node, credMap map[c
 				}
 			}
 		}
-	case "trojan":
+	case "trojan", "anytls":
 		if password, ok := cred["password"].(string); ok && password != "" {
 			proxy["password"] = password
 		}

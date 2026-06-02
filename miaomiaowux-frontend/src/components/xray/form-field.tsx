@@ -175,7 +175,7 @@ export function FormField({ field, value, onChange, error, onPublicKeyGenerated,
         return (
           <Textarea
             placeholder={field.placeholder}
-            value={value || ''}
+            value={value ?? field.defaultValue ?? ''}
             onChange={(e) => onChange(e.target.value)}
             className={error ? 'border-red-500' : ''}
             rows={3}

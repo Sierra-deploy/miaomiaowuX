@@ -156,6 +156,26 @@ function generateSettings(formData: any, protocol: string, security: string) {
       })
       break
 
+    case 'Anytls':
+      // AnyTLS schema:settings.users[](非 clients),字段 {password, level, email}。
+      settings.users = (formData.clients || []).map((client: any) => {
+        const c: any = { password: client.password }
+        if (client.email) c.email = client.email
+        if (client.level !== undefined) c.level = client.level
+        return c
+      })
+      // paddingScheme 为可选的 inbound 级流量整形规则数组,每行一条;留空则 server 用默认。
+      if (formData.paddingScheme && typeof formData.paddingScheme === 'string') {
+        const lines = formData.paddingScheme
+          .split('\n')
+          .map((l: string) => l.trim())
+          .filter(Boolean)
+        if (lines.length > 0) {
+          settings.paddingScheme = lines
+        }
+      }
+      break
+
     case 'HTTP':
       settings.auth = formData.auth || 'noauth'
       if (formData.auth === 'password' && formData.accounts && formData.accounts.length > 0) {

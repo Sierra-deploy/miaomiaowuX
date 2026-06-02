@@ -3042,10 +3042,12 @@ func (h *RemoteManageHandler) inboundToClashProxy(inbound map[string]interface{}
 		return nil, fmt.Errorf("no settings found")
 	}
 
-	// 获取第一个客户/帐户
+	// 获取第一个客户/帐户(anytls 用 users[],其他主流协议用 clients[],socks/http 用 accounts[])
 	var client map[string]interface{}
 	if clients, ok := settings["clients"].([]interface{}); ok && len(clients) > 0 {
 		client, _ = clients[0].(map[string]interface{})
+	} else if users, ok := settings["users"].([]interface{}); ok && len(users) > 0 {
+		client, _ = users[0].(map[string]interface{})
 	} else if accounts, ok := settings["accounts"].([]interface{}); ok && len(accounts) > 0 {
 		client, _ = accounts[0].(map[string]interface{})
 	}
@@ -3159,6 +3161,18 @@ func (h *RemoteManageHandler) inboundToClashProxy(inbound map[string]interface{}
 					proxy["obfs-password"] = obfsPwd
 				}
 			}
+		}
+
+	case "anytls":
+		// mihomo anytls(https://wiki.metacubex.one/en/config/proxies/anytls/):password + sni,跟 trojan 几乎一致。
+		proxy["type"] = "anytls"
+		if password, ok := client["password"].(string); ok {
+			proxy["password"] = password
+		}
+		h.addStreamSettings(proxy, streamSettings)
+		if sn, ok := proxy["servername"]; ok {
+			proxy["sni"] = sn
+			delete(proxy, "servername")
 		}
 
 	case "socks", "http":

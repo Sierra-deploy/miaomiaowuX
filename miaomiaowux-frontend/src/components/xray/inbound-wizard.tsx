@@ -112,8 +112,10 @@ const pickSimpleTransport = (
   return transportNames[0]
 }
 
-const pickSimpleSecurity = (securities: string[]): string => {
+const pickSimpleSecurity = (securities: string[], protocol?: string): string => {
   if (securities.length === 0) return ''
+  // AnyTLS 的 REALITY 在 mihomo/clash 都不被支持,简易模式始终默认 TLS,避免普通用户误选不可用组合。
+  if (protocol === 'Anytls' && securities.includes('TLS')) return 'TLS'
   if (securities.includes('XTLS-Vision-REALITY')) return 'XTLS-Vision-REALITY'
 
   const realitySecurity = securities.find((security) =>
@@ -133,6 +135,24 @@ const generateBase64Key = (byteLength: number): string => {
     binary += String.fromCharCode(array[i])
   }
   return btoa(binary)
+}
+
+// 判定 serverDomain 是否匹配证书 certDomain(含单级泛域名),只允许精确匹配或 *.base 形式且不跨级。
+// 例:certDomainMatches('jpsk.2ha.me', '*.2ha.me') === true
+//    certDomainMatches('a.b.2ha.me', '*.2ha.me') === false
+const certDomainMatches = (serverDomain: string, certDomain: string): boolean => {
+  if (!serverDomain || !certDomain) return false
+  const a = serverDomain.toLowerCase().trim()
+  const b = certDomain.toLowerCase().trim()
+  if (b === a) return true
+  if (b.startsWith('*.')) {
+    const base = b.slice(2)
+    if (a.endsWith('.' + base)) {
+      const prefix = a.slice(0, -(base.length + 1))
+      return prefix.length > 0 && !prefix.includes('.')
+    }
+  }
+  return false
 }
 
 interface Server {
@@ -212,6 +232,36 @@ export function InboundWizard({
   })
   const resolvedUsedPorts = usedPorts.length > 0 ? usedPorts : (inboundInfo?.ports || [])
   const tunnelInPort = inboundInfo?.tunnelInPort || 0
+
+  // 远程服务器列表(主要为了拿当前 server.domain 用于 AnyTLS+TLS 证书自动匹配)。
+  // 没有 single detail endpoint,只能 list 后客户端找。
+  const { data: allRemoteServers } = useQuery({
+    queryKey: ['remote-servers-wizard'],
+    queryFn: async () => {
+      const res = await api.get('/api/admin/remote-servers')
+      return (res.data?.servers ?? []) as Array<{ id: number; domain?: string; ip_address?: string }>
+    },
+    enabled: !!effectiveServerId,
+    staleTime: 60_000,
+  })
+  const currentServerDetail = effectiveServerId
+    ? allRemoteServers?.find((s) => s.id === effectiveServerId)
+    : null
+
+  // 已签发的有效证书列表,用于 AnyTLS+TLS 域名自动匹配(支持泛域名)。
+  const { data: validCertificates } = useQuery({
+    queryKey: ['certificates-valid-wizard'],
+    queryFn: async () => {
+      const res = await api.get('/api/admin/certificates/valid')
+      return (res.data?.certificates ?? []) as Array<{
+        id: number
+        domain: string
+        cert_path: string
+        key_path: string
+      }>
+    },
+    staleTime: 60_000,
+  })
 
   const [selectedProtocol, setSelectedProtocol] = useState<string>('VLESS')
   const [selectedTransport, setSelectedTransport] = useState<string>('TCP')
@@ -341,7 +391,7 @@ export function InboundWizard({
       // Auto-select security
       if (securities.length > 0 && !securities.includes(selectedSecurity)) {
         setSelectedSecurity(
-          isSimpleMode ? pickSimpleSecurity(securities) : securities[0]
+          isSimpleMode ? pickSimpleSecurity(securities, selectedProtocol) : securities[0]
         )
       } else if (securities.length === 0) {
         setSelectedSecurity('')
@@ -444,6 +494,90 @@ export function InboundWizard({
       auth: prev.auth === 'noauth' ? 'password' : prev.auth || 'password',
     }))
   }, [isSimpleMode, selectedProtocol])
+
+  // 协议切换时把 protocolFields[selectedProtocol] 里声明的 defaultValue 注入 formData,
+  // 这样未交互的字段(如 AnyTLS 的 paddingScheme)在简易/专家模式都已预填默认值,提交时直接生效。
+  useEffect(() => {
+    const fields = protocolFields[selectedProtocol] || []
+    setFormData((prev: any) => {
+      let changed = false
+      const next = { ...prev }
+      for (const field of fields) {
+        if (field.defaultValue !== undefined && next[field.name] === undefined) {
+          next[field.name] = field.defaultValue
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [selectedProtocol])
+
+  // AnyTLS + TLS 简易模式:用服务器 domain 匹配现有证书(支持泛域名),命中则自动选中证书 +
+  // 把 serverName 预填成服务器域名;不命中则 toast 提示需切到专家模式手填证书路径。
+  useEffect(() => {
+    if (!isSimpleMode) return
+    if (selectedProtocol !== 'Anytls') return
+    if (selectedSecurity !== 'TLS') return
+    const serverDomain = (currentServerDetail?.domain || '').trim()
+    if (!serverDomain) {
+      toast.warning(t('wizard.anytlsServerHasNoDomain'), { id: 'anytls-no-domain' })
+      return
+    }
+    if (!validCertificates) return
+    if (validCertificates.length === 0) {
+      toast.warning(t('wizard.anytlsNoCertsExpert'), { id: 'anytls-no-certs' })
+      return
+    }
+    const matched = validCertificates.find((c) => certDomainMatches(serverDomain, c.domain))
+    if (matched) {
+      setFormData((prev: any) => {
+        if (prev.cert_id === matched.id && prev.serverName === serverDomain) return prev
+        return {
+          ...prev,
+          cert_id: matched.id,
+          certificateFile: matched.cert_path,
+          keyFile: matched.key_path,
+          serverName: prev.serverName || serverDomain,
+        }
+      })
+    } else {
+      toast.warning(
+        t('wizard.anytlsNoMatchingCert', { domain: serverDomain }),
+        { id: 'anytls-no-matching-cert', duration: 8000 }
+      )
+    }
+  }, [
+    isSimpleMode,
+    selectedProtocol,
+    selectedSecurity,
+    currentServerDetail?.domain,
+    validCertificates,
+    t,
+  ])
+
+  // AnyTLS + REALITY:toast 警告 Clash/Mihomo 不支持此组合,附文档链接(新标签打开)。
+  // id 防止反复触发,duration 留长一点,description 内嵌可点击的 a 标签。
+  useEffect(() => {
+    if (selectedProtocol !== 'Anytls') return
+    if (selectedSecurity !== 'REALITY') return
+    toast.warning(t('wizard.anytlsRealityTitle'), {
+      id: 'anytls-reality-warn',
+      duration: 12000,
+      description: (
+        <span>
+          {t('wizard.anytlsRealityDesc')}{' '}
+          <a
+            href='https://wiki.metacubex.one/config/proxies/anytls/'
+            target='_blank'
+            rel='noopener noreferrer'
+            className='underline text-primary'
+          >
+            {t('wizard.viewDocs')}
+          </a>
+        </span>
+      ),
+    })
+  }, [selectedProtocol, selectedSecurity, t])
 
   // GeoIP auto-detect flag
   useEffect(() => {

@@ -87,6 +87,8 @@
     "userPasswordDesc_psk": "Password will be Base64 encoded automatically",
     "authPasswordField": "Auth Password",
     "authPasswordFieldDesc": "Password used for client connection",
+    "paddingScheme": "Padding Scheme (traffic shaping)",
+    "paddingSchemeDesc": "Optional. One AnyTLS padding rule per line; leave empty to use server default. Example: stop=8 / 0=1200-1400 / 1=900-1200",
     "flow": "Flow Control",
     "flowDesc": "XTLS flow control mode",
     "labelField": "Tag",
@@ -120,6 +122,7 @@
     "vlessHints": ["clients: Configure user list, id is UUID.", "decryption is usually kept as none.", "fallbacks are optional, used for falling back to other services."],
     "vmessHints": ["clients: User list, contains id, level, email and other fields.", "Default template includes default node, adjust as needed."],
     "trojanHints": ["clients: Configure password and user info.", "Optional fallbacks for custom fallback."],
+    "anytlsHints": ["users: Configure password and email; supports multiple users.", "TLS only — cannot combine with REALITY; clients require sing-box >=1.10 / mihomo / shadowrocket.", "Optional padding_scheme controls traffic shaping; idle_session_timeout controls idle session reclamation."],
     "shadowsocksHints": ["method/password are required fields.", "For multiple users, add to clients."],
     "shadowsocks2022Hints": ["key field is Base64 encoded key.", "keys in clients must match client side."],
     "socksHints": ["auth can be noauth or password.", "accounts field is used when password auth is enabled."],
@@ -300,7 +303,13 @@
     "tunnelAnyDoor": "Tunnel (Dokodemo)",
     "securityNone": "None",
     "postQuantum": "Post-Quantum",
-    "probeFailed": "Probe failed"
+    "probeFailed": "Probe failed",
+    "anytlsServerHasNoDomain": "AnyTLS+TLS requires a server domain; current server has no domain configured. Set one in Server Management first.",
+    "anytlsNoCertsExpert": "No valid certificates available. Issue one in Certificate Management, or switch to Expert mode to fill cert paths manually.",
+    "anytlsNoMatchingCert": "No certificate found matching {{domain}}. Switch to Expert mode to fill paths manually, or issue a matching certificate.",
+    "anytlsRealityTitle": "AnyTLS + REALITY client compatibility notice",
+    "anytlsRealityDesc": "Clash does not support AnyTLS-REALITY; Mihomo docs explicitly state it will not be supported.",
+    "viewDocs": "View Docs"
   },
   "tunnelManager": {
     "title": "Tunnel Manager",

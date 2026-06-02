@@ -87,6 +87,8 @@
     "userPasswordDesc_psk": "输入密码后会自动进行 Base64 编码",
     "authPasswordField": "认证密码",
     "authPasswordFieldDesc": "客户端连接时使用的密码",
+    "paddingScheme": "Padding Scheme（流量整形规则）",
+    "paddingSchemeDesc": "可选。每行一条 AnyTLS 填充规则，留空则使用服务端默认方案。示例：stop=8 / 0=1200-1400 / 1=900-1200",
     "flow": "流控",
     "flowDesc": "XTLS流控模式",
     "labelField": "标签",
@@ -120,6 +122,7 @@
     "vlessHints": ["clients: 配置用户列表，id 为 UUID。", "decryption 一般保持为 none。", "fallbacks 可选，用于回落到其他服务。"],
     "vmessHints": ["clients: 用户列表，包含 id、level、email 等字段。", "默认模板包含 default 节点，可按需调整。"],
     "trojanHints": ["clients: 配置密码及用户信息。", "可选的 fallbacks 用于自定义回落。"],
+    "anytlsHints": ["users: 配置密码与 email，支持多用户。", "TLS only — 不能与 REALITY 组合；客户端需要 sing-box ≥1.10 / mihomo / shadowrocket。", "可选 padding_scheme 控制流量整形，idle_session_timeout 控制空闲会话回收。"],
     "shadowsocksHints": ["method/password 为必须字段。", "如需多用户，可在 clients 中追加。"],
     "shadowsocks2022Hints": ["key 字段为 Base64 编码的密钥。", "clients 中的 key 需要与客户端一致。"],
     "socksHints": ["auth 可选择 noauth 或 password。", "accounts 字段在启用密码认证时使用。"],
@@ -300,7 +303,13 @@
     "tunnelAnyDoor": "Tunnel (任意门)",
     "securityNone": "无",
     "postQuantum": "后量子加密",
-    "probeFailed": "探测失败"
+    "probeFailed": "探测失败",
+    "anytlsServerHasNoDomain": "AnyTLS+TLS 需要服务器域名;当前服务器未配置域名，请先在服务管理设置域名",
+    "anytlsNoCertsExpert": "暂无可用证书。请在证书管理签发，或切到专家模式手填证书路径",
+    "anytlsNoMatchingCert": "未找到与 {{domain}} 匹配的证书。请切到专家模式手填证书路径，或在证书管理签发匹配证书",
+    "anytlsRealityTitle": "AnyTLS + REALITY 客户端兼容性提示",
+    "anytlsRealityDesc": "Clash 不支持 AnyTLS-REALITY，Mihomo 文档已明确不会支持。",
+    "viewDocs": "查看文档"
   },
   "tunnelManager": {
     "title": "Tunnel 管理",
