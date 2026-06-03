@@ -691,6 +691,10 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 						proxyGroupsNode := rootMap.Content[i+1]
 						if proxyGroupsNode.Kind == yaml.SequenceNode {
 							reorderProxyGroups(proxyGroupsNode)
+							// 读 dialer-proxy-group 字段 → 给顶层 proxies 注入 dialer-proxy
+							// (顺序:先 inject 读字段,再 strip 删字段;链式代理已注入的 dialer-proxy 不覆盖)
+							injectDialerProxyFromGroups(rootMap)
+							stripDialerProxyGroup(proxyGroupsNode)
 						}
 						break
 					}
@@ -1834,6 +1838,133 @@ func reorderProxyGroups(seqNode *yaml.Node) {
 		if groupNode.Kind == yaml.MappingNode {
 			reorderProxyGroupFields(groupNode)
 		}
+	}
+}
+
+// injectDialerProxyFromGroups 读 proxy-groups 中各组的 dialer-proxy-group 字段,
+// 给该组 proxies 数组里的"叶子节点名"在顶层 proxies 加 dialer-proxy: <值>。
+//   - 已有 dialer-proxy 的节点跳过(尊重链式代理 chain_proxy_node_id 注入的)
+//   - 引用的 dialer-proxy-group 必须是已存在的代理组,否则跳过
+//   - DIRECT / REJECT / PASS 跳过
+//   - 同节点被多组绑定时,按 proxy-groups 出现顺序取第一个
+func injectDialerProxyFromGroups(rootMap *yaml.Node) {
+	var proxyGroupsNode, proxiesNode *yaml.Node
+	for i := 0; i < len(rootMap.Content)-1; i += 2 {
+		switch rootMap.Content[i].Value {
+		case "proxy-groups":
+			proxyGroupsNode = rootMap.Content[i+1]
+		case "proxies":
+			proxiesNode = rootMap.Content[i+1]
+		}
+	}
+	if proxyGroupsNode == nil || proxyGroupsNode.Kind != yaml.SequenceNode {
+		return
+	}
+	if proxiesNode == nil || proxiesNode.Kind != yaml.SequenceNode {
+		return
+	}
+
+	groupNames := make(map[string]bool)
+	type groupInfo struct {
+		dialerGroup string
+		proxies     []string
+	}
+	groups := make(map[string]*groupInfo)
+	var orderedGroupNames []string
+	for _, gNode := range proxyGroupsNode.Content {
+		if gNode.Kind != yaml.MappingNode {
+			continue
+		}
+		var name, dialerGroup string
+		var pxList []string
+		for i := 0; i < len(gNode.Content)-1; i += 2 {
+			switch gNode.Content[i].Value {
+			case "name":
+				name = gNode.Content[i+1].Value
+			case "dialer-proxy-group":
+				dialerGroup = gNode.Content[i+1].Value
+			case "proxies":
+				if gNode.Content[i+1].Kind == yaml.SequenceNode {
+					for _, pn := range gNode.Content[i+1].Content {
+						pxList = append(pxList, pn.Value)
+					}
+				}
+			}
+		}
+		if name == "" {
+			continue
+		}
+		groupNames[name] = true
+		groups[name] = &groupInfo{dialerGroup: dialerGroup, proxies: pxList}
+		orderedGroupNames = append(orderedGroupNames, name)
+	}
+
+	isBuiltIn := func(v string) bool { return v == "DIRECT" || v == "REJECT" || v == "PASS" }
+	nameToDialer := make(map[string]string)
+	for _, name := range orderedGroupNames {
+		info := groups[name]
+		if info.dialerGroup == "" || !groupNames[info.dialerGroup] {
+			continue
+		}
+		for _, p := range info.proxies {
+			if isBuiltIn(p) || groupNames[p] {
+				continue
+			}
+			if _, dup := nameToDialer[p]; !dup {
+				nameToDialer[p] = info.dialerGroup
+			}
+		}
+	}
+	if len(nameToDialer) == 0 {
+		return
+	}
+
+	for _, pNode := range proxiesNode.Content {
+		if pNode.Kind != yaml.MappingNode {
+			continue
+		}
+		var pName string
+		hasDialerAlready := false
+		for i := 0; i < len(pNode.Content)-1; i += 2 {
+			switch pNode.Content[i].Value {
+			case "name":
+				pName = pNode.Content[i+1].Value
+			case "dialer-proxy":
+				hasDialerAlready = true
+			}
+		}
+		if hasDialerAlready {
+			continue
+		}
+		target, ok := nameToDialer[pName]
+		if !ok {
+			continue
+		}
+		pNode.Content = append(pNode.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Value: "dialer-proxy"},
+			&yaml.Node{Kind: yaml.ScalarNode, Value: target},
+		)
+	}
+}
+
+// stripDialerProxyGroup 把每个代理组的 dialer-proxy-group 字段移除
+// (MMW 自定义字段,不应出现在客户端订阅响应里)。
+func stripDialerProxyGroup(proxyGroupsNode *yaml.Node) {
+	if proxyGroupsNode == nil || proxyGroupsNode.Kind != yaml.SequenceNode {
+		return
+	}
+	for _, groupNode := range proxyGroupsNode.Content {
+		if groupNode.Kind != yaml.MappingNode {
+			continue
+		}
+		newContent := make([]*yaml.Node, 0, len(groupNode.Content))
+		for i := 0; i < len(groupNode.Content)-1; i += 2 {
+			if groupNode.Content[i].Value == "dialer-proxy-group" {
+				continue
+			}
+			newContent = append(newContent, groupNode.Content[i], groupNode.Content[i+1])
+		}
+		groupNode.Content = newContent
 	}
 }
 

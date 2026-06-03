@@ -9,6 +9,8 @@ export interface ProxyGroup {
   url?: string
   interval?: number
   strategy?: 'round-robin' | 'consistent-hashing' | 'sticky-sessions'
+  // 中转代理组:这个组的出站流量先经过指定的代理组(Clash 原生字段,与 YAML key 同名,免去序列化映射)
+  'dialer-proxy-group'?: string
 }
 
 export interface Node {

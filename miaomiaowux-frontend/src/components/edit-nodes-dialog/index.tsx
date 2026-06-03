@@ -856,6 +856,7 @@ export function EditNodesDialog({
                         <SortableCard
                           key={group.name}
                           group={group}
+                          allGroups={proxyGroups}
                           isEditing={editingGroupName === group.name}
                           editingValue={editingGroupValue}
                           onEditingValueChange={setEditingGroupValue}

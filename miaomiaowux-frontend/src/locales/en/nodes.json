@@ -459,6 +459,8 @@
       "consistentHashing": "Consistent Hashing",
       "stickySessions": "Sticky Sessions"
     },
+    "dialerProxyGroup": "Transit proxy group",
+    "dialerProxyGroupNone": "None",
     "addGroupDialog": {
       "title": "Add Proxy Group",
       "description": "Enter a custom name or quickly select from predefined options",

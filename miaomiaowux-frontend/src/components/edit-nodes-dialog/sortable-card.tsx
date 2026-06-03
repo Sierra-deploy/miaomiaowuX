@@ -16,6 +16,8 @@ import type { DragItemData, ProxyGroup } from './types'
 
 interface SortableCardProps {
   group: ProxyGroup
+  // 当前所有代理组(供"中转代理组"下拉填充);可缺省以保持向后兼容
+  allGroups?: ProxyGroup[]
   isEditing: boolean
   editingValue: string
   onEditingValueChange: (value: string) => void
@@ -33,6 +35,7 @@ interface SortableCardProps {
 // 内部 SortableContext 把 proxies 和 use 合并到同一容器,解决"单个 use-item 无法拖动"的 bug。
 export const SortableCard = memo(function SortableCard({
   group,
+  allGroups,
   isEditing,
   editingValue,
   onEditingValueChange,
@@ -140,6 +143,7 @@ export const SortableCard = memo(function SortableCard({
                 <PopoverContent className='w-48 p-2' align='end'>
                   <ProxyTypeSelector
                     group={group}
+                    allGroups={allGroups}
                     onChange={(updatedGroup) => onGroupTypeChange(group.name, updatedGroup)}
                   />
                 </PopoverContent>

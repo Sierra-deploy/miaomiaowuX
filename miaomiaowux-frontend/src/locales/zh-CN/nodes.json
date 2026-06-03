@@ -459,6 +459,8 @@
       "consistentHashing": "一致性哈希",
       "stickySessions": "粘性会话"
     },
+    "dialerProxyGroup": "中转代理组",
+    "dialerProxyGroupNone": "无",
     "addGroupDialog": {
       "title": "添加代理组",
       "description": "输入自定义名称或从预定义选项中快速选择",
