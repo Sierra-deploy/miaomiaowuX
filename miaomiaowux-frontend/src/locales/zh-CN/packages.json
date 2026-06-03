@@ -47,6 +47,9 @@
     "deviceLimitPlaceholder": "0 表示不限制",
     "deviceLimitDesc": "每用户最大在线设备数，0 表示不限制",
     "nodesHint": "选择该套餐可以使用的节点（不选择表示可以使用所有节点）",
+    "nodeMultiplier": "流量倍率（默认 1，路由出站子节点继承父节点倍率）",
+    "nodeColumnName": "节点",
+    "nodeMultiplierHeader": "倍率",
     "saving": "保存中...",
     "confirmDelete": "确定要删除套餐模板 \"{{name}}\" 吗？"
   },

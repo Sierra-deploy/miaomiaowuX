@@ -673,6 +673,17 @@ func main() {
 			http.Error(w, "��法不允许", http.StatusMethodNotAllowed)
 		}
 	})))
+	// 节点名称倍率前缀(开关 + 左右分隔符)
+	mux.Handle("/api/admin/system-settings/node-name-multiplier-prefix", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			systemSettingsHandler.GetNodeNameMultiplierPrefix(w, r)
+		case http.MethodPut:
+			systemSettingsHandler.SetNodeNameMultiplierPrefix(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
 	mux.Handle("/api/admin/system-settings/intervals", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:

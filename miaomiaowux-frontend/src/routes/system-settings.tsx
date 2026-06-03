@@ -227,6 +227,37 @@ function SystemSettingsPage() {
     onError: handleServerError,
   })
 
+  // 节点名称倍率前缀:订阅生成时给套餐内倍率 != 1 的节点名加 "{left}{mult}{right}" 前缀
+  const { data: nodeMultPrefixData } = useQuery({
+    queryKey: ['node-name-multiplier-prefix'],
+    queryFn: async () => {
+      const res = await api.get('/api/admin/system-settings/node-name-multiplier-prefix')
+      return res.data as { success: boolean; enabled: boolean; left: string; right: string }
+    },
+    enabled: Boolean(auth.accessToken),
+    staleTime: 5 * 60 * 1000,
+  })
+  const [nodeMultPrefixEnabled, setNodeMultPrefixEnabled] = useState(false)
+  const [nodeMultPrefixLeft, setNodeMultPrefixLeft] = useState('「')
+  const [nodeMultPrefixRight, setNodeMultPrefixRight] = useState('」')
+  useEffect(() => {
+    if (nodeMultPrefixData) {
+      setNodeMultPrefixEnabled(Boolean(nodeMultPrefixData.enabled))
+      if (nodeMultPrefixData.left) setNodeMultPrefixLeft(nodeMultPrefixData.left)
+      if (nodeMultPrefixData.right) setNodeMultPrefixRight(nodeMultPrefixData.right)
+    }
+  }, [nodeMultPrefixData])
+  const saveNodeMultPrefixMutation = useMutation({
+    mutationFn: async (payload: { enabled: boolean; left: string; right: string }) => {
+      await api.put('/api/admin/system-settings/node-name-multiplier-prefix', payload)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['node-name-multiplier-prefix'] })
+      toast.success('设置已更新')
+    },
+    onError: handleServerError,
+  })
+
   // 用户路由出站开关 + 配额(与 UserPermissionsDialog 共享同一 config,通过同 queryKey 缓存复用)
   const { data: userPermConfigData } = useQuery({
     queryKey: ['user-permissions-config'],
@@ -957,6 +988,71 @@ function SystemSettingsPage() {
                     }}
                     disabled={toggleMmwShortLinkCompatMutation.isPending}
                   />
+                </div>
+
+                {/* 节点名称倍率前缀:订阅生成时给套餐内 multiplier != 1 的节点前面加 "{left}{mult}{right}" */}
+                <div className='rounded-lg border p-3 space-y-3'>
+                  <div className='flex items-center justify-between'>
+                    <div className='flex items-center gap-2 min-w-0'>
+                      <Label htmlFor='node-mult-prefix-toggle' className='cursor-pointer'>
+                        节点名称追加倍率
+                      </Label>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <CircleHelp className='h-4 w-4 text-muted-foreground cursor-help shrink-0' />
+                        </TooltipTrigger>
+                        <TooltipContent side='top' className='max-w-xs'>
+                          <p>开启后,订阅生成时套餐内倍率 ≠ 1 的节点会在名称前加上 <code>{nodeMultPrefixLeft}{'<倍率>'}{nodeMultPrefixRight}</code>。例如倍率 2 → <code>{`${nodeMultPrefixLeft}2${nodeMultPrefixRight}原节点名`}</code>。默认关闭。</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                    <Switch
+                      id='node-mult-prefix-toggle'
+                      checked={nodeMultPrefixEnabled}
+                      onCheckedChange={(checked) => {
+                        setNodeMultPrefixEnabled(checked)
+                        saveNodeMultPrefixMutation.mutate({ enabled: checked, left: nodeMultPrefixLeft, right: nodeMultPrefixRight })
+                      }}
+                      disabled={saveNodeMultPrefixMutation.isPending}
+                    />
+                  </div>
+                  {nodeMultPrefixEnabled && (
+                    <div className='grid grid-cols-1 sm:grid-cols-[1fr_auto_1fr_auto] items-end gap-2'>
+                      <div className='space-y-1'>
+                        <Label htmlFor='node-mult-prefix-left' className='text-xs text-muted-foreground'>左分隔符</Label>
+                        <Input
+                          id='node-mult-prefix-left'
+                          value={nodeMultPrefixLeft}
+                          maxLength={4}
+                          onChange={(e) => setNodeMultPrefixLeft(e.target.value)}
+                          onBlur={() => saveNodeMultPrefixMutation.mutate({ enabled: nodeMultPrefixEnabled, left: nodeMultPrefixLeft, right: nodeMultPrefixRight })}
+                          className='h-8 text-center'
+                        />
+                      </div>
+                      <div className='text-xs text-muted-foreground pb-2 px-1 select-none whitespace-nowrap tabular-nums'>
+                        2
+                      </div>
+                      <div className='space-y-1'>
+                        <Label htmlFor='node-mult-prefix-right' className='text-xs text-muted-foreground'>右分隔符</Label>
+                        <Input
+                          id='node-mult-prefix-right'
+                          value={nodeMultPrefixRight}
+                          maxLength={4}
+                          onChange={(e) => setNodeMultPrefixRight(e.target.value)}
+                          onBlur={() => saveNodeMultPrefixMutation.mutate({ enabled: nodeMultPrefixEnabled, left: nodeMultPrefixLeft, right: nodeMultPrefixRight })}
+                          className='h-8 text-center'
+                        />
+                      </div>
+                      <div className='text-xs text-muted-foreground pb-2 select-none whitespace-nowrap'>
+                        节点名
+                      </div>
+                    </div>
+                  )}
+                  {nodeMultPrefixEnabled && (
+                    <p className='text-xs text-muted-foreground'>
+                      预览:<span className='font-mono'>{nodeMultPrefixLeft}2{nodeMultPrefixRight}🇯🇵 日本节点</span>
+                    </p>
+                  )}
                 </div>
 
                 {/* 从妙妙屋迁移 — 跳到独立向导 */}

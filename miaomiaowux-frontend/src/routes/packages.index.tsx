@@ -53,6 +53,7 @@ interface PackageTemplate {
   is_reset: boolean
   reset_day: number
   nodes: number[]
+  node_multipliers?: Record<string, number>
   speed_limit_mbps: number
   device_limit: number
   traffic_mode: string
@@ -68,6 +69,7 @@ interface PackageFormData {
   traffic_limit_gb: number
   cycle_days: number
   nodes: number[]
+  node_multipliers: Record<number, number> // node_id → 倍率;默认 1 不写入
   speed_limit_mbps: number
   device_limit: number
   traffic_mode: string
@@ -93,6 +95,7 @@ function PackagesPage() {
     traffic_limit_gb: 100,
     cycle_days: 30,
     nodes: [],
+    node_multipliers: {},
     speed_limit_mbps: 0,
     device_limit: 0,
     traffic_mode: 'oneway',
@@ -198,6 +201,7 @@ function PackagesPage() {
       is_reset: false,
       reset_day: 1,
       nodes: [],
+      node_multipliers: {},
       speed_limit_mbps: 0,
       device_limit: 0,
       traffic_mode: 'oneway',
@@ -212,6 +216,13 @@ function PackagesPage() {
 
   const handleEdit = (pkg: PackageTemplate) => {
     setEditingPackage(pkg)
+    // 后端 JSON 的 node_multipliers map key 是字符串(JSON 规范),前端转回 number 方便用
+    const mults: Record<number, number> = {}
+    if (pkg.node_multipliers) {
+      for (const [k, v] of Object.entries(pkg.node_multipliers)) {
+        mults[Number(k)] = v
+      }
+    }
     setFormData({
       id: pkg.id,
       name: pkg.name,
@@ -219,6 +230,7 @@ function PackagesPage() {
       traffic_limit_gb: pkg.traffic_limit_gb,
       cycle_days: pkg.cycle_days,
       nodes: pkg.nodes || [],
+      node_multipliers: mults,
       speed_limit_mbps: pkg.speed_limit_mbps || 0,
       device_limit: pkg.device_limit || 0,
       traffic_mode: pkg.traffic_mode || 'oneway',
@@ -383,15 +395,18 @@ function PackagesPage() {
           }
         }}
       >
-        <DialogContent className="max-w-lg">
+        <DialogContent className="max-w-3xl md:max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
           <DialogHeader>
             <DialogTitle>{editingPackage ? t('dialog.editTitle') : t('dialog.createTitle')}</DialogTitle>
             <DialogDescription>
               {editingPackage ? t('dialog.editDesc') : t('dialog.createDesc')}
             </DialogDescription>
           </DialogHeader>
-          <form onSubmit={handleSubmit}>
-            <div className="space-y-4 py-4">
+          <form onSubmit={handleSubmit} className="flex-1 flex flex-col overflow-hidden">
+            {/* 桌面端左右两栏:左侧表单字段,右侧关联节点;移动端堆叠 */}
+            <div className="flex-1 overflow-y-auto md:overflow-hidden grid grid-cols-1 md:grid-cols-2 gap-6 py-4 md:py-2 md:min-h-0">
+              {/* 左栏:基础字段 */}
+              <div className="space-y-4 md:overflow-y-auto md:pr-2">
               <div className="space-y-2">
                 <Label htmlFor="name">{t('dialog.name')}</Label>
                 <Input
@@ -515,39 +530,107 @@ function PackagesPage() {
               </div>
               </ProFeatureGate>
 
-              <div className="space-y-2">
-                <Label>{t('dialog.relatedNodes')}</Label>
-                <div className="border rounded-md p-3 max-h-48 overflow-y-auto space-y-2">
-                  {nodes.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">{t('dialog.noNodes')}</p>
-                  ) : (
-                    nodes.map((node: any) => {
+              </div>
+
+              {/* 右栏:关联节点(桌面端撑满高度,自身滚动;移动端跟左栏堆叠) */}
+              <div className="space-y-2 flex flex-col md:overflow-hidden md:min-h-0">
+                <div className="flex items-center justify-between gap-2">
+                  <Label>{t('dialog.relatedNodes')}</Label>
+                  <span className="text-xs text-muted-foreground tabular-nums">
+                    {formData.nodes.length}/{nodes.length}
+                  </span>
+                </div>
+                {nodes.length === 0 ? (
+                  <div className="border rounded-md p-6 text-sm text-muted-foreground text-center">
+                    {t('dialog.noNodes')}
+                  </div>
+                ) : (
+                  <div className="border rounded-md overflow-y-auto flex-1 max-h-72 md:max-h-none bg-card">
+                    {/* 表头:sticky 在滚动时也可见,提示后面的数字框是倍率 */}
+                    <div className="sticky top-0 z-10 flex items-center gap-2 pl-2.5 pr-2 py-1.5 bg-muted/60 backdrop-blur-sm border-b text-[11px] font-medium text-muted-foreground">
+                      <div className="w-4 shrink-0" />{/* checkbox 位 */}
+                      <span className="flex-1">{t('dialog.nodeColumnName', { defaultValue: '节点' })}</span>
+                      <span className="shrink-0 w-[72px] text-center">{t('dialog.nodeMultiplierHeader', { defaultValue: '流量倍率' })}</span>
+                    </div>
+                    <div className="divide-y">
+                    {nodes.map((node: any) => {
                       const isInternal = Boolean(node.inbound_tag)
+                      const isChecked = formData.nodes.includes(node.id)
+                      const multiplier = formData.node_multipliers[node.id] ?? 1
                       return (
-                        <div key={node.id} className="flex items-center space-x-2">
+                        <div
+                          key={node.id}
+                          className={`flex items-center gap-2 pl-2.5 pr-2 py-2 border-l-2 transition-colors ${
+                            isChecked
+                              ? 'border-l-primary bg-primary/5'
+                              : 'border-l-transparent hover:bg-muted/40'
+                          }`}
+                        >
                           <Checkbox
                             id={`node-${node.id}`}
-                            checked={formData.nodes.includes(node.id)}
+                            checked={isChecked}
                             onCheckedChange={(checked) => {
                               if (checked) {
                                 setFormData({ ...formData, nodes: [...formData.nodes, node.id] })
                               } else {
-                                setFormData({ ...formData, nodes: formData.nodes.filter((id) => id !== node.id) })
+                                // 取消勾选时同步删 multiplier,避免后端清理逻辑兜底也保留个孤儿
+                                const nextMults = { ...formData.node_multipliers }
+                                delete nextMults[node.id]
+                                setFormData({ ...formData, nodes: formData.nodes.filter((id) => id !== node.id), node_multipliers: nextMults })
                               }
                             }}
+                            className="shrink-0"
                           />
-                          <Label htmlFor={`node-${node.id}`} className="cursor-pointer flex-1 flex items-center gap-1.5">
-                            <Badge variant={isInternal ? 'default' : 'outline'} className={`text-[10px] px-1 py-0 shrink-0 ${isInternal ? '' : 'border-amber-500 text-amber-600 dark:text-amber-400'}`}>
+                          <Label
+                            htmlFor={`node-${node.id}`}
+                            className="cursor-pointer flex-1 flex items-center gap-1.5 min-w-0 text-sm font-normal"
+                          >
+                            <Badge
+                              variant={isInternal ? 'default' : 'outline'}
+                              className={`text-[10px] px-1 py-0 shrink-0 ${
+                                isInternal ? '' : 'border-amber-500 text-amber-600 dark:text-amber-400'
+                              }`}
+                            >
                               {isInternal ? t('dialog.nodeInternal') : t('dialog.nodeExternal')}
                             </Badge>
-                            {node.node_name}
+                            <span className="truncate">{node.node_name}</span>
                           </Label>
+                          {/* 倍率列:固定宽度 72px,跟表头对齐;勾选时显示输入,未勾选显示占位文字 */}
+                          <div className="flex items-center justify-end gap-0.5 shrink-0 w-[72px]">
+                            {isChecked ? (
+                              <>
+                                <Input
+                                  type="number"
+                                  step="0.1"
+                                  min="0"
+                                  max="99"
+                                  value={multiplier}
+                                  onChange={(e) => {
+                                    const v = parseFloat(e.target.value)
+                                    const nextMults = { ...formData.node_multipliers }
+                                    if (!Number.isFinite(v) || v === 1) {
+                                      delete nextMults[node.id]
+                                    } else {
+                                      nextMults[node.id] = v
+                                    }
+                                    setFormData({ ...formData, node_multipliers: nextMults })
+                                  }}
+                                  className="no-spin h-7 w-12 px-1.5 text-xs text-right tabular-nums"
+                                  aria-label={t('dialog.nodeMultiplier', { defaultValue: '流量倍率' })}
+                                />
+                                <span className="text-sm font-semibold text-primary leading-none select-none">×</span>
+                              </>
+                            ) : (
+                              <span className="text-xs text-muted-foreground/50">—</span>
+                            )}
+                          </div>
                         </div>
                       )
-                    })
-                  )}
-                </div>
-                <p className="text-xs text-gray-500">
+                    })}
+                    </div>
+                  </div>
+                )}
+                <p className="text-xs text-muted-foreground">
                   {t('dialog.nodesHint')}
                 </p>
               </div>

@@ -138,6 +138,18 @@
 }
 
 @layer components {
+  /* 数字输入隐藏原生上下箭头(spin button),Firefox/Chromium/Edge 通用。
+     class="no-spin" 加到 <input type="number"> 上就生效。 */
+  .no-spin::-webkit-outer-spin-button,
+  .no-spin::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  .no-spin {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
   .pixel-border {
     position: relative;
     border-width: 2px;

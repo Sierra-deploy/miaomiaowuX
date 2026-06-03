@@ -47,6 +47,9 @@
     "deviceLimitPlaceholder": "0 for unlimited",
     "deviceLimitDesc": "Max concurrent devices per user, 0 for unlimited",
     "nodesHint": "Select nodes this package can use (none selected means all nodes)",
+    "nodeMultiplier": "Traffic multiplier (default 1, routed children inherit parent)",
+    "nodeColumnName": "Node",
+    "nodeMultiplierHeader": "Multiplier",
     "saving": "Saving...",
     "confirmDelete": "Are you sure you want to delete package template \"{{name}}\"?"
   },

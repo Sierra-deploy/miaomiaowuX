@@ -195,6 +195,7 @@ type Package struct {
 	IsReset           bool      `json:"is_reset"`         // 流量是否按月重置
 	ResetDay          int       `json:"reset_day"`        // 重置的月份日期 (1-31)
 	Nodes             []int64   `json:"nodes"`              // 关联节点 ID
+	NodeMultipliers   map[int64]float64 `json:"node_multipliers,omitempty"` // node_id → 倍率;遗留套餐为 nil = 全部按 1
 	SpeedLimitMbps    float64   `json:"speed_limit_mbps"`   // 限速 (Mbps)，0=不限
 	DeviceLimit       int       `json:"device_limit"`       // 设备数限制，0=不限
 	AutoSpeedRules    []AutoSpeedLimitRule `json:"auto_speed_rules,omitempty"`
@@ -210,6 +211,55 @@ func (p *Package) TrafficMultiplier() int64 {
 		return 2
 	}
 	return 1
+}
+
+// MultiplierForNode 返回某节点在该套餐内的倍率。
+// routed 子节点(自身不在套餐 NodeMultipliers 里)传入 parentNodeID,自动回退到父物理节点的倍率;
+// 都查不到 → 1.0(默认权重)。
+func (p *Package) MultiplierForNode(nodeID int64, parentNodeID *int64) float64 {
+	if p == nil || len(p.NodeMultipliers) == 0 {
+		return 1.0
+	}
+	if m, ok := p.NodeMultipliers[nodeID]; ok && m > 0 {
+		return m
+	}
+	if parentNodeID != nil {
+		if m, ok := p.NodeMultipliers[*parentNodeID]; ok && m > 0 {
+			return m
+		}
+	}
+	return 1.0
+}
+
+// serializeNodeMultipliers 把 map 序列化为 JSON,**清理掉不在 nodes 列表里的残留 key**
+// (取消勾选节点时 UI 可能没同步删 map 项,在这里兜底);全部省略默认值 1.0 节省空间。
+// nil/空/全是 1.0 → 返回 "{}"。
+func serializeNodeMultipliers(m map[int64]float64, nodes []int64) string {
+	if len(m) == 0 {
+		return "{}"
+	}
+	keep := make(map[string]float64, len(m))
+	allowed := make(map[int64]bool, len(nodes))
+	for _, id := range nodes {
+		allowed[id] = true
+	}
+	for id, v := range m {
+		if !allowed[id] {
+			continue
+		}
+		if v <= 0 || v == 1.0 {
+			continue
+		}
+		keep[fmt.Sprintf("%d", id)] = v
+	}
+	if len(keep) == 0 {
+		return "{}"
+	}
+	b, err := json.Marshal(keep)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }
 
 type AutoSpeedLimitRule struct {
@@ -335,6 +385,12 @@ type SystemConfig struct {
 	// 开启后,直接 GET /<code>(无 /x/ 前缀)会尝试匹配同 code 的 /x/ 短链;命中则放行,
 	// 未命中按安全规则计入暴力枚举失败计数。
 	EnableMmwShortLinkCompat bool
+
+	// 节点名称倍率前缀:订阅生成时,套餐内 multiplier != 1 的节点 name 前面加
+	// "{Left}{multiplier}{Right}" 前缀;Left/Right 默认 「」,用户可改。
+	NodeNameMultiplierPrefixEnabled bool
+	NodeNameMultiplierLeft          string
+	NodeNameMultiplierRight         string
 }
 
 // ExternalSubscription表示用户导入的外部订阅URL。
@@ -1469,6 +1525,16 @@ CREATE INDEX IF NOT EXISTS idx_override_scripts_hook ON override_scripts(hook);
 	if err := r.ensureSystemConfigColumn("default_template_filename", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// 节点名称倍率前缀:订阅生成时把套餐内 multiplier != 1 的节点 name 前缀加上 "{left}{mult}{right}"
+	if err := r.ensureSystemConfigColumn("node_name_multiplier_prefix_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("node_name_multiplier_left", "TEXT NOT NULL DEFAULT '「'"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("node_name_multiplier_right", "TEXT NOT NULL DEFAULT '」'"); err != nil {
+		return err
+	}
 
 	const xrayServersSchema = `
 CREATE TABLE IF NOT EXISTS xray_servers (
@@ -1529,6 +1595,9 @@ CREATE INDEX IF NOT EXISTS idx_packages_name ON packages(name);
 
 	// 如果不存在，则将 short_code 列添加到包表中
 	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN short_code TEXT DEFAULT ''")
+
+	// 节点倍率(套餐级 per-node):JSON {"<node_id>": multiplier}。空 = 全部按 1.0
+	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN node_multipliers TEXT DEFAULT '{}'")
 
 	// 为已有 package 补全短码
 	if err := r.generateMissingPackageShortCodes(); err != nil {
@@ -5812,7 +5881,10 @@ SELECT proxy_groups_source_url, client_compatibility_mode, COALESCE(enable_short
        COALESCE(enable_override_scripts, 0),
        COALESCE(silent_mode, 0), COALESCE(silent_mode_timeout, 15),
        COALESCE(enable_miaomiaowu_features, 1), COALESCE(default_template_filename, ''),
-       COALESCE(enable_mmw_short_link_compat, 0)
+       COALESCE(enable_mmw_short_link_compat, 0),
+       COALESCE(node_name_multiplier_prefix_enabled, 0),
+       COALESCE(node_name_multiplier_left, '「'),
+       COALESCE(node_name_multiplier_right, '」')
 FROM system_config
 WHERE id = 1
 `
@@ -5823,6 +5895,7 @@ WHERE id = 1
 	var notifyServerOffline, notifyServerOnline, notifyTrafficThreshold int
 	var enableOverrideScripts, silentMode, silentModeTimeout int
 	var enableMiaomiaowuFeatures, enableMmwShortLinkCompat int
+	var nodeNameMultPrefixEnabled int
 	err := r.db.QueryRowContext(ctx, query).Scan(
 		&cfg.ProxyGroupsSourceURL, &compatibilityMode, &enableShortLink,
 		&cfg.SpeedCollectInterval, &cfg.TrafficCollectInterval,
@@ -5836,6 +5909,7 @@ WHERE id = 1
 		&silentMode, &silentModeTimeout,
 		&enableMiaomiaowuFeatures, &cfg.DefaultTemplateFilename,
 		&enableMmwShortLinkCompat,
+		&nodeNameMultPrefixEnabled, &cfg.NodeNameMultiplierLeft, &cfg.NodeNameMultiplierRight,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -5862,6 +5936,7 @@ WHERE id = 1
 	}
 	cfg.EnableMiaomiaowuFeatures = enableMiaomiaowuFeatures != 0
 	cfg.EnableMmwShortLinkCompat = enableMmwShortLinkCompat != 0
+	cfg.NodeNameMultiplierPrefixEnabled = nodeNameMultPrefixEnabled != 0
 	return cfg, nil
 }
 
@@ -5895,6 +5970,9 @@ SET proxy_groups_source_url = ?,
     enable_miaomiaowu_features = ?,
     default_template_filename = ?,
     enable_mmw_short_link_compat = ?,
+    node_name_multiplier_prefix_enabled = ?,
+    node_name_multiplier_left = ?,
+    node_name_multiplier_right = ?,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = 1
 `
@@ -5924,6 +6002,16 @@ WHERE id = 1
 		silentModeTimeout = 15
 	}
 
+	// 默认分隔符兜底(老配置可能 nil/空)
+	nnmLeft := cfg.NodeNameMultiplierLeft
+	if nnmLeft == "" {
+		nnmLeft = "「"
+	}
+	nnmRight := cfg.NodeNameMultiplierRight
+	if nnmRight == "" {
+		nnmRight = "」"
+	}
+
 	result, err := r.db.ExecContext(ctx, updateStmt, cfg.ProxyGroupsSourceURL, compatibilityMode, enableShortLink,
 		cfg.SpeedCollectInterval, cfg.TrafficCollectInterval, cfg.TrafficCheckInterval, cfg.HeartbeatInterval,
 		agentLogEnabled,
@@ -5934,7 +6022,8 @@ WHERE id = 1
 		boolToInt(cfg.EnableOverrideScripts),
 		boolToInt(cfg.SilentMode), silentModeTimeout,
 		boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename,
-		boolToInt(cfg.EnableMmwShortLinkCompat))
+		boolToInt(cfg.EnableMmwShortLinkCompat),
+		boolToInt(cfg.NodeNameMultiplierPrefixEnabled), nnmLeft, nnmRight)
 	if err != nil {
 		return fmt.Errorf("update system config: %w", err)
 	}
@@ -5951,8 +6040,9 @@ INSERT INTO system_config (id, proxy_groups_source_url, client_compatibility_mod
     notify_enabled, telegram_bot_token, telegram_chat_id, notify_login, notify_subscribe_fetch,
     notify_daily_traffic, notify_server_offline, notify_server_online, notify_traffic_threshold,
     notify_daily_traffic_time, notify_traffic_threshold_percent, enable_override_scripts,
-    silent_mode, silent_mode_timeout, enable_miaomiaowu_features, default_template_filename, enable_mmw_short_link_compat)
-VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    silent_mode, silent_mode_timeout, enable_miaomiaowu_features, default_template_filename, enable_mmw_short_link_compat,
+    node_name_multiplier_prefix_enabled, node_name_multiplier_left, node_name_multiplier_right)
+VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 		if _, err := r.db.ExecContext(ctx, insertStmt, cfg.ProxyGroupsSourceURL, compatibilityMode, enableShortLink,
 			cfg.SpeedCollectInterval, cfg.TrafficCollectInterval, cfg.TrafficCheckInterval, cfg.HeartbeatInterval, agentLogEnabled,
@@ -5963,7 +6053,8 @@ VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
 			boolToInt(cfg.EnableOverrideScripts),
 			boolToInt(cfg.SilentMode), silentModeTimeout,
 			boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename,
-			boolToInt(cfg.EnableMmwShortLinkCompat)); err != nil {
+			boolToInt(cfg.EnableMmwShortLinkCompat),
+			boolToInt(cfg.NodeNameMultiplierPrefixEnabled), nnmLeft, nnmRight); err != nil {
 			return fmt.Errorf("insert system config: %w", err)
 		}
 	}
@@ -6406,7 +6497,7 @@ func (r *TrafficRepository) ListPackages(ctx context.Context) ([]Package, error)
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
 		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
-		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), COALESCE(template_filename, ''), created_at, updated_at
+		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), COALESCE(template_filename, ''), COALESCE(node_multipliers, '{}'), created_at, updated_at
 		FROM packages
 		ORDER BY created_at DESC
 	`
@@ -6421,10 +6512,10 @@ func (r *TrafficRepository) ListPackages(ctx context.Context) ([]Package, error)
 	for rows.Next() {
 		var pkg Package
 		var isReset int
-		var nodesJSON, autoSpeedJSON string
+		var nodesJSON, autoSpeedJSON, nodeMultJSON string
 		err := rows.Scan(&pkg.ID, &pkg.Name, &pkg.Description, &pkg.TrafficLimitBytes,
 			&pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON, &pkg.SpeedLimitMbps, &pkg.DeviceLimit,
-			&autoSpeedJSON, &pkg.ShortCode, &pkg.TrafficMode, &pkg.TemplateFilename, &pkg.CreatedAt, &pkg.UpdatedAt)
+			&autoSpeedJSON, &pkg.ShortCode, &pkg.TrafficMode, &pkg.TemplateFilename, &nodeMultJSON, &pkg.CreatedAt, &pkg.UpdatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("scan package: %w", err)
 		}
@@ -6439,6 +6530,9 @@ func (r *TrafficRepository) ListPackages(ctx context.Context) ([]Package, error)
 		}
 		if autoSpeedJSON != "" {
 			json.Unmarshal([]byte(autoSpeedJSON), &pkg.AutoSpeedRules)
+		}
+		if nodeMultJSON != "" && nodeMultJSON != "{}" {
+			json.Unmarshal([]byte(nodeMultJSON), &pkg.NodeMultipliers)
 		}
 
 		packages = append(packages, pkg)
@@ -6460,18 +6554,18 @@ func (r *TrafficRepository) GetPackage(ctx context.Context, id int64) (*Package,
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
 		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
-		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), COALESCE(template_filename, ''), created_at, updated_at
+		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), COALESCE(template_filename, ''), COALESCE(node_multipliers, '{}'), created_at, updated_at
 		FROM packages
 		WHERE id = ?
 	`
 
 	var pkg Package
 	var isReset int
-	var nodesJSON, autoSpeedJSON string
+	var nodesJSON, autoSpeedJSON, nodeMultJSON string
 	err := r.db.QueryRowContext(ctx, query, id).Scan(&pkg.ID, &pkg.Name, &pkg.Description,
 		&pkg.TrafficLimitBytes, &pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON,
 		&pkg.SpeedLimitMbps, &pkg.DeviceLimit, &autoSpeedJSON, &pkg.ShortCode, &pkg.TrafficMode,
-		&pkg.TemplateFilename, &pkg.CreatedAt, &pkg.UpdatedAt)
+		&pkg.TemplateFilename, &nodeMultJSON, &pkg.CreatedAt, &pkg.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrPackageNotFound
@@ -6491,6 +6585,9 @@ func (r *TrafficRepository) GetPackage(ctx context.Context, id int64) (*Package,
 	if autoSpeedJSON != "" {
 		json.Unmarshal([]byte(autoSpeedJSON), &pkg.AutoSpeedRules)
 	}
+	if nodeMultJSON != "" && nodeMultJSON != "{}" {
+		json.Unmarshal([]byte(nodeMultJSON), &pkg.NodeMultipliers)
+	}
 
 	return &pkg, nil
 }
@@ -6509,18 +6606,18 @@ func (r *TrafficRepository) GetPackageByName(ctx context.Context, name string) (
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
 		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
-		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), COALESCE(template_filename, ''), created_at, updated_at
+		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), COALESCE(template_filename, ''), COALESCE(node_multipliers, '{}'), created_at, updated_at
 		FROM packages
 		WHERE name = ?
 	`
 
 	var pkg Package
 	var isReset int
-	var nodesJSON, autoSpeedJSON string
+	var nodesJSON, autoSpeedJSON, nodeMultJSON string
 	err := r.db.QueryRowContext(ctx, query, name).Scan(&pkg.ID, &pkg.Name, &pkg.Description,
 		&pkg.TrafficLimitBytes, &pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON,
 		&pkg.SpeedLimitMbps, &pkg.DeviceLimit, &autoSpeedJSON, &pkg.ShortCode, &pkg.TrafficMode,
-		&pkg.TemplateFilename, &pkg.CreatedAt, &pkg.UpdatedAt)
+		&pkg.TemplateFilename, &nodeMultJSON, &pkg.CreatedAt, &pkg.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrPackageNotFound
@@ -6539,6 +6636,9 @@ func (r *TrafficRepository) GetPackageByName(ctx context.Context, name string) (
 	}
 	if autoSpeedJSON != "" {
 		json.Unmarshal([]byte(autoSpeedJSON), &pkg.AutoSpeedRules)
+	}
+	if nodeMultJSON != "" && nodeMultJSON != "{}" {
+		json.Unmarshal([]byte(nodeMultJSON), &pkg.NodeMultipliers)
 	}
 	return &pkg, nil
 }
@@ -6571,6 +6671,9 @@ func (r *TrafficRepository) CreatePackage(ctx context.Context, pkg Package) (int
 		autoSpeedJSON = string(b)
 	}
 
+	// node_multipliers 序列化:仅保留 nodes 列表里的 key,nil/空 map → "{}"
+	nodeMultJSON := serializeNodeMultipliers(pkg.NodeMultipliers, pkg.Nodes)
+
 	// 生成短码
 	shortCode, err := generatePackageShortCode()
 	if err != nil {
@@ -6578,8 +6681,8 @@ func (r *TrafficRepository) CreatePackage(ctx context.Context, pkg Package) (int
 	}
 
 	const query = `
-		INSERT INTO packages (name, description, traffic_limit_bytes, cycle_days, is_reset, reset_day, nodes, speed_limit_mbps, device_limit, auto_speed_limit_json, short_code, traffic_mode, template_filename)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO packages (name, description, traffic_limit_bytes, cycle_days, is_reset, reset_day, nodes, speed_limit_mbps, device_limit, auto_speed_limit_json, short_code, traffic_mode, template_filename, node_multipliers)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	isReset := 0
@@ -6593,7 +6696,7 @@ func (r *TrafficRepository) CreatePackage(ctx context.Context, pkg Package) (int
 	}
 
 	result, err := r.db.ExecContext(ctx, query, name, pkg.Description, pkg.TrafficLimitBytes,
-		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, autoSpeedJSON, shortCode, trafficMode, pkg.TemplateFilename)
+		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, autoSpeedJSON, shortCode, trafficMode, pkg.TemplateFilename, nodeMultJSON)
 	if err != nil {
 		return 0, fmt.Errorf("create package: %w", err)
 	}
@@ -6633,11 +6736,13 @@ func (r *TrafficRepository) UpdatePackage(ctx context.Context, pkg Package) erro
 		autoSpeedJSON = string(b)
 	}
 
+	nodeMultJSON := serializeNodeMultipliers(pkg.NodeMultipliers, pkg.Nodes)
+
 	const query = `
 		UPDATE packages
 		SET name = ?, description = ?, traffic_limit_bytes = ?, cycle_days = ?,
 		    is_reset = ?, reset_day = ?, nodes = ?, speed_limit_mbps = ?, device_limit = ?,
-		    auto_speed_limit_json = ?, traffic_mode = ?, template_filename = ?, updated_at = CURRENT_TIMESTAMP
+		    auto_speed_limit_json = ?, traffic_mode = ?, template_filename = ?, node_multipliers = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`
 
@@ -6652,7 +6757,7 @@ func (r *TrafficRepository) UpdatePackage(ctx context.Context, pkg Package) erro
 	}
 
 	result, err := r.db.ExecContext(ctx, query, name, pkg.Description, pkg.TrafficLimitBytes,
-		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, autoSpeedJSON, trafficMode, pkg.TemplateFilename, pkg.ID)
+		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, autoSpeedJSON, trafficMode, pkg.TemplateFilename, nodeMultJSON, pkg.ID)
 	if err != nil {
 		return fmt.Errorf("update package: %w", err)
 	}
@@ -7227,6 +7332,132 @@ func (r *TrafficRepository) GetUserTotalTraffic(ctx context.Context, username st
 	err := r.db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(uplink + downlink), 0) FROM user_traffic WHERE username = ?`, username).Scan(&total)
 	return total, err
+}
+
+// GetUserWeightedTraffic 按 pkg.NodeMultipliers 加权汇总该用户的流量。
+// 数据源:user_email_traffic(每行 email 维度),email 形态:
+//   - <username>__<inbound_tag>:主账号在某 inbound 的流量,反查 nodes(server_name+inbound_tag)→ 节点 → 倍率
+//   - 子账号:命中 user_subaccounts → routed_node_id → routed 节点 → 父节点 → 父倍率
+//   - 其它(主账号无 __ 分隔等)→ 兜底按 1.0 计算
+// 套餐 nil 或 NodeMultipliers 空 → 等价于 GetUserTotalTraffic 在 email 维度的求和(全部按 1)。
+func (r *TrafficRepository) GetUserWeightedTraffic(ctx context.Context, username string, pkg *Package) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return 0, errors.New("username is required")
+	}
+
+	// 套餐空 / 无倍率配置 → 直接用 user_traffic(按 username 聚合,等价于全 1)
+	if pkg == nil || len(pkg.NodeMultipliers) == 0 {
+		return r.GetUserTotalTraffic(ctx, username)
+	}
+
+	// 预加载:server_id → server.name(反查主账号节点用)
+	serverNames := make(map[int64]string)
+	srvRows, err := r.db.QueryContext(ctx, `SELECT id, name FROM remote_servers`)
+	if err != nil {
+		return 0, fmt.Errorf("list servers: %w", err)
+	}
+	for srvRows.Next() {
+		var id int64
+		var name string
+		if err := srvRows.Scan(&id, &name); err == nil {
+			serverNames[id] = name
+		}
+	}
+	srvRows.Close()
+
+	// 预加载:user_subaccounts(email → routed_node_id);仅本用户的
+	subaccNodeID := make(map[string]int64)
+	saRows, err := r.db.QueryContext(ctx,
+		`SELECT email, routed_node_id FROM user_subaccounts WHERE username = ?`, username)
+	if err != nil {
+		return 0, fmt.Errorf("list subaccounts: %w", err)
+	}
+	for saRows.Next() {
+		var email string
+		var nid int64
+		if err := saRows.Scan(&email, &nid); err == nil {
+			subaccNodeID[email] = nid
+		}
+	}
+	saRows.Close()
+
+	// 预加载:nodes 缓存(id → {id, parent_node_id, original_server, inbound_tag})
+	// 给 routed 节点拿父 ID + 给主账号反查 server+inbound → id
+	nodeByID := make(map[int64]struct {
+		ParentID *int64
+	})
+	nodeByServerTag := make(map[string]int64) // key=server_name+"\x00"+inbound_tag
+	nRows, err := r.db.QueryContext(ctx,
+		`SELECT id, parent_node_id, COALESCE(original_server,''), COALESCE(inbound_tag,'') FROM nodes`)
+	if err != nil {
+		return 0, fmt.Errorf("list nodes: %w", err)
+	}
+	for nRows.Next() {
+		var id int64
+		var parentID *int64
+		var srv, tag string
+		if err := nRows.Scan(&id, &parentID, &srv, &tag); err != nil {
+			continue
+		}
+		nodeByID[id] = struct{ ParentID *int64 }{ParentID: parentID}
+		if srv != "" && tag != "" {
+			nodeByServerTag[srv+"\x00"+tag] = id
+		}
+	}
+	nRows.Close()
+
+	// 扫该用户所有 email 流量行
+	prefix := username + "__"
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT server_id, email, uplink, downlink FROM user_email_traffic WHERE email = ? OR email LIKE ?`,
+		username, prefix+"%")
+	if err != nil {
+		return 0, fmt.Errorf("query user_email_traffic: %w", err)
+	}
+	defer rows.Close()
+
+	var weighted float64
+	for rows.Next() {
+		var serverID, uplink, downlink int64
+		var email string
+		if err := rows.Scan(&serverID, &email, &uplink, &downlink); err != nil {
+			continue
+		}
+		bytes := uplink + downlink
+
+		// 子账号路径(routed)
+		if nid, ok := subaccNodeID[email]; ok {
+			var parent *int64
+			if meta, ok2 := nodeByID[nid]; ok2 {
+				parent = meta.ParentID
+			}
+			weighted += float64(bytes) * pkg.MultiplierForNode(nid, parent)
+			continue
+		}
+
+		// 主账号 inbound 路径:<username>__<inbound_tag>
+		if strings.HasPrefix(email, prefix) {
+			tag := email[len(prefix):]
+			srvName := serverNames[serverID]
+			if srvName != "" {
+				if nid, ok := nodeByServerTag[srvName+"\x00"+tag]; ok {
+					weighted += float64(bytes) * pkg.MultiplierForNode(nid, nil)
+					continue
+				}
+			}
+		}
+
+		// 兜底:无法识别节点 → 按 1 算(包括 email == username 的历史孤行)
+		weighted += float64(bytes)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("scan user_email_traffic: %w", err)
+	}
+	return int64(weighted), nil
 }
 
 func (r *TrafficRepository) UpdateUserLimitOverrides(ctx context.Context, username string, speedOverride *float64, deviceOverride *int) error {

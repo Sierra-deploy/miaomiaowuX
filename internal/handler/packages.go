@@ -72,6 +72,7 @@ type createPackageRequest struct {
 	IsReset          bool                         `json:"is_reset"`
 	ResetDay         int                          `json:"reset_day"`
 	Nodes            []int64                      `json:"nodes"`
+	NodeMultipliers  map[int64]float64            `json:"node_multipliers"` // node_id → 倍率
 	SpeedLimitMbps   float64                      `json:"speed_limit_mbps"`
 	DeviceLimit      int                          `json:"device_limit"`
 	AutoSpeedRules   []storage.AutoSpeedLimitRule `json:"auto_speed_rules"`
@@ -162,6 +163,7 @@ func (h *PackageCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		IsReset:           req.IsReset,
 		ResetDay:          req.ResetDay,
 		Nodes:             nodes,
+		NodeMultipliers:   req.NodeMultipliers,
 		SpeedLimitMbps:    req.SpeedLimitMbps,
 		DeviceLimit:       req.DeviceLimit,
 		AutoSpeedRules:    req.AutoSpeedRules,
@@ -213,6 +215,7 @@ type updatePackageRequest struct {
 	IsReset          bool                         `json:"is_reset"`
 	ResetDay         int                          `json:"reset_day"`
 	Nodes            []int64                      `json:"nodes"`
+	NodeMultipliers  map[int64]float64            `json:"node_multipliers"` // node_id → 倍率
 	SpeedLimitMbps   float64                      `json:"speed_limit_mbps"`
 	DeviceLimit      int                          `json:"device_limit"`
 	AutoSpeedRules   []storage.AutoSpeedLimitRule `json:"auto_speed_rules"`
@@ -296,6 +299,7 @@ func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		IsReset:           req.IsReset,
 		ResetDay:          req.ResetDay,
 		Nodes:             nodes,
+		NodeMultipliers:   req.NodeMultipliers,
 		SpeedLimitMbps:    req.SpeedLimitMbps,
 		DeviceLimit:       req.DeviceLimit,
 		AutoSpeedRules:    req.AutoSpeedRules,

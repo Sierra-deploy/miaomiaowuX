@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"miaomiaowux/internal/auth"
@@ -65,6 +66,16 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	// Build user credential lookup for per-user proxy configs
 	credMap := h.buildUserCredentialMap(r, username)
 
+	// 节点名称倍率前缀:开关开启时,套餐内倍率 != 1 的节点 name 加上 "{Left}{mult}{Right}" 前缀
+	// renameMap 收集所有重命名,后面要同步 proxy-groups 里"按全名引用"的列表,避免组找不到节点
+	sysCfg, _ := h.repo.GetSystemConfig(r.Context())
+	renameMap := make(map[string]string)
+	recordRename := func(oldName, newName string, did bool) {
+		if did && oldName != "" && newName != "" && oldName != newName {
+			renameMap[oldName] = newName
+		}
+	}
+
 	// 按用户 node_order 重排 pkg.Nodes。
 	// 用户拖过节点顺序 → settings.NodeOrder 非空 → 按其位置排;
 	// 没拖过 → fallback 用 admin 的顺序(过滤掉用户没绑的节点) — 跟 /api/user/config GET 一致。
@@ -81,6 +92,7 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		// routed 节点:克隆父 inbound 的 clash 模板,替换 uuid 为该用户子账号 uuid + 节点名
 		if node.NodeType == "routed" {
 			if proxyConfig, ok := buildRoutedProxyForUser(r.Context(), h.repo, node, username); ok {
+				recordRename(applyMultiplierPrefix(proxyConfig, node, pkg, &sysCfg))
 				proxies = append(proxies, proxyConfig)
 			}
 			continue
@@ -93,6 +105,7 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 			continue
 		}
 		applyUserCredentials(proxyConfig, node, credMap)
+		recordRename(applyMultiplierPrefix(proxyConfig, node, pkg, &sysCfg))
 		proxies = append(proxies, proxyConfig)
 	}
 
@@ -105,6 +118,7 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 				continue
 			}
 			if proxyConfig, ok := buildRoutedProxyForUser(r.Context(), h.repo, n.Node, username); ok {
+				recordRename(applyMultiplierPrefix(proxyConfig, n.Node, pkg, &sysCfg))
 				proxies = append(proxies, proxyConfig)
 			}
 		}
@@ -134,6 +148,13 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+
+	// 节点名重命名了 → 同步 proxy-groups 里手写的全名引用(模板若用 filter 自动会用新名,这里兜底全名引用场景)
+	if len(renameMap) > 0 {
+		if rewritten, rerr := rewriteProxyGroupRefs([]byte(result), renameMap); rerr == nil {
+			result = string(rewritten)
+		}
 	}
 
 	// Format conversion
@@ -403,6 +424,103 @@ func (h *PackageSubscribeHandler) buildUserCredentialMap(r *http.Request, userna
 		}
 	}
 	return m
+}
+
+// rewriteProxyGroupRefs 给定 YAML 文档 + 节点名映射,把每个 proxy-group 的 proxies 数组里
+// 命中的旧名替换为新名。模板若用 filter/regex 选节点会自动用 proxies 数组里的新名,
+// 这里专门兜底"模板里手写全名引用"的场景,避免代理组指向不存在的节点。
+// 解析失败 / proxy-groups 缺失 → 原样返回。
+func rewriteProxyGroupRefs(data []byte, rename map[string]string) ([]byte, error) {
+	if len(rename) == 0 || len(data) == 0 {
+		return data, nil
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return data, err
+	}
+	if len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
+		return data, nil
+	}
+	doc := root.Content[0]
+	modified := false
+	for i := 0; i < len(doc.Content)-1; i += 2 {
+		if doc.Content[i].Value != "proxy-groups" {
+			continue
+		}
+		groups := doc.Content[i+1]
+		if groups.Kind != yaml.SequenceNode {
+			break
+		}
+		for _, g := range groups.Content {
+			if g.Kind != yaml.MappingNode {
+				continue
+			}
+			for j := 0; j < len(g.Content)-1; j += 2 {
+				if g.Content[j].Value != "proxies" {
+					continue
+				}
+				pxs := g.Content[j+1]
+				if pxs.Kind != yaml.SequenceNode {
+					continue
+				}
+				for _, pn := range pxs.Content {
+					if pn.Kind != yaml.ScalarNode {
+						continue
+					}
+					if newName, ok := rename[pn.Value]; ok {
+						pn.Value = newName
+						modified = true
+					}
+				}
+			}
+		}
+		break
+	}
+	if !modified {
+		return data, nil
+	}
+	out, err := MarshalYAMLWithIndent(&root)
+	if err != nil {
+		return data, err
+	}
+	return []byte(RemoveUnicodeEscapeQuotes(string(out))), nil
+}
+
+// applyMultiplierPrefix 按系统开关给节点名加倍率前缀,效果 "「2」原节点名"。
+//   - 开关关 / 套餐空 / 节点倍率 == 1 → 不动 name,返回 ("","",false)
+//   - routed 子节点通过 ParentNodeID 自动回退到父物理节点的套餐倍率
+//   - 前缀左右分隔符由 SystemConfig.NodeNameMultiplierLeft / Right 决定,默认 「」
+//   - 返回 (oldName, newName, true) 给调用方收集 renameMap,后续要同步 proxy-groups 引用
+func applyMultiplierPrefix(proxy map[string]any, node storage.Node, pkg *storage.Package, cfg *storage.SystemConfig) (string, string, bool) {
+	if proxy == nil || cfg == nil || pkg == nil || !cfg.NodeNameMultiplierPrefixEnabled {
+		return "", "", false
+	}
+	mult := pkg.MultiplierForNode(node.ID, node.ParentNodeID)
+	if mult == 1.0 {
+		return "", "", false
+	}
+	name, _ := proxy["name"].(string)
+	if name == "" {
+		name = node.NodeName
+	}
+	left := cfg.NodeNameMultiplierLeft
+	if left == "" {
+		left = "「"
+	}
+	right := cfg.NodeNameMultiplierRight
+	if right == "" {
+		right = "」"
+	}
+	// 整数倍率不带小数(2 → "2" 而非 "2.0")
+	var multStr string
+	if mult == float64(int64(mult)) {
+		multStr = strconv.FormatInt(int64(mult), 10)
+	} else {
+		multStr = strconv.FormatFloat(mult, 'f', -1, 64)
+	}
+	newName := left + multStr + right + name
+	proxy["name"] = newName
+	return name, newName, true
 }
 
 func applyUserCredentials(proxy map[string]any, node storage.Node, credMap map[credKey]string) {

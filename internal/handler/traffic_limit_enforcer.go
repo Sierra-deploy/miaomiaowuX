@@ -85,7 +85,8 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 			continue
 		}
 
-		totalTraffic, err := e.repo.GetUserTotalTraffic(ctx, user.Username)
+		// 加权流量:每行 user_email_traffic 乘以节点在套餐内的倍率(routed 子节点继承父节点)
+		totalTraffic, err := e.repo.GetUserWeightedTraffic(ctx, user.Username, pkg)
 		if err != nil {
 			log.Printf("[TrafficLimitEnforcer] Failed to get traffic for %s: %v", user.Username, err)
 			continue

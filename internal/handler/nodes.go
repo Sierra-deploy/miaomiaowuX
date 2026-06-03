@@ -303,8 +303,20 @@ func (h *nodesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	// routed 节点没有用户子账号的 → 完全过滤掉(用户无访问权,不该出现在列表)。
 	nodes = substituteNodesForUser(r.Context(), h.repo, username, nodes)
 
+	// 节点级倍率:根据用户绑定套餐查 multiplier(routed 子节点用 parent 回退),仅当 != 1 时写入响应
+	dto := convertNodes(nodes)
+	if user, uerr := h.repo.GetUser(r.Context(), username); uerr == nil && user.PackageID > 0 {
+		if pkg, perr := h.repo.GetPackage(r.Context(), user.PackageID); perr == nil && pkg != nil && len(pkg.NodeMultipliers) > 0 {
+			for i, n := range nodes {
+				m := pkg.MultiplierForNode(n.ID, n.ParentNodeID)
+				if m != 1.0 {
+					dto[i].Multiplier = m
+				}
+			}
+		}
+	}
 	respondJSON(w, http.StatusOK, map[string]any{
-		"nodes": convertNodes(nodes),
+		"nodes": dto,
 	})
 }
 
@@ -1382,10 +1394,9 @@ type nodeDTO struct {
 	ParsedConfig     string    `json:"parsed_config"`
 	ClashConfig      string    `json:"clash_config"`
 	Enabled          bool      `json:"enabled"`
-	// Tag 字段后端仍保留(订阅生成里按 subscribe_files.selected_tags 过滤要用),但不再回前端。
-	// 节点来源(直连节点 / 手动输入 / 订阅导入)这种归类元数据对普通用户没有价值,
-	// 而管理员视角已经有 original_server / inbound_tag 等更精确的标识。
-	Tag              string    `json:"-"`
+	// Tag 是用户自定义分类标签(VIP / Asia / 测试),前端节点页用它做过滤、分组显示、批量更新。
+	// 必须下发,否则前端改了 tag 拉回来缺字段,显示永远是原状态,等同"修改不起作用"。
+	Tag              string    `json:"tag"`
 	OriginalServer   string    `json:"original_server"`
 	OriginalDomain   string    `json:"original_domain"`
 	InboundTag       string    `json:"inbound_tag"`
@@ -1395,6 +1406,9 @@ type nodeDTO struct {
 	RoutedOutboundTag  string    `json:"routed_outbound_tag"`   // routed 节点专用:绑定的出站 tag(便于 UI 直接展示)
 	RoutedOwner        string    `json:"routed_owner,omitempty"` // routed 节点专用:'shared'(admin 套餐分配) | 'user'(用户私有)
 	CreatedBy          string    `json:"created_by,omitempty"`   // routed 节点专用:创建者用户名(user 视角下用于鉴别"是不是我创建的")
+	// Multiplier 仅在普通用户视角(其绑定套餐内有 NodeMultipliers 配置)下注入。admin 视角省略字段
+	// (一个节点可能在多个套餐里有不同倍率,无法单值显示);== 1 时也省略,前端按"未设置"对待。
+	Multiplier         float64   `json:"multiplier,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 }

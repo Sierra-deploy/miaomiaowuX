@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"miaomiaowux/internal/agentlog"
@@ -656,4 +657,64 @@ func (h *SystemSettingsHandler) SetDefaultTemplate(w http.ResponseWriter, r *htt
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "默认模板已更新"})
+}
+
+// 节点名称倍率前缀:开关 + 左右分隔符。
+// 开启后订阅生成时,套餐内 multiplier != 1 的节点 name 前面会拼上 "{left}{mult}{right}"。
+func (h *SystemSettingsHandler) GetNodeNameMultiplierPrefix(w http.ResponseWriter, r *http.Request) {
+	cfg, err := h.repo.GetSystemConfig(r.Context())
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "获取设置失败"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"success": true,
+		"enabled": cfg.NodeNameMultiplierPrefixEnabled,
+		"left":    cfg.NodeNameMultiplierLeft,
+		"right":   cfg.NodeNameMultiplierRight,
+	})
+}
+
+func (h *SystemSettingsHandler) SetNodeNameMultiplierPrefix(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled bool   `json:"enabled"`
+		Left    string `json:"left"`
+		Right   string `json:"right"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "请求格式错误"})
+		return
+	}
+	cfg, err := h.repo.GetSystemConfig(r.Context())
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "获取设置失败"})
+		return
+	}
+	cfg.NodeNameMultiplierPrefixEnabled = req.Enabled
+	// 留 1 个字符的小白名单宽松:空字符串兜底回默认,避免 UI 提交空导致 "2原名" 无分隔
+	if strings.TrimSpace(req.Left) == "" {
+		cfg.NodeNameMultiplierLeft = "「"
+	} else {
+		cfg.NodeNameMultiplierLeft = req.Left
+	}
+	if strings.TrimSpace(req.Right) == "" {
+		cfg.NodeNameMultiplierRight = "」"
+	} else {
+		cfg.NodeNameMultiplierRight = req.Right
+	}
+	if err := h.repo.UpdateSystemConfig(r.Context(), cfg); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "保存失败"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "倍率前缀设置已更新"})
 }
