@@ -102,6 +102,78 @@ func (r *TrafficRepository) UnbindTelegram(ctx context.Context, username string)
 	return err
 }
 
+// ============ 用户自助通知开关 ============
+
+// NotifyTarget 每日推送名单的一行(轻量,流量/套餐细节由 handler 现取)。
+type NotifyTarget struct {
+	Username       string
+	TelegramID     int64
+	PackageID      int64
+	PackageEndDate *time.Time
+}
+
+// SetTGNotify 按 tg_id 开关用户通知。未绑(影响 0 行)返回错误。
+func (r *TrafficRepository) SetTGNotify(ctx context.Context, tgID int64, enabled bool) error {
+	if tgID == 0 {
+		return errors.New("tg_id required")
+	}
+	v := 0
+	if enabled {
+		v = 1
+	}
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE users SET tg_notify_enabled = ?, updated_at = CURRENT_TIMESTAMP WHERE telegram_id = ?`,
+		v, tgID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("该 TG 未绑定任何账号")
+	}
+	return nil
+}
+
+// GetTGNotify 查 tg_id 的通知开关;ok=false 表示该 tg_id 未绑定。
+func (r *TrafficRepository) GetTGNotify(ctx context.Context, tgID int64) (enabled bool, ok bool) {
+	if tgID == 0 {
+		return false, false
+	}
+	var v int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT COALESCE(tg_notify_enabled, 0) FROM users WHERE telegram_id = ? LIMIT 1`, tgID).Scan(&v)
+	if err != nil {
+		return false, false
+	}
+	return v != 0, true
+}
+
+// ListNotifyUsers 列出已开通知的绑定用户(供 bot 每日推送)。
+func (r *TrafficRepository) ListNotifyUsers(ctx context.Context) ([]NotifyTarget, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT username, telegram_id, COALESCE(package_id, 0), package_end_date
+		   FROM users
+		  WHERE telegram_id IS NOT NULL AND tg_notify_enabled = 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []NotifyTarget
+	for rows.Next() {
+		var t NotifyTarget
+		var endDate sql.NullTime
+		if err := rows.Scan(&t.Username, &t.TelegramID, &t.PackageID, &endDate); err != nil {
+			return nil, err
+		}
+		if endDate.Valid {
+			v := endDate.Time
+			t.PackageEndDate = &v
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // ============ 邀请码 ============
 
 // GenerateInviteCode 生成 12 位大小写字母数字串(密码学随机)。

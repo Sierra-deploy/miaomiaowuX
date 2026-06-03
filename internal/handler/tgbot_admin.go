@@ -73,6 +73,10 @@ func (h *TGBotAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.userSubscriptions(w, r)
 	case path == "user-nodes" && r.Method == http.MethodGet:
 		h.userNodes(w, r)
+	case path == "notify" && r.Method == http.MethodPost:
+		h.setNotify(w, r)
+	case path == "notify-digest" && r.Method == http.MethodGet:
+		h.notifyDigest(w, r)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
@@ -412,12 +416,14 @@ func (h *TGBotAPIHandler) userByTG(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	notifyEnabled, _ := h.repo.GetTGNotify(r.Context(), tgID)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"success":   true,
-		"bound":     true,
-		"username":  username,
-		"role":      user.Role,
-		"is_active": user.IsActive,
+		"success":        true,
+		"bound":          true,
+		"username":       username,
+		"role":           user.Role,
+		"is_active":      user.IsActive,
+		"notify_enabled": notifyEnabled,
 	})
 }
 
@@ -599,6 +605,74 @@ func (h *TGBotAPIHandler) userNodes(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "nodes": out})
+}
+
+// ============ 用户自助通知 ============
+
+// setNotify POST /notify {telegram_id, enabled} 开关用户的每日通知。
+func (h *TGBotAPIHandler) setNotify(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		TelegramID int64 `json:"telegram_id"`
+		Enabled    bool  `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if body.TelegramID == 0 {
+		writeJSONError(w, http.StatusBadRequest, "telegram_id 必填")
+		return
+	}
+	if err := h.repo.SetTGNotify(r.Context(), body.TelegramID, body.Enabled); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "enabled": body.Enabled})
+}
+
+// notifyDigest GET /notify-digest 返回已开通知用户的流量 + 到期,供 bot 每日推送。
+func (h *TGBotAPIHandler) notifyDigest(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	targets, err := h.repo.ListNotifyUsers(ctx)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	type digestUser struct {
+		Username       string  `json:"username"`
+		TelegramID     int64   `json:"telegram_id"`
+		PackageName    string  `json:"package_name,omitempty"`
+		TrafficLimitGB float64 `json:"traffic_limit_gb"`
+		CycleUplink    int64   `json:"cycle_uplink"`
+		CycleDownlink  int64   `json:"cycle_downlink"`
+		TotalUplink    int64   `json:"total_uplink"`
+		TotalDownlink  int64   `json:"total_downlink"`
+		PackageEndDate string  `json:"package_end_date,omitempty"`
+	}
+
+	users := make([]digestUser, 0, len(targets))
+	for _, t := range targets {
+		du := digestUser{Username: t.Username, TelegramID: t.TelegramID}
+		if t.PackageID > 0 {
+			if pkg, perr := h.repo.GetPackage(ctx, t.PackageID); perr == nil && pkg != nil {
+				du.PackageName = pkg.Name
+				du.TrafficLimitGB = pkg.TrafficLimitGB
+			}
+		}
+		if t.PackageEndDate != nil {
+			du.PackageEndDate = t.PackageEndDate.Format(time.RFC3339)
+		}
+		rows, _ := h.repo.GetUserTrafficByUsername(ctx, t.Username)
+		for _, tr := range rows {
+			du.CycleUplink += tr.Uplink
+			du.CycleDownlink += tr.Downlink
+			du.TotalUplink += tr.TotalUplink
+			du.TotalDownlink += tr.TotalDownlink
+		}
+		users = append(users, du)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "users": users})
 }
 
 // 占位:避免编译器报错(若未来 storage 没暴露某方法,可在这里 stub)
