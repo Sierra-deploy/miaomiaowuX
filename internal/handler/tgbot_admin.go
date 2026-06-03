@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -77,6 +78,10 @@ func (h *TGBotAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.setNotify(w, r)
 	case path == "notify-digest" && r.Method == http.MethodGet:
 		h.notifyDigest(w, r)
+	case path == "user-daily-traffic" && r.Method == http.MethodGet:
+		h.userDailyTraffic(w, r)
+	case path == "redeem" && r.Method == http.MethodPost:
+		h.redeem(w, r)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
@@ -213,6 +218,7 @@ func (h *TGBotAPIHandler) bind(w http.ResponseWriter, r *http.Request) {
 		TelegramHandle string `json:"telegram_handle"`
 		Username       string `json:"username"` // kind=new 时由 bot 收集
 		Email          string `json:"email"`    // kind=new 可选
+		Password       string `json:"password"` // kind=new 可选:用户自定义密码,空则随机生成
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid body")
@@ -244,7 +250,7 @@ func (h *TGBotAPIHandler) bind(w http.ResponseWriter, r *http.Request) {
 	case "bind":
 		h.bindExisting(ctx, w, body.TelegramID, body.TelegramHandle, ic)
 	case "new":
-		h.bindNew(ctx, w, body.TelegramID, body.TelegramHandle, body.Username, body.Email, ic)
+		h.bindNew(ctx, w, body.TelegramID, body.TelegramHandle, body.Username, body.Email, body.Password, ic)
 	default:
 		writeJSONError(w, http.StatusInternalServerError, "未知邀请码 kind: "+ic.Kind)
 	}
@@ -283,7 +289,7 @@ func (h *TGBotAPIHandler) bindExisting(ctx context.Context, w http.ResponseWrite
 }
 
 func (h *TGBotAPIHandler) bindNew(ctx context.Context, w http.ResponseWriter,
-	tgID int64, tgHandle, requestedUsername, email string, ic storage.InviteCode) {
+	tgID int64, tgHandle, requestedUsername, email, password string, ic storage.InviteCode) {
 
 	requestedUsername = strings.TrimSpace(requestedUsername)
 	if !usernameRe.MatchString(requestedUsername) {
@@ -295,13 +301,22 @@ func (h *TGBotAPIHandler) bindNew(ctx context.Context, w http.ResponseWriter,
 		return
 	}
 
-	// 随机初始密码
-	pwBuf := make([]byte, 8)
-	if _, err := rand.Read(pwBuf); err != nil {
-		writeJSONError(w, http.StatusInternalServerError, "rand: "+err.Error())
-		return
+	// 密码:用户自定义优先(>=6 位),否则随机生成。
+	plainPw := strings.TrimSpace(password)
+	userSetPw := plainPw != ""
+	if userSetPw {
+		if len(plainPw) < 6 || len(plainPw) > 64 {
+			writeJSONError(w, http.StatusBadRequest, "密码长度需 6-64 位")
+			return
+		}
+	} else {
+		pwBuf := make([]byte, 8)
+		if _, err := rand.Read(pwBuf); err != nil {
+			writeJSONError(w, http.StatusInternalServerError, "rand: "+err.Error())
+			return
+		}
+		plainPw = hex.EncodeToString(pwBuf)
 	}
-	plainPw := hex.EncodeToString(pwBuf)
 	hash, err := bcrypt.GenerateFromPassword([]byte(plainPw), bcrypt.DefaultCost)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "bcrypt: "+err.Error())
@@ -358,11 +373,15 @@ func (h *TGBotAPIHandler) bindNew(ctx context.Context, w http.ResponseWriter,
 		Action: "register", Detail: "invite_code=" + ic.Code,
 	})
 
+	respPw := plainPw
+	if userSetPw { // 用户自设密码,不回显
+		respPw = ""
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":          true,
 		"username":         requestedUsername,
 		"kind":             "new",
-		"initial_password": plainPw,
+		"initial_password": respPw,
 		"package":          pkgInfo,
 	})
 }
@@ -673,6 +692,142 @@ func (h *TGBotAPIHandler) notifyDigest(w http.ResponseWriter, r *http.Request) {
 		users = append(users, du)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"success": true, "users": users})
+}
+
+// userDailyTraffic GET /user-daily-traffic?username= 返回用户套餐周期内每日用量(GB)。
+// 复用 ListUserRecent(每日累计快照)+ 差分,口径同 /api/traffic/summary 的 history。
+func (h *TGBotAPIHandler) userDailyTraffic(w http.ResponseWriter, r *http.Request) {
+	username := strings.TrimSpace(r.URL.Query().Get("username"))
+	if username == "" {
+		writeJSONError(w, http.StatusBadRequest, "username 必填")
+		return
+	}
+	ctx := r.Context()
+
+	days := 31
+	if user, err := h.repo.GetUser(ctx, username); err == nil && user.PackageID > 0 {
+		if pkg, perr := h.repo.GetPackage(ctx, user.PackageID); perr == nil && pkg != nil && pkg.CycleDays > 0 {
+			days = pkg.CycleDays + 1
+			if days > 62 {
+				days = 62
+			}
+		}
+	}
+
+	records, err := h.repo.ListUserRecent(ctx, username, days)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	sort.SliceStable(records, func(i, j int) bool { return records[i].Date.Before(records[j].Date) })
+
+	type dayUsage struct {
+		Date   string  `json:"date"`
+		UsedGB float64 `json:"used_gb"`
+	}
+	out := make([]dayUsage, 0, len(records))
+	var prevUsed int64
+	var hasPrev bool
+	for _, rec := range records {
+		delta := rec.TotalUsed
+		if hasPrev {
+			delta = rec.TotalUsed - prevUsed
+			if delta < 0 {
+				delta = 0
+			}
+		}
+		prevUsed = rec.TotalUsed
+		hasPrev = true
+		out = append(out, dayUsage{Date: rec.Date.Format("2006-01-02"), UsedGB: roundUpTwoDecimals(bytesToGigabytes(delta))})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "history": out})
+}
+
+// redeem POST /redeem {code, telegram_id}:已绑定用户用兑换码续期(只延长到期时间,不重置流量)。
+func (h *TGBotAPIHandler) redeem(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Code       string `json:"code"`
+		TelegramID int64  `json:"telegram_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	body.Code = strings.ToUpper(strings.TrimSpace(body.Code))
+	if body.Code == "" || body.TelegramID == 0 {
+		writeJSONError(w, http.StatusBadRequest, "code 和 telegram_id 必填")
+		return
+	}
+	ctx := r.Context()
+
+	existing, ok := h.repo.GetUsernameByTelegramID(ctx, body.TelegramID)
+	if !ok {
+		writeJSONError(w, http.StatusBadRequest, "该 TG 未绑定账号,请先注册")
+		return
+	}
+	ic, ok := h.repo.GetInviteCode(ctx, body.Code)
+	if !ok {
+		writeJSONError(w, http.StatusNotFound, "兑换码不存在")
+		return
+	}
+	if !ic.IsUsable() {
+		writeJSONError(w, http.StatusBadRequest, "兑换码不可用(已撤销/已用尽/已过期)")
+		return
+	}
+	if ic.PackageID == nil {
+		writeJSONError(w, http.StatusBadRequest, "该兑换码无套餐,无法续期")
+		return
+	}
+	pkg, err := h.repo.GetPackage(ctx, *ic.PackageID)
+	if err != nil || pkg == nil {
+		writeJSONError(w, http.StatusInternalServerError, "套餐不存在")
+		return
+	}
+	user, err := h.repo.GetUser(ctx, existing)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	// 从「当前到期日(若未过期)否则现在」往后延长,只延长不重置流量。
+	now := time.Now()
+	base := now
+	if user.PackageEndDate != nil && user.PackageEndDate.After(now) {
+		base = *user.PackageEndDate
+	}
+	isReset := pkg.IsReset
+	var end time.Time
+	if ic.DurationMonths > 0 {
+		end = base.AddDate(0, ic.DurationMonths, 0)
+		if ic.DurationMonths > 1 {
+			isReset = true
+		}
+	} else {
+		end = base.AddDate(0, 0, pkg.CycleDays)
+	}
+	resetDay := pkg.ResetDay
+	if isReset && resetDay < 1 {
+		resetDay = now.Day()
+		if resetDay > 28 {
+			resetDay = 28
+		}
+	}
+
+	if err := h.repo.ConsumeInviteCode(ctx, ic.Code, existing, body.TelegramID); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "兑换失败: "+err.Error())
+		return
+	}
+	if err := h.repo.AssignPackageToUser(ctx, existing, pkg.ID, now, end, isReset, resetDay); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "续期失败: "+err.Error())
+		return
+	}
+	_ = h.repo.WriteTGAudit(ctx, storage.TGAudit{
+		TGID: body.TelegramID, Username: existing, Action: "renew", Detail: "code=" + ic.Code,
+	})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success": true, "kind": "renew", "username": existing,
+		"package_name": pkg.Name, "end_date": end.Format("2006-01-02"),
+	})
 }
 
 // 占位:避免编译器报错(若未来 storage 没暴露某方法,可在这里 stub)

@@ -159,7 +159,8 @@ export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit,
     if (security === 'TLS') {
       newFormData.serverNames = clashConfig.sni || clashConfig.servername || clashConfig.server || ''
       newFormData.alpn = clashConfig.alpn?.join(',') || ''
-      if (clashConfig['skip-cert-verify']) newFormData.allowInsecure = true
+      // xray 已废弃 allowInsecure。skip-cert-verify=true 的节点保存时由后端 TLS dial 目标自动获取 sha256
+      newFormData.pinnedPeerCertSha256 = ''
       if (clashConfig.fingerprint) newFormData.fingerprint = clashConfig.fingerprint
     } else if (security === 'Reality') {
       const realityOpts = clashConfig['reality-opts'] || {}

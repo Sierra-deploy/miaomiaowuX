@@ -1984,6 +1984,14 @@ func (h *RemoteManageHandler) HandleOutbounds(w http.ResponseWriter, r *http.Req
 			remoteWriteError(w, http.StatusBadRequest, "failed to read body")
 			return
 		}
+		// Hook: action=add 且 outbound 是 TLS 且 pinnedPeerCertSha256 缺失 → TLS dial 拿对端证书 sha256 自动注入
+		// 失败直接 400 返给前端,提示用户手动填(替代已废弃的 allowInsecure)
+		if newBody, hookErr := autoInjectPinnedCertSha256(r.Context(), body); hookErr != nil {
+			remoteWriteError(w, http.StatusBadRequest, hookErr.Error())
+			return
+		} else if newBody != nil {
+			body = newBody
+		}
 	}
 
 	result, err := h.forwardToRemoteServer(r.Context(), id, r.Method, "/api/child/outbounds", body)
@@ -1995,6 +2003,113 @@ func (h *RemoteManageHandler) HandleOutbounds(w http.ResponseWriter, r *http.Req
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	w.Write(result)
+}
+
+// autoInjectPinnedCertSha256 解析 outbound add 请求体,若 TLS outbound 缺 pinnedPeerCertSha256
+// 则 TLS dial 抓 peer cert sha256 注入。非 add 动作 / 非 TLS / 已填 sha256 → 返回 (nil, nil) 不动 body。
+// 失败返回错误(前端会展开 sha256 输入框让用户手动填)。
+func autoInjectPinnedCertSha256(ctx context.Context, body []byte) ([]byte, error) {
+	if len(body) == 0 {
+		return nil, nil
+	}
+	var req map[string]any
+	if err := json.Unmarshal(body, &req); err != nil {
+		return nil, nil // 不是 JSON 就不动,让 forward 把原 body 透传
+	}
+	action, _ := req["action"].(string)
+	if strings.ToLower(strings.TrimSpace(action)) != "add" {
+		return nil, nil
+	}
+	ob, _ := req["outbound"].(map[string]any)
+	if ob == nil {
+		return nil, nil
+	}
+	ss, _ := ob["streamSettings"].(map[string]any)
+	if ss == nil {
+		return nil, nil
+	}
+	if sec, _ := ss["security"].(string); strings.ToLower(strings.TrimSpace(sec)) != "tls" {
+		return nil, nil
+	}
+	tlsObj, _ := ss["tlsSettings"].(map[string]any)
+	if tlsObj == nil {
+		tlsObj = map[string]any{}
+		ss["tlsSettings"] = tlsObj
+	}
+	// 已填 sha256 → 跳过
+	if existing, _ := tlsObj["pinnedPeerCertSha256"].(string); strings.TrimSpace(existing) != "" {
+		return nil, nil
+	}
+
+	// 提取 address/port:支持 vnext[0] (VLESS/VMess) 或 servers[0] (Trojan/Shadowsocks)
+	addr, port := extractOutboundTarget(ob)
+	if addr == "" || port == 0 {
+		return nil, fmt.Errorf("无法识别 outbound 目标地址,请在 tlsSettings.pinnedPeerCertSha256 手动填写证书 SHA256")
+	}
+
+	sni, _ := tlsObj["serverName"].(string)
+	alpn := ""
+	if alpnArr, ok := tlsObj["alpn"].([]any); ok && len(alpnArr) > 0 {
+		parts := make([]string, 0, len(alpnArr))
+		for _, a := range alpnArr {
+			if s, ok := a.(string); ok {
+				parts = append(parts, s)
+			}
+		}
+		alpn = strings.Join(parts, ",")
+	}
+
+	dialCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	defer cancel()
+	sha, err := fetchPeerCertSha256(dialCtx, addr, port, sni, alpn)
+	if err != nil {
+		return nil, fmt.Errorf("自动获取对端证书 SHA256 失败 (%s:%d): %v;请在 tlsSettings.pinnedPeerCertSha256 手动填写", addr, port, err)
+	}
+	tlsObj["pinnedPeerCertSha256"] = sha
+	// 顺手清掉 allowInsecure(xray 已废弃,留着没意义)
+	delete(tlsObj, "allowInsecure")
+	return json.Marshal(req)
+}
+
+// extractOutboundTarget 从 xray outbound JSON 中提取目标 address/port。
+// 支持 settings.vnext[0] (VLESS/VMess) 和 settings.servers[0] (Trojan/Shadowsocks/Socks/HTTP)。
+func extractOutboundTarget(ob map[string]any) (string, int) {
+	settings, _ := ob["settings"].(map[string]any)
+	if settings == nil {
+		return "", 0
+	}
+	pickAddrPort := func(m map[string]any) (string, int) {
+		addr, _ := m["address"].(string)
+		var port int
+		switch v := m["port"].(type) {
+		case float64:
+			port = int(v)
+		case int:
+			port = v
+		case int64:
+			port = int(v)
+		case string:
+			if p, err := strconv.Atoi(v); err == nil {
+				port = p
+			}
+		}
+		return strings.TrimSpace(addr), port
+	}
+	if vnext, ok := settings["vnext"].([]any); ok && len(vnext) > 0 {
+		if first, ok := vnext[0].(map[string]any); ok {
+			if a, p := pickAddrPort(first); a != "" && p > 0 {
+				return a, p
+			}
+		}
+	}
+	if servers, ok := settings["servers"].([]any); ok && len(servers) > 0 {
+		if first, ok := servers[0].(map[string]any); ok {
+			if a, p := pickAddrPort(first); a != "" && p > 0 {
+				return a, p
+			}
+		}
+	}
+	return "", 0
 }
 
 // ================== X 射线路由管理 ==================
@@ -3227,8 +3342,16 @@ func (h *RemoteManageHandler) addStreamSettings(proxy map[string]interface{}, st
 			if fp, ok := tlsSettings["fingerprint"].(string); ok && fp != "" {
 				proxy["client-fingerprint"] = fp
 			}
+			// 反查 xray → clash:客户端不支持 pinnedPeerCertSha256,只能退化到 skip-cert-verify。
+			// - pinnedPeerCertSha256 非空 → skip-cert-verify=true(客户端宽松,但服务端仍精确锁证书)
+			// - allowInsecure(老数据兼容)→ 同上
+			pinned, _ := tlsSettings["pinnedPeerCertSha256"].(string)
 			allowInsecure, _ := tlsSettings["allowInsecure"].(bool)
-			proxy["skip-cert-verify"] = allowInsecure
+			if strings.TrimSpace(pinned) != "" || allowInsecure {
+				proxy["skip-cert-verify"] = true
+			} else {
+				proxy["skip-cert-verify"] = false
+			}
 		}
 	}
 

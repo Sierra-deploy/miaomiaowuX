@@ -277,8 +277,10 @@ function generateStreamSettings(formData: any, transport: string, security: stri
       if (formData.alpn) {
         streamSettings.tlsSettings.alpn = formData.alpn.split(',').map((a: string) => a.trim())
       }
-      if (formData.allowInsecure) {
-        streamSettings.tlsSettings.allowInsecure = true
+      // xray 已废弃 allowInsecure,改用 pinnedPeerCertSha256(hex,逗号分隔多值)精确锁证书
+      // 用户没填 → 留空字段,后端 hook 会在 POST 时 TLS dial 自动获取
+      if (formData.pinnedPeerCertSha256 && String(formData.pinnedPeerCertSha256).trim()) {
+        streamSettings.tlsSettings.pinnedPeerCertSha256 = String(formData.pinnedPeerCertSha256).trim()
       }
       if (formData.fingerprint) {
         streamSettings.tlsSettings.fingerprint = formData.fingerprint
@@ -546,7 +548,8 @@ export function clashConfigToOutbound(clashConfig: any, tag: string): any {
   if (security === 'TLS') {
     formData.serverNames = clashConfig.sni || clashConfig.servername || clashConfig.server || ''
     formData.alpn = clashConfig.alpn?.join(',') || ''
-    if (clashConfig['skip-cert-verify']) formData.allowInsecure = true
+    // xray 已废弃 allowInsecure。skip-cert-verify=true 的 clash 节点不再写入"放弃验证"标记到 xray outbound;
+    // 后端 hook 会在保存时 TLS dial 目标节点拿 peer cert sha256 自动填入 pinnedPeerCertSha256
     if (clashConfig.fingerprint) formData.fingerprint = clashConfig.fingerprint
   } else if (security === 'Reality') {
     const realityOpts = clashConfig['reality-opts'] || {}

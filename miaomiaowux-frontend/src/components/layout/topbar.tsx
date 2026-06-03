@@ -219,7 +219,7 @@ export function Topbar() {
               alt={`${t('brand')} Logo`}
               className='h-10 w-10 border-2 border-[color:rgba(241,140,110,0.4)] shadow-[4px_4px_0_rgba(0,0,0,0.2)] shrink-0 hidden dark:block'
             />
-            {!hideLogoText && <span data-logo-text className='hidden md:inline pixel-text text-primary text-base whitespace-nowrap'>{t('brand').replace('X', '')}<AnimatedX size="sm" /></span>}
+            {!hideLogoText && <span data-logo-text className='hidden md:inline pixel-text text-primary text-base whitespace-nowrap inline-flex items-baseline gap-0.5'>{t('brand').replace('X', '')}<AnimatedX size="sm" className='!text-3xl' /></span>}
           </Link>
 
           {/* Sidebar Toggle Button - Only show in sidebar mode */}
