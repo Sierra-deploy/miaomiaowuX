@@ -511,13 +511,36 @@ echo ""
 echo "Master Server: $MASTER_URL"
 echo ""
 
-# 检测 init 系统:systemd(主流)/ OpenRC(Alpine)/ 兜底用 nohup + rc.local。
-# 大部分 LXC 容器没有 systemd —— 老脚本直接 systemctl 失败"systemctl: command not found"。
+# 检测 init 系统:OpenRC(Alpine 首选)/ systemd(主流)/ 兜底用 nohup + rc.local。
+# - Alpine 优先用 OpenRC:Alpine 主流就是 OpenRC,即便镜像里塞了 systemd 也不用它
+# - Alpine 极简镜像/LXC 可能没装 openrc 包 → 自动 apk add 装上,再走 OpenRC 路径
+# - 大部分 LXC 容器没有 systemd,老脚本直接 systemctl 失败"systemctl: command not found"
 HAS_SYSTEMD=0
 HAS_OPENRC=0
-if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then HAS_SYSTEMD=1; fi
-if command -v rc-service >/dev/null 2>&1 && command -v rc-update >/dev/null 2>&1; then HAS_OPENRC=1; fi
-echo "Init system: $([ "$HAS_SYSTEMD" = 1 ] && echo systemd || ([ "$HAS_OPENRC" = 1 ] && echo openrc || echo none))"
+IS_ALPINE=0
+if [ -f /etc/alpine-release ]; then
+    IS_ALPINE=1
+elif [ -f /etc/os-release ] && grep -qE '^ID=alpine' /etc/os-release 2>/dev/null; then
+    IS_ALPINE=1
+fi
+# Alpine 上 openrc 缺失就尝试自动装,失败不致命(下面还有 nohup 兜底)
+if [ "$IS_ALPINE" = "1" ] && ! command -v rc-service >/dev/null 2>&1; then
+    echo "[Init] Alpine detected without OpenRC, installing openrc..."
+    if command -v apk >/dev/null 2>&1; then
+        apk add --no-cache openrc 2>/dev/null || echo "[Init] apk add openrc failed, will fall back to nohup"
+    fi
+fi
+# Alpine 优先 OpenRC;非 Alpine 仍然先看 systemd(主流发行版默认)
+if [ "$IS_ALPINE" = "1" ]; then
+    if command -v rc-service >/dev/null 2>&1; then HAS_OPENRC=1; fi
+fi
+if [ "$HAS_OPENRC" = "0" ] && command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    HAS_SYSTEMD=1
+fi
+if [ "$HAS_SYSTEMD" = "0" ] && [ "$HAS_OPENRC" = "0" ] && command -v rc-service >/dev/null 2>&1; then
+    HAS_OPENRC=1
+fi
+echo "Init system: $([ "$HAS_OPENRC" = 1 ] && echo openrc || ([ "$HAS_SYSTEMD" = 1 ] && echo systemd || echo none))$([ "$IS_ALPINE" = 1 ] && echo " (Alpine)")"
 
 # Step 1: Stop existing service if running
 echo "[1/6] Stopping existing service (if any)..."
@@ -702,7 +725,8 @@ if [ "$HAS_SYSTEMD" = "1" ]; then
     systemctl enable mmw-agent
     systemctl start mmw-agent
 elif [ "$HAS_OPENRC" = "1" ]; then
-    rc-update add mmw-agent default
+    # rc-update 在 LXC 容器里没初始化 runlevel 时会报错,失败不致命(set -e 兜底)
+    rc-update add mmw-agent default 2>/dev/null || echo "  ⚠ rc-update add 失败(常见于 LXC 容器,不影响当前会话启动)"
     rc-service mmw-agent start
 else
     nohup /usr/local/bin/mmw-agent-supervisor.sh >/dev/null 2>&1 &
