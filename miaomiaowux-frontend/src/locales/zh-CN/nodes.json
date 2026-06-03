@@ -461,6 +461,7 @@
     },
     "dialerProxyGroup": "中转代理组",
     "dialerProxyGroupNone": "无",
+    "dialerProxyGroupBadge": "中转: {{name}}",
     "addGroupDialog": {
       "title": "添加代理组",
       "description": "输入自定义名称或从预定义选项中快速选择",

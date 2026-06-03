@@ -461,6 +461,7 @@
     },
     "dialerProxyGroup": "Transit proxy group",
     "dialerProxyGroupNone": "None",
+    "dialerProxyGroupBadge": "Transit: {{name}}",
     "addGroupDialog": {
       "title": "Add Proxy Group",
       "description": "Enter a custom name or quickly select from predefined options",

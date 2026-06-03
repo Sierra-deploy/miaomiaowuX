@@ -126,6 +126,12 @@ export const SortableCard = memo(function SortableCard({
                 : t('editNodesDialog.nodeCountOnly', { count: (group.proxies || []).length })}
               )
             </CardDescription>
+            {/* 中转代理组标识:仅当组上有 dialer-proxy-group 字段时显示;订阅生成时给该组节点注入 dialer-proxy */}
+            {group['dialer-proxy-group'] && (
+              <p className='text-xs text-muted-foreground mt-0.5 truncate' title={`${t('editNodesDialog.dialerProxyGroup')}: ${group['dialer-proxy-group']}`}>
+                {t('editNodesDialog.dialerProxyGroupBadge', { name: group['dialer-proxy-group'] })}
+              </p>
+            )}
           </div>
           {!isEditing && (
             <div className='flex items-center gap-1'>
