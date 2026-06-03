@@ -155,6 +155,44 @@ func (r *TrafficRepository) CountLicensedNodes(ctx context.Context) (int64, erro
 	return count, nil
 }
 
+// ListSharedRoutedByParentIDs 按父节点 ID 列举所有 routed_owner='shared' 的子节点。
+// 用于普通用户节点列表:套餐里只放父物理节点 ID,但 admin 派生的 shared routed 子节点
+// (落地+路由出站功能)也应该在套餐内自动可见。无父 ID → 返回空,无 panic。
+func (r *TrafficRepository) ListSharedRoutedByParentIDs(ctx context.Context, parentIDs []int64) ([]Node, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	if len(parentIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(parentIDs))
+	args := make([]interface{}, len(parentIDs))
+	for i, id := range parentIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), created_at, updated_at FROM nodes WHERE node_type = 'routed' AND COALESCE(routed_owner, 'shared') = 'shared' AND parent_node_id IN (` + strings.Join(placeholders, ",") + `) ORDER BY created_at DESC`
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list shared routed by parents: %w", err)
+	}
+	defer rows.Close()
+	var nodes []Node
+	for rows.Next() {
+		var node Node
+		var enabled int
+		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.CreatedAt, &node.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan node: %w", err)
+		}
+		node.Enabled = enabled != 0
+		nodes = append(nodes, node)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate nodes: %w", err)
+	}
+	return nodes, nil
+}
+
 // 返回管理员用户的所有节点。
 func (r *TrafficRepository) ListAllNodes(ctx context.Context) ([]Node, error) {
 	if r == nil || r.db == nil {

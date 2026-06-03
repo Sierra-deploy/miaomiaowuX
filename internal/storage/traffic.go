@@ -857,6 +857,10 @@ CREATE TABLE IF NOT EXISTS users (
 	if err := r.ensureUserColumn("telegram_bound_at", "TIMESTAMP"); err != nil {
 		return err
 	}
+	// 用户自助通知开关(/notify on):默认关,开启后 bot 每日推流量 + 临期到期提醒。
+	if err := r.ensureUserColumn("tg_notify_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if _, err := r.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id) WHERE telegram_id IS NOT NULL;`); err != nil {
 		return fmt.Errorf("create telegram_id index: %w", err)
 	}
@@ -876,7 +880,8 @@ CREATE TABLE IF NOT EXISTS invite_codes (
     expires_at     TIMESTAMP,
     revoked        INTEGER NOT NULL DEFAULT 0,
     remark         TEXT NOT NULL DEFAULT '',
-    created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    duration_months INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_invite_codes_created_by ON invite_codes(created_by);
 CREATE INDEX IF NOT EXISTS idx_invite_codes_kind ON invite_codes(kind);
@@ -884,6 +889,8 @@ CREATE INDEX IF NOT EXISTS idx_invite_codes_kind ON invite_codes(kind);
 	if _, err := r.db.Exec(inviteCodeSchema); err != nil {
 		return fmt.Errorf("migrate invite_codes: %w", err)
 	}
+	// 老库补列(已存在则忽略错误):kind=new 注册时账号有效期 = now + N 月。
+	_, _ = r.db.Exec("ALTER TABLE invite_codes ADD COLUMN duration_months INTEGER NOT NULL DEFAULT 0")
 
 	// invite_code_uses:邀请码使用记录(单次邀请码 max_uses=1 时唯一,但多次邀请码允许多行)。
 	// 主键 (code, username) 防止同一用户重复消耗同一码。

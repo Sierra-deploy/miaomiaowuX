@@ -25,6 +25,9 @@ type InviteCode struct {
 	Revoked      bool
 	Remark       string
 	CreatedAt    time.Time
+	// DurationMonths 仅 kind=new 有用:注册时账号有效期 = now + N 个月。
+	// 0 = 沿用套餐自身周期(cycle_days)的旧行为。>1 时 bind 自动开 is_reset(按月重置/续期)。
+	DurationMonths int
 }
 
 // IsUsable 邀请码是否当前可消耗(未撤销 + 未达使用上限 + 未过期)。
@@ -143,10 +146,10 @@ func (r *TrafficRepository) CreateInviteCode(ctx context.Context, ic InviteCode)
 
 	_, err := r.db.ExecContext(ctx,
 		`INSERT INTO invite_codes (code, kind, bind_username, created_by, package_id,
-		                          max_uses, used_count, expires_at, revoked, remark)
-		 VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, ?)`,
+		                          max_uses, used_count, expires_at, revoked, remark, duration_months)
+		 VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, ?, ?)`,
 		ic.Code, ic.Kind, ic.BindUsername, ic.CreatedBy, pkgArg,
-		ic.MaxUses, expiresArg, ic.Remark)
+		ic.MaxUses, expiresArg, ic.Remark, ic.DurationMonths)
 	if err != nil {
 		return "", err
 	}
@@ -162,10 +165,10 @@ func (r *TrafficRepository) GetInviteCode(ctx context.Context, code string) (Inv
 
 	err := r.db.QueryRowContext(ctx,
 		`SELECT code, kind, bind_username, created_by, package_id,
-		        max_uses, used_count, expires_at, revoked, remark, created_at
+		        max_uses, used_count, expires_at, revoked, remark, created_at, duration_months
 		   FROM invite_codes WHERE code = ?`, code).
 		Scan(&ic.Code, &ic.Kind, &ic.BindUsername, &ic.CreatedBy, &pkgID,
-			&ic.MaxUses, &ic.UsedCount, &expiresAt, &revokedInt, &ic.Remark, &ic.CreatedAt)
+			&ic.MaxUses, &ic.UsedCount, &expiresAt, &revokedInt, &ic.Remark, &ic.CreatedAt, &ic.DurationMonths)
 	if err != nil {
 		return InviteCode{}, false
 	}
@@ -262,12 +265,12 @@ func (r *TrafficRepository) ListInviteCodes(ctx context.Context, createdBy strin
 	if createdBy == "" {
 		rows, err = r.db.QueryContext(ctx,
 			`SELECT code, kind, bind_username, created_by, package_id,
-			        max_uses, used_count, expires_at, revoked, remark, created_at
+			        max_uses, used_count, expires_at, revoked, remark, created_at, duration_months
 			   FROM invite_codes ORDER BY created_at DESC LIMIT ?`, limit)
 	} else {
 		rows, err = r.db.QueryContext(ctx,
 			`SELECT code, kind, bind_username, created_by, package_id,
-			        max_uses, used_count, expires_at, revoked, remark, created_at
+			        max_uses, used_count, expires_at, revoked, remark, created_at, duration_months
 			   FROM invite_codes WHERE created_by = ? ORDER BY created_at DESC LIMIT ?`,
 			createdBy, limit)
 	}
@@ -283,7 +286,7 @@ func (r *TrafficRepository) ListInviteCodes(ctx context.Context, createdBy strin
 		var expiresAt sql.NullTime
 		var revokedInt int
 		if err := rows.Scan(&ic.Code, &ic.Kind, &ic.BindUsername, &ic.CreatedBy, &pkgID,
-			&ic.MaxUses, &ic.UsedCount, &expiresAt, &revokedInt, &ic.Remark, &ic.CreatedAt); err != nil {
+			&ic.MaxUses, &ic.UsedCount, &expiresAt, &revokedInt, &ic.Remark, &ic.CreatedAt, &ic.DurationMonths); err != nil {
 			return nil, err
 		}
 		if pkgID.Valid {

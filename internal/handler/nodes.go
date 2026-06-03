@@ -283,6 +283,18 @@ func (h *nodesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 					seen[nid] = true
 				}
 			}
+			// 追加套餐内父节点派生出的 shared routed 子节点(admin 通过"添加路由出站"批量分配的)。
+			// 套餐字段 Nodes 只存父物理节点 ID,但 admin 在出站管理里给父节点派生的 routed_owner='shared'
+			// 子节点应当随套餐一起对用户可见;遗漏会导致用户看不到自己实际能用的路由出站节点。
+			if children, cerr := h.repo.ListSharedRoutedByParentIDs(r.Context(), pkg.Nodes); cerr == nil {
+				for _, cn := range children {
+					if seen[cn.ID] {
+						continue
+					}
+					nodes = append(nodes, cn)
+					seen[cn.ID] = true
+				}
+			}
 		}
 	}
 

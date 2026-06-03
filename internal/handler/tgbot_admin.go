@@ -89,10 +89,11 @@ type inviteOut struct {
 	MaxUses      int    `json:"max_uses"`
 	UsedCount    int    `json:"used_count"`
 	ExpiresAt    string `json:"expires_at,omitempty"`
-	Revoked      bool   `json:"revoked"`
-	Remark       string `json:"remark,omitempty"`
-	CreatedAt    string `json:"created_at"`
-	Usable       bool   `json:"usable"`
+	Revoked        bool   `json:"revoked"`
+	Remark         string `json:"remark,omitempty"`
+	CreatedAt      string `json:"created_at"`
+	Usable         bool   `json:"usable"`
+	DurationMonths int    `json:"duration_months,omitempty"`
 }
 
 func toInviteOut(ic storage.InviteCode) inviteOut {
@@ -101,8 +102,9 @@ func toInviteOut(ic storage.InviteCode) inviteOut {
 		CreatedBy: ic.CreatedBy, PackageID: ic.PackageID,
 		MaxUses: ic.MaxUses, UsedCount: ic.UsedCount,
 		Revoked: ic.Revoked, Remark: ic.Remark,
-		CreatedAt: ic.CreatedAt.Format(time.RFC3339),
-		Usable:    ic.IsUsable(),
+		CreatedAt:      ic.CreatedAt.Format(time.RFC3339),
+		Usable:         ic.IsUsable(),
+		DurationMonths: ic.DurationMonths,
 	}
 	if ic.ExpiresAt != nil {
 		out.ExpiresAt = ic.ExpiresAt.Format(time.RFC3339)
@@ -127,12 +129,13 @@ func (h *TGBotAPIHandler) listInvites(w http.ResponseWriter, r *http.Request) {
 
 func (h *TGBotAPIHandler) createInvite(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Kind         string `json:"kind"`
-		BindUsername string `json:"bind_username"`
-		PackageID    *int64 `json:"package_id"`
-		MaxUses      int    `json:"max_uses"`
-		ExpiresAt    string `json:"expires_at"`
-		Remark       string `json:"remark"`
+		Kind           string `json:"kind"`
+		BindUsername   string `json:"bind_username"`
+		PackageID      *int64 `json:"package_id"`
+		MaxUses        int    `json:"max_uses"`
+		ExpiresAt      string `json:"expires_at"`
+		Remark         string `json:"remark"`
+		DurationMonths int    `json:"duration_months"` // kind=new 账号有效期(月);0=按套餐周期
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid body")
@@ -151,12 +154,13 @@ func (h *TGBotAPIHandler) createInvite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ic := storage.InviteCode{
-		Kind:         body.Kind,
-		BindUsername: strings.TrimSpace(body.BindUsername),
-		CreatedBy:    auth.UsernameFromContext(r.Context()),
-		PackageID:    body.PackageID,
-		MaxUses:      body.MaxUses,
-		Remark:       body.Remark,
+		Kind:           body.Kind,
+		BindUsername:   strings.TrimSpace(body.BindUsername),
+		CreatedBy:      auth.UsernameFromContext(r.Context()),
+		PackageID:      body.PackageID,
+		MaxUses:        body.MaxUses,
+		Remark:         body.Remark,
+		DurationMonths: body.DurationMonths,
 	}
 	if strings.TrimSpace(body.ExpiresAt) != "" {
 		t, err := time.Parse(time.RFC3339, body.ExpiresAt)
@@ -313,9 +317,23 @@ func (h *TGBotAPIHandler) bindNew(ctx context.Context, w http.ResponseWriter,
 	if ic.PackageID != nil {
 		if pkg, perr := h.repo.GetPackage(ctx, *ic.PackageID); perr == nil && pkg != nil {
 			start := time.Now()
+			// 邀请码指定了月数则按月数算到期,并在 >1 月时自动开启续期(按月重置流量);
+			// 未指定(0)沿用套餐自身周期 + 套餐默认 is_reset。
 			end := start.AddDate(0, 0, pkg.CycleDays)
+			isReset := pkg.IsReset
+			resetDay := pkg.ResetDay
+			if ic.DurationMonths > 0 {
+				end = start.AddDate(0, ic.DurationMonths, 0)
+				isReset = ic.DurationMonths > 1
+			}
+			if isReset && resetDay < 1 { // 强制开续期但套餐没设重置日 → 用注册当天(避免 reset_day=0)
+				resetDay = start.Day()
+				if resetDay > 28 {
+					resetDay = 28
+				}
+			}
 			if aerr := h.repo.AssignPackageToUser(ctx, requestedUsername, pkg.ID, start, end,
-				pkg.IsReset, pkg.ResetDay); aerr == nil {
+				isReset, resetDay); aerr == nil {
 				pkgInfo = map[string]any{
 					"package_name":     pkg.Name,
 					"traffic_limit_gb": pkg.TrafficLimitGB,
@@ -503,11 +521,25 @@ func (h *TGBotAPIHandler) userSubscriptions(w http.ResponseWriter, r *http.Reque
 			CombinedCode: combined,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{
+
+	resp := map[string]any{
 		"success":         true,
 		"user_short_code": userShortCode,
 		"subscriptions":   out,
-	})
+	}
+	// 默认订阅:用户套餐的动态订阅(/x/{套餐短码}{用户短码}),无需分配 subscribe_file,
+	// 与网页端「登录即见」的默认订阅一致。
+	if user, uerr := h.repo.GetUser(r.Context(), username); uerr == nil && user.PackageID > 0 {
+		if pkg, perr := h.repo.GetPackage(r.Context(), user.PackageID); perr == nil && pkg != nil &&
+			strings.TrimSpace(pkg.ShortCode) != "" {
+			resp["default_subscription"] = subOut{
+				Name:         pkg.Name,
+				Description:  "套餐默认订阅",
+				CombinedCode: pkg.ShortCode + userShortCode,
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ============ /user-nodes ============
