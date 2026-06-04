@@ -827,29 +827,45 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	if err := h.repo.AssignPackageToUser(ctx, req.Username, req.PackageID, startDate, endDate, req.IsReset, req.ResetDay); err != nil {
-		if err == storage.ErrPackageNotFound {
+	warnings, perr := h.AssignAndProvision(ctx, req.Username, req.PackageID, startDate, endDate, req.IsReset, req.ResetDay)
+	if perr != nil {
+		if perr == storage.ErrPackageNotFound {
 			http.Error(w, "Package not found", http.StatusNotFound)
 			return
 		}
-		if err == storage.ErrUserNotFound {
+		if perr == storage.ErrUserNotFound {
 			http.Error(w, "User not found", http.StatusNotFound)
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, perr.Error(), http.StatusInternalServerError)
 		return
+	}
+	if len(warnings) > 0 {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"message": "Package assigned with warnings", "warnings": warnings})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"message": "Package assigned successfully"})
+}
+
+// AssignAndProvision 绑定套餐并真正下发(给套餐节点 inbound 加用户凭据 + 批量推服务器 + 重启 xray + 推限速)。
+// 抽自 ServeHTTP,供 web /api/admin/packages/assign 与 TGBOT 注册/兑换共用,确保两条路都生效。
+func (h *PackageAssignHandler) AssignAndProvision(ctx context.Context, username string, packageID int64, startDate, endDate time.Time, isReset bool, resetDay int) ([]string, error) {
+	var warnings []string
+	if err := h.repo.AssignPackageToUser(ctx, username, packageID, startDate, endDate, isReset, resetDay); err != nil {
+		return nil, err
 	}
 
 	// 获取套餐关联的节点，为每个节点的入站添加用户凭据
-	pkg, err := h.repo.GetPackage(ctx, req.PackageID)
+	pkg, err := h.repo.GetPackage(ctx, packageID)
 	if err != nil {
 		log.Printf("[PackageAssign] Failed to get package: %v", err)
 	} else {
-		user, err := h.repo.GetUser(ctx, req.Username)
+		user, err := h.repo.GetUser(ctx, username)
 		if err != nil {
 			log.Printf("[PackageAssign] Failed to get user: %v", err)
 		} else {
-			var warnings []string
 			var mu sync.Mutex
 			// 只收集"必须重启 xray 才能让改动生效"的服务器:
 			//   - routed 节点:改了 routing rules → 必须重启
@@ -888,7 +904,7 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 						}
 						item, err := collectRoutedBatchItem(ctx, h.remoteManage, h.repo, user, node.ID)
 						if err != nil {
-							log.Printf("[PackageAssign] routed node %d collect failed for user %s: %v", node.ID, req.Username, err)
+							log.Printf("[PackageAssign] routed node %d collect failed for user %s: %v", node.ID, username, err)
 							mu.Lock()
 							warnings = append(warnings, fmt.Sprintf("路由出站 %s 添加用户失败", node.NodeName))
 							mu.Unlock()
@@ -965,7 +981,7 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 						defer fbWg.Done()
 						if err := addUserToInbound(ctx, h.remoteManage, h.repo, user, fb.ServerID, fb.InboundTag); err != nil {
 							log.Printf("[PackageAssign] fallback addUserToInbound user=%s server=%d tag=%s: %v",
-								req.Username, fb.ServerID, fb.InboundTag, err)
+								username, fb.ServerID, fb.InboundTag, err)
 							mu.Lock()
 							warnings = append(warnings, fmt.Sprintf("节点 %s 添加用户失败", fb.NodeName))
 							mu.Unlock()
@@ -976,32 +992,13 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			}
 
 			restartXrayInParallel(ctx, h.remoteManage, restartNeeded, "PackageAssign")
-			if len(warnings) > 0 {
-				if h.pusher != nil {
-					go h.pusher.PushToAllServersForUser(context.Background(), req.Username)
-				}
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]interface{}{
-					"message":  "Package assigned with warnings",
-					"warnings": warnings,
-				})
-				return
-			}
 		}
 	}
 
 	if h.pusher != nil {
-		go h.pusher.PushToAllServersForUser(context.Background(), req.Username)
+		go h.pusher.PushToAllServersForUser(context.Background(), username)
 	}
-
-	// 不再预生成套餐订阅文件:套餐订阅由 PackageSubscribeHandler 通过
-	// /x/{套餐短码}{用户短码} 或 /api/user/package-subscribe 动态生成(默认模板 + 套餐节点),
-	// 预生成的 pkg_<user>.yaml 既不被读取、又会污染订阅管理列表,故移除。
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"message": "Package assigned successfully",
-	})
+	return warnings, nil
 }
 
 func (h *PackageAssignHandler) autoGenerateSubscription(ctx context.Context, username string, packageID int64) {

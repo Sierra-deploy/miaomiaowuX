@@ -37,11 +37,26 @@ import (
 //	GET    /api/admin/tgbot/user-subscriptions?username=  订阅列表 + short_code
 //	GET    /api/admin/tgbot/user-nodes?username=   套餐节点 + 服务器在线状态
 type TGBotAPIHandler struct {
-	repo *storage.TrafficRepository
+	repo   *storage.TrafficRepository
+	assign *PackageAssignHandler // 套餐绑定+下发(与 web /api/admin/packages/assign 共用),由 main.go 注入
 }
 
 func NewTGBotAPIHandler(repo *storage.TrafficRepository) *TGBotAPIHandler {
 	return &TGBotAPIHandler{repo: repo}
+}
+
+// SetPackageAssign 注入套餐下发器,让 TGBOT 注册/兑换的套餐真正生效(下发节点凭据/推送)。
+func (h *TGBotAPIHandler) SetPackageAssign(a *PackageAssignHandler) {
+	h.assign = a
+}
+
+// assignPackage 绑定套餐:有下发器走完整下发(同 web),否则回退到仅写记录(兜底,不应发生)。
+func (h *TGBotAPIHandler) assignPackage(ctx context.Context, username string, packageID int64, start, end time.Time, isReset bool, resetDay int) error {
+	if h.assign != nil {
+		_, err := h.assign.AssignAndProvision(ctx, username, packageID, start, end, isReset, resetDay)
+		return err
+	}
+	return h.repo.AssignPackageToUser(ctx, username, packageID, start, end, isReset, resetDay)
 }
 
 // 向后兼容旧名字
@@ -335,6 +350,8 @@ func (h *TGBotAPIHandler) bindNew(ctx context.Context, w http.ResponseWriter,
 		writeJSONError(w, http.StatusInternalServerError, "创建账号失败: "+err.Error())
 		return
 	}
+	// 确保生成 user_tokens 行 + 用户短码,否则订阅链接缺用户码(/x/<套餐码> 而非 /x/<套餐码><用户码>)。
+	_, _ = h.repo.GetOrCreateUserToken(ctx, requestedUsername)
 
 	pkgInfo := map[string]any{}
 	if ic.PackageID != nil {
@@ -355,7 +372,7 @@ func (h *TGBotAPIHandler) bindNew(ctx context.Context, w http.ResponseWriter,
 					resetDay = 28
 				}
 			}
-			if aerr := h.repo.AssignPackageToUser(ctx, requestedUsername, pkg.ID, start, end,
+			if aerr := h.assignPackage(ctx, requestedUsername, pkg.ID, start, end,
 				isReset, resetDay); aerr == nil {
 				pkgInfo = map[string]any{
 					"package_name":     pkg.Name,
@@ -570,6 +587,7 @@ func (h *TGBotAPIHandler) userSubscriptions(w http.ResponseWriter, r *http.Reque
 		writeJSONError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	_, _ = h.repo.GetOrCreateUserToken(r.Context(), username) // 确保有短码(修复老账号)
 	userShortCode, _ := h.repo.GetEffectiveUserShortCode(r.Context(), username)
 
 	type subOut struct {
@@ -864,7 +882,7 @@ func (h *TGBotAPIHandler) redeem(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "兑换失败: "+err.Error())
 		return
 	}
-	if err := h.repo.AssignPackageToUser(ctx, existing, pkg.ID, now, end, isReset, resetDay); err != nil {
+	if err := h.assignPackage(ctx, existing, pkg.ID, now, end, isReset, resetDay); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "续期失败: "+err.Error())
 		return
 	}
@@ -896,6 +914,7 @@ func (h *TGBotAPIHandler) adminSubview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f := files[0]
+	_, _ = h.repo.GetOrCreateUserToken(ctx, username) // 确保有短码(修复老账号)
 	userShort, _ := h.repo.GetEffectiveUserShortCode(ctx, username)
 	combined := strings.TrimSpace(f.CustomShortCode)
 	if combined == "" {

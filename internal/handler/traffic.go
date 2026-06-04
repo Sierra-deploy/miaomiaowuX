@@ -112,11 +112,13 @@ func (h *TrafficHandler) handleUserNodes(w http.ResponseWriter, r *http.Request)
 	}
 	routedNodeByID := make(map[int64]storage.Node)
 	inboundNodeByKey := make(map[string]storage.Node) // "serverName::tag"
+	serverNameToInboundTags := make(map[string][]string)
 	for _, n := range allNodes {
 		if n.NodeType == "routed" {
 			routedNodeByID[n.ID] = n
 		} else if n.InboundTag != "" {
 			inboundNodeByKey[n.OriginalServer+"::"+n.InboundTag] = n
+			serverNameToInboundTags[n.OriginalServer] = append(serverNameToInboundTags[n.OriginalServer], n.InboundTag)
 		}
 	}
 
@@ -188,10 +190,16 @@ func (h *TrafficHandler) handleUserNodes(w http.ResponseWriter, r *http.Request)
 			}
 		}
 		tags := serverToInboundTags[uet.ServerID]
-		if len(tags) == 0 {
-			continue
-		}
 		srvName := serverNameByID[uet.ServerID]
+		if len(tags) == 0 {
+			// fallback: 该 user 在这台 server 上没 user_inbound_configs 记录。
+			// 典型场景:admin 自己用 inbound(client.email 直接是 "admin"),没走"绑套餐"自动注册流程。
+			// 把流量摊到该 server 上所有非 routed 物理 inbound 节点,而不是直接丢弃。
+			tags = serverNameToInboundTags[srvName]
+			if len(tags) == 0 {
+				continue
+			}
+		}
 		// 一般一 server 一个 inbound;若多 inbound,流量平均分(Xray stats 上 user 维度本身就是 across inbounds 的合计,没法精确拆)
 		share := uet
 		if len(tags) > 1 {
@@ -279,6 +287,12 @@ func (h *TrafficHandler) handleNodeUsers(w http.ResponseWriter, r *http.Request)
 	// 即使流量落在本 server 的统计里也不该归到本 inbound。
 	inboundUsernames := make(map[string]bool)
 	serverSubaccountEmails := make(map[string]bool)
+	// fallback 用:本 server 上所有非 routed inbound 节点数。client.email 直接用 username
+	// 的用户(典型 admin 自用)流量按这个数摊分,本节点占 1/N。
+	nodeInboundsOnServer := 0
+	// 真实 username 白名单 — fallback 仅放行 users 表中存在的 username,避免 outbound tag 等
+	// 脏数据通过 ResolveUsernameByEmail 兜底返回 email 字面值伪装成 username。
+	realUsernames := make(map[string]bool)
 	if !isRouted && nodeServerID > 0 && node.InboundTag != "" {
 		cfgs, err := h.repo.ListAllUserInboundConfigs(ctx)
 		if err != nil {
@@ -297,6 +311,22 @@ func (h *TrafficHandler) handleNodeUsers(w http.ResponseWriter, r *http.Request)
 			for _, sa := range subs {
 				serverSubaccountEmails[sa.Email] = true
 			}
+			allNodes, err := h.repo.ListAllNodes(ctx)
+			if err != nil {
+				log.Printf("[Traffic API] node-users: list nodes for fallback failed: %v", err)
+			}
+			for _, n := range allNodes {
+				if n.NodeType != "routed" && n.InboundTag != "" && n.OriginalServer == node.OriginalServer {
+					nodeInboundsOnServer++
+				}
+			}
+		}
+		users, err := h.repo.ListUsers(ctx, 10000)
+		if err != nil {
+			log.Printf("[Traffic API] node-users: list users for fallback failed: %v", err)
+		}
+		for _, u := range users {
+			realUsernames[u.Username] = true
 		}
 	}
 
@@ -351,12 +381,25 @@ func (h *TrafficHandler) handleNodeUsers(w http.ResponseWriter, r *http.Request)
 		if username == "" {
 			continue
 		}
-		// 必须确实在本 inbound 有配置才算 — 这同时滤掉了 ResolveUsernameByEmail
-		// fallback 把 outbound tag 当 username 返回的脏数据。
-		if !inboundUsernames[username] {
+		if inboundUsernames[username] {
+			addUser(username, uet)
 			continue
 		}
-		addUser(username, uet)
+		// fallback: username 在 user_inbound_configs 没显式登记,但确实是 users 表里的真实用户
+		// (典型 admin 自用 inbound,client.email 直接用 "admin")。按本 server 上 inbound 节点
+		// 总数摊分流量,本节点占 1/N。realUsernames 同时滤掉 ResolveUsernameByEmail 兜底把
+		// outbound tag 当 username 返回的脏数据。
+		if !realUsernames[username] || nodeInboundsOnServer <= 0 {
+			continue
+		}
+		share := uet
+		if nodeInboundsOnServer > 1 {
+			share.Uplink = uet.Uplink / int64(nodeInboundsOnServer)
+			share.Downlink = uet.Downlink / int64(nodeInboundsOnServer)
+			share.LastUplink = uet.LastUplink / int64(nodeInboundsOnServer)
+			share.LastDownlink = uet.LastDownlink / int64(nodeInboundsOnServer)
+		}
+		addUser(username, share)
 	}
 
 	out := make([]item, 0, len(byUser))

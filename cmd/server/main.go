@@ -413,11 +413,19 @@ func main() {
 	// 启动延迟 60s — 等 agent WS 重连。失败的行下次启动重试,全部成功才写 done 标记。
 	handler.NewCredentialEmailMigrator(repo, remoteManageHandler).Start(context.Background(), 60*time.Second)
 
+	// 一次性补写 user_inbound_configs 孤儿 — collector 有 (server, email) 流量但表里
+	// 没该用户的 inbound 持有记录,导致 /api/admin/traffic/user-nodes & node-users 反查空。
+	// 只补 role=user 的真实付费用户,admin 自用走 handler fallback,不污染本表。
+	// 延迟 90s — 比 CredentialEmailMigrator(60s)晚跑,确保它先把老 email 迁完再补剩下的。
+	handler.NewOrphanInboundConfigBackfiller(repo).Start(context.Background(), 90*time.Second)
+
 	// 依赖 limiterPusher 的端点
 	packageUpdateHandler := handler.NewPackageUpdateHandler(repo, remoteManageHandler, limiterPusher)
 	packageUpdateHandler.SetLicenseManager(licenseManager)
 	mux.Handle("/api/admin/packages/update", auth.RequireAdmin(tokenStore, userRepo, packageUpdateHandler))
-	mux.Handle("/api/admin/packages/assign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageAssignHandler(repo, remoteManageHandler, limiterPusher)))
+	packageAssignHandler := handler.NewPackageAssignHandler(repo, remoteManageHandler, limiterPusher)
+	tgbotAPIHandler.SetPackageAssign(packageAssignHandler) // 让 TGBOT 注册/兑换的套餐走同一套下发
+	mux.Handle("/api/admin/packages/assign", auth.RequireAdmin(tokenStore, userRepo, packageAssignHandler))
 	mux.Handle("/api/admin/packages/unassign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageUnassignHandler(repo, remoteManageHandler, limiterPusher)))
 	// 删除套餐:解绑所有绑定用户(移除入站凭据/清 package_id/删套餐订阅)后再删,故依赖 remoteManageHandler/limiterPusher
 	mux.Handle("/api/admin/packages/", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageDeleteHandler(repo, remoteManageHandler, limiterPusher)))
