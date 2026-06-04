@@ -158,6 +158,22 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.2.0 (2026-06-04)
+- 🌈MCP功能补全
+- 🌈TG BOT开发测试
+- 🌈TGBOT支持邀请码注册绑定套餐
+- 🌈优化lxc容器的识别
+- 🌈优化xray路由管理与出站管理
+- 🌈支持TgBot和MiniApp
+- 🌈支持节点单独设置倍率与倍率展示
+- 🌈迁移妙妙屋代理组编辑的中转代理组功能
+- 🛠️ fix: 修改插件默认组织
+- 🛠️ fix: 功能性BUG修复
+- 🛠️ fix: 每日流量折线图重启错误统计数据
+- 🛠️ fix: 节点流量用户展示错误
+- 🛠️ fix:出招allowinsecure改为pinnedPeerCertSha256
+- 🛠️ fix:出站allowinsecure改为pinnedPeerCertSha256
+- 🛠️ fix:已经是路由出站的节点不能再次添加路由出站
 ### v0.1.9 (2026-06-02)
 - 🌈Xray管理路由规则管理优化
 - 🌈支持AnyTLS
