@@ -978,7 +978,10 @@ function AdminDashboard() {
                     return (
                       <TableRow key={s.name}>
                         <TableCell className="font-medium">{s.name}</TableCell>
-                        <TableCell className="text-xs text-muted-foreground whitespace-nowrap">↑{formatSpeed(s.upload)} ↓{formatSpeed(s.download)}</TableCell>
+                        <TableCell className="text-xs whitespace-nowrap">
+                          <span className="inline-block w-[72px] text-right tabular-nums text-green-600 dark:text-green-400">↑ {formatSpeed(s.upload)}</span>
+                          <span className="inline-block w-[72px] text-right tabular-nums text-blue-600 dark:text-blue-400 ml-2">↓ {formatSpeed(s.download)}</span>
+                        </TableCell>
                         <TableCell className="text-right">{formatBytes(s.used)}</TableCell>
                         <TableCell className="text-right">{s.limit > 0 ? formatBytes(s.limit) : t('admin.serverOverview.unlimited')}</TableCell>
                         <TableCell className="text-right">{remaining >= 0 ? formatBytes(remaining) : '--'}</TableCell>

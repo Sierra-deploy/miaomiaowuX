@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { LogOut, Settings2, ExternalLink, BookOpen, HardDrive, RefreshCw, Bug, Palette, Languages, Info, ArrowRightLeft } from 'lucide-react'
+import { LogOut, Settings2, ExternalLink, BookOpen, HardDrive, RefreshCw, Bug, Palette, Languages, Info, ArrowRightLeft, Bot } from 'lucide-react'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
 import useDialogState from '@/hooks/use-dialog-state'
@@ -307,6 +307,11 @@ export function UserMenu() {
           <DropdownMenuItem asChild className='cursor-pointer justify-center'>
             <a href='https://miaomiaowu.net/x' target='_blank' rel='noopener noreferrer' className='flex items-center gap-2'>
               <BookOpen className='size-4' /> {t('userMenu.help')}
+            </a>
+          </DropdownMenuItem>
+          <DropdownMenuItem asChild className='cursor-pointer justify-center'>
+            <a href='https://miaomiaowu.net/x/docs/tool-mmwx-tgbot' target='_blank' rel='noopener noreferrer' className='flex items-center gap-2'>
+              <Bot className='size-4' /> {t('userMenu.tgBotApp')}
             </a>
           </DropdownMenuItem>
           {profile?.is_admin && (

@@ -136,6 +136,7 @@
     "settings": "Settings",
     "debugLog": "Debug Log",
     "help": "Help",
+    "tgBotApp": "TG Bot & APP",
     "backup": "Backup Data",
     "migrateFromMmw": "Migrate from MMW",
     "checkUpdate": "Check Update",

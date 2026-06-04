@@ -136,6 +136,7 @@
     "settings": "个人设置",
     "debugLog": "Debug 日志",
     "help": "使用帮助",
+    "tgBotApp": "TG Bot & APP",
     "backup": "备份数据",
     "migrateFromMmw": "从妙妙屋迁移",
     "checkUpdate": "检查更新",

@@ -84,6 +84,8 @@ func (h *TGBotAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.userDailyTraffic(w, r)
 	case path == "redeem" && r.Method == http.MethodPost:
 		h.redeem(w, r)
+	case path == "admin-subview" && r.Method == http.MethodGet:
+		h.adminSubview(w, r)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
@@ -872,6 +874,65 @@ func (h *TGBotAPIHandler) redeem(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success": true, "kind": "renew", "username": existing,
 		"package_name": pkg.Name, "end_date": end.Format("2006-01-02"),
+	})
+}
+
+// adminSubview GET /admin-subview?username= 返回「系统订阅列表第一个订阅」及其节点(名/协议/在线状态)。
+// 用于管理员账号(无套餐、无个人订阅)在 Mini App 里有可用的订阅与节点视图。
+func (h *TGBotAPIHandler) adminSubview(w http.ResponseWriter, r *http.Request) {
+	username := strings.TrimSpace(r.URL.Query().Get("username"))
+	if username == "" {
+		writeJSONError(w, http.StatusBadRequest, "username 必填")
+		return
+	}
+	ctx := r.Context()
+	files, err := h.repo.ListSubscribeFiles(ctx)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if len(files) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "subscription": nil, "nodes": []any{}})
+		return
+	}
+	f := files[0]
+	userShort, _ := h.repo.GetEffectiveUserShortCode(ctx, username)
+	combined := strings.TrimSpace(f.CustomShortCode)
+	if combined == "" {
+		combined = f.FileShortCode + userShort
+	}
+
+	servers, _ := h.repo.ListRemoteServers(ctx)
+	serverStatus := make(map[string]string, len(servers))
+	for _, s := range servers {
+		serverStatus[s.Name] = s.Status
+	}
+
+	type nodeOut struct {
+		NodeID   int64  `json:"node_id"`
+		Name     string `json:"name"`
+		Protocol string `json:"protocol"`
+		Status   string `json:"status"` // online | offline | unknown
+	}
+	nodes := make([]nodeOut, 0, len(f.SelectedNodeIDs))
+	for _, id := range f.SelectedNodeIDs {
+		n, err := h.repo.GetNodeByID(ctx, id)
+		if err != nil {
+			continue
+		}
+		st := "offline"
+		if s := serverStatus[n.OriginalServer]; s == "connected" {
+			st = "online"
+		} else if strings.TrimSpace(n.OriginalServer) == "" || s == "" {
+			st = "unknown"
+		}
+		nodes = append(nodes, nodeOut{NodeID: n.ID, Name: n.NodeName, Protocol: n.Protocol, Status: st})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"success":      true,
+		"subscription": map[string]any{"name": f.Name, "combined_code": combined},
+		"nodes":        nodes,
 	})
 }
 
