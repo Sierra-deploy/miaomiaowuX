@@ -26,7 +26,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { parseProxyUrl, toClashProxy, type ProxyNode, type ClashProxy } from '@/lib/proxy-parser'
+import { parseProxyUrl, parseSurgeLine, toClashProxy, type ProxyNode, type ClashProxy } from '@/lib/proxy-parser'
 import { Check, Pencil, X, Undo2, Activity, Eye, Copy, ChevronDown, Link2, Flag, GripVertical, Zap, CheckCircle2, Loader2, Route as RouteIcon, Trash2, Cable, Scale } from 'lucide-react'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import IpIcon from '@/assets/icons/ip.svg'
@@ -2317,9 +2317,19 @@ function NodesPage() {
 
     for (const line of lines) {
       const trimmed = line.trim()
-      if (!trimmed || !trimmed.includes('://')) continue
-      const parsedNode = parseProxyUrl(trimmed)
-      const clashNode = parsedNode ? toClashProxy(parsedNode) : null
+      if (!trimmed) continue
+      // 跳过注释 / 段头
+      if (trimmed.startsWith('#') || trimmed.startsWith(';') || trimmed.startsWith('[')) continue
+      // 1. URI 格式(snell:// vmess:// ss:// 等);2. 失败则尝试 Surge INI(`节点名 = type, server, port, ...`)
+      let parsedNode: ProxyNode | null = null
+      if (trimmed.includes('://')) {
+        parsedNode = parseProxyUrl(trimmed)
+      }
+      if (!parsedNode && trimmed.includes('=')) {
+        parsedNode = parseSurgeLine(trimmed)
+      }
+      if (!parsedNode) continue
+      const clashNode = toClashProxy(parsedNode)
       if (skipCertVerify && clashNode) clashNode['skip-cert-verify'] = true
       const name = parsedNode?.name || clashNode?.name || t('nodeList.unknown')
       const normalizedParsed = cloneProxyWithName(parsedNode, name)

@@ -19,6 +19,7 @@ export interface SubscribeFile {
   auto_sync_custom_rules: boolean
   template_filename: string
   selected_tags: string[]
+  selected_node_ids?: number[]
   selected_custom_rule_ids?: number[]
   selected_override_script_ids?: number[]
   stats_server_ids: string

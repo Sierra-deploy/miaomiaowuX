@@ -33,6 +33,7 @@ func subscribeFileSelectClause(alias string) string {
 		"COALESCE(" + pfx + "auto_sync_custom_rules, 0)",
 		"COALESCE(" + pfx + "template_filename, '')",
 		"COALESCE(" + pfx + "selected_tags, '[]')",
+		"COALESCE(" + pfx + "selected_node_ids, '[]')",
 		"COALESCE(" + pfx + "selected_custom_rule_ids, '[]')",
 		"COALESCE(" + pfx + "selected_override_script_ids, '[]')",
 		"COALESCE(" + pfx + "stats_server_ids, '')",
@@ -63,13 +64,13 @@ func marshalIDArray(ids []int64) string {
 func scanSubscribeFile(scanner interface{ Scan(dest ...any) error }) (SubscribeFile, error) {
 	var file SubscribeFile
 	var autoSync, rawOutput int
-	var tagsJSON, customRuleIDsJSON, overrideScriptIDsJSON string
+	var tagsJSON, nodeIDsJSON, customRuleIDsJSON, overrideScriptIDsJSON string
 	var trafficLimit sql.NullFloat64
 	if err := scanner.Scan(
 		&file.ID, &file.Name, &file.Description, &file.URL, &file.Type, &file.Filename,
 		&file.FileShortCode, &file.CustomShortCode,
 		&autoSync,
-		&file.TemplateFilename, &tagsJSON,
+		&file.TemplateFilename, &tagsJSON, &nodeIDsJSON,
 		&customRuleIDsJSON, &overrideScriptIDsJSON,
 		&file.StatsServerIDs, &trafficLimit,
 		&file.SortOrder, &rawOutput, &file.CreatedBy,
@@ -87,6 +88,12 @@ func scanSubscribeFile(scanner interface{ Scan(dest ...any) error }) (SubscribeF
 	}
 	if file.SelectedTags == nil {
 		file.SelectedTags = []string{}
+	}
+	if nodeIDsJSON != "" && nodeIDsJSON != "[]" {
+		_ = json.Unmarshal([]byte(nodeIDsJSON), &file.SelectedNodeIDs)
+	}
+	if file.SelectedNodeIDs == nil {
+		file.SelectedNodeIDs = []int64{}
 	}
 	if customRuleIDsJSON != "" && customRuleIDsJSON != "[]" {
 		_ = json.Unmarshal([]byte(customRuleIDsJSON), &file.SelectedCustomRuleIDs)
@@ -239,6 +246,7 @@ func (r *TrafficRepository) CreateSubscribeFile(ctx context.Context, file Subscr
 	if file.SelectedTags == nil {
 		tagsJSON = []byte("[]")
 	}
+	nodeIDsJSON := marshalIDArray(file.SelectedNodeIDs)
 	customRuleIDsJSON := marshalIDArray(file.SelectedCustomRuleIDs)
 	overrideScriptIDsJSON := marshalIDArray(file.SelectedOverrideScriptIDs)
 
@@ -251,12 +259,12 @@ func (r *TrafficRepository) CreateSubscribeFile(ctx context.Context, file Subscr
 
 		res, err := r.db.ExecContext(ctx, `INSERT INTO subscribe_files
 			(name, description, url, type, filename, file_short_code, custom_short_code,
-			auto_sync_custom_rules, template_filename, selected_tags,
+			auto_sync_custom_rules, template_filename, selected_tags, selected_node_ids,
 			selected_custom_rule_ids, selected_override_script_ids, stats_server_ids,
 			traffic_limit, sort_order, raw_output, created_by)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			file.Name, file.Description, file.URL, file.Type, file.Filename, newFileShortCode, file.CustomShortCode,
-			file.TemplateFilename, string(tagsJSON),
+			file.TemplateFilename, string(tagsJSON), nodeIDsJSON,
 			customRuleIDsJSON, overrideScriptIDsJSON, file.StatsServerIDs,
 			file.TrafficLimit, file.SortOrder, boolToInt(file.RawOutput), file.CreatedBy)
 		if err != nil {
@@ -312,19 +320,20 @@ func (r *TrafficRepository) UpdateSubscribeFile(ctx context.Context, file Subscr
 	if file.SelectedTags == nil {
 		tagsJSON = []byte("[]")
 	}
+	nodeIDsJSON := marshalIDArray(file.SelectedNodeIDs)
 	customRuleIDsJSON := marshalIDArray(file.SelectedCustomRuleIDs)
 	overrideScriptIDsJSON := marshalIDArray(file.SelectedOverrideScriptIDs)
 
 	res, err := r.db.ExecContext(ctx, `UPDATE subscribe_files SET
 		name = ?, description = ?, url = ?, type = ?, filename = ?,
 		custom_short_code = ?, auto_sync_custom_rules = ?,
-		template_filename = ?, selected_tags = ?,
+		template_filename = ?, selected_tags = ?, selected_node_ids = ?,
 		selected_custom_rule_ids = ?, selected_override_script_ids = ?, stats_server_ids = ?,
 		traffic_limit = ?, sort_order = ?, raw_output = ?,
 		updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
 		file.Name, file.Description, file.URL, file.Type, file.Filename,
 		file.CustomShortCode, boolToInt(file.AutoSyncCustomRules),
-		file.TemplateFilename, string(tagsJSON),
+		file.TemplateFilename, string(tagsJSON), nodeIDsJSON,
 		customRuleIDsJSON, overrideScriptIDsJSON, file.StatsServerIDs,
 		file.TrafficLimit, file.SortOrder, boolToInt(file.RawOutput),
 		file.ID)

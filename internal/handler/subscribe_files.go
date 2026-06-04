@@ -153,6 +153,7 @@ func (h *subscribeFilesHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 		Filename:         req.Filename,
 		TemplateFilename: req.TemplateFilename,
 		SelectedTags:     req.SelectedTags,
+		SelectedNodeIDs:  req.SelectedNodeIDs,
 		SelectedCustomRuleIDs:     req.SelectedCustomRuleIDs,
 		SelectedOverrideScriptIDs: req.SelectedOverrideScriptIDs,
 		StatsServerIDs:   req.StatsServerIDs,
@@ -487,6 +488,9 @@ func (h *subscribeFilesHandler) handleUpdate(w http.ResponseWriter, r *http.Requ
 	existing.TemplateFilename = req.TemplateFilename
 	if req.SelectedTags != nil {
 		existing.SelectedTags = req.SelectedTags
+	}
+	if req.SelectedNodeIDs != nil {
+		existing.SelectedNodeIDs = req.SelectedNodeIDs
 	}
 	if req.SelectedCustomRuleIDs != nil {
 		existing.SelectedCustomRuleIDs = req.SelectedCustomRuleIDs
@@ -838,6 +842,7 @@ type subscribeFileRequest struct {
 	AutoSyncCustomRules *bool    `json:"auto_sync_custom_rules,omitempty"`
 	TemplateFilename    string   `json:"template_filename"`
 	SelectedTags        []string `json:"selected_tags"`
+	SelectedNodeIDs     []int64  `json:"selected_node_ids"`
 	SelectedCustomRuleIDs     []int64 `json:"selected_custom_rule_ids"`
 	SelectedOverrideScriptIDs []int64 `json:"selected_override_script_ids"`
 	StatsServerIDs      string   `json:"stats_server_ids"`
@@ -861,6 +866,7 @@ type subscribeFileDTO struct {
 	AutoSyncCustomRules bool       `json:"auto_sync_custom_rules"`
 	TemplateFilename    string     `json:"template_filename"`
 	SelectedTags        []string   `json:"selected_tags"`
+	SelectedNodeIDs     []int64    `json:"selected_node_ids"`
 	SelectedCustomRuleIDs     []int64 `json:"selected_custom_rule_ids"`
 	SelectedOverrideScriptIDs []int64 `json:"selected_override_script_ids"`
 	StatsServerIDs      string     `json:"stats_server_ids"`
@@ -874,6 +880,23 @@ type subscribeFileDTO struct {
 }
 
 func convertSubscribeFile(file storage.SubscribeFile) subscribeFileDTO {
+	// nil → 空数组,避免 JSON 序列化成 null 让前端 .map / .has 走错分支
+	tags := file.SelectedTags
+	if tags == nil {
+		tags = []string{}
+	}
+	nodeIDs := file.SelectedNodeIDs
+	if nodeIDs == nil {
+		nodeIDs = []int64{}
+	}
+	ruleIDs := file.SelectedCustomRuleIDs
+	if ruleIDs == nil {
+		ruleIDs = []int64{}
+	}
+	scriptIDs := file.SelectedOverrideScriptIDs
+	if scriptIDs == nil {
+		scriptIDs = []int64{}
+	}
 	return subscribeFileDTO{
 		ID:                  file.ID,
 		Name:                file.Name,
@@ -884,9 +907,10 @@ func convertSubscribeFile(file storage.SubscribeFile) subscribeFileDTO {
 		CustomShortCode:     file.CustomShortCode,
 		AutoSyncCustomRules: file.AutoSyncCustomRules,
 		TemplateFilename:    file.TemplateFilename,
-		SelectedTags:        file.SelectedTags,
-		SelectedCustomRuleIDs:     file.SelectedCustomRuleIDs,
-		SelectedOverrideScriptIDs: file.SelectedOverrideScriptIDs,
+		SelectedTags:        tags,
+		SelectedNodeIDs:     nodeIDs,
+		SelectedCustomRuleIDs:     ruleIDs,
+		SelectedOverrideScriptIDs: scriptIDs,
 		StatsServerIDs:      file.StatsServerIDs,
 		TrafficLimit:        file.TrafficLimit,
 		SortOrder:           file.SortOrder,

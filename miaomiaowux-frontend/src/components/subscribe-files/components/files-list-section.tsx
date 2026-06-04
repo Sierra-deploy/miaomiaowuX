@@ -9,9 +9,9 @@
 //
 // 设计:所有 state / mutation / 副作用都由父端持有,这里只接 props + 回调。
 //      `isAdmin` 决定隐藏某些只对管理员开放的列(自定义连接 / 描述 / 上下移)。
-import type { ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
-import { ChevronDown, ChevronUp, Edit, Settings, Trash2 } from 'lucide-react'
+import { ChevronDown, ChevronUp, Edit, Network, Settings, Trash2 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -35,6 +35,7 @@ import {
 } from '@/components/ui/alert-dialog'
 import { DataTable, type DataTableColumn } from '@/components/data-table'
 import { TrafficScopePopover } from '../dialogs/traffic-scope-drawer'
+import { NodePicker, type NodePickerItem } from './node-picker'
 
 // 文件 / 模板的最小引用形(只声明本组件用到的字段)
 export interface SubscribeFileRef {
@@ -48,6 +49,7 @@ export interface SubscribeFileRef {
   auto_sync_custom_rules: boolean
   template_filename: string
   selected_tags: string[]
+  selected_node_ids?: number[]
   latest_version?: number
   updated_at: string
 }
@@ -95,6 +97,10 @@ interface FilesListSectionProps {
   trafficScopeServers?: { id: number; name: string }[]
   onSaveTrafficScope?: (file: SubscribeFileRef, statsServerIds: string) => void
   savingTrafficScope?: boolean
+  // "选择节点" Popover:行内快捷入口,父端提供全节点 + 保存回调
+  allNodes?: NodePickerItem[]
+  onSaveSelectedNodes?: (file: SubscribeFileRef, nodeIds: number[]) => void
+  savingSelectedNodes?: boolean
   // mutation 状态 + 调用代理
   inlineUpdate: (payload: { id: number; data: Record<string, any> }) => void
   updateUserShortCode: (value: string) => void
@@ -121,6 +127,9 @@ export function FilesListSection({
   trafficScopeServers,
   onSaveTrafficScope,
   savingTrafficScope,
+  allNodes,
+  onSaveSelectedNodes,
+  savingSelectedNodes,
   inlineUpdate,
   updateUserShortCode,
   updateMetadataPending,
@@ -350,6 +359,15 @@ export function FilesListSection({
                       <Button variant='ghost' size='sm' title={t('management.fileList.editInfo')} onClick={() => onEditMetadata(file)} disabled={updateMetadataPending}>
                         <Settings className='h-4 w-4' />
                       </Button>
+                      {/* 选择节点 — 行内 Popover 快捷入口;仅在父端提供 onSaveSelectedNodes 时显示 */}
+                      {onSaveSelectedNodes && file.template_filename && (
+                        <SelectNodesPopover
+                          file={file}
+                          allNodes={allNodes ?? []}
+                          onSave={onSaveSelectedNodes}
+                          saving={Boolean(savingSelectedNodes)}
+                        />
+                      )}
                       <Button variant='ghost' size='sm' title={t('management.fileList.editConfig')} onClick={() => onEditConfig(file)}>
                         <Edit className='h-4 w-4' />
                       </Button>
@@ -376,7 +394,7 @@ export function FilesListSection({
                   ),
                   headerClassName: 'text-center',
                   cellClassName: 'text-center',
-                  width: '140px',
+                  width: '180px',
                 },
               ] as DataTableColumn<SubscribeFileRef>[]).filter(
                 (c) => isAdmin || (c.header !== '' && c.header !== t('management.fileList.descriptionCol') && c.header !== '自定义连接'),
@@ -592,5 +610,75 @@ export function FilesListSection({
         )}
       </CardContent>
     </Card>
+  )
+}
+
+// SelectNodesPopover:行内快捷"选择节点"。点击图标打开 Popover,内嵌通用 NodePicker;
+// 本地维护草稿态(避免每次 toggle 都发请求),点"保存"才提交回调,关闭时草稿丢弃。
+function SelectNodesPopover({
+  file,
+  allNodes,
+  onSave,
+  saving,
+}: {
+  file: SubscribeFileRef
+  allNodes: NodePickerItem[]
+  onSave: (file: SubscribeFileRef, nodeIds: number[]) => void
+  saving: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const [draft, setDraft] = useState<number[]>(file.selected_node_ids ?? [])
+  const { t: _t } = useTranslation('subscribe')
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(o) => {
+        setOpen(o)
+        // 打开时同步当前文件的选择(避免上一个文件的草稿污染)
+        if (o) setDraft(file.selected_node_ids ?? [])
+      }}
+    >
+      <PopoverTrigger asChild>
+        <Button variant='ghost' size='sm' title='选择节点' disabled={saving}>
+          <Network className='h-4 w-4' />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align='end' className='w-[480px] p-3'>
+        <div className='space-y-3'>
+          <div className='flex items-center justify-between'>
+            <div className='text-sm font-medium'>选择该订阅使用的节点</div>
+            <div className='text-[10px] text-muted-foreground truncate max-w-[220px]' title={file.name}>
+              {file.name}
+            </div>
+          </div>
+          {allNodes.length === 0 ? (
+            <div className='text-xs text-muted-foreground border rounded-md p-4 text-center'>暂无节点</div>
+          ) : (
+            <NodePicker
+              allNodes={allNodes}
+              selectedNodeIds={draft}
+              onChange={setDraft}
+              listHeightClass='max-h-72'
+              hintText='不选 = 该订阅使用全部节点。'
+            />
+          )}
+          <div className='flex justify-end gap-2 pt-1'>
+            <Button variant='outline' size='sm' onClick={() => setOpen(false)} disabled={saving}>
+              取消
+            </Button>
+            <Button
+              size='sm'
+              onClick={() => {
+                onSave(file, draft)
+                setOpen(false)
+              }}
+              disabled={saving || allNodes.length === 0}
+            >
+              {saving ? '保存中...' : '保存'}
+            </Button>
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
   )
 }

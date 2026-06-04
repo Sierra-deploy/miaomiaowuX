@@ -910,11 +910,18 @@ func (h *SubscriptionHandler) generateFromTemplate(ctx context.Context, subscrib
 		nodes = orderNodesByUserOrder(ctx, h.repo, creator, nodes)
 	}
 
+	// 优先按节点 ID 过滤(新模式);为空回退按标签过滤(legacy 兼容)
+	selectedNodeIDsMap := make(map[int64]bool, len(subscribeFile.SelectedNodeIDs))
+	for _, id := range subscribeFile.SelectedNodeIDs {
+		selectedNodeIDsMap[id] = true
+	}
+	hasNodeFilter := len(selectedNodeIDsMap) > 0
+
 	selectedTagsMap := make(map[string]bool)
 	for _, tag := range subscribeFile.SelectedTags {
 		selectedTagsMap[tag] = true
 	}
-	hasTagFilter := len(selectedTagsMap) > 0
+	hasTagFilter := !hasNodeFilter && len(selectedTagsMap) > 0
 
 	nodeIDToName := make(map[int64]string, len(nodes))
 	for _, node := range nodes {
@@ -933,6 +940,9 @@ func (h *SubscriptionHandler) generateFromTemplate(ctx context.Context, subscrib
 	var proxies []map[string]any
 	for _, node := range nodes {
 		if !node.Enabled {
+			continue
+		}
+		if hasNodeFilter && !selectedNodeIDsMap[node.ID] {
 			continue
 		}
 		if hasTagFilter && !node.HasAnyTag(selectedTagsMap) {
@@ -966,7 +976,7 @@ func (h *SubscriptionHandler) generateFromTemplate(ctx context.Context, subscrib
 		}
 		proxies = append(proxies, proxyConfig)
 	}
-	logger.Info("[模板生成] 节点筛选完成", "total", len(nodes), "filtered", len(proxies), "tag_filter", hasTagFilter, "restricted_to_package", restrictToPackage)
+	logger.Info("[模板生成] 节点筛选完成", "total", len(nodes), "filtered", len(proxies), "node_filter", hasNodeFilter, "tag_filter", hasTagFilter, "restricted_to_package", restrictToPackage)
 
 	if len(proxies) == 0 {
 		return nil, errors.New("无可用节点")
@@ -981,6 +991,13 @@ func (h *SubscriptionHandler) generateFromTemplate(ctx context.Context, subscrib
 	result, err = injectProxiesIntoTemplate(result, proxies)
 	if err != nil {
 		return nil, fmt.Errorf("注入代理节点失败: %w", err)
+	}
+
+	// 孤儿节点裁剪:顶层 proxies: 只保留被 proxy-groups 实际引用的节点,删掉没被引用的
+	if pruned, perr := pruneUnreferencedProxies([]byte(result)); perr == nil {
+		result = string(pruned)
+	} else {
+		logger.Info("[模板生成] 孤儿裁剪跳过", "error", perr.Error())
 	}
 
 	logger.Info("[模板生成] 完成", "subscribe", subscribeFile.Name, "template", subscribeFile.TemplateFilename, "bytes", len(result))
@@ -1945,6 +1962,73 @@ func injectDialerProxyFromGroups(rootMap *yaml.Node) {
 			&yaml.Node{Kind: yaml.ScalarNode, Value: target},
 		)
 	}
+}
+
+// pruneUnreferencedProxies 解析模板订阅生成的 YAML,把顶层 proxies: 数组里"未被任何 proxy-group 引用"的节点删掉。
+// 复用 substore.CollectUsedProxyNamesFromGroups 拿 used 集合,然后过滤 proxies.Content。
+// 无 proxy-groups / used 集合为空(理论上不应该,但若发生) → 不裁剪,原样返回。
+// 解析失败 / 重新 Marshal 失败 → 返回原数据 + error,调用方决定是否 fallback。
+func pruneUnreferencedProxies(data []byte) ([]byte, error) {
+	if len(data) == 0 {
+		return data, nil
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return data, err
+	}
+	if len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
+		return data, nil
+	}
+	doc := root.Content[0]
+
+	var proxiesNode, groupsNode *yaml.Node
+	for i := 0; i < len(doc.Content)-1; i += 2 {
+		switch doc.Content[i].Value {
+		case "proxies":
+			proxiesNode = doc.Content[i+1]
+		case "proxy-groups":
+			groupsNode = doc.Content[i+1]
+		}
+	}
+	if groupsNode == nil || proxiesNode == nil || proxiesNode.Kind != yaml.SequenceNode {
+		return data, nil
+	}
+
+	used := substore.CollectUsedProxyNamesFromGroups(groupsNode)
+	if len(used) == 0 {
+		return data, nil
+	}
+
+	kept := make([]*yaml.Node, 0, len(proxiesNode.Content))
+	removed := 0
+	for _, item := range proxiesNode.Content {
+		if item.Kind != yaml.MappingNode {
+			kept = append(kept, item)
+			continue
+		}
+		var name string
+		for j := 0; j < len(item.Content)-1; j += 2 {
+			if item.Content[j].Value == "name" {
+				name = item.Content[j+1].Value
+				break
+			}
+		}
+		if name == "" || used[name] {
+			kept = append(kept, item)
+		} else {
+			removed++
+		}
+	}
+	if removed == 0 {
+		return data, nil
+	}
+	proxiesNode.Content = kept
+
+	out, err := MarshalYAMLWithIndent(&root)
+	if err != nil {
+		return data, err
+	}
+	return []byte(RemoveUnicodeEscapeQuotes(string(out))), nil
 }
 
 // stripDialerProxyGroup 把每个代理组的 dialer-proxy-group 字段移除

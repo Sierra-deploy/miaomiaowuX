@@ -319,7 +319,8 @@ type SubscribeFile struct {
 	CustomShortCode     string   // 用户自定义短码（唯一，优先）
 	AutoSyncCustomRules bool
 	TemplateFilename    string   // 绑定的 V3 模板文件名
-	SelectedTags        []string // 选中的节点标签（DB 中 JSON 数组）
+	SelectedTags        []string // 选中的节点标签（DB 中 JSON 数组）— legacy,与 SelectedNodeIDs 二选一
+	SelectedNodeIDs     []int64  // 选中的节点 ID（DB 中 JSON 数组）— 优先于 SelectedTags;空 → 回退 tag 过滤
 	SelectedCustomRuleIDs     []int64 // 该订阅生效的覆写规则 ID（空=全部启用的生效）
 	SelectedOverrideScriptIDs []int64 // 该订阅生效的覆写脚本 ID（空=全部启用的生效）
 	StatsServerIDs      string   // 流量统计服务器 ID（逗号分隔 remote_servers.id）
@@ -1433,6 +1434,10 @@ CREATE INDEX IF NOT EXISTS idx_custom_rules_enabled ON custom_rules(enabled);
 		return err
 	}
 	if err := r.ensureSubscribeFileColumn("selected_tags", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+	// 节点选择(取代 selected_tags 的精确粒度;非空 → 按 ID 过滤;空 → 回退 selected_tags 兼容老数据)
+	if err := r.ensureSubscribeFileColumn("selected_node_ids", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
 		return err
 	}
 	if err := r.ensureSubscribeFileColumn("stats_server_ids", "TEXT NOT NULL DEFAULT ''"); err != nil {

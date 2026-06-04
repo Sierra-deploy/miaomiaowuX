@@ -10,6 +10,8 @@ interface NodeWithTag {
   id: number
   node_name: string
   tag: string
+  protocol?: string
+  original_server?: string
 }
 
 export function useAllNodes(opts: { enabled: boolean }) {

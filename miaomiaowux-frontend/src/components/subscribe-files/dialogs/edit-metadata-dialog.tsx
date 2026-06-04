@@ -8,6 +8,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
+import { NodePicker, type NodePickerItem as SharedNodePickerItem } from '../components/node-picker'
 
 export interface MetadataFormData {
   name: string
@@ -15,6 +16,7 @@ export interface MetadataFormData {
   filename: string
   template_filename: string
   selected_tags: string[]
+  selected_node_ids: number[]
   selected_custom_rule_ids: number[]
   selected_override_script_ids: number[]
   stats_server_ids: string
@@ -22,6 +24,9 @@ export interface MetadataFormData {
   custom_short_code: string
   raw_output: boolean
 }
+
+// re-export 共用 NodePicker 的 item 类型,父端(routes/subscribe-files.index.tsx)的 allNodes prop 用它
+export type NodePickerItem = SharedNodePickerItem
 
 interface TemplateRef {
   filename: string
@@ -53,6 +58,8 @@ interface EditMetadataDialogProps {
   customRules: CustomRuleRef[]
   overrideScripts: OverrideScriptRef[]
   nodeTags: string[]
+  // 全量节点供 NodePicker(服务器分组)选择;为空数组时退回不显示 picker
+  allNodes: NodePickerItem[]
   remoteServers: RemoteServerRef[]
   // 提交回调,父端负责真正调 mutation
   onSubmit: () => void
@@ -71,13 +78,21 @@ export function EditMetadataDialog({
   templates,
   customRules,
   overrideScripts,
-  nodeTags,
+  // nodeTags 已被 allNodes 取代(NodePickerSection 内部按服务器分组 + 提取 tag chips),保留 prop 兼容父端
+  nodeTags: _nodeTags,
+  allNodes,
   remoteServers,
   onSubmit,
   saving,
   isAdmin = false,
 }: EditMetadataDialogProps) {
   const { t } = useTranslation('subscribe')
+  // Defensive: 任何 prop 在某次渲染若 hook/缓存异常变成非数组,这里兜底成 [] 避免 .map 崩溃
+  const safeTemplates = Array.isArray(templates) ? templates : []
+  const safeCustomRules = Array.isArray(customRules) ? customRules : []
+  const safeOverrideScripts = Array.isArray(overrideScripts) ? overrideScripts : []
+  const safeAllNodes = Array.isArray(allNodes) ? allNodes : []
+  const safeRemoteServers = Array.isArray(remoteServers) ? remoteServers : []
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -134,7 +149,7 @@ export function EditMetadataDialog({
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value='__none__'>不使用模板</SelectItem>
-                  {templates.map((tpl) => (
+                  {safeTemplates.map((tpl) => (
                     <SelectItem key={tpl.filename} value={tpl.filename}>
                       {tpl.name || tpl.filename}
                     </SelectItem>
@@ -142,14 +157,14 @@ export function EditMetadataDialog({
                 </SelectContent>
               </Select>
             </div>
-            {customRules.length > 0 && (
+            {safeCustomRules.length > 0 && (
               <div className='space-y-2'>
                 <Label>生效的覆写规则</Label>
                 <p className='text-muted-foreground text-xs'>
                   不勾选则该订阅应用你全部启用的覆写规则;勾选后仅应用所选规则。
                 </p>
                 <div className='flex flex-col gap-1.5 rounded-md border p-2 max-h-40 overflow-y-auto'>
-                  {customRules.map((rule) => (
+                  {safeCustomRules.map((rule) => (
                     <label key={rule.id} className='flex items-center gap-2 text-sm'>
                       <Checkbox
                         checked={form.selected_custom_rule_ids.includes(rule.id)}
@@ -171,14 +186,14 @@ export function EditMetadataDialog({
                 </div>
               </div>
             )}
-            {overrideScripts.length > 0 && (
+            {safeOverrideScripts.length > 0 && (
               <div className='space-y-2'>
                 <Label>生效的覆写脚本</Label>
                 <p className='text-muted-foreground text-xs'>
                   不勾选则该订阅应用你全部启用的覆写脚本;勾选后仅应用所选脚本。
                 </p>
                 <div className='flex flex-col gap-1.5 rounded-md border p-2 max-h-40 overflow-y-auto'>
-                  {overrideScripts.map((script) => (
+                  {safeOverrideScripts.map((script) => (
                     <label key={script.id} className='flex items-center gap-2 text-sm'>
                       <Checkbox
                         checked={form.selected_override_script_ids.includes(script.id)}
@@ -200,26 +215,17 @@ export function EditMetadataDialog({
                 </div>
               </div>
             )}
-            {form.template_filename && nodeTags.length > 0 && (
+            {form.template_filename && safeAllNodes.length > 0 && (
               <div className='space-y-2'>
-                <Label>节点标签筛选</Label>
-                <div className='flex flex-wrap gap-2'>
-                  {nodeTags.map((tag) => (
-                    <label key={tag} className='flex items-center gap-1.5 text-sm'>
-                      <Checkbox
-                        checked={form.selected_tags.includes(tag)}
-                        onCheckedChange={(checked) => {
-                          onFormChange((prev) => ({
-                            ...prev,
-                            selected_tags: checked ? [...prev.selected_tags, tag] : prev.selected_tags.filter((t) => t !== tag),
-                          }))
-                        }}
-                      />
-                      {tag}
-                    </label>
-                  ))}
-                </div>
-                <p className='text-xs text-muted-foreground'>不选则包含所有节点</p>
+                <Label>节点选择(按服务器分组)</Label>
+                <NodePicker
+                  allNodes={safeAllNodes}
+                  selectedNodeIds={form.selected_node_ids}
+                  onChange={(ids) =>
+                    onFormChange((prev) => ({ ...prev, selected_node_ids: ids, selected_tags: [] }))
+                  }
+                  hintText='不选 = 包含所有节点。模板生成时只用选中节点;同时顶层 proxies 自动裁掉孤儿。'
+                />
               </div>
             )}
             {isAdmin && (
@@ -227,7 +233,7 @@ export function EditMetadataDialog({
                 <div className='space-y-2'>
                   <Label>流量统计服务器</Label>
                   <div className='flex flex-wrap gap-2'>
-                    {remoteServers.map((server) => {
+                    {safeRemoteServers.map((server) => {
                       const selected = form.stats_server_ids.split(',').filter(Boolean).includes(String(server.id))
                       return (
                         <label key={server.id} className='flex items-center gap-1.5 text-sm'>
@@ -290,3 +296,4 @@ export function EditMetadataDialog({
     </Dialog>
   )
 }
+

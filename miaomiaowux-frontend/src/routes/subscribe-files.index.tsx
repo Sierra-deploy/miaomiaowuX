@@ -152,6 +152,7 @@ type SubscribeFile = {
   auto_sync_custom_rules: boolean
   template_filename: string
   selected_tags: string[]
+  selected_node_ids?: number[]
   selected_custom_rule_ids?: number[]
   selected_override_script_ids?: number[]
   stats_server_ids: string
@@ -316,6 +317,7 @@ function SubscribeFilesPage() {
     filename: '',
     template_filename: '',
     selected_tags: [] as string[],
+    selected_node_ids: [] as number[],
     selected_custom_rule_ids: [] as number[],
     selected_override_script_ids: [] as number[],
     stats_server_ids: '',
@@ -427,6 +429,7 @@ function SubscribeFilesPage() {
         filename: '',
         template_filename: '',
         selected_tags: [],
+        selected_node_ids: [],
         selected_custom_rule_ids: [],
         selected_override_script_ids: [],
         stats_server_ids: '',
@@ -502,9 +505,10 @@ function SubscribeFilesPage() {
     },
   })
 
-  // 全部节点 + 按 tag 分组,见 ./subscribe-files/hooks/use-all-nodes(只在外部订阅展开时拉)
+  // 全部节点 + 按 tag 分组,见 ./subscribe-files/hooks/use-all-nodes
+  // 编辑元数据 dialog + 列表行内"选择节点" Popover 都需要全节点 — 直接在登录后常驻拉(数据量小)
   const { allNodesData, allNodesLoaded, nodesByTag } = useAllNodes({
-    enabled: Boolean(auth.accessToken && isExternalSubsExpanded),
+    enabled: Boolean(auth.accessToken),
   })
 
   // 6 个支持数据 query(下拉候选 + 流量统计)聚合到 hook,见 ./subscribe-files/hooks/use-support-data
@@ -889,6 +893,7 @@ function SubscribeFilesPage() {
       filename: file.filename,
       template_filename: file.template_filename || '',
       selected_tags: file.selected_tags || [],
+      selected_node_ids: file.selected_node_ids || [],
       selected_custom_rule_ids: file.selected_custom_rule_ids || [],
       selected_override_script_ids: file.selected_override_script_ids || [],
       stats_server_ids: file.stats_server_ids || '',
@@ -916,7 +921,9 @@ function SubscribeFilesPage() {
         description: metadataForm.description,
         filename: metadataForm.filename,
         template_filename: metadataForm.template_filename,
-        selected_tags: metadataForm.selected_tags,
+        // 提交时:节点选择模式(selected_node_ids 非空)清空 selected_tags;反之亦然(避免双重过滤)
+        selected_tags: metadataForm.selected_node_ids.length > 0 ? [] : metadataForm.selected_tags,
+        selected_node_ids: metadataForm.selected_node_ids,
         selected_custom_rule_ids: metadataForm.selected_custom_rule_ids,
         selected_override_script_ids: metadataForm.selected_override_script_ids,
         stats_server_ids: metadataForm.stats_server_ids,
@@ -1955,6 +1962,7 @@ function SubscribeFilesPage() {
                 url: (file as any).url || '',
                 template_filename: (file as any).template_filename || '',
                 selected_tags: (file as any).selected_tags || [],
+                selected_node_ids: (file as any).selected_node_ids || [],
                 selected_custom_rule_ids: (file as any).selected_custom_rule_ids || [],
                 selected_override_script_ids: (file as any).selected_override_script_ids || [],
                 stats_server_ids: statsServerIds,
@@ -1969,6 +1977,36 @@ function SubscribeFilesPage() {
           updateUserShortCode={(value) => updateMyShortCodeMutation.mutate(value)}
           updateMetadataPending={updateMetadataMutation.isPending}
           deletePending={deleteMutation.isPending}
+          allNodes={(allNodesData?.nodes ?? []).map((n: any) => ({
+            id: n.id,
+            node_name: n.node_name,
+            protocol: n.protocol || '',
+            original_server: n.original_server || '',
+            tag: n.tag || '',
+          }))}
+          savingSelectedNodes={inlineUpdateMutation.isPending}
+          onSaveSelectedNodes={(file, nodeIds) => {
+            // 行内快捷"选择节点":发完整 payload,只改 selected_node_ids + 清空 selected_tags,其它字段维持现状
+            inlineUpdateMutation.mutate({
+              id: file.id,
+              data: {
+                name: file.name,
+                description: (file as any).description || '',
+                filename: file.filename,
+                type: file.type,
+                url: (file as any).url || '',
+                template_filename: file.template_filename || '',
+                selected_tags: [],
+                selected_node_ids: nodeIds,
+                selected_custom_rule_ids: (file as any).selected_custom_rule_ids || [],
+                selected_override_script_ids: (file as any).selected_override_script_ids || [],
+                stats_server_ids: (file as any).stats_server_ids || '',
+                traffic_limit: (file as any).traffic_limit,
+                custom_short_code: (file as any).custom_short_code || '',
+                raw_output: (file as any).raw_output ?? false,
+              },
+            })
+          }}
         />
 
         {/* 外部订阅 Card section — 拆到 ./subscribe-files/components/external-subs-section */}
@@ -2207,6 +2245,7 @@ function SubscribeFilesPage() {
               filename: '',
               template_filename: '',
               selected_tags: [],
+              selected_node_ids: [],
               selected_custom_rule_ids: [],
               selected_override_script_ids: [],
               stats_server_ids: '',
@@ -2222,6 +2261,13 @@ function SubscribeFilesPage() {
         customRules={customRulesList ?? []}
         overrideScripts={overrideScriptsList ?? []}
         nodeTags={nodeTagsData ?? []}
+        allNodes={(allNodesData?.nodes ?? []).map((n: any) => ({
+          id: n.id,
+          node_name: n.node_name,
+          protocol: n.protocol || '',
+          original_server: n.original_server || '',
+          tag: n.tag || '',
+        }))}
         remoteServers={remoteServersData?.servers ?? []}
         onSubmit={handleUpdateMetadata}
         saving={updateMetadataMutation.isPending}

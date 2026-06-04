@@ -1230,6 +1230,14 @@ export function toClashProxy(node: ProxyNode): ClashProxy {
     if (node.version) {
       clash.version = node.version
     }
+    // obfs-opts(Snell 2/3),Surge `obfs = http/tls` + `obfs-host = ...` 来源
+    if (node['obfs-opts']) {
+      clash['obfs-opts'] = node['obfs-opts']
+    }
+    // 通用开关:Surge `tfo = true` / `udp-relay = true` / `reuse = true`(Snell 4+)
+    if (node.tfo) clash.tfo = true
+    if (node.udp) clash.udp = true
+    if ((node as Record<string, unknown>)['reuse']) clash.reuse = true
   } else if (node.type === 'hysteria2' || node.type === 'hysteria' || node.type === 'anytls') {
     // Hysteria/Hysteria2/AnyTLS 使用 password
     if (node.password) {
@@ -1369,6 +1377,66 @@ export function toClashProxy(node: ProxyNode): ClashProxy {
 /**
  * 解析订阅内容（多个代理 URL，每行一个或 base64 编码）
  */
+/**
+ * 解析 Surge INI 行格式: `节点名 = type, server, port, key1 = value1, key2 = value2, ...`
+ * 支持类型:snell(主用)、ss/shadowsocks、vmess、trojan、socks5、http、https、hysteria2、tuic、wireguard 等
+ * 实现先聚焦 snell(用户反馈缺失),其它类型按 Surge 同款字段映射。
+ */
+export function parseSurgeLine(line: string): ProxyNode | null {
+  // 形态:`<name> = <type>, <server>, <port>, kv...`
+  const eqIdx = line.indexOf('=')
+  if (eqIdx === -1) return null
+  const name = line.substring(0, eqIdx).trim()
+  const rest = line.substring(eqIdx + 1).trim()
+  if (!name || !rest) return null
+
+  // 按逗号切;但 value 里如果含 = 也是普通 token(`psk = xxx` 整体一个 token,内部空格分隔)
+  const tokens = rest.split(',').map((s) => s.trim()).filter(Boolean)
+  if (tokens.length < 3) return null
+
+  const type = tokens[0].toLowerCase()
+  const server = tokens[1]
+  const port = parseInt(tokens[2], 10)
+  if (!server || !Number.isFinite(port) || port <= 0) return null
+
+  // kv 解析:`key = value` / `key=value`
+  const kv: Record<string, string> = {}
+  for (let i = 3; i < tokens.length; i++) {
+    const t = tokens[i]
+    const ei = t.indexOf('=')
+    if (ei === -1) continue
+    const k = t.substring(0, ei).trim().toLowerCase()
+    const v = t.substring(ei + 1).trim()
+    if (k) kv[k] = v
+  }
+  const truthy = (v: string | undefined) => v === 'true' || v === '1' || v === 'yes'
+
+  // 仅做 snell 这次;其它类型等用户提需求再加(避免一次性灌水)
+  if (type === 'snell') {
+    const node: ProxyNode = {
+      name,
+      type: 'snell',
+      server,
+      port,
+      psk: kv['psk'] || '',
+      version: parseInt(kv['version'] || '4', 10) || 4,
+    }
+    // obfs(Snell 2/3,Snell 4+ 移除)
+    if (kv['obfs'] && kv['obfs'] !== 'none') {
+      node['obfs-opts'] = {
+        mode: kv['obfs'],
+        host: kv['obfs-host'] || kv['obfs-hostname'] || '',
+      }
+    }
+    // 通用开关:tfo/udp-relay/reuse → 透传到 ProxyNode 由 Clash 输出
+    if (truthy(kv['tfo'])) node.tfo = true
+    if (truthy(kv['udp-relay']) || truthy(kv['udp'])) node.udp = true
+    if (truthy(kv['reuse'])) (node as Record<string, unknown>)['reuse'] = true
+    return node
+  }
+  return null
+}
+
 export function parseSubscription(content: string): ClashProxy[] {
   if (!content) return []
 
@@ -1390,11 +1458,22 @@ export function parseSubscription(content: string): ClashProxy[] {
 
   for (const line of lines) {
     const trimmed = line.trim()
-    if (!trimmed || !trimmed.includes('://')) continue
+    if (!trimmed) continue
 
-    const node = parseProxyUrl(trimmed)
-    if (node) {
-      proxies.push(toClashProxy(node))
+    // 1. URI 格式(snell:// / vmess:// / ss:// 等)
+    if (trimmed.includes('://')) {
+      const node = parseProxyUrl(trimmed)
+      if (node) {
+        proxies.push(toClashProxy(node))
+        continue
+      }
+    }
+    // 2. Surge INI 格式(`节点名 = type, server, port, ...`)
+    if (trimmed.includes('=') && !trimmed.startsWith('#') && !trimmed.startsWith(';') && !trimmed.startsWith('[')) {
+      const node = parseSurgeLine(trimmed)
+      if (node) {
+        proxies.push(toClashProxy(node))
+      }
     }
   }
 
