@@ -567,7 +567,7 @@ function TestersView({ onBack, t, autoRotateId }: { onBack: () => void; t: any; 
   const copy = (s: string) => copyToClipboard(s, { success: t('speedtest.copied') })
   // mmwX-plugins 提供的一键安装脚本(自动下载对应平台二进制 + systemd / 任务计划)。
   // tester 名称在创建时就已确定并存到主控库,二进制不需要带 -name 参数。
-  const scriptBaseURL = 'https://raw.githubusercontent.com/MMWOrg/mmwX-plugins/refs/heads/main/speedtest/scripts'
+  const scriptBaseURL = 'https://raw.githubusercontent.com/mmwx-group/mmwX-plugins/refs/heads/main/speedtest/scripts'
   const linuxCmd = newCred ? `curl -fsSL ${scriptBaseURL}/install.sh | bash -s -- -master ${masterURL} -token ${newCred.token}` : ''
   const windowsCmd = newCred ? `irm ${scriptBaseURL}/install.ps1 -OutFile install.ps1; .\\install.ps1 -Master ${masterURL} -Token ${newCred.token}` : ''
 
@@ -584,7 +584,7 @@ function TestersView({ onBack, t, autoRotateId }: { onBack: () => void; t: any; 
         {!compactMode && (
           <>
             <a
-              href='https://github.com/MMWOrg/mmwX-plugins/releases/latest'
+              href='https://github.com/mmwx-group/mmwX-plugins/releases/latest'
               target='_blank'
               rel='noopener noreferrer'
               className='flex items-center gap-1.5 text-xs text-primary hover:underline'
