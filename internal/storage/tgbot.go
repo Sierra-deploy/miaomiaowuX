@@ -88,6 +88,19 @@ func (r *TrafficRepository) BindTelegram(ctx context.Context, username string, t
 	return err
 }
 
+// GetTelegramIDByUsername 查 username 已绑的 tg_id(0=未绑/不存在)。
+func (r *TrafficRepository) GetTelegramIDByUsername(ctx context.Context, username string) int64 {
+	var tg sql.NullInt64
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT telegram_id FROM users WHERE username = ? LIMIT 1`, username).Scan(&tg); err != nil {
+		return 0
+	}
+	if tg.Valid {
+		return tg.Int64
+	}
+	return 0
+}
+
 // UnbindTelegram 解绑(置 NULL)。
 func (r *TrafficRepository) UnbindTelegram(ctx context.Context, username string) error {
 	if username == "" {

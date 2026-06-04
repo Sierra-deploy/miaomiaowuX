@@ -188,7 +188,7 @@ func SendServerOnlineNotification(ctx context.Context, serverName, ip string) {
 	}
 	_ = n.Send(ctx, notify.Event{
 		Type:    notify.EventServerOnline,
-		Title:   "服务器上线",
+		Title:   "🟢 服务器上线",
 		Message: fmt.Sprintf("服务器: `%s`\nIP: `%s`", serverName, ip),
 	})
 }
@@ -200,7 +200,7 @@ func SendServerOfflineNotification(ctx context.Context, serverName, ip string) {
 	}
 	_ = n.Send(ctx, notify.Event{
 		Type:    notify.EventServerOffline,
-		Title:   "服务器离线",
+		Title:   "🔴 服务器离线",
 		Message: fmt.Sprintf("服务器: `%s`\nIP: `%s`", serverName, ip),
 	})
 }
@@ -217,13 +217,13 @@ func SendXrayStatusChangeNotification(ctx context.Context, serverName, ip string
 	if running {
 		evt = notify.Event{
 			Type:    notify.EventServerOnline,
-			Title:   "Xray 已启动",
+			Title:   "🟢 Xray 已启动",
 			Message: fmt.Sprintf("服务器: `%s`\nIP: `%s`", serverName, ip),
 		}
 	} else {
 		evt = notify.Event{
 			Type:    notify.EventServerOffline,
-			Title:   "Xray 已停止",
+			Title:   "🔴 Xray 已停止",
 			Message: fmt.Sprintf("服务器: `%s`\nIP: `%s`", serverName, ip),
 		}
 	}

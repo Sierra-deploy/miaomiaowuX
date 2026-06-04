@@ -64,6 +64,8 @@ func (h *TGBotAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 独立 bot 用
 	case path == "bind" && r.Method == http.MethodPost:
 		h.bind(w, r)
+	case path == "bind-admin" && r.Method == http.MethodPost:
+		h.bindAdmin(w, r)
 	case path == "unbind" && r.Method == http.MethodPost:
 		h.unbind(w, r)
 	case path == "user-by-tg" && r.Method == http.MethodGet:
@@ -384,6 +386,49 @@ func (h *TGBotAPIHandler) bindNew(ctx context.Context, w http.ResponseWriter,
 		"initial_password": respPw,
 		"package":          pkgInfo,
 	})
+}
+
+// bindAdmin POST /bind-admin {telegram_id, telegram_handle}:把 TG 自动绑到主控管理员账号。
+// 用于 Mini App:管理员打开面板时若未绑定,自动绑到(默认单一的)管理员账号。
+func (h *TGBotAPIHandler) bindAdmin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		TelegramID     int64  `json:"telegram_id"`
+		TelegramHandle string `json:"telegram_handle"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	if body.TelegramID == 0 {
+		writeJSONError(w, http.StatusBadRequest, "telegram_id 必填")
+		return
+	}
+	ctx := r.Context()
+
+	// 已绑 → 幂等返回
+	if existing, ok := h.repo.GetUsernameByTelegramID(ctx, body.TelegramID); ok {
+		writeJSON(w, http.StatusOK, map[string]any{"success": true, "username": existing})
+		return
+	}
+
+	adminUser := h.repo.GetSystemNodeOwner(ctx) // role=admin 最早一个(无则回退 "admin")
+	u, err := h.repo.GetUser(ctx, adminUser)
+	if err != nil || u.Role != "admin" {
+		writeJSONError(w, http.StatusNotFound, "未找到管理员账号")
+		return
+	}
+	if boundTG := h.repo.GetTelegramIDByUsername(ctx, adminUser); boundTG != 0 && boundTG != body.TelegramID {
+		writeJSONError(w, http.StatusConflict, "管理员账号已绑定其它 Telegram,请先在网页端解绑")
+		return
+	}
+	if err := h.repo.BindTelegram(ctx, adminUser, body.TelegramID, body.TelegramHandle); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, "绑定失败: "+err.Error())
+		return
+	}
+	_ = h.repo.WriteTGAudit(ctx, storage.TGAudit{
+		TGID: body.TelegramID, Username: adminUser, Action: "bind", Detail: "auto-admin",
+	})
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "username": adminUser})
 }
 
 // ============ /unbind ============

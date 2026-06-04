@@ -50,6 +50,8 @@ func (h *TrafficHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleUserSnapshots(w, r)
 	case path == "user-nodes":
 		h.handleUserNodes(w, r)
+	case path == "node-users":
+		h.handleNodeUsers(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -210,6 +212,157 @@ func (h *TrafficHandler) handleUserNodes(w http.ResponseWriter, r *http.Request)
 		out = append(out, *it)
 	}
 	// 按总流量降序
+	sort.Slice(out, func(i, j int) bool {
+		return (out[i].Uplink + out[i].Downlink) > (out[j].Uplink + out[j].Downlink)
+	})
+
+	h.writeJSON(w, http.StatusOK, map[string]any{"success": true, "items": out})
+}
+
+// handleNodeUsers 返回某节点上各用户的流量(节点视图 drilldown 反向用)。
+// 走 user_email_traffic + user_subaccounts/user_inbound_configs 反查,与 handleUserNodes 对称。
+//
+// GET /api/admin/traffic/node-users?node_id=42
+//
+// 响应: { items: [ { username, uplink, downlink, last_uplink, last_downlink } ] }
+func (h *TrafficHandler) handleNodeUsers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	nodeIDStr := strings.TrimSpace(r.URL.Query().Get("node_id"))
+	nodeID, err := strconv.ParseInt(nodeIDStr, 10, 64)
+	if err != nil || nodeID <= 0 {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+
+	node, err := h.repo.GetNodeByID(ctx, nodeID)
+	if err != nil {
+		h.writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "node not found"})
+		return
+	}
+	isRouted := node.NodeType == "routed"
+
+	// server_name → server_id 反查(普通 inbound 路径要的)
+	servers, err := h.repo.ListRemoteServers(ctx)
+	if err != nil {
+		log.Printf("[Traffic API] node-users: list servers failed: %v", err)
+	}
+	serverIDByName := make(map[string]int64, len(servers))
+	for _, s := range servers {
+		serverIDByName[s.Name] = s.ID
+	}
+	var nodeServerID int64
+	if !isRouted {
+		nodeServerID = serverIDByName[node.OriginalServer]
+	}
+
+	// routed 节点:本节点的所有 active 子账号 email → username
+	routedEmailToUsername := make(map[string]string)
+	if isRouted {
+		subs, err := h.repo.ListSubaccountsByRoutedNode(ctx, nodeID)
+		if err != nil {
+			log.Printf("[Traffic API] node-users: list subaccounts by routed node failed: %v", err)
+		}
+		for _, sa := range subs {
+			if sa.IsActive {
+				routedEmailToUsername[sa.Email] = sa.Username
+			}
+		}
+	}
+
+	// 普通 inbound 节点:本 (server_id, inbound_tag) 上有 user_inbound_configs 的所有 username,作为白名单。
+	// 同时拿本 server 的所有 active 子账号 email 作为排除集 — 子账号 email 走 routed 节点,
+	// 即使流量落在本 server 的统计里也不该归到本 inbound。
+	inboundUsernames := make(map[string]bool)
+	serverSubaccountEmails := make(map[string]bool)
+	if !isRouted && nodeServerID > 0 && node.InboundTag != "" {
+		cfgs, err := h.repo.ListAllUserInboundConfigs(ctx)
+		if err != nil {
+			log.Printf("[Traffic API] node-users: list user inbound configs failed: %v", err)
+		}
+		for _, c := range cfgs {
+			if c.ServerID == nodeServerID && c.InboundTag == node.InboundTag {
+				inboundUsernames[c.Username] = true
+			}
+		}
+		if node.OriginalServer != "" {
+			subs, err := h.repo.ListActiveSubaccountsByServerName(ctx, node.OriginalServer)
+			if err != nil {
+				log.Printf("[Traffic API] node-users: list server subaccounts failed: %v", err)
+			}
+			for _, sa := range subs {
+				serverSubaccountEmails[sa.Email] = true
+			}
+		}
+	}
+
+	allEmailTraffic, err := h.repo.ListUserEmailTraffic(ctx)
+	if err != nil {
+		log.Printf("[Traffic API] node-users: list user_email_traffic failed: %v", err)
+		h.writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "list email traffic failed"})
+		return
+	}
+
+	type item struct {
+		Username     string `json:"username"`
+		Uplink       int64  `json:"uplink"`
+		Downlink     int64  `json:"downlink"`
+		LastUplink   int64  `json:"last_uplink"`
+		LastDownlink int64  `json:"last_downlink"`
+	}
+	byUser := make(map[string]*item)
+	addUser := func(username string, uet storage.UserEmailTraffic) {
+		if existing, ok := byUser[username]; ok {
+			existing.Uplink += uet.Uplink
+			existing.Downlink += uet.Downlink
+			existing.LastUplink += uet.LastUplink
+			existing.LastDownlink += uet.LastDownlink
+			return
+		}
+		byUser[username] = &item{
+			Username:     username,
+			Uplink:       uet.Uplink,
+			Downlink:     uet.Downlink,
+			LastUplink:   uet.LastUplink,
+			LastDownlink: uet.LastDownlink,
+		}
+	}
+
+	for _, uet := range allEmailTraffic {
+		if isRouted {
+			if username, ok := routedEmailToUsername[uet.Email]; ok {
+				addUser(username, uet)
+			}
+			continue
+		}
+		// 普通 inbound:必须是本 server
+		if uet.ServerID != nodeServerID {
+			continue
+		}
+		// 排除本 server 上的子账号 email(归 routed 节点)
+		if serverSubaccountEmails[uet.Email] {
+			continue
+		}
+		username := h.repo.ResolveUsernameByEmail(ctx, uet.Email)
+		if username == "" {
+			continue
+		}
+		// 必须确实在本 inbound 有配置才算 — 这同时滤掉了 ResolveUsernameByEmail
+		// fallback 把 outbound tag 当 username 返回的脏数据。
+		if !inboundUsernames[username] {
+			continue
+		}
+		addUser(username, uet)
+	}
+
+	out := make([]item, 0, len(byUser))
+	for _, it := range byUser {
+		out = append(out, *it)
+	}
 	sort.Slice(out, func(i, j int) bool {
 		return (out[i].Uplink + out[i].Downlink) > (out[j].Uplink + out[j].Downlink)
 	})

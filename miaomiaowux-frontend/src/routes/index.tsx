@@ -99,6 +99,7 @@ interface UserProfile {
 }
 
 type NodeTrafficItem = {
+  node_id: number
   tag: string
   server_id: number
   server_name: string
@@ -724,7 +725,7 @@ function AdminDashboard() {
           const snap = (isRouted ? outboundSnapByKey : inboundSnapByKey).get(key)
           if (snap) { uplink = Math.max(0, uplink - snap.uplink); downlink = Math.max(0, downlink - snap.downlink) }
         }
-        return { tag: lookupTag, server_id: 0, server_name: '', server_names: t?.server_names ?? [srv].filter(Boolean), display_name: n.node_name, uplink, downlink, total_uplink: 0, total_downlink: 0, last_uplink: t?.last_uplink ?? 0, last_downlink: t?.last_downlink ?? 0, updated_at: '' }
+        return { node_id: n.id, tag: lookupTag, server_id: 0, server_name: '', server_names: t?.server_names ?? [srv].filter(Boolean), display_name: n.node_name, uplink, downlink, total_uplink: 0, total_downlink: 0, last_uplink: t?.last_uplink ?? 0, last_downlink: t?.last_downlink ?? 0, updated_at: '' }
       })
       // 上下行都为 0 的节点不展示(没流量的占位会把卡片刷满,信息密度低)
       .filter(item => item.uplink > 0 || item.downlink > 0)
@@ -790,21 +791,28 @@ function AdminDashboard() {
     staleTime: 10 * 1000,
   })
 
+  // type='node' 时拉对称接口 /api/admin/traffic/node-users:某节点上各用户的精确流量。
+  // 跟 user-nodes 同款 user_email_traffic + 子账号/inbound 配置反查,routed 节点也覆盖。
+  const { data: nodeUsersData } = useQuery({
+    queryKey: ['admin-traffic-node-users', drilldown?.type === 'node' ? drilldown.key : null],
+    queryFn: async () => {
+      const resp = await api.get(`/api/admin/traffic/node-users?node_id=${encodeURIComponent(drilldown!.key)}`)
+      return resp.data as { items?: Array<{ username: string; uplink: number; downlink: number; last_uplink: number; last_downlink: number }> }
+    },
+    enabled: drilldown?.type === 'node',
+    staleTime: 10 * 1000,
+  })
+
   const drilldownData = useMemo<DrilldownItem[]>(() => {
     if (!drilldown) return []
     if (drilldown.type === 'node') {
-      if (!trafficData?.servers) return []
-      const userMap = new Map<string, DrilldownItem>()
-      for (const server of trafficData.servers) {
-        const hasTag = (server.inbounds ?? []).some((ib: any) => ib.tag === drilldown.key)
-        if (!hasTag) continue
-        for (const u of server.users ?? []) {
-          const existing = userMap.get(u.username)
-          if (existing) { existing.uplink += u.uplink ?? 0; existing.downlink += u.downlink ?? 0; existing.last_uplink += u.last_uplink ?? 0; existing.last_downlink += u.last_downlink ?? 0 }
-          else userMap.set(u.username, { label: u.username, uplink: u.uplink ?? 0, downlink: u.downlink ?? 0, last_uplink: u.last_uplink ?? 0, last_downlink: u.last_downlink ?? 0 })
-        }
-      }
-      return [...userMap.values()].sort((a, b) => (b.uplink + b.downlink) - (a.uplink + a.downlink))
+      return (nodeUsersData?.items ?? []).map(it => ({
+        label: it.username,
+        uplink: it.uplink,
+        downlink: it.downlink,
+        last_uplink: it.last_uplink,
+        last_downlink: it.last_downlink,
+      }))
     }
     // type === 'user' — 直接用接口返回(后端已按总流量降序)
     return (userNodesData?.items ?? []).map(it => ({
@@ -814,7 +822,7 @@ function AdminDashboard() {
       last_uplink: it.last_uplink,
       last_downlink: it.last_downlink,
     }))
-  }, [drilldown, trafficData, userNodesData])
+  }, [drilldown, nodeUsersData, userNodesData])
 
   const metrics = useMemo(() => data?.metrics ?? {}, [data?.metrics])
 
@@ -895,8 +903,8 @@ function AdminDashboard() {
               ) : (
                 <div className="space-y-1">
                   {nodeTrafficList.slice(0, PREVIEW_COUNT).map((node) => (
-                    <div key={node.tag} className="flex items-center justify-between rounded-md px-3 py-2 text-sm cursor-pointer transition hover:bg-muted"
-                      onClick={() => { setDrilldown({ type: 'node', key: node.tag, label: node.display_name }); setDrilldownPage(0) }}>
+                    <div key={`${node.node_id}::${node.tag}`} className="flex items-center justify-between rounded-md px-3 py-2 text-sm cursor-pointer transition hover:bg-muted"
+                      onClick={() => { setDrilldown({ type: 'node', key: String(node.node_id), label: node.display_name }); setDrilldownPage(0) }}>
                       <div className="truncate flex-1 min-w-0 mr-3 font-medium" title={`${node.display_name}\n${t('admin.nodeView.serverTooltip', { servers: node.server_names.join(', ') })}`}>{node.display_name}</div>
                       <div className="shrink-0 text-muted-foreground text-xs">↑{formatBytes(node.uplink)} ↓{formatBytes(node.downlink)}</div>
                     </div>
@@ -1054,9 +1062,9 @@ function FullscreenNodeList({ items, page, onPageChange, onDrilldown }: {
     <div>
       <div className="space-y-1">
         {paged.map((node) => (
-          <TrafficRow key={node.tag} label={node.display_name} tooltip={`${node.display_name}\n${t('admin.nodeView.serverTooltip', { servers: node.server_names.join(', ') })}`}
+          <TrafficRow key={`${node.node_id}::${node.tag}`} label={node.display_name} tooltip={`${node.display_name}\n${t('admin.nodeView.serverTooltip', { servers: node.server_names.join(', ') })}`}
             uplink={node.uplink} downlink={node.downlink} showSpeed={false}
-            onClick={() => onDrilldown(node.tag, node.display_name)} />
+            onClick={() => onDrilldown(String(node.node_id), node.display_name)} />
         ))}
       </div>
       <PaginationControls page={page} totalPages={totalPages} onPageChange={onPageChange} />
