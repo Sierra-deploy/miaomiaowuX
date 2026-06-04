@@ -21,6 +21,7 @@
     "username": "Username",
     "nickname": "Nickname",
     "remark": "Remark",
+    "userShortCode": "Short Code",
     "packageTraffic": "Package / Traffic",
     "role": "Role",
     "status": "Status",
@@ -42,7 +43,20 @@
     "tooltipPackage": "Package: {{name}}",
     "tooltipUsed": "Used: {{used}}",
     "tooltipLimit": "Limit: {{limit}} GB",
-    "tooltipPercent": "Usage: {{percent}}%"
+    "tooltipPercent": "Usage: {{percent}}%",
+    "tooltipSpeed": "Speed Limit: {{speed}} Mbps",
+    "tooltipDevice": "Device Limit: {{count}}"
+  },
+  "limits": {
+    "title": "Edit Limit Overrides",
+    "edit": "Limits",
+    "override": "Override",
+    "speedLimit": "Speed Limit Override (Mbps)",
+    "speedPlaceholder": "Leave empty to use package default",
+    "speedDesc": "Overrides package speed limit (user override > package). Unit: Mbps (megabits/sec). Conversion: 8 Mbps ≈ 1 MB/s, 100 Mbps ≈ 12.5 MB/s. Enter 0 = explicit unlimited; leave empty = inherit package default.",
+    "deviceLimit": "Device Limit Override",
+    "devicePlaceholder": "Leave empty to use package default",
+    "deviceDesc": "Override package device limit, leave empty for package default"
   },
   "actions": {
     "resetPassword": "Reset Password",
@@ -104,6 +118,13 @@
     "saving": "Saving...",
     "confirmSave": "Confirm Save"
   },
+  "shortCode": {
+    "label": "User Short Code",
+    "placeholderAuto": "Leave empty to revert to auto ({{code}})",
+    "placeholderEmpty": "Leave empty for auto-generated code",
+    "hint": "Press Enter to save. Leave empty to revert to auto. Allowed: letters / digits / underscore / hyphen, length 2-16.",
+    "editTooltip": "Click to edit short code"
+  },
   "toast": {
     "statusUpdated": "User status updated",
     "passwordReset": "Password has been reset",
@@ -111,6 +132,9 @@
     "userCreated": "User created, initial password copied",
     "packageUpdated": "Package updated",
     "packageWarning": "Package bound, but some node configurations failed: {{warnings}}",
-    "remarkUpdated": "Remark updated"
+    "remarkUpdated": "Remark updated",
+    "limitsUpdated": "Limits updated",
+    "shortCodeUpdated": "Short code updated",
+    "shortCodeInvalid": "Short code must be letters / digits / underscore / hyphen, length 2-16"
   }
 }

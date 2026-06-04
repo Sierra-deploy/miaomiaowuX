@@ -1,23 +1,43 @@
 import { Link } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, Users, Package, Settings, Shield, Server, LayoutTemplate, Network } from 'lucide-react'
+import { Activity, Users, Package, Settings, Shield, Server, LayoutTemplate, Network, Link2, FileText, Scissors, LinkIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { useAuthStore } from '@/stores/auth-store'
 import { useLayoutStore } from '@/stores/layout-store'
 import { profileQueryFn } from '@/lib/profile'
+import { userPermissionsQueryFn, type UserPageKey } from '@/lib/user-permissions'
+import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 
 const baseNavLinks = [
   { titleKey: 'nav.trafficInfo' as const, to: '/', icon: Activity },
 ]
 
-const adminNavLinks = [
+const coreAdminNavLinks = [
   { titleKey: 'nav.nodeManagement' as const, to: '/nodes', icon: Network },
-  { titleKey: 'nav.certificateManagement' as const, to: '/certificates', icon: Shield },
   { titleKey: 'nav.serviceManagement' as const, to: '/xray-servers', icon: Server },
   { titleKey: 'nav.userManagement' as const, to: '/users', icon: Users },
   { titleKey: 'nav.packageManagement' as const, to: '/packages', icon: Package },
-  { titleKey: 'nav.templateManagement' as const, to: '/templates', icon: LayoutTemplate },
+  { titleKey: 'nav.certificateManagement' as const, to: '/certificates', icon: Shield },
+]
+
+const mmwTopNavLinks = [
+  { titleKey: 'nav.subscriptionLinks' as const, to: '/subscription', icon: LinkIcon, pageKey: 'subscription' as UserPageKey },
+  { titleKey: 'nav.subscriptionGenerator' as const, to: '/generator', icon: Link2, pageKey: 'generator' as UserPageKey },
+]
+
+const mmwBottomNavLinks = [
+  { titleKey: 'nav.templateManagement' as const, to: '/templates', icon: LayoutTemplate, pageKey: 'templates' as UserPageKey },
+  { titleKey: 'nav.subscriptionManagement' as const, to: '/subscribe-files', icon: FileText, pageKey: 'subscribe-files' as UserPageKey },
+  { titleKey: 'nav.customRulesManagement' as const, to: '/custom-rules', icon: Scissors, pageKey: 'custom-rules' as UserPageKey },
+]
+
+// 普通用户可被授权的核心页面(管理员始终可见,见 coreAdminNavLinks)
+const userGrantableNavLinks = [
+  { titleKey: 'nav.nodeManagement' as const, to: '/nodes', icon: Network, pageKey: 'nodes' as UserPageKey },
+]
+
+const tailAdminNavLinks = [
   { titleKey: 'nav.systemSettings' as const, to: '/system-settings', icon: Settings },
 ]
 
@@ -34,7 +54,35 @@ export function Sidebar() {
   })
 
   const isAdmin = Boolean(profile?.is_admin)
-  const allNavLinks = isAdmin ? [...baseNavLinks, ...adminNavLinks] : baseNavLinks
+
+  const { data: mmwFeaturesData } = useQuery({
+    queryKey: ['miaomiaowu-features-enabled'],
+    queryFn: async () => {
+      const response = await api.get('/api/admin/system-settings/miaomiaowu-features')
+      return response.data as { success: boolean; enable_miaomiaowu_features: boolean }
+    },
+    enabled: Boolean(auth.accessToken) && isAdmin,
+    staleTime: 5 * 60 * 1000,
+  })
+  const enableMmwFeatures = mmwFeaturesData?.enable_miaomiaowu_features ?? true
+
+  // 普通用户:按全局权限策略动态显示妙妙屋页面。
+  const { data: userPerms } = useQuery({
+    queryKey: ['user-permissions'],
+    queryFn: userPermissionsQueryFn,
+    enabled: Boolean(auth.accessToken) && !isAdmin,
+    staleTime: 5 * 60 * 1000,
+  })
+
+  let allNavLinks
+  if (isAdmin) {
+    const adminNavLinks = [...(enableMmwFeatures ? mmwTopNavLinks : []), ...coreAdminNavLinks, ...(enableMmwFeatures ? mmwBottomNavLinks : []), ...tailAdminNavLinks]
+    allNavLinks = [...baseNavLinks, ...adminNavLinks]
+  } else {
+    const allowed = new Set(userPerms?.pages ?? [])
+    const permittedMmwLinks = [...mmwTopNavLinks, ...mmwBottomNavLinks, ...userGrantableNavLinks].filter((l) => allowed.has(l.pageKey))
+    allNavLinks = [...baseNavLinks, ...permittedMmwLinks]
+  }
 
   return (
     <aside

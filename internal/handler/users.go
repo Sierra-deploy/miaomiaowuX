@@ -1,34 +1,48 @@
 package handler
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log"
 	"net/http"
+	"regexp"
 	"strings"
 
 	"golang.org/x/crypto/bcrypt"
 
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
 )
 
 type userEntry struct {
-	Username       string  `json:"username"`
-	Email          string  `json:"email"`
-	Nickname       string  `json:"nickname"`
-	Avatar         string  `json:"avatar_url"`
-	Role           string  `json:"role"`
-	IsActive       bool    `json:"is_active"`
-	Remark         string  `json:"remark"`
-	PackageID      *int64  `json:"package_id"`
-	PackageName    string  `json:"package_name,omitempty"`
-	TrafficLimitGB float64 `json:"traffic_limit_gb,omitempty"`
-	TrafficUsed    int64   `json:"traffic_used,omitempty"`
-	TrafficLimit   int64   `json:"traffic_limit,omitempty"`
-	IsOverLimit    bool    `json:"is_over_limit"`
-	IsReset        bool    `json:"is_reset"`
-	ResetDay       int     `json:"reset_day"`
-	PackageEndDate *string `json:"package_end_date,omitempty"`
+	Username            string   `json:"username"`
+	Email               string   `json:"email"`
+	Nickname            string   `json:"nickname"`
+	Avatar              string   `json:"avatar_url"`
+	Role                string   `json:"role"`
+	IsActive            bool     `json:"is_active"`
+	Remark              string   `json:"remark"`
+	PackageID           *int64   `json:"package_id"`
+	PackageName         string   `json:"package_name,omitempty"`
+	TrafficLimitGB      float64  `json:"traffic_limit_gb,omitempty"`
+	TrafficUsed         int64    `json:"traffic_used,omitempty"`
+	TrafficLimit        int64    `json:"traffic_limit,omitempty"`
+	TrafficMultiplier   int64    `json:"traffic_multiplier,omitempty"` // 套餐流量倍率(oneway=1/twoway=2),供首页按用户流量列表换算计费流量
+	IsOverLimit         bool     `json:"is_over_limit"`
+	IsReset             bool     `json:"is_reset"`
+	ResetDay            int      `json:"reset_day"`
+	PackageEndDate      *string  `json:"package_end_date,omitempty"`
+	SpeedLimitMbps      float64  `json:"speed_limit_mbps"`
+	DeviceLimit         int      `json:"device_limit"`
+	SpeedLimitOverride  *float64 `json:"speed_limit_override"`
+	DeviceLimitOverride *int     `json:"device_limit_override"`
+	// 短码:user_short_code 是系统自动生成的;custom_user_short_code 非空时优先生效。
+	// 前端用 user_short_code 显示"当前生效",custom_user_short_code 作为编辑输入框的回填值。
+	UserShortCode       string   `json:"user_short_code"`
+	CustomUserShortCode string   `json:"custom_user_short_code"`
 }
 
 type userStatusRequest struct {
@@ -86,17 +100,25 @@ func NewUserListHandler(repo *storage.TrafficRepository) http.Handler {
 			trafficMap[t.Username] += t.Uplink + t.Downlink
 		}
 
+		// 一次性查所有用户短码,避免列表循环里逐个 query(N+1)。
+		shortCodeMap, _ := repo.ListUserShortCodeInfo(r.Context())
+
 		entries := make([]userEntry, 0, len(users))
 		for _, user := range users {
+			scInfo := shortCodeMap[user.Username]
 			entry := userEntry{
-				Username: user.Username,
-				Email:    user.Email,
-				Nickname: user.Nickname,
-				Avatar:   user.AvatarURL,
-				Role:     user.Role,
-				IsActive: user.IsActive,
-				Remark:   user.Remark,
+				Username:            user.Username,
+				Email:               user.Email,
+				Nickname:            user.Nickname,
+				Avatar:              user.AvatarURL,
+				Role:                user.Role,
+				IsActive:            user.IsActive,
+				Remark:              user.Remark,
+				UserShortCode:       scInfo.UserShortCode,
+				CustomUserShortCode: scInfo.CustomUserShortCode,
 			}
+			entry.SpeedLimitOverride = user.SpeedLimitOverride
+			entry.DeviceLimitOverride = user.DeviceLimitOverride
 			if user.PackageID > 0 {
 				pid := user.PackageID
 				entry.PackageID = &pid
@@ -104,8 +126,15 @@ func NewUserListHandler(repo *storage.TrafficRepository) http.Handler {
 					entry.PackageName = pkg.Name
 					entry.TrafficLimitGB = pkg.TrafficLimitGB
 					entry.TrafficLimit = pkg.TrafficLimitBytes
+					entry.SpeedLimitMbps = pkg.SpeedLimitMbps
+					entry.DeviceLimit = pkg.DeviceLimit
 				}
-				entry.TrafficUsed = trafficMap[user.Username]
+				used := trafficMap[user.Username]
+				if pkg, ok := pkgMap[pid]; ok {
+					entry.TrafficMultiplier = pkg.TrafficMultiplier()
+					used *= pkg.TrafficMultiplier()
+				}
+				entry.TrafficUsed = used
 				if entry.TrafficLimit > 0 && entry.TrafficUsed >= entry.TrafficLimit {
 					entry.IsOverLimit = true
 				}
@@ -124,7 +153,22 @@ func NewUserListHandler(repo *storage.TrafficRepository) http.Handler {
 	})
 }
 
-func NewUserStatusHandler(repo *storage.TrafficRepository) http.Handler {
+// NewUserStatusHandler 切换 user.is_active。
+//
+// 禁用 (is_active=false):
+//   - 把 users.is_active 设为 0
+//   - 遍历 user_inbound_configs,从每个节点的 xray inbound 移除该用户的 client (uuid/password 还在 DB 里)
+//   - 推 limiter 给 agent,让 agent limiter UserInfo 里也移除
+//
+// 启用 (is_active=true):
+//   - 把 users.is_active 设为 1
+//   - 遍历 user_inbound_configs,用 saved credential_json 调 addUserToInbound 把 client 加回 xray
+//     (addUserToInbound 已实现"复用已保存凭据",见 packages.go:775)
+//   - 推 limiter
+//
+// 跟 user delete 路径区别:本接口 **保留** user_inbound_configs 行 (credential 留着),
+// 启用时能精确还原原 uuid/password,客户端订阅无需重新生成。
+func NewUserStatusHandler(repo *storage.TrafficRepository, remoteManage *RemoteManageHandler, pusher *LimiterConfigPusher) http.Handler {
 	if repo == nil {
 		panic("user status handler requires repository")
 	}
@@ -147,8 +191,10 @@ func NewUserStatusHandler(repo *storage.TrafficRepository) http.Handler {
 			return
 		}
 
+		ctx := r.Context()
+
 		// 检查目标用户是否是admin
-		targetUser, err := repo.GetUser(r.Context(), username)
+		targetUser, err := repo.GetUser(ctx, username)
 		if err != nil {
 			if errors.Is(err, storage.ErrUserNotFound) {
 				writeError(w, http.StatusNotFound, errors.New("user not found"))
@@ -163,13 +209,51 @@ func NewUserStatusHandler(repo *storage.TrafficRepository) http.Handler {
 			return
 		}
 
-		if err := repo.UpdateUserStatus(r.Context(), username, payload.IsActive); err != nil {
+		if err := repo.UpdateUserStatus(ctx, username, payload.IsActive); err != nil {
 			if errors.Is(err, storage.ErrUserNotFound) {
 				writeError(w, http.StatusNotFound, errors.New("user not found"))
 				return
 			}
 			writeError(w, http.StatusInternalServerError, err)
 			return
+		}
+
+		// 状态切换后,同步 xray inbound clients。
+		// 仅在 remoteManage 非空且用户有套餐绑定时才有 inbound 需要操作。
+		if remoteManage != nil {
+			configs, cfgErr := repo.GetUserInboundConfigs(ctx, username)
+			if cfgErr != nil {
+				log.Printf("[UserStatus] get inbound configs for %s failed: %v", username, cfgErr)
+			}
+			if !payload.IsActive {
+				// 禁用 → 从每个 inbound 移除 client (但保留 user_inbound_configs 行)
+				for _, cfg := range configs {
+					if err := removeUserFromInbound(ctx, remoteManage, cfg); err != nil {
+						log.Printf("[UserStatus] disable: remove %s from inbound %s on server %d failed: %v",
+							username, cfg.InboundTag, cfg.ServerID, err)
+					}
+				}
+				// 用户私有路由出站(routed_owner='user'):拆 rule + client,outbound 保留
+				suspendUserPrivateRouted(ctx, remoteManage, repo, username)
+			} else {
+				// 启用 → 用 saved credential 调 addUserToInbound 把 client 加回。
+				// addUserToInbound 内部会发现 GetUserInboundConfig 已有记录,自动复用 credential_json。
+				targetUserCopy, _ := repo.GetUser(ctx, username)
+				for _, cfg := range configs {
+					if err := addUserToInbound(ctx, remoteManage, repo, targetUserCopy, cfg.ServerID, cfg.InboundTag); err != nil {
+						log.Printf("[UserStatus] enable: add %s back to inbound %s on server %d failed: %v",
+							username, cfg.InboundTag, cfg.ServerID, err)
+					}
+				}
+				// 用户私有路由出站:重建 rule + 加回 client
+				resumeUserPrivateRouted(ctx, remoteManage, repo, username)
+			}
+		}
+
+		// 推 limiter 配置,让 agent 内存 limiter UserInfo 跟 DB 状态对齐
+		// (push 路径会重新从 DB 读 is_active,disabled 用户不会被推送。)
+		if pusher != nil {
+			go pusher.PushToAllServersForUser(context.Background(), username)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -246,72 +330,94 @@ func NewUserResetPasswordHandler(repo *storage.TrafficRepository) http.Handler {
 	})
 }
 
-func NewUserCreateHandler(repo *storage.TrafficRepository) http.Handler {
+type userCreateHandler struct {
+	repo           *storage.TrafficRepository
+	licenseManager *license.Manager
+}
+
+func NewUserCreateHandler(repo *storage.TrafficRepository) *userCreateHandler {
 	if repo == nil {
 		panic("user create handler requires repository")
 	}
+	return &userCreateHandler{repo: repo}
+}
 
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			writeError(w, http.StatusMethodNotAllowed, errors.New("only POST is supported"))
+func (h *userCreateHandler) SetLicenseManager(mgr *license.Manager) {
+	h.licenseManager = mgr
+}
+
+func (h *userCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("only POST is supported"))
+		return
+	}
+
+	if h.licenseManager != nil {
+		status := h.licenseManager.GetStatus()
+		maxUsers := 10
+		if status.Plan != nil {
+			maxUsers = status.Plan.MaxUsers
+		}
+		count, err := h.repo.CountUsers(r.Context())
+		if err == nil && count >= int64(maxUsers) {
+			writeJSONError(w, http.StatusForbidden, fmt.Sprintf("已达到用户数量上限 (%d/%d)，请升级许可证", count, maxUsers))
 			return
 		}
+	}
 
-		var payload userCreateRequest
-		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-			writeError(w, http.StatusBadRequest, err)
-			return
-		}
+	var payload userCreateRequest
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 
-		username := strings.TrimSpace(payload.Username)
-		email := strings.TrimSpace(payload.Email)
-		nickname := strings.TrimSpace(payload.Nickname)
-		password := strings.TrimSpace(payload.Password)
-		remark := strings.TrimSpace(payload.Remark)
+	username := strings.TrimSpace(payload.Username)
+	email := strings.TrimSpace(payload.Email)
+	nickname := strings.TrimSpace(payload.Nickname)
+	password := strings.TrimSpace(payload.Password)
+	remark := strings.TrimSpace(payload.Remark)
 
-		if username == "" {
-			writeError(w, http.StatusBadRequest, errors.New("username is required"))
-			return
-		}
+	if username == "" {
+		writeError(w, http.StatusBadRequest, errors.New("username is required"))
+		return
+	}
 
-		if password == "" {
-			random, err := generateRandomPassword(12)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, err)
-				return
-			}
-			password = random
-		}
-		if nickname == "" {
-			nickname = username
-		}
-
-		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if password == "" {
+		random, err := generateRandomPassword(12)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
+		password = random
+	}
+	if nickname == "" {
+		nickname = username
+	}
 
-		// 新用户被创建为普通用户，而不是管理员
-		role := storage.RoleUser
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 
-		if err := repo.CreateUser(r.Context(), username, email, nickname, string(hash), role, remark); err != nil {
-			if errors.Is(err, storage.ErrUserExists) {
-				writeError(w, http.StatusConflict, errors.New("用户已存在"))
-				return
-			}
-			writeError(w, http.StatusInternalServerError, err)
+	role := storage.RoleUser
+
+	if err := h.repo.CreateUser(r.Context(), username, email, nickname, string(hash), role, remark); err != nil {
+		if errors.Is(err, storage.ErrUserExists) {
+			writeError(w, http.StatusConflict, errors.New("用户已存在"))
 			return
 		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(userCreateResponse{
-			Username: username,
-			Email:    email,
-			Nickname: nickname,
-			Role:     role,
-			Password: password,
-		})
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(userCreateResponse{
+		Username: username,
+		Email:    email,
+		Nickname: nickname,
+		Role:     role,
+		Password: password,
 	})
 }
 
@@ -319,7 +425,7 @@ type userDeleteRequest struct {
 	Username string `json:"username"`
 }
 
-func NewUserDeleteHandler(repo *storage.TrafficRepository) http.Handler {
+func NewUserDeleteHandler(repo *storage.TrafficRepository, remoteManage *RemoteManageHandler, pusher *LimiterConfigPusher) http.Handler {
 	if repo == nil {
 		panic("user delete handler requires repository")
 	}
@@ -342,8 +448,10 @@ func NewUserDeleteHandler(repo *storage.TrafficRepository) http.Handler {
 			return
 		}
 
+		ctx := r.Context()
+
 		// 检查目标用户是否是admin
-		targetUser, err := repo.GetUser(r.Context(), username)
+		targetUser, err := repo.GetUser(ctx, username)
 		if err != nil {
 			if errors.Is(err, storage.ErrUserNotFound) {
 				writeError(w, http.StatusNotFound, errors.New("user not found"))
@@ -358,13 +466,39 @@ func NewUserDeleteHandler(repo *storage.TrafficRepository) http.Handler {
 			return
 		}
 
-		if err := repo.DeleteUser(r.Context(), username); err != nil {
+		// 删除前从所有 xray inbound 里清掉该用户的 client，
+		// 否则节点上还残留着该用户的 uuid/password，套餐节点上会出现"幽灵用户"。
+		// 这里复用 packages.go 里的 removeUserFromInbound 路径，跟 PackageUnassign 行为一致。
+		if remoteManage != nil {
+			configs, cfgErr := repo.GetUserInboundConfigs(ctx, username)
+			if cfgErr != nil {
+				log.Printf("[UserDelete] get inbound configs for %s failed: %v", username, cfgErr)
+			}
+			for _, cfg := range configs {
+				if err := removeUserFromInbound(ctx, remoteManage, cfg); err != nil {
+					log.Printf("[UserDelete] remove %s from inbound %s on server %d failed: %v",
+						username, cfg.InboundTag, cfg.ServerID, err)
+				}
+			}
+			if err := repo.DeleteUserInboundConfigs(ctx, username); err != nil {
+				log.Printf("[UserDelete] delete inbound config records for %s failed: %v", username, err)
+			}
+			// 级联清理用户私有路由出站(routed_owner='user'):删 xray 配置 + 删节点行
+			deleteUserPrivateRoutedAll(ctx, remoteManage, repo, username)
+		}
+
+		if err := repo.DeleteUser(ctx, username); err != nil {
 			if errors.Is(err, storage.ErrUserNotFound) {
 				writeError(w, http.StatusNotFound, errors.New("user not found"))
 				return
 			}
 			writeError(w, http.StatusInternalServerError, err)
 			return
+		}
+
+		// 通知 agent limiter 移除该用户
+		if pusher != nil {
+			go pusher.PushToAllServersForUser(context.Background(), username)
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -390,6 +524,113 @@ func generateRandomPassword(length int) (string, error) {
 type userRemarkRequest struct {
 	Username string `json:"username"`
 	Remark   string `json:"remark"`
+}
+
+// shortCodeRe 跟前端 SHORT_CODE_RE 保持一致 — 留空表示清除自定义,系统回退到 user_short_code。
+var shortCodeRe = regexp.MustCompile(`^[A-Za-z0-9_-]{2,16}$`)
+
+// reservedShortCodes 不允许普通用户把自己短码设成这些字符串,防止订阅短链路由被误用 / 钓鱼。
+// 大小写不敏感比较。
+var reservedShortCodes = map[string]bool{
+	"admin":  true,
+	"root":   true,
+	"system": true,
+	"api":    true,
+	"share":  true,
+	"test":   true,
+	"user":   true,
+	"guest":  true,
+	"null":   true,
+	"www":    true,
+	"mmw":    true,
+	"mmwx":   true,
+}
+
+// validateCustomUserShortCode 在所有"设置用户自定义短码"路径(admin 改任意用户 + user 改自己)前调用。
+//   - code = ""             → 通过(清除自定义,系统回退自动 user_short_code)
+//   - 格式不匹配 shortCodeRe → 400
+//   - 命中保留字            → 400(防 /x/admin 之类的钓鱼)
+//   - 撞其他用户的 username  → 409
+//   - 撞其他用户的有效短码    → 409(custom_user_short_code 列的 UNIQUE 索引只防"custom 撞 custom",
+//                              并不阻止"custom 撞别人的自动 user_short_code")
+// targetUsername 是被设置短码的"目标用户";同名跳过(允许重置成自己当前的值)。
+func validateCustomUserShortCode(ctx context.Context, repo *storage.TrafficRepository, code, targetUsername string) error {
+	code = strings.TrimSpace(code)
+	if code == "" {
+		return nil
+	}
+	if !shortCodeRe.MatchString(code) {
+		return errors.New("短码只能含字母 / 数字 / 下划线 / 横杠,长度 2-16")
+	}
+	if reservedShortCodes[strings.ToLower(code)] {
+		return errors.New("该短码为系统保留字,请更换")
+	}
+	// 撞其他用户的 username(无论该用户角色)。同名跳过。
+	if u, err := repo.GetUser(ctx, code); err == nil && u.Username != "" && !strings.EqualFold(u.Username, targetUsername) {
+		return errors.New("该短码与已存在用户名冲突,请更换")
+	}
+	// 撞其他用户的有效短码 / 自定义短码。
+	if infos, err := repo.ListUserShortCodeInfo(ctx); err == nil {
+		for username, info := range infos {
+			if strings.EqualFold(username, targetUsername) {
+				continue
+			}
+			if strings.EqualFold(info.UserShortCode, code) || strings.EqualFold(info.CustomUserShortCode, code) {
+				return errors.New("该短码已被其他用户占用,请更换")
+			}
+		}
+	}
+	return nil
+}
+
+type userShortCodeRequest struct {
+	Username  string `json:"username"`
+	ShortCode string `json:"short_code"`
+}
+
+// 管理员改任意用户的自定义短码。前端在用户管理表的气泡编辑里用。
+//   - 留空 = 清除 custom_user_short_code,系统继续用自动生成的 user_short_code
+//   - 非空 = 必须匹配 shortCodeRe;UNIQUE 冲突由 DB 索引兜底
+func NewUserShortCodeHandler(repo *storage.TrafficRepository) http.Handler {
+	if repo == nil {
+		panic("user short code handler requires repository")
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, errors.New("only POST is supported"))
+			return
+		}
+		var payload userShortCodeRequest
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		username := strings.TrimSpace(payload.Username)
+		if username == "" {
+			writeError(w, http.StatusBadRequest, errors.New("username is required"))
+			return
+		}
+		code := strings.TrimSpace(payload.ShortCode)
+		// 格式 / 保留字 / 撞别人 username / 撞别人 effective short code 一并校验。
+		if err := validateCustomUserShortCode(r.Context(), repo, code, username); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+		if err := repo.UpdateUserCustomShortCode(r.Context(), username, code); err != nil {
+			// UpdateUserCustomShortCode 返回的"该短码已被占用..."字符串作为 409 抛上去
+			if strings.Contains(err.Error(), "已被占用") {
+				writeError(w, http.StatusConflict, err)
+				return
+			}
+			if errors.Is(err, storage.ErrUserNotFound) {
+				writeError(w, http.StatusNotFound, err)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]any{"status": "updated"})
+	})
 }
 
 func NewUserRemarkHandler(repo *storage.TrafficRepository) http.Handler {
@@ -463,6 +704,54 @@ func NewUserUpdateEmailHandler(repo *storage.TrafficRepository) http.Handler {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"message": "Email updated successfully",
+		})
+	})
+}
+
+func NewUserLimitsHandler(repo *storage.TrafficRepository, pusher *LimiterConfigPusher, licenseManager *license.Manager) http.Handler {
+	type req struct {
+		Username            string   `json:"username"`
+		SpeedLimitOverride  *float64 `json:"speed_limit_override"`
+		DeviceLimitOverride *int     `json:"device_limit_override"`
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut && r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var body req
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			writeError(w, http.StatusBadRequest, errors.New("invalid request body"))
+			return
+		}
+
+		if strings.TrimSpace(body.Username) == "" {
+			writeError(w, http.StatusBadRequest, errors.New("username is required"))
+			return
+		}
+
+		// limiter 是 PRO feature — 设置非空 SpeedLimitOverride 才走 gate。
+		// DeviceLimit 不算 limiter 范围(那是 socket 数限制,跟限速逻辑不同)。
+		if body.SpeedLimitOverride != nil && *body.SpeedLimitOverride > 0 && licenseManager != nil && !licenseManager.HasFeature("limiter") {
+			http.Error(w, "限速器是 PRO 功能,需要许可证", http.StatusForbidden)
+			return
+		}
+
+		if err := repo.UpdateUserLimitOverrides(r.Context(), body.Username, body.SpeedLimitOverride, body.DeviceLimitOverride); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+
+		if pusher != nil {
+			go pusher.PushToAllServersForUser(r.Context(), body.Username)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"success": true,
+			"message": "User limits updated",
 		})
 	})
 }

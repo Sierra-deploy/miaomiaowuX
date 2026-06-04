@@ -7,6 +7,8 @@ import { toast } from 'sonner'
 import { Topbar } from '@/components/layout/topbar'
 import { DataTable } from '@/components/data-table'
 import type { DataTableColumn } from '@/components/data-table'
+import { useLicenseUsage } from '@/hooks/use-license'
+import { formatBytes } from '@/lib/format'
 import { Button } from '@/components/ui/button'
 import {
   Card,
@@ -25,6 +27,7 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Switch } from '@/components/ui/switch'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Badge } from '@/components/ui/badge'
@@ -39,7 +42,8 @@ import { api } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
 import { profileQueryFn } from '@/lib/profile'
 import { useAuthStore } from '@/stores/auth-store'
-import { Package, Pencil } from 'lucide-react'
+import { Package, Pencil, Users as UsersIcon } from 'lucide-react'
+import { ScrollArea } from '@/components/ui/scroll-area'
 
 // @ts-ignore - retained simple route definition
 export const Route = createFileRoute('/users')({
@@ -68,7 +72,16 @@ type UserRow = {
   is_reset?: boolean
   reset_day?: number
   package_end_date?: string
+  speed_limit_mbps?: number
+  device_limit?: number
+  speed_limit_override?: number | null
+  device_limit_override?: number | null
+  user_short_code?: string
+  custom_user_short_code?: string
 }
+
+// 跟后端 shortCodeRe 严格保持一致(users.go)。前端做 UX 校验避免无效请求,后端兜底。
+const SHORT_CODE_RE = /^[A-Za-z0-9_-]{2,16}$/
 
 type ResetState = {
   username: string
@@ -92,13 +105,6 @@ type PackageManageState = {
   initialized: boolean
 }
 
-const formatBytes = (bytes: number) => {
-  if (bytes === 0) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(1024))
-  return `${(bytes / Math.pow(1024, i)).toFixed(2)} ${units[i]}`
-}
-
 const defaultExpireDate = () => {
   const d = new Date()
   d.setMonth(d.getMonth() + 1)
@@ -114,6 +120,9 @@ function UsersPage() {
   const { auth } = useAuthStore()
   const queryClient = useQueryClient()
   const { t } = useTranslation('users')
+  const { t: tc } = useTranslation('common')
+  const { data: licenseUsage } = useLicenseUsage()
+  const usersAtLimit = Boolean(licenseUsage?.usage?.users && licenseUsage.usage.users.current >= licenseUsage.usage.users.max)
   const [resetState, setResetState] = useState<ResetState | null>(null)
   const [deleteUsername, setDeleteUsername] = useState<string | null>(null)
   const [createOpen, setCreateOpen] = useState(false)
@@ -126,6 +135,17 @@ function UsersPage() {
   })
   const [packageManageState, setPackageManageState] = useState<PackageManageState | null>(null)
   const [remarkEditState, setRemarkEditState] = useState<{ username: string; remark: string } | null>(null)
+  // 查看用户子账户对话框
+  const [subaccountsViewUser, setSubaccountsViewUser] = useState<string | null>(null)
+  const subaccountsQuery = useQuery({
+    queryKey: ['user-subaccounts', subaccountsViewUser],
+    queryFn: async () => {
+      const r = await api.get(`/api/admin/users/subaccounts?username=${encodeURIComponent(subaccountsViewUser!)}`)
+      return r.data as { success: boolean; username: string; subaccounts: Array<{ type: 'routed' | 'inbound'; email?: string; identifier?: string; node_id?: number; node_name?: string; server_id?: number; server_name?: string; inbound_tag?: string; protocol?: string; is_active: boolean; updated_at?: string }> }
+    },
+    enabled: !!subaccountsViewUser,
+  })
+  const [limitsEditState, setLimitsEditState] = useState<{ username: string; speed_limit_override: string; device_limit_override: string } | null>(null)
 
   const { data: profile, isLoading: profileLoading, isError: profileError } = useQuery({
     queryKey: ['profile'],
@@ -150,10 +170,9 @@ function UsersPage() {
     queryKey: ['packages'],
     queryFn: async () => {
       const response = await api.get('/api/admin/packages')
-      return response.data?.packages ?? []
+      return response.data
     },
-    enabled: Boolean(isAdmin && auth.accessToken),
-    staleTime: 60 * 1000,
+    enabled: Boolean(packageManageState && auth.accessToken),
   })
 
   const statusMutation = useMutation({
@@ -271,6 +290,42 @@ function UsersPage() {
     onError: handleServerError,
   })
 
+  // 短码 mutation:留空 = 清自定义(回退到自动生成 user_short_code);非空必须匹配 SHORT_CODE_RE。
+  // 后端会再校验一次 + DB UNIQUE 索引兜底冲突。
+  const shortCodeMutation = useMutation({
+    mutationFn: async (payload: { username: string; short_code: string }) => {
+      if (payload.short_code !== '' && !SHORT_CODE_RE.test(payload.short_code)) {
+        throw new Error(t('toast.shortCodeInvalid', { defaultValue: '短码只能含字母 / 数字 / 下划线 / 横杠,长度 2-16' }))
+      }
+      await api.post('/api/admin/users/short-code', payload)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+      toast.success(t('toast.shortCodeUpdated', { defaultValue: '短码已更新' }))
+    },
+    onError: (err: any) => {
+      // 显式抛出的 Error(前端格式校验)直接弹 message;后端 409 / 500 走通用 handler
+      const msg = err?.message || err?.response?.data?.error || err?.response?.data?.message
+      if (msg) {
+        toast.error(msg)
+      } else {
+        handleServerError(err)
+      }
+    },
+  })
+
+  const limitsMutation = useMutation({
+    mutationFn: async (payload: { username: string; speed_limit_override: number | null; device_limit_override: number | null }) => {
+      await api.put('/api/admin/users/limits', payload)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin-users'] })
+      toast.success(t('toast.limitsUpdated'))
+      setLimitsEditState(null)
+    },
+    onError: handleServerError,
+  })
+
   const users = useMemo(() => usersQuery.data?.users ?? [], [usersQuery.data])
 
   if (profileLoading) {
@@ -330,6 +385,8 @@ function UsersPage() {
               </div>
               <Button
                 size='sm'
+                disabled={usersAtLimit}
+                title={usersAtLimit ? tc('license.userLimitReached', { current: licenseUsage?.usage?.users?.current, max: licenseUsage?.usage?.users?.max }) : undefined}
                 onClick={() => {
                   setCreateState({ username: '', email: '', nickname: '', password: generatePassword(), remark: '' })
                   setCreateOpen(true)
@@ -373,6 +430,51 @@ function UsersPage() {
                     </div>
                   ),
                   width: '180px'
+                },
+                {
+                  header: t('columns.userShortCode', { defaultValue: '用户短码' }),
+                  cell: (user) => {
+                    // 当前生效:custom 非空走 custom,否则系统自动生成的 user_short_code。
+                    // 跟后端 GetEffectiveUserShortCode 一致。
+                    const effective = user.custom_user_short_code || user.user_short_code || ''
+                    return (
+                      <Popover>
+                        <PopoverTrigger asChild>
+                          <Button
+                            variant='ghost'
+                            size='sm'
+                            className='h-7 px-2 font-mono text-xs gap-1'
+                            title={t('shortCode.editTooltip', { defaultValue: '点击编辑短码' })}
+                          >
+                            <span>{effective || '—'}</span>
+                            <Pencil className='h-3 w-3 opacity-60' />
+                          </Button>
+                        </PopoverTrigger>
+                        <PopoverContent className='w-72 p-3' align='start'>
+                          <Label className='text-xs'>{t('shortCode.label', { defaultValue: '用户短码' })}</Label>
+                          <Input
+                            className='h-7 text-sm font-mono mt-1'
+                            placeholder={user.user_short_code ? t('shortCode.placeholderAuto', { code: user.user_short_code, defaultValue: '留空恢复自动 ({{code}})' }) : t('shortCode.placeholderEmpty', { defaultValue: '留空使用自动短码' })}
+                            defaultValue={user.custom_user_short_code || ''}
+                            disabled={shortCodeMutation.isPending}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                e.preventDefault()
+                                const value = (e.target as HTMLInputElement).value.trim()
+                                shortCodeMutation.mutate({ username: user.username, short_code: value })
+                              }
+                            }}
+                          />
+                          <p className='text-[10px] text-muted-foreground mt-1'>
+                            {t('shortCode.hint', {
+                              defaultValue: '回车保存。留空恢复自动短码。允许字母 / 数字 / 下划线 / 横杠,长度 2-16。',
+                            })}
+                          </p>
+                        </PopoverContent>
+                      </Popover>
+                    )
+                  },
+                  width: '140px'
                 },
                 {
                   header: t('columns.packageTraffic'),
@@ -436,6 +538,12 @@ function UsersPage() {
                             <p>{t('package.tooltipUsed', { used: formatBytes(used) })}</p>
                             <p>{t('package.tooltipLimit', { limit: user.traffic_limit_gb })}</p>
                             <p>{t('package.tooltipPercent', { percent: percent.toFixed(1) })}</p>
+                            {((user.speed_limit_mbps ?? 0) > 0 || user.speed_limit_override != null) && (
+                              <p>{t('package.tooltipSpeed', { speed: user.speed_limit_override ?? user.speed_limit_mbps ?? 0 })}{user.speed_limit_override != null ? ` (${t('limits.override')})` : ''}</p>
+                            )}
+                            {((user.device_limit ?? 0) > 0 || user.device_limit_override != null) && (
+                              <p>{t('package.tooltipDevice', { count: user.device_limit_override ?? user.device_limit ?? 0 })}{user.device_limit_override != null ? ` (${t('limits.override')})` : ''}</p>
+                            )}
                           </TooltipContent>
                         </Tooltip>
                       </TooltipProvider>
@@ -512,6 +620,28 @@ function UsersPage() {
                         >
                           <Package className='h-3 w-3 mr-1' />
                           {t('package.manage')}
+                        </Button>
+                        {user.package_id && (
+                          <Button
+                            size='sm'
+                            variant='outline'
+                            onClick={() => setLimitsEditState({
+                              username: user.username,
+                              speed_limit_override: user.speed_limit_override != null ? String(user.speed_limit_override) : '',
+                              device_limit_override: user.device_limit_override != null ? String(user.device_limit_override) : '',
+                            })}
+                          >
+                            {t('limits.edit')}
+                          </Button>
+                        )}
+                        <Button
+                          size='sm'
+                          variant='outline'
+                          onClick={() => setSubaccountsViewUser(user.username)}
+                          title='查看子账户与所在节点'
+                        >
+                          <UsersIcon className='h-3 w-3 mr-1' />
+                          子账户
                         </Button>
                         <Button
                           size='sm'
@@ -625,6 +755,14 @@ function UsersPage() {
                         }
                       >
                         {t('package.manage')}
+                      </Button>
+                      <Button
+                        variant='outline'
+                        size='sm'
+                        className='flex-1'
+                        onClick={() => setSubaccountsViewUser(user.username)}
+                      >
+                        子账户
                       </Button>
                       <Button
                         variant='destructive'
@@ -829,9 +967,9 @@ function UsersPage() {
             </div>
             <div className='space-y-3'>
               <Label>{t('packageDialog.selectPackage')}</Label>
-              {packagesQuery.isLoading ? (
+              {(packagesQuery.isLoading || packagesQuery.isPending) ? (
                 <div className='text-sm text-muted-foreground'>{t('packageDialog.loadingPackages')}</div>
-              ) : (packagesQuery.data as any[])?.length > 0 ? (
+              ) : (packagesQuery.data?.packages as any[])?.length > 0 ? (
                 <div className='space-y-2 max-h-80 overflow-y-auto border rounded-md p-3'>
                   <div
                     className={`flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 transition hover:bg-muted ${packageManageState?.selectedPackageId === null ? 'bg-primary/10 border border-primary/30' : ''}`}
@@ -839,7 +977,7 @@ function UsersPage() {
                   >
                     <span className='text-sm font-medium'>{t('packageDialog.noPackage')}</span>
                   </div>
-                  {(packagesQuery.data as any[]).map((pkg: any) => (
+                  {(packagesQuery.data?.packages as any[]).map((pkg: any) => (
                     <div
                       key={pkg.id}
                       className={`flex cursor-pointer items-center justify-between gap-3 rounded-md px-3 py-2 transition hover:bg-muted ${packageManageState?.selectedPackageId === pkg.id ? 'bg-primary/10 border border-primary/30' : ''}`}
@@ -857,7 +995,7 @@ function UsersPage() {
                 <div className='text-sm text-muted-foreground'>{t('packageDialog.noAvailablePackages')}</div>
               )}
             </div>
-            {packageManageState?.selectedPackageId !== null && (
+            {packageManageState?.selectedPackageId != null && (
               <div className='space-y-3'>
                 <div className='space-y-2'>
                   <Label htmlFor='pkg-expire-date'>{t('packageDialog.expireDate')}</Label>
@@ -960,6 +1098,139 @@ function UsersPage() {
             >
               {remarkMutation.isPending ? t('remarkDialog.saving') : t('remarkDialog.confirmSave')}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={Boolean(limitsEditState)} onOpenChange={(open) => !open && setLimitsEditState(null)}>
+        <DialogContent className='sm:max-w-md'>
+          <DialogHeader>
+            <DialogTitle>{t('limits.title')}</DialogTitle>
+          </DialogHeader>
+          <div className='space-y-4'>
+            <div className='space-y-2'>
+              <Label>{t('remarkDialog.username')}</Label>
+              <Input value={limitsEditState?.username ?? ''} readOnly disabled />
+            </div>
+            <div className='space-y-2'>
+              <Label htmlFor='edit-speed-limit'>{t('limits.speedLimit')}</Label>
+              <Input
+                id='edit-speed-limit'
+                type='number'
+                min='0'
+                step='1'
+                value={limitsEditState?.speed_limit_override ?? ''}
+                placeholder={t('limits.speedPlaceholder')}
+                onChange={(event) =>
+                  setLimitsEditState((prev) =>
+                    prev ? { ...prev, speed_limit_override: event.target.value } : prev
+                  )
+                }
+              />
+              <p className='text-xs text-muted-foreground'>{t('limits.speedDesc')}</p>
+            </div>
+            <div className='space-y-2'>
+              <Label htmlFor='edit-device-limit'>{t('limits.deviceLimit')}</Label>
+              <Input
+                id='edit-device-limit'
+                type='number'
+                min='0'
+                step='1'
+                value={limitsEditState?.device_limit_override ?? ''}
+                placeholder={t('limits.devicePlaceholder')}
+                onChange={(event) =>
+                  setLimitsEditState((prev) =>
+                    prev ? { ...prev, device_limit_override: event.target.value } : prev
+                  )
+                }
+              />
+              <p className='text-xs text-muted-foreground'>{t('limits.deviceDesc')}</p>
+            </div>
+          </div>
+          <DialogFooter className='gap-2'>
+            <DialogClose asChild>
+              <Button type='button' variant='outline' disabled={limitsMutation.isPending}>
+                {t('actions.cancel', { ns: 'common' })}
+              </Button>
+            </DialogClose>
+            <Button
+              type='button'
+              disabled={limitsMutation.isPending}
+              onClick={() => {
+                if (!limitsEditState) return
+                limitsMutation.mutate({
+                  username: limitsEditState.username,
+                  speed_limit_override: limitsEditState.speed_limit_override ? parseFloat(limitsEditState.speed_limit_override) : null,
+                  device_limit_override: limitsEditState.device_limit_override ? parseInt(limitsEditState.device_limit_override) : null,
+                })
+              }}
+            >
+              {limitsMutation.isPending ? t('remarkDialog.saving') : t('remarkDialog.confirmSave')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* 子账户与所在节点对话框(管理员视图) */}
+      <Dialog open={Boolean(subaccountsViewUser)} onOpenChange={(open) => !open && setSubaccountsViewUser(null)}>
+        <DialogContent className='max-w-2xl'>
+          <DialogHeader>
+            <DialogTitle>子账户与所在节点 — {subaccountsViewUser}</DialogTitle>
+          </DialogHeader>
+          <ScrollArea className='max-h-[60vh] pr-2'>
+            {subaccountsQuery.isLoading ? (
+              <div className='py-6 text-center text-sm text-muted-foreground'>加载中…</div>
+            ) : !subaccountsQuery.data?.subaccounts?.length ? (
+              <div className='py-6 text-center text-sm text-muted-foreground'>该用户暂无子账户</div>
+            ) : (
+              <div className='space-y-2'>
+                {subaccountsQuery.data.subaccounts.map((sa, idx) => (
+                  <div key={idx} className='rounded border p-3 text-sm space-y-1'>
+                    <div className='flex items-center gap-2'>
+                      <Badge variant={sa.type === 'routed' ? 'default' : 'secondary'}>
+                        {sa.type === 'routed' ? '路由出站' : '入站绑定'}
+                      </Badge>
+                      {!sa.is_active && <Badge variant='outline'>已暂停</Badge>}
+                      <span className='ml-auto text-xs text-muted-foreground'>{sa.updated_at}</span>
+                    </div>
+                    {sa.node_name && (
+                      <div className='text-xs'>
+                        <span className='text-muted-foreground'>节点: </span>
+                        <span className='font-mono'>{sa.node_name}</span>
+                      </div>
+                    )}
+                    {sa.server_name && (
+                      <div className='text-xs'>
+                        <span className='text-muted-foreground'>服务器: </span>
+                        <span className='font-mono'>{sa.server_name}</span>
+                      </div>
+                    )}
+                    {sa.inbound_tag && (
+                      <div className='text-xs'>
+                        <span className='text-muted-foreground'>入站 tag: </span>
+                        <span className='font-mono'>{sa.inbound_tag}</span>
+                        {sa.protocol && <span className='text-muted-foreground ml-2'>({sa.protocol})</span>}
+                      </div>
+                    )}
+                    {sa.email && (
+                      <div className='text-xs'>
+                        <span className='text-muted-foreground'>email: </span>
+                        <span className='font-mono'>{sa.email}</span>
+                      </div>
+                    )}
+                    {sa.identifier && (
+                      <div className='text-xs break-all'>
+                        <span className='text-muted-foreground'>凭据: </span>
+                        <span className='font-mono'>{sa.identifier}</span>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </ScrollArea>
+          <DialogFooter>
+            <Button variant='outline' onClick={() => setSubaccountsViewUser(null)}>关闭</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

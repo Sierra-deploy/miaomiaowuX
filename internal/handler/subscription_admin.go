@@ -417,8 +417,19 @@ func NewSubscriptionListHandler(repo *storage.TrafficRepository) http.Handler {
 						FileShortCode: pkg.ShortCode,
 						UpdatedAt:     pkg.UpdatedAt,
 					}}
-					if user.PackageEndDate != nil {
-						files[0].ExpireAt = user.PackageEndDate
+				}
+			}
+
+			// 追加用户自己创建的订阅(套餐之外用户手动创建的),否则在订阅链接页面看不到
+			seen := make(map[int64]bool, len(files))
+			for _, f := range files {
+				seen[f.ID] = true
+			}
+			if own, oerr := repo.ListSubscribeFiles(r.Context()); oerr == nil {
+				for _, f := range own {
+					if f.CreatedBy == username && !seen[f.ID] {
+						files = append(files, f)
+						seen[f.ID] = true
 					}
 				}
 			}
@@ -431,26 +442,30 @@ func NewSubscriptionListHandler(repo *storage.TrafficRepository) http.Handler {
 			enableShortLink = systemConfig.EnableShortLink
 		}
 
-		// 仅在启用短链接时获取用户短代码
+		// 仅在启用短链接时获取用户短代码(优先用户自定义短码,否则系统自动短码)。
+		// 管理员现在也能编辑自己的 user_short_code(订阅文件 popover 里),所以订阅链接也拼上,
+		// 与普通用户一致 = /x/{fileShortCode}{userShortCode}。short_link.go 会先按整 code 找文件,
+		// 找不到再按"文件短码+用户短码"分裂,所以拼上 admin 自己的短码不影响"全权访问"语义。
 		var userShortCode string
 		if enableShortLink {
-			userShortCode, err = repo.GetUserShortCode(r.Context(), username)
+			userShortCode, err = repo.GetEffectiveUserShortCode(r.Context(), username)
 			if err != nil {
 				// 如果用户短代码不存在，它将在下次令牌访问时生成
 				userShortCode = ""
 			}
 		}
+		_ = user // role 字段不再用于此处的短码逻辑(保留 user 变量供其他地方使用)
 
 		type item struct {
-			ID            int64      `json:"id"`
-			Name          string     `json:"name"`
-			Description   string     `json:"description"`
-			Filename      string     `json:"filename"`
-			Type          string     `json:"type"`
-			FileShortCode string     `json:"file_short_code,omitempty"`
-			ExpireAt      *time.Time `json:"expire_at,omitempty"`
-			UpdatedAt     time.Time  `json:"updated_at"`
-			LatestVersion int64      `json:"latest_version,omitempty"`
+			ID              int64     `json:"id"`
+			Name            string    `json:"name"`
+			Description     string    `json:"description"`
+			Filename        string    `json:"filename"`
+			Type            string    `json:"type"`
+			FileShortCode   string    `json:"file_short_code,omitempty"`
+			CustomShortCode string    `json:"custom_short_code,omitempty"`
+			UpdatedAt       time.Time `json:"updated_at"`
+			LatestVersion   int64     `json:"latest_version,omitempty"`
 		}
 
 		payload := make([]item, 0, len(files))
@@ -460,22 +475,23 @@ func NewSubscriptionListHandler(repo *storage.TrafficRepository) http.Handler {
 				latestVersion = versions[0].Version
 			}
 
-			// 如果启用短链接，则仅包含文件短代码
 			fileShortCode := ""
+			customShortCode := ""
 			if enableShortLink {
 				fileShortCode = file.FileShortCode
+				customShortCode = file.CustomShortCode
 			}
 
 			payload = append(payload, item{
-				ID:            file.ID,
-				Name:          file.Name,
-				Description:   file.Description,
-				Filename:      file.Filename,
-				Type:          file.Type,
-				FileShortCode: fileShortCode,
-				ExpireAt:      file.ExpireAt,
-				UpdatedAt:     file.UpdatedAt,
-				LatestVersion: latestVersion,
+				ID:              file.ID,
+				Name:            file.Name,
+				Description:     file.Description,
+				Filename:        file.Filename,
+				Type:            file.Type,
+				FileShortCode:   fileShortCode,
+				CustomShortCode: customShortCode,
+				UpdatedAt:       file.UpdatedAt,
+				LatestVersion:   latestVersion,
 			})
 		}
 

@@ -1,5 +1,5 @@
 // @ts-nocheck
-import React, { useState, useMemo, useCallback, useEffect, memo, useDeferredValue } from 'react'
+import React, { useState, useMemo, useCallback, useEffect, useRef, memo, useDeferredValue } from 'react'
 import { createPortal } from 'react-dom'
 import { createFileRoute, redirect } from '@tanstack/react-router'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -7,12 +7,14 @@ import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
 import { Topbar } from '@/components/layout/topbar'
 import { useAuthStore } from '@/stores/auth-store'
+import { profileQueryFn } from '@/lib/profile'
 import { api } from '@/lib/api'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -24,8 +26,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from '@/components/ui/alert-dialog'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
-import { parseProxyUrl, toClashProxy, type ProxyNode, type ClashProxy } from '@/lib/proxy-parser'
-import { Check, Pencil, X, Undo2, Activity, Eye, Copy, ChevronDown, Link2, Flag, GripVertical, Zap, CheckCircle2, Loader2, Route as RouteIcon } from 'lucide-react'
+import { parseProxyUrl, parseSurgeLine, toClashProxy, type ProxyNode, type ClashProxy } from '@/lib/proxy-parser'
+import { Check, Pencil, X, Undo2, Activity, Eye, Copy, ChevronDown, Link2, Flag, GripVertical, Zap, CheckCircle2, Loader2, Route as RouteIcon, Trash2, Cable, Scale } from 'lucide-react'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import IpIcon from '@/assets/icons/ip.svg'
 import ExchangeIcon from '@/assets/icons/exchange.svg'
@@ -36,7 +38,13 @@ import { Twemoji } from '@/components/twemoji'
 import { useMediaQuery } from '@/hooks/use-media-query'
 import { InboundWizard } from '@/components/xray/inbound-wizard'
 import { NodeRoutingDialog } from '@/components/node-routing-dialog'
+import { TunnelManagerDialog } from '@/components/tunnel-manager-dialog'
+import { RoutedOutboundsPanel } from '@/components/routed-outbounds-panel'
+import { SpeedTestDialog } from '@/components/speedtest-dialog'
+import { useLicenseFeature } from '@/hooks/use-license'
+import { Gauge } from 'lucide-react'
 import { clashConfigToOutbound } from '@/lib/xray-config-generator'
+import { balancerStrategyLabel } from '@/lib/xray-balancer'
 import {
   DndContext,
   closestCenter,
@@ -76,7 +84,15 @@ type ParsedNode = {
   enabled: boolean
   tag: string
   original_server: string
+  original_domain: string
   inbound_tag: string
+  chain_proxy_node_id: number | null
+  node_type?: string
+  parent_node_id?: number | null
+  routed_outbound_tag?: string
+  routed_owner?: 'shared' | 'user' | string
+  created_by?: string
+  multiplier?: number // 节点在当前用户绑定套餐内的倍率;admin/无套餐用户为 undefined
   created_at: string
   updated_at: string
 }
@@ -106,9 +122,10 @@ const PROTOCOL_COLORS: Record<string, string> = {
   tuic: 'bg-cyan-500/10 text-cyan-700 dark:text-cyan-400',
   anytls: 'bg-teal-500/10 text-teal-700 dark:text-teal-400',
   wireguard: 'bg-orange-500/10 text-orange-700 dark:text-orange-400',
+  snell: 'bg-lime-500/10 text-lime-700 dark:text-lime-400',
 }
 
-const PROTOCOLS = ['vmess', 'vless', 'trojan', 'ss', 'socks5', 'hysteria', 'hysteria2', 'tuic', 'anytls', 'wireguard']
+const PROTOCOLS = ['vmess', 'vless', 'trojan', 'ss', 'socks5', 'hysteria', 'hysteria2', 'tuic', 'anytls', 'wireguard', 'snell']
 
 // 检查是否是IP地址（IPv4或IPv6）
 function isIpAddress(hostname: string): boolean {
@@ -352,8 +369,18 @@ function getStoredSelectedIds(): Set<number> {
 
 function NodesPage() {
   const { t } = useTranslation('nodes')
+  const { t: txr } = useTranslation('xray')
   const { auth } = useAuthStore()
   const queryClient = useQueryClient()
+
+  const { data: profile } = useQuery({
+    queryKey: ['profile'],
+    queryFn: profileQueryFn,
+    enabled: Boolean(auth.accessToken),
+    staleTime: 5 * 60 * 1000,
+  })
+  const isAdmin = Boolean(profile?.is_admin)
+  const { hasFeature: hasSpeedTest } = useLicenseFeature('speed_test')
 
   // 视口宽度判断 - 用于条件渲染 SortableContext，避免重复注册导致拖动偏移
   const isDesktop = useMediaQuery('(min-width: 1024px)')
@@ -372,21 +399,71 @@ function NodesPage() {
   const [resolvingIpFor, setResolvingIpFor] = useState<string | null>(null) // 正在解析IP的节点ID
   const [ipMenuState, setIpMenuState] = useState<{ nodeId: string; ips: string[] } | null>(null) // IP选择菜单状态
   const [landingDialogOpen, setLandingDialogOpen] = useState(false)
+  // 落地节点作用范围:'all'=节点级(默认,现有行为)| 'routed'=用户级(路由出站,套餐绑用户时自动开子账号)
+  const [landingScope, setLandingScope] = useState<'all' | 'routed'>('all')
+  // routed 模式下用户点选的目标节点(选后填 Label + 显示底部"创建"按钮,而不是立即提交)
+  const [routedTargetNode, setRoutedTargetNode] = useState<ParsedNode | null>(null)
+  const [landingRoutedLabel, setLandingRoutedLabel] = useState('')
+
+  // 把节点名规整为合法 label slug([a-zA-Z0-9-] 长度 2-32):非合规字符全部转 -,首尾 - 去掉,过长截断
+  const slugifyForLabel = (name: string) => {
+    let s = name.replace(/[^a-zA-Z0-9-]+/g, '-').replace(/^-+|-+$/g, '')
+    if (s.length > 32) s = s.slice(0, 32)
+    return s
+  }
+  // 自动给 routed 节点生成 label = `rout-<slug>-<rand4>`。
+  // slug 只剩字母数字-,中文/空格/竖线都被 squash 成 -,所以"🇸🇬 新加坡 BAGE | OUT"和
+  // "🇯🇵 日本 BAGE | OUT"会产出同样的 slug `BAGE-OUT` → 选不同节点跑同款自动 label 会撞,
+  // 后端按 (parent_node_id, label) UNIQUE 直接 409。加 4 位 lowercase-alnum 随机后缀。
+  const generateRoutedLabel = (name: string) => {
+    const slug = slugifyForLabel(name)
+    const rand = Math.random().toString(36).slice(2, 6) || 'r1zz'  // base36 → [0-9a-z]
+    const base = slug ? `rout-${slug}` : 'rout-node'
+    const max = 32 - rand.length - 1  // 留 "-" + 4 字符随机的空间
+    const trimmed = base.length > max ? base.slice(0, max) : base
+    return `${trimmed}-${rand}`
+  }
   const [sourceNodeForLanding, setSourceNodeForLanding] = useState<ParsedNode | null>(null)
   const [landingFilterText, setLandingFilterText] = useState<string>('')
-  const [landingTab, setLandingTab] = useState<'nodes' | 'servers'>('nodes')
+  const [landingTagFilter, setLandingTagFilter] = useState<string>('all')
+  // 落地节点 tunnel 二次确认:target 节点 server:port 命中某 tunnel 的 target 时,让用户选直连 or 走 tunnel
+  const [landingTunnelChoice, setLandingTunnelChoice] = useState<null | {
+    tunnelHost: string
+    tunnelPort: number
+    tunnelServerName: string
+    tunnelTag: string
+    directAddress: string
+    directPort: number
+  }>(null)
+  const [landingTab, setLandingTab] = useState<'nodes' | 'servers' | 'balancer'>('nodes')
   const [landingStep, setLandingStep] = useState<'select' | 'create-inbound'>('select')
   const [landingServerId, setLandingServerId] = useState<number | null>(null)
   const [landingLoading, setLandingLoading] = useState(false)
+  // 落地目标=负载均衡器:选中后只在源服务器下一条 routing rule {inboundTag, balancerTag},不建出站不建节点
+  const [landingBalancerTag, setLandingBalancerTag] = useState<string>('')
+
+  const [chainProxyDialogOpen, setChainProxyDialogOpen] = useState(false)
+  const [sourceNodeForChainProxy, setSourceNodeForChainProxy] = useState<ParsedNode | null>(null)
+  const [chainProxyFilterText, setChainProxyFilterText] = useState<string>('')
 
   const [routingDialogOpen, setRoutingDialogOpen] = useState(false)
   const [routingSourceNode, setRoutingSourceNode] = useState<any>(null)
+  const [tunnelDialogOpen, setTunnelDialogOpen] = useState(false)
+  const [routedOutboundsDialogOpen, setRoutedOutboundsDialogOpen] = useState(false)
+  const [speedDialogOpen, setSpeedDialogOpen] = useState(false) // 节点测速工作台是否打开
+  const [speedDialogMin, setSpeedDialogMin] = useState(false)   // 是否收起为右侧悬浮按钮(点外部时,而非点 X)
   const [routingServerId, setRoutingServerId] = useState<number | null>(null)
   const [routingServerName, setRoutingServerName] = useState<string>('')
 
   // 自定义标签状态
   const [manualTag, setManualTag] = useState<string>(() => t('filter.manualInput'))
   const [subscriptionTag, setSubscriptionTag] = useState<string>('')
+
+  // 导入节点时是否强制给 clash 配置加 skip-cert-verify:true。默认关,从 localStorage 恢复
+  const [skipCertVerify, setSkipCertVerify] = useState<boolean>(() => {
+    const cached = localStorage.getItem('mmwx-skip-cert-verify')
+    return cached !== null ? cached === 'true' : false
+  })
 
   // 导入节点卡片折叠状态 - 默认折叠
   const [isInputCardExpanded, setIsInputCardExpanded] = useState(false)
@@ -427,6 +504,10 @@ function NodesPage() {
   // 添加节点状态
   const [quickCreateServerDialogOpen, setQuickCreateServerDialogOpen] = useState(false)
   const [quickCreateServerId, setQuickCreateServerId] = useState<number | null>(null)
+  // 服务器选择 dialog 的 footer ref:选完滚到底显示"下一步"
+  const quickCreateFooterRef = useRef<HTMLDivElement | null>(null)
+  // 落地节点对话框的顶部锚点:选完节点/服务器后滚回顶部,让用户看到 routed banner / 切换 step 后的 wizard 顶部
+  const landingDialogTopRef = useRef<HTMLDivElement | null>(null)
   const [quickCreateOpen, setQuickCreateOpen] = useState(false)
   const [quickCreateStep, setQuickCreateStep] = useState<'inbound' | 'done'>('inbound')
   const [quickCreateResult, setQuickCreateResult] = useState<{ serverCount: number; inboundTag: string; outboundTag: string } | null>(null)
@@ -480,7 +561,17 @@ function NodesPage() {
   }, [handleNodeSelect])
 
   // 节点排序状态
-  const [nodeOrder, setNodeOrder] = useState<number[]>([])
+  // nodeOrder 从 localStorage 缓存初始化 —— 防止首次渲染时用空数组导致节点列表先以默认顺序闪一下再切换到用户排序
+  const [nodeOrder, setNodeOrder] = useState<number[]>(() => {
+    try {
+      const cached = localStorage.getItem('nodes-node-order')
+      if (cached) {
+        const parsed = JSON.parse(cached)
+        if (Array.isArray(parsed)) return parsed as number[]
+      }
+    } catch {}
+    return []
+  })
   // 批量拖动状态：当拖动选中的节点时，记录正在批量拖动的节点ID集合
   const [batchDraggingIds, setBatchDraggingIds] = useState<Set<number>>(new Set())
   // 当前正在拖动的节点ID（用于 DragOverlay）
@@ -501,10 +592,11 @@ function NodesPage() {
     enabled: Boolean(auth.accessToken),
   })
 
-  // 同步 nodeOrder 状态
+  // 同步 nodeOrder 状态 + 写回 localStorage,下次进页面能立刻按这个顺序渲染
   useEffect(() => {
     if (userConfig?.node_order) {
       setNodeOrder(userConfig.node_order)
+      try { localStorage.setItem('nodes-node-order', JSON.stringify(userConfig.node_order)) } catch {}
     }
   }, [userConfig?.node_order])
 
@@ -514,6 +606,12 @@ function NodesPage() {
       localStorage.setItem(STORAGE_KEY_PROTOCOL, selectedProtocol)
     } catch {}
   }, [selectedProtocol])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('mmwx-skip-cert-verify', String(skipCertVerify))
+    } catch {}
+  }, [skipCertVerify])
 
   useEffect(() => {
     try {
@@ -567,21 +665,254 @@ function NodesPage() {
 
   const savedNodes = useMemo(() => nodesData?.nodes ?? [], [nodesData?.nodes])
 
-  // 远程服务器列表（添加节点用）
+  // 按用户在节点管理里调整过的顺序排过的副本 — 传给测速等 dialog,让它们也跟列表顺序保持一致
+  const savedNodesSorted = useMemo(() => {
+    if (!nodeOrder?.length) return savedNodes
+    const idx = new Map<number, number>()
+    nodeOrder.forEach((id, i) => idx.set(id, i))
+    return [...savedNodes].sort((a: any, b: any) => {
+      const ai = idx.get(a.id) ?? Number.NEGATIVE_INFINITY
+      const bi = idx.get(b.id) ?? Number.NEGATIVE_INFINITY
+      return ai - bi
+    })
+  }, [savedNodes, nodeOrder])
+
+  // 所有 tunnel 入站(跨远程/分享服务器),用于节点行「被 tunnel 转发」标识
+  const { data: tunnelsData } = useQuery({
+    queryKey: ['tunnels'],
+    queryFn: async () => {
+      const res = await api.get('/api/admin/tunnels')
+      return (res.data.tunnels || []) as Array<{
+        server_id: number
+        server_name: string
+        is_federated: boolean
+        tag: string
+        listen_port: number
+        target_address: string
+        target_port: number
+        network: string
+      }>
+    },
+    enabled: isAdmin && Boolean(auth.accessToken),
+    staleTime: 30_000,
+  })
+  const tunnels = useMemo(() => tunnelsData || [], [tunnelsData])
+
+  // 节点 server:port → 转发它的 tunnel 列表(用于行内标签 hover 显示)
+  const tunnelsByTarget = useMemo(() => {
+    const map = new Map<string, typeof tunnels>()
+    for (const tn of tunnels) {
+      const key = `${tn.target_address}:${tn.target_port}`
+      const arr = map.get(key) || []
+      arr.push(tn)
+      map.set(key, arr)
+    }
+    return map
+  }, [tunnels])
+
+  // 节点行「被 tunnel 转发」标签:tunnel.target 和 node.server 可能是同一服务器不同别名(domain vs IP),
+  // 按 port + node 所在服务器的别名集匹配(包含 clash server / ip_address / domain / pull_address)。
+  // tooltip 里把 tunnel 的 target_address 也尝试反查回服务器名,跟 tunnel 管理面板显示一致。
+  const renderForwardedBadge = (node: any) => {
+    if (!node.parsed?.server || !node.parsed?.port) return null
+    const nodeServer: any = (remoteServersData?.servers || []).find((s: any) => s.name === node.dbNode?.original_server)
+    const nodeAliases = new Set<string>([node.parsed.server, nodeServer?.ip_address, nodeServer?.domain, nodeServer?.pull_address].filter(Boolean))
+    const fwd = tunnels.filter((tn: any) => Number(tn.target_port) === Number(node.parsed.port) && nodeAliases.has(tn.target_address))
+    if (!fwd || fwd.length === 0) return null
+    const resolveServerByAddr = (addr: string): string | null => {
+      for (const s of (remoteServersData?.servers || []) as any[]) {
+        if (s.ip_address === addr || s.domain === addr || s.pull_address === addr) return s.name
+      }
+      return null
+    }
+    return (
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <Badge
+            variant='outline'
+            className='h-5 w-5 p-0 flex items-center justify-center border-orange-300 text-orange-600 dark:text-orange-400'
+            onClick={(e) => e.stopPropagation()}
+            aria-label={t('nodeList.forwardedByTunnel')}
+          >
+            <Cable className='h-3 w-3' />
+          </Badge>
+        </TooltipTrigger>
+        <TooltipContent>
+          <div className='space-y-0.5 text-xs'>
+            <div className='font-medium'>{t('nodeList.forwardedByTunnelTip')}</div>
+            {fwd.map((tn: any) => {
+              const targetServer = resolveServerByAddr(tn.target_address)
+              const targetLabel = targetServer ? `${targetServer}:${tn.target_port}` : `${tn.target_address}:${tn.target_port}`
+              return (
+                <div key={`${tn.server_id}-${tn.tag}`} className='font-mono'>
+                  {tn.server_name}:{tn.listen_port} → {targetLabel} · {tn.tag}
+                </div>
+              )
+            })}
+          </div>
+        </TooltipContent>
+      </Tooltip>
+    )
+  }
+
+  // 取节点所属服务器名:优先 original_server,兼容老数据 tag=「远程:服务器名」
+  const getNodeServerName = (dbNode: any): string => {
+    if (!dbNode) return ''
+    if (dbNode.original_server) return dbNode.original_server
+    if (typeof dbNode.tag === 'string' && dbNode.tag.startsWith('远程:')) {
+      return dbNode.tag.slice(3)
+    }
+    return ''
+  }
+
+  // 取要展示在 tag 徽章上的文本:若 tag 是「远程:xxx」形式,则不再显示(服务器名已挪到节点名下方)
+  const getDisplayTag = (dbNode: any, fallbackTag?: string): string => {
+    const raw = dbNode?.tag || fallbackTag || ''
+    if (typeof raw === 'string' && raw.startsWith('远程:')) return ''
+    return raw
+  }
+
+  // 远程服务器列表（admin 才能调,普通用户没有这个权限,跳过这个 query）
   const { data: remoteServersData } = useQuery({
     queryKey: ['remote-servers'],
     queryFn: async () => {
       const response = await api.get('/api/admin/remote-servers')
-      return response.data as { success: boolean; servers: Array<{ id: number; name: string; status: string; ip_address?: string; pull_address?: string; domain?: string }> }
+      return response.data as { success: boolean; servers: Array<{ id: number; name: string; status: string; ip_address?: string; pull_address?: string; domain?: string; xray_running?: boolean }> }
     },
+    enabled: isAdmin && Boolean(auth.accessToken),
     staleTime: 30_000,
   })
   const remoteServers = useMemo(() => (remoteServersData?.servers || []).filter(s => s.status === 'connected'), [remoteServersData])
 
+  // 路由出站节点的友好显示:列出所有需要解析的 routed 节点,按 original_server 分组拉一次 outbounds,
+  // 然后建一份 (server_name, outbound_tag) → 友好名 的映射。优先 server 名 → 节点名 → tag 兜底。
+  const routedDisplayServerIds = useMemo(() => {
+    const names = new Set<string>()
+    savedNodes.forEach((n: any) => {
+      if (n.node_type === 'routed' && n.routed_outbound_tag && n.original_server) {
+        names.add(n.original_server)
+      }
+    })
+    return Array.from(names)
+      .map(name => (remoteServersData?.servers || []).find(s => s.name === name))
+      .filter(Boolean) as Array<{ id: number; name: string }>
+  }, [savedNodes, remoteServersData])
+
+  const routedOutboundsQ = useQuery({
+    queryKey: ['routed-outbounds-resolve', routedDisplayServerIds.map(s => s.id)],
+    enabled: isAdmin && Boolean(auth.accessToken) && routedDisplayServerIds.length > 0,
+    queryFn: async () => {
+      const map = new Map<string, any[]>() // serverName → outbounds[]
+      await Promise.all(routedDisplayServerIds.map(async (s) => {
+        try {
+          const res = await api.get(`/api/admin/remote/outbounds?server_id=${s.id}`)
+          map.set(s.name, res.data?.outbounds || [])
+        } catch {}
+      }))
+      return map
+    },
+    staleTime: 60_000,
+  })
+
+  // (server_name, outbound_tag) → 显示名(优先 节点对应 server 名 → 节点名 → tag);
+  // 路径里碰到的 tunnel 入站做一次"跳一跳"解析:如果命中某 server 的 tunnel listen_port,
+  // 就接着按 tunnel.target_address:target_port 继续找,最多跳 3 次防环。
+  const routedOutboundDisplay = useMemo(() => {
+    const map: Record<string, string> = {}
+    if (!routedOutboundsQ.data || savedNodes.length === 0) return map
+    const nodeByAddr = new Map<string, { nodeName: string; serverName: string }>()
+    for (const n of savedNodes as any[]) {
+      try {
+        const cfg = JSON.parse(n.clash_config)
+        if (cfg?.server && cfg?.port != null) {
+          const key = `${cfg.server}:${cfg.port}`
+          if (!nodeByAddr.has(key)) nodeByAddr.set(key, { nodeName: n.node_name, serverName: n.original_server || '' })
+        }
+      } catch {}
+    }
+    const serverByAddr = new Map<string, { id: number; name: string }>()
+    for (const s of (remoteServersData?.servers || []) as any[]) {
+      for (const a of [s.ip_address, s.domain, s.pull_address]) {
+        if (a) serverByAddr.set(a, { id: s.id, name: s.name })
+      }
+    }
+    // server_id → tunnels[]
+    const tunnelsByServerId = new Map<number, typeof tunnels>()
+    for (const tn of tunnels) {
+      const arr = tunnelsByServerId.get(tn.server_id) || []
+      arr.push(tn)
+      tunnelsByServerId.set(tn.server_id, arr)
+    }
+
+    // 解析单个 addr:port,跟 tunnel 一起最多 3 跳
+    const resolve = (addr: string, port: any, depth = 0): string | null => {
+      if (depth > 3 || !addr) return null
+      const hit = nodeByAddr.get(`${addr}:${port}`)
+      if (hit) return hit.serverName || hit.nodeName
+      const srv = serverByAddr.get(addr)
+      if (srv) {
+        // 这台服务器是否有一个 tunnel 在监听这个 port?有就接着跳
+        const list = tunnelsByServerId.get(srv.id) || []
+        const tn = list.find((x) => Number(x.listen_port) === Number(port))
+        if (tn) {
+          const next = resolve(tn.target_address, tn.target_port, depth + 1)
+          if (next) return next
+        }
+        return srv.name
+      }
+      // 兜底:用户常把同一台服务器配多个域名别名(hkbs.2ha.me / hkbs6.2ha.me 都指向 BAGE HKS),
+      // 系统没记录这些 alias,直接按 addr 查不到 server。这时按 listen_port 在所有 tunnel 里找,
+      // 如果端口在全局只命中 1 条 tunnel,基本可以断定它就是要找的那条;>1 条就放弃避免误判。
+      const tunnelMatches = tunnels.filter((x) => Number(x.listen_port) === Number(port))
+      if (tunnelMatches.length === 1) {
+        const tn = tunnelMatches[0]
+        const next = resolve(tn.target_address, tn.target_port, depth + 1)
+        if (next) return next
+        return tn.server_name
+      }
+      return null
+    }
+
+    for (const [serverName, outbounds] of routedOutboundsQ.data.entries()) {
+      for (const ob of outbounds) {
+        if (!ob.tag) continue
+        let addr = '', port: any = ''
+        const vnext = ob.settings?.vnext?.[0]
+        const sv = ob.settings?.servers?.[0]
+        if (vnext) { addr = vnext.address; port = vnext.port }
+        else if (sv) { addr = sv.address; port = sv.port }
+        else if (ob.settings?.address) { addr = ob.settings.address; port = ob.settings.port }
+        const resolved = resolve(addr, port, 0)
+        if (resolved) {
+          map[`${serverName}::${ob.tag}`] = resolved
+        }
+      }
+    }
+    return map
+  }, [routedOutboundsQ.data, savedNodes, remoteServersData, tunnels])
+
+  const resolveRoutedDisplay = (n: any) => {
+    if (!n?.routed_outbound_tag) return ''
+    const fullTag = String(n.routed_outbound_tag)
+    // map 存的 key 用 agent 上完整的 outbound tag(`routed:p<id>:<label>`),
+    // 之前这里剥皮后再查导致永远 miss → 兜底显示短 tag(用户看到 `rout-wtt-out` 这种 bug)。
+    const shortTag = fullTag.replace(/^routed:p\d+:/, '')
+    if (!n.original_server) return shortTag
+    return routedOutboundDisplay[`${n.original_server}::${fullTag}`] || shortTag
+  }
+
   // 添加节点：提交入站 → 创建 freedom 出站（单服务器）
-  const handleQuickCreateSubmit = async (serverIds: number[], inbound: any, tag: string, nodeName?: string) => {
+  const handleQuickCreateSubmit = async (serverIds: number[], inbound: any, tag: string, nodeName?: string, forwardNodeId?: number) => {
     if (serverIds.length === 0) {
       toast.error(t('toast.selectServer'))
+      return
+    }
+    const notReadyServer = serverIds.find(id => {
+      const s = (remoteServersData?.servers || []).find(srv => srv.id === id)
+      return s && !s.xray_running
+    })
+    if (notReadyServer !== undefined) {
+      toast.error(t('toast.xrayNotReady'))
       return
     }
     const trimmedTag = tag?.trim() || inbound.tag || ''
@@ -602,6 +933,10 @@ function NodesPage() {
         if (nodeName) {
           inboundPayload.node_name = nodeName
         }
+        // tunnel「转发已有节点」:携带源节点 ID,后端据此创建「<源节点名> | Tunnel」配套节点
+        if (forwardNodeId) {
+          inboundPayload.forward_node_id = forwardNodeId
+        }
         const inboundRes = await api.post(`/api/admin/remote/inbounds?server_id=${serverId}`, inboundPayload)
         if (!inboundRes.data.success) {
           const serverName = remoteServers.find(s => s.id === serverId)?.name || serverId
@@ -609,12 +944,6 @@ function NodesPage() {
           continue
         }
 
-        // 2. 自动创建 freedom 出站
-        const outboundTag = `direct-${trimmedTag}`
-        await api.post(`/api/admin/remote/outbounds?server_id=${serverId}`, {
-          action: 'add',
-          outbound: { protocol: 'freedom', tag: outboundTag, settings: {} },
-        })
         successCount++
       }
 
@@ -623,10 +952,14 @@ function NodesPage() {
         return
       }
 
-      // 3. 刷新节点列表（NodeSyncListener 已自动创建节点）
-      setTimeout(() => queryClient.invalidateQueries({ queryKey: ['nodes'] }), 500)
+      // 刷新节点列表（NodeSyncListener 已自动创建节点）+ 用户配置(后端把新节点 ID 写到 node_order 顶部,
+      // 不一起刷新的话,前端 nodeOrder 还是旧数组,新节点 ID 拿不到序号会被排到末尾)
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ['nodes'] })
+        queryClient.invalidateQueries({ queryKey: ['user-config'] })
+      }, 500)
 
-      setQuickCreateResult({ serverCount: successCount, inboundTag: trimmedTag, outboundTag: `direct-${trimmedTag}` })
+      setQuickCreateResult({ serverCount: successCount, inboundTag: trimmedTag, outboundTag: '' })
       setQuickCreateStep('done')
       toast.success(successCount === serverIds.length
         ? t('toast.serversCreated', { count: successCount })
@@ -1506,8 +1839,9 @@ function NodesPage() {
   }, [tempSubDialogOpen, tempSubMaxAccess, tempSubExpireSeconds, tempSubSingleNodeId])
 
   // 新增落地节点：在源服务器配置出站+路由，将入站流量转发到落地节点
+  // overrideTarget(可选)用于"通过 tunnel"场景:在生成 outbound 之前把 clash 配置里的 server/port 换成 tunnel 服务器地址 + listen 端口
   const addLandingNodeMutation = useMutation({
-    mutationFn: async ({ sourceNode, targetNode }: { sourceNode: ParsedNode; targetNode: ParsedNode }) => {
+    mutationFn: async ({ sourceNode, targetNode, overrideTarget }: { sourceNode: ParsedNode; targetNode: ParsedNode; overrideTarget?: { address: string; port: number } }) => {
       // 从 original_server 或 tag（格式 "远程:服务器名"）提取服务器名
       let serverName = sourceNode.original_server
       if (!serverName && sourceNode.tag?.startsWith('远程:')) {
@@ -1519,6 +1853,18 @@ function NodesPage() {
 
       let targetClashConfig: any
       try { targetClashConfig = JSON.parse(targetNode.clash_config) } catch { throw new Error(t('toast.landingTargetParseError')) }
+      // 落地出站默认用目标节点所在服务器的域名(域名比 IP 稳定;老节点 clash_config.server 可能存的还是 IP)
+      if (!overrideTarget && targetNode.original_server) {
+        const tnSrv: any = (remoteServersData?.servers || []).find((s: any) => s.name === targetNode.original_server)
+        const domain = (tnSrv?.domain || '').trim()
+        if (domain && domain !== targetClashConfig.server) {
+          targetClashConfig = { ...targetClashConfig, server: domain }
+        }
+      }
+      // 用户在 tunnel 二次确认里选了走 tunnel → 把 outbound 目标地址 + 端口换成 tunnel 服务器对外地址 + tunnel 监听端口
+      if (overrideTarget) {
+        targetClashConfig = { ...targetClashConfig, server: overrideTarget.address, port: overrideTarget.port }
+      }
 
       // 检查是否已存在相同目标的出站
       const existingOutbounds = await api.get(`/api/admin/remote/outbounds?server_id=${sourceServer.id}`)
@@ -1530,6 +1876,32 @@ function NodesPage() {
         return addr === targetAddr
       })) {
         throw new Error(t('toast.landingTargetDuplicate', { name: targetNode.node_name }))
+      }
+
+      // 清理同一 source inbound 已有的"整个节点"落地配置:此 scope 的 outbound tag 由 addLandingNodeMutation 生成,
+      // 格式 `landing-<inboundTag>-<ts>`。若不清理,旧 rule 在新 rule 之前先命中,新落地形同虚设。
+      // (路由出站 scope 不走这里 — 它是新增一个 routed 节点,不会影响整个 inbound 的流量)
+      const landingPrefix = `landing-${sourceNode.inbound_tag}-`
+      const existingRouting = await api.get(`/api/admin/remote/routing?server_id=${sourceServer.id}`)
+      const existingRules = existingRouting.data?.routing?.rules || []
+      const staleOutboundTags = new Set<string>()
+      for (let i = existingRules.length - 1; i >= 0; i--) {
+        const ru = existingRules[i] || {}
+        const tag = String(ru.outboundTag || '')
+        if (tag.startsWith(landingPrefix) && Array.isArray(ru.inboundTag) && ru.inboundTag.includes(sourceNode.inbound_tag)) {
+          await api.post(`/api/admin/remote/routing?server_id=${sourceServer.id}`, { action: 'remove_rule', index: i })
+          staleOutboundTags.add(tag)
+        }
+      }
+      // 也兜底扫一遍 outbounds:有 landing-<inboundTag>-* 但 rule 已经先删过的(脏数据),一起清掉
+      for (const ob of existingOutbounds.data?.outbounds || []) {
+        const tag = String(ob.tag || '')
+        if (tag.startsWith(landingPrefix)) staleOutboundTags.add(tag)
+      }
+      for (const tag of staleOutboundTags) {
+        try {
+          await api.post(`/api/admin/remote/outbounds?server_id=${sourceServer.id}`, { action: 'remove', tag })
+        } catch {}
       }
 
       const outboundTag = `landing-${sourceNode.inbound_tag}-${Date.now()}`
@@ -1558,12 +1930,215 @@ function NodesPage() {
       setSourceNodeForLanding(null)
     },
     onError: (error: any) => {
-      toast.error(error.message || error.response?.data?.error || t('toast.landingConfigFailed'))
+      toast.error(error.response?.data?.error || error.response?.data?.message || error.message || t('toast.landingConfigFailed'))
+    },
+  })
+
+  // 落地 dialog "选择负载均衡器" tab 用:拉源服务器的 balancers
+  const landingSourceServerId = useMemo(() => {
+    if (!sourceNodeForLanding) return null
+    let serverName = sourceNodeForLanding.original_server
+    if (!serverName && sourceNodeForLanding.tag?.startsWith('远程:')) serverName = sourceNodeForLanding.tag.slice(3)
+    return remoteServers.find(s => s.name === serverName)?.id ?? null
+  }, [sourceNodeForLanding, remoteServers])
+  const landingBalancersQuery = useQuery({
+    queryKey: ['landing-balancers', landingSourceServerId],
+    queryFn: async () => {
+      const res = await api.get(`/api/admin/remote/routing?server_id=${landingSourceServerId}`)
+      return (res.data?.routing?.balancers || []) as Array<{ tag: string; selector?: string[]; strategy?: string }>
+    },
+    enabled: isAdmin && landingDialogOpen && landingTab === 'balancer' && landingScope === 'all' && !!landingSourceServerId,
+  })
+
+  // 落地目标=负载均衡器:在源服务器添加一条 routing rule {inboundTag:[源inbound], balancerTag},不建出站不建节点
+  // 同一源 inbound 只保留一条"落地规则" — 不论目标是 node-landing(outboundTag landing-*)还是 balancer
+  const addBalancerLandingMutation = useMutation({
+    mutationFn: async ({ sourceNode, balancerTag }: { sourceNode: ParsedNode; balancerTag: string }) => {
+      let serverName = sourceNode.original_server
+      if (!serverName && sourceNode.tag?.startsWith('远程:')) serverName = sourceNode.tag.slice(3)
+      const sourceServer = remoteServers.find(s => s.name === serverName)
+      if (!sourceServer) throw new Error(t('toast.sourceNodeNoServer'))
+      if (!sourceNode.inbound_tag) throw new Error(t('toast.sourceNodeNoInboundTag'))
+      if (!balancerTag) throw new Error(t('toast.balancerTagRequired'))
+
+      const sourceInbound = sourceNode.inbound_tag
+      const landingPrefix = `landing-${sourceInbound}-`
+      const existingRouting = await api.get(`/api/admin/remote/routing?server_id=${sourceServer.id}`)
+      const existingRules = existingRouting.data?.routing?.rules || []
+      const staleOutboundTags = new Set<string>()
+      for (let i = existingRules.length - 1; i >= 0; i--) {
+        const ru = existingRules[i] || {}
+        if (!Array.isArray(ru.inboundTag) || !ru.inboundTag.includes(sourceInbound)) continue
+        const outTag = String(ru.outboundTag || '')
+        const hasBalancer = !!ru.balancerTag
+        if (outTag.startsWith(landingPrefix) || hasBalancer) {
+          await api.post(`/api/admin/remote/routing?server_id=${sourceServer.id}`, { action: 'remove_rule', index: i })
+          if (outTag.startsWith(landingPrefix)) staleOutboundTags.add(outTag)
+        }
+      }
+      for (const tag of staleOutboundTags) {
+        try { await api.post(`/api/admin/remote/outbounds?server_id=${sourceServer.id}`, { action: 'remove', tag }) } catch {}
+      }
+
+      const routeRes = await api.post(`/api/admin/remote/routing?server_id=${sourceServer.id}`, {
+        action: 'add_rule',
+        rule: { type: 'field', inboundTag: [sourceInbound], balancerTag },
+      })
+      if (!routeRes.data.success) throw new Error(routeRes.data.message || t('toast.addRoutingRuleFailed'))
+      return { balancerTag }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['nodes'] })
+      toast.success(t('toast.landingBalancerSuccess'))
+      setLandingDialogOpen(false)
+      setSourceNodeForLanding(null)
+      setLandingBalancerTag('')
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.error || error.response?.data?.message || error.message || t('toast.landingBalancerFailed'))
+    },
+  })
+
+  // 用户私有路由出站:普通用户为自己创建专属出站(不经套餐分配,创建即生效)
+  // 后端 /api/user/routed-outbound POST,跳过 admin 占位,rule.user 直接是创建者 email
+  const addUserRoutedLandingMutation = useMutation({
+    mutationFn: async ({ sourceNode, targetNode, label }: { sourceNode: ParsedNode; targetNode: ParsedNode; label: string }) => {
+      const trimmed = label.trim()
+      if (!trimmed) throw new Error('请填写 Label')
+      if (!/^[a-zA-Z0-9-]{2,32}$/.test(trimmed)) throw new Error('Label 只允许 [a-zA-Z0-9-] 长度 2-32')
+      let targetClashConfig: any
+      try { targetClashConfig = JSON.parse(targetNode.clash_config) } catch { throw new Error(t('toast.landingTargetParseError')) }
+      const outbound = clashConfigToOutbound(targetClashConfig, 'tmp')
+      delete outbound.tag
+      const res = await api.post('/api/user/routed-outbound', {
+        parent_node_id: sourceNode.id,
+        target_node_id: targetNode.id,
+        label: trimmed,
+        outbound,
+        node_name: `${sourceNode.node_name}-${trimmed}`,
+      })
+      return res.data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['nodes'] })
+      queryClient.invalidateQueries({ queryKey: ['user-routed-outbounds'] })
+      // 同 addRoutedLandingMutation:刷新 routed outbound 友好名映射的 cache,否则首列显示退化成 tag
+      queryClient.invalidateQueries({ queryKey: ['routed-outbounds-resolve'] })
+      toast.success('路由出站创建成功')
+      setLandingDialogOpen(false)
+      setSourceNodeForLanding(null)
+      setLandingRoutedLabel('')
+      setLandingScope('routed')
+      setRoutedTargetNode(null)
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.error || error.response?.data?.message || error.message || '创建失败')
+    },
+  })
+
+  // 用户视角:查询自己已创建的私有路由出站数 + 配额 + 每日次数 + 全局开关(用于禁用按钮 + 显示剩余)
+  const { data: userRoutedQuotaData } = useQuery({
+    queryKey: ['user-routed-outbounds'],
+    queryFn: async () => {
+      const res = await api.get('/api/user/routed-outbound')
+      return res.data as { items: any[]; enabled: boolean; quota: { used: number; max: number }; daily: { used: number; max: number } }
+    },
+    enabled: !isAdmin && Boolean(auth.accessToken),
+    staleTime: 30 * 1000,
+  })
+  const userRoutedEnabled = Boolean(userRoutedQuotaData?.enabled)
+  const userRoutedQuota = userRoutedQuotaData?.quota ?? { used: 0, max: 2 }
+  const userRoutedDaily = userRoutedQuotaData?.daily ?? { used: 0, max: 5 }
+  const userRoutedQuotaExhausted = !isAdmin && userRoutedQuota.max > 0 && userRoutedQuota.used >= userRoutedQuota.max
+  const userRoutedDailyExhausted = !isAdmin && userRoutedDaily.max > 0 && userRoutedDaily.used >= userRoutedDaily.max
+
+  // 节点行内联渲染:用户私有路由出站的删除按钮(仅创建者本人可见)
+  const renderUserRoutedDeleteBtn = (dbNode: any) => {
+    if (!dbNode) return null
+    if (dbNode.node_type !== 'routed' || dbNode.routed_owner !== 'user') return null
+    if (dbNode.created_by && profile?.username && dbNode.created_by !== profile.username) return null
+    return (
+      <AlertDialog>
+        <AlertDialogTrigger asChild>
+          <Button
+            variant='ghost'
+            size='icon'
+            className='size-7 text-destructive hover:text-destructive/80'
+            title='删除我的路由出站'
+          >
+            <Trash2 className='size-4' />
+          </Button>
+        </AlertDialogTrigger>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>删除路由出站</AlertDialogTitle>
+            <AlertDialogDescription>
+              将从你的订阅中移除该节点,并清理 xray 上对应的出站与路由规则。此操作不可恢复。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction onClick={() => deleteUserRoutedMutation.mutate(dbNode.id)}>
+              确认删除
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    )
+  }
+
+  // 用户删除自己的路由出站
+  const deleteUserRoutedMutation = useMutation({
+    mutationFn: async (id: number) => {
+      await api.delete(`/api/user/routed-outbound?id=${id}`)
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['nodes'] })
+      queryClient.invalidateQueries({ queryKey: ['user-routed-outbounds'] })
+      toast.success('路由出站已删除')
+    },
+    onError: (e: any) => {
+      toast.error(e?.response?.data?.error || e?.message || '删除失败')
+    },
+  })
+
+  // 路由出站(用户级)版本的落地:源 inbound 加一个 routed 子节点 + admin 占位 + marktag rule
+  // 套餐分配该 routed 子节点的用户会自动开子账号并加入 rule.user
+  const addRoutedLandingMutation = useMutation({
+    mutationFn: async ({ sourceNode, targetNode, label }: { sourceNode: ParsedNode; targetNode: ParsedNode; label: string }) => {
+      if (!label.trim()) throw new Error('请填写 Label')
+      if (!/^[a-zA-Z0-9-]{2,32}$/.test(label.trim())) throw new Error('Label 只允许 [a-zA-Z0-9-] 长度 2-32')
+      let targetClashConfig: any
+      try { targetClashConfig = JSON.parse(targetNode.clash_config) } catch { throw new Error(t('toast.landingTargetParseError')) }
+      // 用 target 节点的 clash_config 转成 xray outbound 定义(tag 留空,后端会用 routed:p<id>:<label> 覆盖)
+      const outbound = clashConfigToOutbound(targetClashConfig, 'tmp')
+      delete outbound.tag
+      const res = await api.post('/api/admin/routed-outbound', {
+        parent_node_id: sourceNode.id,
+        label: label.trim(),
+        outbound,
+        node_name: `${sourceNode.node_name}-${label.trim()}`,
+      })
+      return res.data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['nodes'] })
+      // 新建的 routed outbound 在 agent xray 里刚加进去,routedOutboundsQ 60s cache 不会主动重拉,
+      // 不 invalidate 的话首列"路由出站标识"找不到目标 server/节点 → 兜底显示 tag(用户报的 bug)。
+      queryClient.invalidateQueries({ queryKey: ['routed-outbounds-resolve'] })
+      toast.success('路由出站创建成功,套餐分配该节点的用户会自动开子账号')
+      setLandingDialogOpen(false)
+      setSourceNodeForLanding(null)
+      setLandingRoutedLabel('')
+      setLandingScope('all')
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.error || error.response?.data?.message || error.message || '路由出站创建失败')
     },
   })
 
   // 选择服务器后通过 InboundWizard 创建入站，然后自动配置出站+路由
-  const handleLandingInboundCreated = async (serverIds: number[], inbound: any, tag: string) => {
+  const handleLandingInboundCreated = async (serverIds: number[], inbound: any, tag: string, nodeName?: string, forwardNodeId?: number) => {
     if (!sourceNodeForLanding || serverIds.length === 0) return
     const serverId = serverIds[0]
     const trimmedTag = tag?.trim() || inbound.tag || ''
@@ -1571,20 +2146,18 @@ function NodesPage() {
 
     setLandingLoading(true)
     try {
-      // 1. 在选定服务器创建入站
-      const inboundRes = await api.post(`/api/admin/remote/inbounds?server_id=${serverId}`, {
+      // 1. 在选定服务器创建入站。带上用户在 InboundWizard 里填的 node_name(之前漏接这个参数,
+      // 导致节点列表里只能拿到 NodeSyncListener 自动生成的默认名,用户输入完全无效)。
+      const inboundPayload: any = {
         action: 'add',
         inbound: { ...inbound, tag: trimmedTag },
-      })
+      }
+      if (nodeName) inboundPayload.node_name = nodeName
+      if (forwardNodeId) inboundPayload.forward_node_id = forwardNodeId
+      const inboundRes = await api.post(`/api/admin/remote/inbounds?server_id=${serverId}`, inboundPayload)
       if (!inboundRes.data.success) throw new Error(inboundRes.data.message || t('toast.inboundCreateFailed'))
 
-      // 2. 创建 freedom 出站
-      await api.post(`/api/admin/remote/outbounds?server_id=${serverId}`, {
-        action: 'add',
-        outbound: { protocol: 'freedom', tag: 'direct', settings: {} },
-      })
-
-      // 3. 等待 NodeSyncListener 创建节点
+      // 2. 等待 NodeSyncListener 创建节点
       await new Promise(r => setTimeout(r, 800))
       await queryClient.invalidateQueries({ queryKey: ['nodes'] })
       const freshNodes = await queryClient.fetchQuery<{ nodes: ParsedNode[] }>({ queryKey: ['nodes'] })
@@ -1598,16 +2171,65 @@ function NodesPage() {
       }
 
       // 4. 用新节点作为落地节点，配置源服务器出站+路由
-      await addLandingNodeMutation.mutateAsync({
-        sourceNode: sourceNodeForLanding,
-        targetNode: newNode,
-      })
+      if (landingScope === 'routed') {
+        // 用户从 servers tab 进 InboundWizard 时没机会填 Label(没经过 node 列表那一步),
+        // 此时 inbound 已经创建好了,用新节点名自动生成 label,免得卡在"未填 label"出不去。
+        // 用户事后可以改节点名同步触发更新(或手动改 routed_outbound_tag)。
+        let lbl = landingRoutedLabel.trim()
+        if (!lbl) {
+          lbl = generateRoutedLabel(newNode.node_name)
+        }
+        await addRoutedLandingMutation.mutateAsync({
+          sourceNode: sourceNodeForLanding,
+          targetNode: newNode,
+          label: lbl,
+        })
+      } else {
+        await addLandingNodeMutation.mutateAsync({
+          sourceNode: sourceNodeForLanding,
+          targetNode: newNode,
+        })
+      }
     } catch (error: any) {
-      toast.error(error.message || t('toast.createLandingFailed'))
+      toast.error(error.response?.data?.error || error.response?.data?.message || error.message || t('toast.createLandingFailed'))
     } finally {
       setLandingLoading(false)
     }
   }
+
+  // 创建链式代理节点
+  const createRelayNodeMutation = useMutation({
+    mutationFn: async ({ sourceNode, targetNode }: { sourceNode: ParsedNode; targetNode: ParsedNode }) => {
+      let sourceClashConfig: Record<string, unknown>
+      try {
+        sourceClashConfig = JSON.parse(sourceNode.clash_config)
+      } catch {
+        throw new Error(t('toast.chainProxySourceParseError'))
+      }
+      const newNodeName = `${sourceNode.node_name} | ${targetNode.node_name}`
+      const newClashConfig = { ...sourceClashConfig, name: newNodeName }
+      const response = await api.post('/api/admin/nodes', {
+        raw_url: sourceNode.raw_url,
+        node_name: newNodeName,
+        protocol: `${sourceNode.protocol}⇋${targetNode.protocol}`,
+        parsed_config: JSON.stringify(newClashConfig),
+        clash_config: JSON.stringify(newClashConfig),
+        enabled: true,
+        tag: '链式代理',
+        chain_proxy_node_id: targetNode.id,
+      })
+      return response.data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['nodes'] })
+      toast.success(t('toast.chainProxyCreateSuccess'))
+      setChainProxyDialogOpen(false)
+      setSourceNodeForChainProxy(null)
+    },
+    onError: (error: any) => {
+      toast.error(error.response?.data?.error || t('toast.chainProxyCreateFailed'))
+    },
+  })
 
   // 从订阅获取节点
   const fetchSubscriptionMutation = useMutation({
@@ -1633,6 +2255,7 @@ function NodesPage() {
 
       // 将Clash节点转换为TempNode格式
       const parsed: TempNode[] = data.proxies.map((clashNode) => {
+        if (skipCertVerify) clashNode['skip-cert-verify'] = true
         // Clash节点已经是标准格式，直接作为ProxyNode和ClashProxy使用
         const proxyNode: ProxyNode = {
           name: clashNode.name || t('nodeList.unknown'),
@@ -1694,9 +2317,20 @@ function NodesPage() {
 
     for (const line of lines) {
       const trimmed = line.trim()
-      if (!trimmed || !trimmed.includes('://')) continue
-      const parsedNode = parseProxyUrl(trimmed)
-      const clashNode = parsedNode ? toClashProxy(parsedNode) : null
+      if (!trimmed) continue
+      // 跳过注释 / 段头
+      if (trimmed.startsWith('#') || trimmed.startsWith(';') || trimmed.startsWith('[')) continue
+      // 1. URI 格式(snell:// vmess:// ss:// 等);2. 失败则尝试 Surge INI(`节点名 = type, server, port, ...`)
+      let parsedNode: ProxyNode | null = null
+      if (trimmed.includes('://')) {
+        parsedNode = parseProxyUrl(trimmed)
+      }
+      if (!parsedNode && trimmed.includes('=')) {
+        parsedNode = parseSurgeLine(trimmed)
+      }
+      if (!parsedNode) continue
+      const clashNode = toClashProxy(parsedNode)
+      if (skipCertVerify && clashNode) clashNode['skip-cert-verify'] = true
       const name = parsedNode?.name || clashNode?.name || t('nodeList.unknown')
       const normalizedParsed = cloneProxyWithName(parsedNode, name)
       const normalizedClash = cloneProxyWithName(clashNode, name)
@@ -1871,13 +2505,15 @@ function NodesPage() {
       dbId: 0,
     }))
 
-    // 按 nodeOrder 排序已保存的节点
+    // 按 nodeOrder 排序已保存的节点。
+    // 新节点(未在 nodeOrder 里)用 -Infinity 排到拖拽过的节点之前;saved 数组已是 created_at DESC,
+    // Array.sort 稳定 → 多个新节点之间保持 created_at DESC(最新创建的在最顶)。
     const orderMap = new Map<number, number>()
     nodeOrder.forEach((id, index) => orderMap.set(id, index))
 
     const sortedSaved = [...saved].sort((a, b) => {
-      const aOrder = orderMap.get(a.dbId) ?? Infinity
-      const bOrder = orderMap.get(b.dbId) ?? Infinity
+      const aOrder = orderMap.get(a.dbId) ?? -Infinity
+      const bOrder = orderMap.get(b.dbId) ?? -Infinity
       return aOrder - bOrder
     })
 
@@ -2179,6 +2815,7 @@ function NodesPage() {
                       <TabsTrigger value='subscription'>{t('importCard.tabs.subscription')}</TabsTrigger>
                     </TabsList>
 
+                    {(
                     <TabsContent value='manual' className='space-y-4 mt-4'>
                       <Textarea
                         placeholder={`vmess://eyJwcyI6IuWPsOa5vualviIsImFkZCI6ImV4YW1wbGUuY29tIiwicG9ydCI6IjQ0MyIsImlkIjoidXVpZCIsImFpZCI6IjAiLCJzY3kiOiJhdXRvIiwibmV0Ijoid3MiLCJ0bHMiOiJ0bHMifQ==
@@ -2193,13 +2830,25 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                         <Label htmlFor='manual-tag' className='text-sm font-medium'>
                           {t('importCard.manual.tagLabel')}
                         </Label>
-                        <Input
-                          id='manual-tag'
-                          placeholder={t('importCard.manual.tagPlaceholder')}
-                          value={manualTag}
-                          onChange={(e) => setManualTag(e.target.value)}
-                          className='font-mono text-sm'
-                        />
+                        <div className='flex items-center gap-4'>
+                          <Input
+                            id='manual-tag'
+                            placeholder={t('importCard.manual.tagPlaceholder')}
+                            value={manualTag}
+                            onChange={(e) => setManualTag(e.target.value)}
+                            className='font-mono text-sm flex-1'
+                          />
+                          <div className='flex items-center gap-2 shrink-0'>
+                            <Switch
+                              id='skip-cert-verify-manual'
+                              checked={skipCertVerify}
+                              onCheckedChange={setSkipCertVerify}
+                            />
+                            <Label htmlFor='skip-cert-verify-manual' className='text-sm whitespace-nowrap cursor-pointer'>
+                              {t('importCard.manual.skipCertVerify')}
+                            </Label>
+                          </div>
+                        </div>
                         <p className='text-xs text-muted-foreground'>
                           {t('importCard.manual.tagDescription')}
                         </p>
@@ -2216,6 +2865,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                         </Button>
                       </div>
                     </TabsContent>
+                    )}
 
                     <TabsContent value='subscription' className='space-y-4 mt-4'>
                       <div className='space-y-2'>
@@ -2294,19 +2944,27 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                 <div className='flex flex-col gap-4 md:flex-row md:items-center md:justify-between'>
                   <div>
                     <CardTitle>{t('nodeList.titleWithCount', { count: deferredFilteredNodes.length })}</CardTitle>
-                    <p className='mt-2 text-sm font-semibold text-destructive'>{t('nodeList.warning')}</p>
-                    <p className='mt-2 text-xs text-primary flex flex-wrap items-center gap-1'>
-                      <Pencil className='h-4 w-4 inline' /> {t('nodeList.editNodeName')}
-                      <img src={ExchangeIcon} alt='chain proxy' className='h-4 w-4 inline [filter:invert(63%)_sepia(45%)_saturate(1068%)_hue-rotate(327deg)_brightness(95%)_contrast(88%)]' /> {t('nodeList.chainProxy')}
-                      <Flag className='h-4 w-4 inline' /> {t('nodeList.addRegionEmoji')}
-                      <img src={IpIcon} alt='resolve IP' className='h-4 w-4 inline [filter:invert(63%)_sepia(45%)_saturate(1068%)_hue-rotate(327deg)_brightness(95%)_contrast(88%)]' /> {t('nodeList.resolveIp')}
-                      <Undo2 className='h-4 w-4 inline' /> {t('nodeList.restoreDomain')}
-                      <Eye className='h-4 w-4 inline' /> {t('nodeList.viewEditConfig')}
-                      <Copy className='h-4 w-4 inline' /> {t('nodeList.copyUri')}
-                      <Link2 className='h-4 w-4 inline' /> {t('nodeList.tempSubscription')}
-                    </p>
+                    {isAdmin && <p className='mt-2 text-sm font-semibold text-destructive'>{t('nodeList.warning')}</p>}
+                    {isAdmin ? (
+                      <p className='mt-2 text-xs text-primary flex flex-wrap items-center gap-1'>
+                        <Pencil className='h-4 w-4 inline' /> {t('nodeList.editNodeName')}
+                        <img src={ExchangeIcon} alt='chain proxy' className='h-4 w-4 inline [filter:invert(63%)_sepia(45%)_saturate(1068%)_hue-rotate(327deg)_brightness(95%)_contrast(88%)]' /> {t('nodeList.chainProxy')}
+                        <Flag className='h-4 w-4 inline' /> {t('nodeList.addRegionEmoji')}
+                        <img src={IpIcon} alt='resolve IP' className='h-4 w-4 inline [filter:invert(63%)_sepia(45%)_saturate(1068%)_hue-rotate(327deg)_brightness(95%)_contrast(88%)]' /> {t('nodeList.resolveIp')}
+                        <Undo2 className='h-4 w-4 inline' /> {t('nodeList.restoreDomain')}
+                        <Eye className='h-4 w-4 inline' /> {t('nodeList.viewEditConfig')}
+                        <Copy className='h-4 w-4 inline' /> {t('nodeList.copyUri')}
+                        <Link2 className='h-4 w-4 inline' /> {t('nodeList.tempSubscription')}
+                        <Activity className='h-4 w-4 inline' /> {t('nodeList.tcpingTest')}
+                        <RouteIcon className='h-4 w-4 inline' /> {t('nodeList.specifyOutbound')}
+                      </p>
+                    ) : (
+                      <p className='mt-2 text-xs text-primary flex flex-wrap items-center gap-1'>
+                        <Activity className='h-4 w-4 inline' /> {t('nodeList.tcpingTest')}
+                      </p>
+                    )}
                   </div>
-                  <div className='flex flex-wrap gap-2 justify-end'>
+                  <div className={cn('flex flex-wrap gap-2 justify-end', !isAdmin && 'hidden')}>
                     <Button
                       variant='outline'
                       size='sm'
@@ -2324,6 +2982,30 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                     >
                       <Zap className='h-4 w-4 mr-1' />
                       {t('actions.addNode')}
+                    </Button>
+                    <Button
+                      variant='outline'
+                      size='sm'
+                      onClick={() => setTunnelDialogOpen(true)}
+                    >
+                      <Cable className='h-4 w-4 mr-1' />
+                      {t('actions.tunnelManager')}
+                    </Button>
+                    <Button
+                      variant='outline'
+                      size='sm'
+                      onClick={() => setRoutedOutboundsDialogOpen(true)}
+                    >
+                      <RouteIcon className='h-4 w-4 mr-1' />
+                      路由出站
+                    </Button>
+                    <Button
+                      variant='outline'
+                      size='sm'
+                      onClick={() => { setSpeedDialogOpen(true); setSpeedDialogMin(false) }}
+                    >
+                      <Gauge className='h-4 w-4 mr-1' />
+                      {t('speedtest.dialogTitle')}
                     </Button>
                     <Button
                       variant='outline'
@@ -2619,19 +3301,46 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                         }}
                                       />
                                     )}
-                                {node.parsed ? (
-                                  <Badge
-                                    variant='outline'
-                                    className={
-                                      node.dbNode?.protocol?.includes('⇋')
-                                        ? 'bg-pink-500/10 text-pink-700 border-pink-200 dark:text-pink-300 dark:border-pink-800'
-                                        : PROTOCOL_COLORS[node.parsed.type] || 'bg-gray-500/10'
-                                    }
-                                  >
-                                    {node.dbNode?.protocol?.includes('⇋')
-                                      ? node.dbNode.protocol.toUpperCase()
-                                      : node.parsed.type.toUpperCase()}
-                                  </Badge>
+                                {node.parsed || node.dbNode?.protocol ? (
+                                  <div className='flex flex-col items-start gap-0.5'>
+                                    <Badge
+                                      variant='outline'
+                                      className={
+                                        node.dbNode?.protocol?.includes('⇋')
+                                          ? 'bg-pink-500/10 text-pink-700 border-pink-200 dark:text-pink-300 dark:border-pink-800'
+                                          : PROTOCOL_COLORS[node.parsed?.type || node.dbNode?.protocol?.toLowerCase() || ''] || 'bg-gray-500/10'
+                                      }
+                                    >
+                                      {node.dbNode?.protocol?.includes('⇋')
+                                        ? node.dbNode.protocol.toUpperCase()
+                                        : (node.parsed?.type || node.dbNode?.protocol || '').toUpperCase()}
+                                    </Badge>
+                                    {node.dbNode?.node_type === 'routed' && node.dbNode?.routed_outbound_tag && (
+                                      <Tooltip>
+                                        <TooltipTrigger asChild>
+                                          <span className='text-[10px] text-indigo-600 dark:text-indigo-400 font-mono max-w-[110px] truncate'>
+                                            ↳ {resolveRoutedDisplay(node.dbNode)}
+                                          </span>
+                                        </TooltipTrigger>
+                                        <TooltipContent>
+                                          <div className='text-xs'>路由出站: <span className='font-mono'>{node.dbNode.routed_outbound_tag}</span></div>
+                                        </TooltipContent>
+                                      </Tooltip>
+                                    )}
+                                    {/* 倍率小字:仅在用户绑定套餐内 != 1 时由后端注入 */}
+                                    {node.dbNode?.multiplier !== undefined && node.dbNode.multiplier !== 1 && (
+                                      <Tooltip>
+                                        <TooltipTrigger asChild>
+                                          <span className={`text-[10px] font-mono ${node.dbNode.multiplier > 1 ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                                            ×{node.dbNode.multiplier}
+                                          </span>
+                                        </TooltipTrigger>
+                                        <TooltipContent>
+                                          <div className='text-xs'>{t('nodeList.multiplierHint', { defaultValue: '此节点流量按 {{x}}× 计入套餐配额', x: node.dbNode.multiplier })}</div>
+                                        </TooltipContent>
+                                      </Tooltip>
+                                    )}
+                                  </div>
                                 ) : (
                                   <Badge variant='destructive'>{t('nodeList.parseFailed')}</Badge>
                                 )}
@@ -2676,12 +3385,21 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   </Button>
                                 </div>
                               ) : (
-                                <div className='font-medium text-sm break-all line-clamp-2'><Twemoji>{node.name || t('nodeList.unknown')}</Twemoji></div>
+                                <div>
+                                  <div className='font-medium text-sm break-all line-clamp-2'><Twemoji>{node.name || t('nodeList.unknown')}</Twemoji></div>
+                                  {isAdmin && getNodeServerName(node.dbNode) && (
+                                    <div className='text-[11px] text-muted-foreground mt-0.5 truncate'>
+                                      {getNodeServerName(node.dbNode)}
+                                    </div>
+                                  )}
+                                </div>
                               )}
+                              {renderForwardedBadge(node)}
                             </div>
                             {/* 编辑、交换按钮 */}
                             {editingNode?.id !== node.id && (
                               <div className='flex items-center gap-1 shrink-0' onClick={(e) => e.stopPropagation()}>
+                                {(isAdmin || !node.isSaved) && (
                                 <Button
                                   variant='ghost'
                                   size='icon'
@@ -2691,6 +3409,8 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                 >
                                   <Pencil className='size-4' />
                                 </Button>
+                                )}
+                                {isAdmin && (
                                 <FlagEmojiPicker
                                   onSelect={(flag) => handleSetNodeFlag(node.id, flag)}
                                   onAutoDetect={node.isSaved && node.dbNode ? () => handleAddSingleNodeEmoji(node.dbNode!.id) : undefined}
@@ -2699,7 +3419,8 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   currentFlag={hasRegionEmoji(node.name) ? node.name.match(/[\u{1F1E6}-\u{1F1FF}]{2}/u)?.[0] : undefined}
                                   className='size-7 text-[#d97757] hover:text-[#c66647]'
                                 />
-                                {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
+                                )}
+                                {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (isAdmin || userRoutedEnabled) && node.dbNode.node_type !== 'routed' && (
                                   <Button
                                     variant='ghost'
                                     size='icon'
@@ -2710,6 +3431,10 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       setLandingStep('select')
                                       setLandingTab('nodes')
                                       setLandingFilterText('')
+                                      // 普通用户只能用 routed 模式,且不能选服务器 tab
+                                      if (!isAdmin) {
+                                        setLandingScope('routed')
+                                      }
                                     }}
                                   >
                                     <img
@@ -2719,7 +3444,8 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                     />
                                   </Button>
                                 )}
-                                {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
+                                {renderUserRoutedDeleteBtn(node.dbNode)}
+                                {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
                                   <Tooltip>
                                     <TooltipTrigger asChild>
                                       <Button
@@ -2743,6 +3469,29 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       </Button>
                                     </TooltipTrigger>
                                     <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
+                                  </Tooltip>
+                                )}
+                                {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (isAdmin || userRoutedEnabled) && (
+                                  <Tooltip>
+                                    <TooltipTrigger asChild>
+                                      <Button
+                                        variant='ghost'
+                                        size='icon'
+                                        className='size-7 text-[#d97757] hover:text-[#c66647]'
+                                        onClick={() => {
+                                          setSourceNodeForChainProxy(node.dbNode)
+                                          setChainProxyDialogOpen(true)
+                                          setChainProxyFilterText('')
+                                        }}
+                                      >
+                                        <img
+                                          src={ExchangeIcon}
+                                          alt={t('tooltip.chainProxy')}
+                                          className='size-4 [filter:invert(63%)_sepia(45%)_saturate(1068%)_hue-rotate(327deg)_brightness(95%)_contrast(88%)]'
+                                        />
+                                      </Button>
+                                    </TooltipTrigger>
+                                    <TooltipContent>{t('tooltip.chainProxy')}</TooltipContent>
                                   </Tooltip>
                                 )}
                                 {node.isSaved && node.dbId && (
@@ -2786,12 +3535,19 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                 )}
                               </div>
                             )}
-                            <div className='flex items-center gap-2 flex-wrap text-xs'>
-                              <span className='text-muted-foreground shrink-0'>{t('label.tag')}</span>
-                              <Badge variant='secondary' className='text-xs'>
-                                {node.dbNode?.tag || node.tag || (currentTag === 'manual' ? manualTag.trim() || t('filter.manualInput') : currentTag === 'subscription' ? subscriptionTag.trim() || t('filter.subscriptionImport') : t('nodeList.unknown'))}
-                              </Badge>
-                            </div>
+                            {(() => {
+                              const tagText = getDisplayTag(node.dbNode, node.tag) ||
+                                (currentTag === 'manual' ? manualTag.trim() || t('filter.manualInput')
+                                  : currentTag === 'subscription' ? subscriptionTag.trim() || t('filter.subscriptionImport')
+                                  : '')
+                              if (!tagText) return null
+                              return (
+                                <div className='flex items-center gap-2 flex-wrap text-xs'>
+                                  <span className='text-muted-foreground shrink-0'>{t('label.tag')}</span>
+                                  <Badge variant='secondary' className='text-xs'>{tagText}</Badge>
+                                </div>
+                              )
+                            })()}
                           </div>
 
                           {/* 操作按钮组 */}
@@ -2826,6 +3582,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                 {t('actions.copy')}
                               </Button>
                             )}
+                            {(isAdmin || !node.isSaved || (node.isSaved && node.dbNode?.created_by === profile?.username)) && (
                             <AlertDialog>
                               <AlertDialogTrigger asChild>
                                 <Button
@@ -2855,6 +3612,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                 </AlertDialogFooter>
                               </AlertDialogContent>
                             </AlertDialog>
+                            )}
                           </div>
                         </CardContent>
                       </SortableCard>
@@ -2894,9 +3652,9 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                           <TableHead style={{ width: '36px' }}></TableHead>
                           <TableHead style={{ width: '60px' }}>{t('columns.protocol')}</TableHead>
                           <TableHead>{t('columns.nodeName')}</TableHead>
-                          <TableHead style={{ width: '100px' }}>{t('columns.tag')}</TableHead>
+                          {isAdmin && <TableHead style={{ width: '100px' }}>{t('columns.tag')}</TableHead>}
                           <TableHead style={{ width: '70px' }} className='text-center'>{t('columns.config')}</TableHead>
-                        <TableHead style={{ width: '70px' }} className='text-center'>{t('columns.actions')}</TableHead>
+                        {isAdmin && <TableHead style={{ width: '70px' }} className='text-center'>{t('columns.actions')}</TableHead>}
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -2922,19 +3680,45 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                               )}
                             </TableCell>
                             <TableCell>
-                              {node.parsed ? (
-                                <Badge
-                                  variant='outline'
-                                  className={
-                                    node.dbNode?.protocol?.includes('⇋')
-                                      ? 'bg-pink-500/10 text-pink-700 border-pink-200 dark:text-pink-300 dark:border-pink-800'
-                                      : PROTOCOL_COLORS[node.parsed.type] || 'bg-gray-500/10'
-                                  }
-                                >
-                                  {node.dbNode?.protocol?.includes('⇋')
-                                    ? node.dbNode.protocol.toUpperCase()
-                                    : node.parsed.type.toUpperCase()}
-                                </Badge>
+                              {node.parsed || node.dbNode?.protocol ? (
+                                <div className='flex flex-col items-start gap-0.5'>
+                                  <Badge
+                                    variant='outline'
+                                    className={
+                                      node.dbNode?.protocol?.includes('⇋')
+                                        ? 'bg-pink-500/10 text-pink-700 border-pink-200 dark:text-pink-300 dark:border-pink-800'
+                                        : PROTOCOL_COLORS[node.parsed?.type || node.dbNode?.protocol?.toLowerCase() || ''] || 'bg-gray-500/10'
+                                    }
+                                  >
+                                    {node.dbNode?.protocol?.includes('⇋')
+                                      ? node.dbNode.protocol.toUpperCase()
+                                      : (node.parsed?.type || node.dbNode?.protocol || '').toUpperCase()}
+                                  </Badge>
+                                  {node.dbNode?.node_type === 'routed' && node.dbNode?.routed_outbound_tag && (isAdmin || (node.dbNode?.routed_owner === 'user' && node.dbNode?.created_by === profile?.username)) && (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <span className='text-[10px] text-indigo-600 dark:text-indigo-400 font-mono max-w-[110px] truncate'>
+                                          ↳ {resolveRoutedDisplay(node.dbNode)}
+                                        </span>
+                                      </TooltipTrigger>
+                                      <TooltipContent>
+                                        <div className='text-xs'>路由出站: <span className='font-mono'>{node.dbNode.routed_outbound_tag}</span></div>
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  )}
+                                  {node.dbNode?.multiplier !== undefined && node.dbNode.multiplier !== 1 && (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <span className={`text-[10px] font-mono ${node.dbNode.multiplier > 1 ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                                          ×{node.dbNode.multiplier}
+                                        </span>
+                                      </TooltipTrigger>
+                                      <TooltipContent>
+                                        <div className='text-xs'>{t('nodeList.multiplierHint', { defaultValue: '此节点流量按 {{x}}× 计入套餐配额', x: node.dbNode.multiplier })}</div>
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  )}
+                                </div>
                               ) : (
                                 <Badge variant='destructive'>{t('nodeList.parseFailed')}</Badge>
                               )}
@@ -3002,7 +3786,13 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       {node.isSaved && (
                                         <Check className='size-4 text-green-600 shrink-0' />
                                       )}
+                                      {renderForwardedBadge(node)}
                                     </div>
+                                    {isAdmin && getNodeServerName(node.dbNode) && (
+                                      <div className='text-[11px] text-muted-foreground mt-0.5 truncate'>
+                                        {getNodeServerName(node.dbNode)}
+                                      </div>
+                                    )}
                                     {/* 服务器地址显示在节点名称下方 */}
                                     {node.parsed && (
                                       <div className='flex items-center gap-1 mt-0.5 text-xs text-muted-foreground'>
@@ -3020,6 +3810,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       </div>
                                     )}
                                   </div>
+                                  {(isAdmin || !node.isSaved) && (
                                   <Button
                                     variant='ghost'
                                     size='icon'
@@ -3029,6 +3820,8 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   >
                                     <Pencil className='size-4' />
                                   </Button>
+                                  )}
+                                  {isAdmin && (
                                   <FlagEmojiPicker
                                     onSelect={(flag) => handleSetNodeFlag(node.id, flag)}
                                     onAutoDetect={node.isSaved && node.dbNode ? () => handleAddSingleNodeEmoji(node.dbNode!.id) : undefined}
@@ -3037,7 +3830,8 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                     currentFlag={hasRegionEmoji(node.name) ? node.name.match(/[\u{1F1E6}-\u{1F1FF}]{2}/u)?.[0] : undefined}
                                     className='size-7 text-[#d97757] hover:text-[#c66647] shrink-0'
                                   />
-                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
+                                  )}
+                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (isAdmin || userRoutedEnabled) && node.dbNode.node_type !== 'routed' && (
                                     <Button
                                       variant='ghost'
                                       size='icon'
@@ -3048,6 +3842,9 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                         setLandingStep('select')
                                         setLandingTab('nodes')
                                         setLandingFilterText('')
+                                        if (!isAdmin) {
+                                          setLandingScope('routed')
+                                        }
                                       }}
                                     >
                                       <img
@@ -3057,7 +3854,8 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       />
                                     </Button>
                                   )}
-                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
+                                  {renderUserRoutedDeleteBtn(node.dbNode)}
+                                  {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
                                     <Tooltip>
                                       <TooltipTrigger asChild>
                                         <Button
@@ -3083,16 +3881,48 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                     </Tooltip>
                                   )}
+                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (isAdmin || userRoutedEnabled) && (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Button
+                                          variant='ghost'
+                                          size='icon'
+                                          className='size-7 text-[#d97757] hover:text-[#c66647] shrink-0'
+                                          onClick={() => {
+                                            setSourceNodeForChainProxy(node.dbNode)
+                                            setChainProxyDialogOpen(true)
+                                            setChainProxyFilterText('')
+                                          }}
+                                        >
+                                          <img
+                                            src={ExchangeIcon}
+                                            alt={t('tooltip.chainProxy')}
+                                            className='size-4 [filter:invert(63%)_sepia(45%)_saturate(1068%)_hue-rotate(327deg)_brightness(95%)_contrast(88%)]'
+                                          />
+                                        </Button>
+                                      </TooltipTrigger>
+                                      <TooltipContent>{t('tooltip.chainProxy')}</TooltipContent>
+                                    </Tooltip>
+                                  )}
                                 </div>
                               )}
                             </TableCell>
+                            {isAdmin && (
                             <TableCell>
                               <div className='flex flex-wrap gap-1'>
-                                <Badge variant='secondary' className='text-xs max-w-[90px] truncate'>
-                                  {node.dbNode?.tag || node.tag || (currentTag === 'manual' ? manualTag.trim() || t('filter.manualInput') : currentTag === 'subscription' ? subscriptionTag.trim() || t('filter.subscriptionImport') : t('nodeList.unknown'))}
-                                </Badge>
+                                {(() => {
+                                  const tagText = getDisplayTag(node.dbNode, node.tag) ||
+                                    (currentTag === 'manual' ? manualTag.trim() || t('filter.manualInput')
+                                      : currentTag === 'subscription' ? subscriptionTag.trim() || t('filter.subscriptionImport')
+                                      : '')
+                                  if (!tagText) return null
+                                  return (
+                                    <Badge variant='secondary' className='text-xs max-w-[90px] truncate'>{tagText}</Badge>
+                                  )
+                                })()}
                               </div>
                             </TableCell>
+                            )}
                             <TableCell className='text-center'>
                               {node.clash ? (
                                 <div className='flex gap-1 justify-center'>
@@ -3126,7 +3956,9 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                 <span className='text-xs text-muted-foreground'>-</span>
                               )}
                             </TableCell>
+                            {isAdmin && (
                             <TableCell className='text-center'>
+                              {(isAdmin || !node.isSaved || (node.isSaved && node.dbNode?.created_by === profile?.username)) && (
                               <AlertDialog>
                                 <AlertDialogTrigger asChild>
                                   <Button
@@ -3156,7 +3988,9 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   </AlertDialogFooter>
                                 </AlertDialogContent>
                               </AlertDialog>
+                              )}
                             </TableCell>
+                            )}
                           </SortableTableRow>
                         ))
                       )}
@@ -3179,10 +4013,10 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                             <TableHead style={{ width: '36px' }}></TableHead>
                             <TableHead style={{ width: '90px' }}>{t('columns.protocol')}</TableHead>
                             <TableHead>{t('columns.nodeName')}</TableHead>
-                            <TableHead style={{ width: '120px' }}>{t('columns.tag')}</TableHead>
+                            {isAdmin && <TableHead style={{ width: '120px' }}>{t('columns.tag')}</TableHead>}
                             <TableHead style={{ width: '280px', maxWidth: '280px' }}>{t('columns.serverAddress')}</TableHead>
                             <TableHead style={{ width: '80px' }} className='text-center'>{t('columns.config')}</TableHead>
-                            <TableHead style={{ width: '80px' }} className='text-center'>{t('columns.actions')}</TableHead>
+                            {isAdmin && <TableHead style={{ width: '80px' }} className='text-center'>{t('columns.actions')}</TableHead>}
                           </TableRow>
                         </TableHeader>
                         <TableBody>
@@ -3208,19 +4042,45 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   )}
                                 </TableCell>
                                 <TableCell>
-                              {node.parsed ? (
-                                <Badge
-                                  variant='outline'
-                                  className={
-                                    node.dbNode?.protocol?.includes('⇋')
-                                      ? 'bg-pink-500/10 text-pink-700 border-pink-200 dark:text-pink-300 dark:border-pink-800'
-                                      : PROTOCOL_COLORS[node.parsed.type] || 'bg-gray-500/10'
-                                  }
-                                >
-                                  {node.dbNode?.protocol?.includes('⇋')
-                                    ? node.dbNode.protocol.toUpperCase()
-                                    : node.parsed.type.toUpperCase()}
-                                </Badge>
+                              {node.parsed || node.dbNode?.protocol ? (
+                                <div className='flex flex-col items-start gap-0.5'>
+                                  <Badge
+                                    variant='outline'
+                                    className={
+                                      node.dbNode?.protocol?.includes('⇋')
+                                        ? 'bg-pink-500/10 text-pink-700 border-pink-200 dark:text-pink-300 dark:border-pink-800'
+                                        : PROTOCOL_COLORS[node.parsed?.type || node.dbNode?.protocol?.toLowerCase() || ''] || 'bg-gray-500/10'
+                                    }
+                                  >
+                                    {node.dbNode?.protocol?.includes('⇋')
+                                      ? node.dbNode.protocol.toUpperCase()
+                                      : (node.parsed?.type || node.dbNode?.protocol || '').toUpperCase()}
+                                  </Badge>
+                                  {node.dbNode?.node_type === 'routed' && node.dbNode?.routed_outbound_tag && (isAdmin || (node.dbNode?.routed_owner === 'user' && node.dbNode?.created_by === profile?.username)) && (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <span className='text-[10px] text-indigo-600 dark:text-indigo-400 font-mono max-w-[110px] truncate'>
+                                          ↳ {resolveRoutedDisplay(node.dbNode)}
+                                        </span>
+                                      </TooltipTrigger>
+                                      <TooltipContent>
+                                        <div className='text-xs'>路由出站: <span className='font-mono'>{node.dbNode.routed_outbound_tag}</span></div>
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  )}
+                                  {node.dbNode?.multiplier !== undefined && node.dbNode.multiplier !== 1 && (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <span className={`text-[10px] font-mono ${node.dbNode.multiplier > 1 ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'}`}>
+                                          ×{node.dbNode.multiplier}
+                                        </span>
+                                      </TooltipTrigger>
+                                      <TooltipContent>
+                                        <div className='text-xs'>{t('nodeList.multiplierHint', { defaultValue: '此节点流量按 {{x}}× 计入套餐配额', x: node.dbNode.multiplier })}</div>
+                                      </TooltipContent>
+                                    </Tooltip>
+                                  )}
+                                </div>
                               ) : (
                                 <Badge variant='destructive'>{t('nodeList.parseFailed')}</Badge>
                               )}
@@ -3262,11 +4122,14 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   </Button>
                                 </div>
                               ) : (
+                                <div className='min-w-0'>
                                 <div className='flex items-center gap-2 min-w-0'>
                                   <span className='truncate flex-1 min-w-0' title={node.name || t('nodeList.unknown')}><Twemoji>{node.name || t('nodeList.unknown')}</Twemoji></span>
                                   {node.isSaved && (
                                     <Check className='size-4 text-green-600 shrink-0' />
                                   )}
+                                  {renderForwardedBadge(node)}
+                                  {(isAdmin || !node.isSaved) && (
                                   <Button
                                     variant='ghost'
                                     size='icon'
@@ -3276,7 +4139,8 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   >
                                     <Pencil className='size-4' />
                                   </Button>
-                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
+                                  )}
+                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (isAdmin || userRoutedEnabled) && node.dbNode.node_type !== 'routed' && (
                                     <Button
                                       variant='ghost'
                                       size='icon'
@@ -3287,6 +4151,9 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                         setLandingStep('select')
                                         setLandingTab('nodes')
                                         setLandingFilterText('')
+                                        if (!isAdmin) {
+                                          setLandingScope('routed')
+                                        }
                                       }}
                                     >
                                       <img
@@ -3296,7 +4163,8 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       />
                                     </Button>
                                   )}
-                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
+                                  {renderUserRoutedDeleteBtn(node.dbNode)}
+                                  {isAdmin && node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && node.dbNode.inbound_tag && (
                                     <Tooltip>
                                       <TooltipTrigger asChild>
                                         <Button
@@ -3322,6 +4190,30 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                       <TooltipContent>{t('tooltip.nodeRouting')}</TooltipContent>
                                     </Tooltip>
                                   )}
+                                  {node.isSaved && node.dbNode && !node.dbNode.protocol.includes('⇋') && !node.dbNode.inbound_tag && (isAdmin || userRoutedEnabled) && (
+                                    <Tooltip>
+                                      <TooltipTrigger asChild>
+                                        <Button
+                                          variant='ghost'
+                                          size='icon'
+                                          className='size-7 text-[#d97757] hover:text-[#c66647] shrink-0'
+                                          onClick={() => {
+                                            setSourceNodeForChainProxy(node.dbNode)
+                                            setChainProxyDialogOpen(true)
+                                            setChainProxyFilterText('')
+                                          }}
+                                        >
+                                          <img
+                                            src={ExchangeIcon}
+                                            alt={t('tooltip.chainProxy')}
+                                            className='size-4 [filter:invert(63%)_sepia(45%)_saturate(1068%)_hue-rotate(327deg)_brightness(95%)_contrast(88%)]'
+                                          />
+                                        </Button>
+                                      </TooltipTrigger>
+                                      <TooltipContent>{t('tooltip.chainProxy')}</TooltipContent>
+                                    </Tooltip>
+                                  )}
+                                  {isAdmin && (
                                   <FlagEmojiPicker
                                     onSelect={(flag) => handleSetNodeFlag(node.id, flag)}
                                     onAutoDetect={node.isSaved && node.dbNode ? () => handleAddSingleNodeEmoji(node.dbNode!.id) : undefined}
@@ -3330,20 +4222,38 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                     currentFlag={hasRegionEmoji(node.name) ? node.name.match(/[\u{1F1E6}-\u{1F1FF}]{2}/u)?.[0] : undefined}
                                     className='size-7 text-[#d97757] hover:text-[#c66647] shrink-0'
                                   />
+                                  )}
+                                </div>
+                                {isAdmin && getNodeServerName(node.dbNode) && (
+                                  <div className='text-[11px] text-muted-foreground mt-0.5 truncate'>
+                                    {getNodeServerName(node.dbNode)}
+                                  </div>
+                                )}
                                 </div>
                               )}
                             </TableCell>
+                            {isAdmin && (
                             <TableCell>
                               <div className='flex flex-wrap gap-1'>
-                                <Badge
-                                  variant='secondary'
-                                  className='text-xs max-w-[120px] truncate'
-                                  title={node.dbNode?.tag || node.tag || (currentTag === 'manual' ? manualTag.trim() || t('filter.manualInput') : currentTag === 'subscription' ? subscriptionTag.trim() || t('filter.subscriptionImport') : t('nodeList.unknown'))}
-                                >
-                                  {node.dbNode?.tag || node.tag || (currentTag === 'manual' ? manualTag.trim() || t('filter.manualInput') : currentTag === 'subscription' ? subscriptionTag.trim() || t('filter.subscriptionImport') : t('nodeList.unknown'))}
-                                </Badge>
+                                {(() => {
+                                  const tagText = getDisplayTag(node.dbNode, node.tag) ||
+                                    (currentTag === 'manual' ? manualTag.trim() || t('filter.manualInput')
+                                      : currentTag === 'subscription' ? subscriptionTag.trim() || t('filter.subscriptionImport')
+                                      : '')
+                                  if (!tagText) return null
+                                  return (
+                                    <Badge
+                                      variant='secondary'
+                                      className='text-xs max-w-[120px] truncate'
+                                      title={tagText}
+                                    >
+                                      {tagText}
+                                    </Badge>
+                                  )
+                                })()}
                               </div>
                             </TableCell>
+                            )}
                             <TableCell style={{ maxWidth: '280px' }}>
                               <div className='text-sm text-muted-foreground'>
                                 {node.parsed ? (
@@ -3363,7 +4273,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                         </div>
                                       )}
                                     </div>
-                                    {node.parsed?.server && (
+                                    {isAdmin && node.parsed?.server && (
                                       (() => {
                                         const nodeKey = node.isSaved ? String(node.dbId) : node.id
                                         const serverIsIp = isIpAddress(node.parsed.server)
@@ -3445,7 +4355,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                         )
                                       })()
                                     )}
-                                    {node.isSaved && node.dbNode?.original_server && (
+                                    {isAdmin && node.isSaved && node.dbNode?.original_domain && (
                                       <Button
                                         variant='ghost'
                                         size='sm'
@@ -3608,7 +4518,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                           onChange={(e) => handleClashConfigChange(e.target.value)}
                                           className='font-mono text-xs flex-1 min-h-[400px] resize-none border-0 rounded-none focus-visible:ring-0 leading-5'
                                           placeholder={t('dialog.clashConfig.inputPlaceholder')}
-                                          readOnly={editingClashConfig?.nodeId === -1}
+                                          readOnly={editingClashConfig?.nodeId === -1 || !isAdmin}
                                         />
                                       </div>
                                       {clashConfigError && (
@@ -3624,7 +4534,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                         >
                                           {editingClashConfig?.nodeId === -1 ? t('dialog.clashConfig.close') : t('actions.cancel', { ns: 'common' })}
                                         </Button>
-                                        {editingClashConfig?.nodeId !== -1 && (
+                                        {editingClashConfig?.nodeId !== -1 && isAdmin && (
                                           <Button
                                             size='sm'
                                             onClick={handleSaveClashConfig}
@@ -3666,7 +4576,9 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                 <span className='text-xs text-muted-foreground'>-</span>
                               )}
                             </TableCell>
+                            {isAdmin && (
                             <TableCell className='text-center'>
+                              {(isAdmin || !node.isSaved || (node.isSaved && node.dbNode?.created_by === profile?.username)) && (
                               <AlertDialog>
                                 <AlertDialogTrigger asChild>
                                   <Button
@@ -3695,7 +4607,9 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                                   </AlertDialogFooter>
                                 </AlertDialogContent>
                               </AlertDialog>
+                              )}
                                 </TableCell>
+                                )}
                               </SortableTableRow>
                             ))
                           )}
@@ -3766,7 +4680,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                 onChange={(e) => handleClashConfigChange(e.target.value)}
                 className='font-mono text-xs flex-1 min-h-[400px] resize-none border-0 rounded-none focus-visible:ring-0 leading-5'
                 placeholder={t('dialog.clashConfig.inputPlaceholder')}
-                readOnly={editingClashConfig?.nodeId === -1}
+                readOnly={editingClashConfig?.nodeId === -1 || !isAdmin}
               />
             </div>
             {clashConfigError && (
@@ -3782,7 +4696,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
               >
                 {editingClashConfig?.nodeId === -1 ? t('dialog.clashConfig.close') : t('actions.cancel', { ns: 'common' })}
               </Button>
-              {editingClashConfig?.nodeId !== -1 && (
+              {editingClashConfig?.nodeId !== -1 && isAdmin && (
                 <Button
                   size='sm'
                   onClick={handleSaveClashConfig}
@@ -3838,11 +4752,19 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
         setLandingDialogOpen(open)
         if (!open) {
           setLandingFilterText('')
+          setLandingTagFilter('all')
           setLandingStep('select')
           setLandingServerId(null)
+          setLandingScope('all')
+          setLandingRoutedLabel('')
+          setRoutedTargetNode(null)
+          setLandingTab('nodes')
+          setLandingBalancerTag('')
         }
       }}>
-        <DialogContent className={landingStep === 'create-inbound' ? 'max-w-[95vw] max-h-[90vh] overflow-y-auto' : 'max-w-2xl max-h-[80vh] overflow-y-auto'}>
+        <DialogContent className={landingStep === 'create-inbound' ? 'max-w-[95vw] sm:max-w-[95vw] max-h-[90vh] overflow-y-auto' : 'max-w-2xl sm:max-w-2xl max-h-[80vh] overflow-y-auto'}>
+          {/* 顶部锚点:点节点/服务器后 scrollIntoView 让 routed banner 或下一 step 的 wizard 顶部入视野 */}
+          <div ref={landingDialogTopRef} />
           <DialogHeader>
             <DialogTitle>{landingStep === 'create-inbound' ? t('dialog.landing.createInboundTitle') : t('dialog.landing.addLandingTitle')}</DialogTitle>
             <DialogDescription>
@@ -3853,52 +4775,205 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
           </DialogHeader>
 
           {landingStep === 'select' ? (
-            <Tabs value={landingTab} onValueChange={(v) => setLandingTab(v as 'nodes' | 'servers')}>
-              <TabsList className='w-full'>
-                <TabsTrigger value='nodes' className='flex-1'>{t('dialog.landing.tabNodes')}</TabsTrigger>
-                <TabsTrigger value='servers' className='flex-1'>{t('dialog.landing.tabServers')}</TabsTrigger>
-              </TabsList>
+            <>
+              {/* 作用范围:管理员可在"整个节点"和"按用户(路由出站)"间切换;普通用户只能用路由出站 */}
+              <div className='space-y-2 mb-3 p-3 rounded-md border bg-muted/30'>
+                {isAdmin ? (
+                  <>
+                    <Label className='text-xs font-medium'>作用范围</Label>
+                    <RadioGroup value={landingScope} onValueChange={(v) => setLandingScope(v as 'all' | 'routed')} className='gap-2'>
+                      <div className='flex items-start gap-2'>
+                        <RadioGroupItem value='all' id='scope-all' className='mt-0.5' />
+                        <label htmlFor='scope-all' className='text-sm cursor-pointer'>
+                          <div className='font-medium'>整个节点</div>
+                          <div className='text-xs text-muted-foreground'>源 inbound 的所有用户共享此落地(现有行为)</div>
+                        </label>
+                      </div>
+                      <div className='flex items-start gap-2'>
+                        <RadioGroupItem value='routed' id='scope-routed' className='mt-0.5' />
+                        <label htmlFor='scope-routed' className='text-sm cursor-pointer'>
+                          <div className='font-medium'>按用户(路由出站)</div>
+                          <div className='text-xs text-muted-foreground'>创建一个路由出站子节点;套餐里加入该子节点,绑定用户自动开子账号走此落地</div>
+                        </label>
+                      </div>
+                    </RadioGroup>
+                  </>
+                ) : (
+                  <div className='space-y-1'>
+                    <Label className='text-xs font-medium'>路由出站(按用户)</Label>
+                    {!userRoutedEnabled ? (
+                      <p className='text-xs text-destructive'>管理员暂未开放路由出站功能</p>
+                    ) : (
+                      <>
+                        <p className='text-xs text-muted-foreground'>
+                          选择一个落地节点,系统会为你创建专属出站。
+                          数量 {userRoutedQuota.used} / {userRoutedQuota.max} · 今日操作 {userRoutedDaily.used} / {userRoutedDaily.max}
+                        </p>
+                        {userRoutedQuotaExhausted && (
+                          <p className='text-xs text-destructive'>已达数量上限,需删除旧的或联系管理员调整</p>
+                        )}
+                        {!userRoutedQuotaExhausted && userRoutedDailyExhausted && (
+                          <p className='text-xs text-destructive'>今日操作次数已用完,请明天再试</p>
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+                {landingScope === 'routed' && (
+                  <div className='pt-2 space-y-2'>
+                    <div className='space-y-1'>
+                      <Label className='text-xs'>Label(用于生成 outbound tag)</Label>
+                      <Input
+                        value={landingRoutedLabel}
+                        onChange={(e) => setLandingRoutedLabel(e.target.value)}
+                        placeholder='选择目标节点后自动填 rout-<节点名>,也可手动改'
+                        className='text-sm h-8'
+                      />
+                      <p className='text-[10px] text-muted-foreground'>[a-zA-Z0-9-] 长度 2-32</p>
+                    </div>
+                    {routedTargetNode && (
+                      <div className='flex items-center justify-between gap-2 p-2 rounded-md bg-primary/5 border border-primary/20 text-xs'>
+                        <div className='min-w-0'>
+                          <div className='font-medium truncate'>已选目标:{routedTargetNode.node_name}</div>
+                          <div className='text-muted-foreground truncate'>{routedTargetNode.protocol} · {routedTargetNode.original_server}</div>
+                        </div>
+                        <Button
+                          size='sm'
+                          className='shrink-0'
+                          onClick={() => {
+                            if (!sourceNodeForLanding) return
+                            if (isAdmin) {
+                              addRoutedLandingMutation.mutate({ sourceNode: sourceNodeForLanding, targetNode: routedTargetNode, label: landingRoutedLabel })
+                            } else {
+                              addUserRoutedLandingMutation.mutate({ sourceNode: sourceNodeForLanding, targetNode: routedTargetNode, label: landingRoutedLabel })
+                            }
+                          }}
+                          disabled={
+                            !landingRoutedLabel.trim() ||
+                            addRoutedLandingMutation.isPending ||
+                            addUserRoutedLandingMutation.isPending ||
+                            (!isAdmin && (!userRoutedEnabled || userRoutedQuotaExhausted || userRoutedDailyExhausted))
+                          }
+                        >
+                          {(addRoutedLandingMutation.isPending || addUserRoutedLandingMutation.isPending) ? '创建中...' : '创建路由出站'}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            <Tabs value={landingTab} onValueChange={(v) => setLandingTab(v as 'nodes' | 'servers' | 'balancer')}>
+              {isAdmin && (
+                <TabsList className='w-full'>
+                  <TabsTrigger value='nodes' className='flex-1'>{t('dialog.landing.tabNodes')}</TabsTrigger>
+                  <TabsTrigger value='servers' className='flex-1'>{t('dialog.landing.tabServers')}</TabsTrigger>
+                  {landingScope === 'all' && (
+                    <TabsTrigger value='balancer' className='flex-1'>{t('dialog.landing.tabBalancer')}</TabsTrigger>
+                  )}
+                </TabsList>
+              )}
 
-              <TabsContent value='nodes' className='space-y-4 pt-2'>
+              <TabsContent value='nodes' className='space-y-3 pt-2'>
                 <Input
                   placeholder={t('dialog.landing.searchPlaceholder')}
                   value={landingFilterText}
                   onChange={(e) => setLandingFilterText(e.target.value)}
                   className='text-sm'
                 />
+                {/* 快捷标签筛选:把节点里出现过的 tag 列出来,点一下按 tag 过滤 */}
+                {(() => {
+                  const tags = Array.from(new Set(
+                    savedNodes
+                      .filter((n: any) => n.id !== sourceNodeForLanding?.id && !n.protocol.includes('⇋') && n.tag && n.node_type !== 'routed')
+                      .map((n: any) => n.tag.trim())
+                      .filter(Boolean),
+                  )).sort()
+                  if (tags.length === 0) return null
+                  return (
+                    <div className='flex flex-wrap gap-1.5'>
+                      <Button size='sm' variant={landingTagFilter === 'all' ? 'default' : 'outline'} className='h-7 text-xs' onClick={() => setLandingTagFilter('all')}>全部</Button>
+                      {tags.map((tg) => (
+                        <Button key={tg} size='sm' variant={landingTagFilter === tg ? 'default' : 'outline'} className='h-7 text-xs' onClick={() => setLandingTagFilter(tg)}>{tg}</Button>
+                      ))}
+                    </div>
+                  )
+                })()}
                 <p className='text-xs text-muted-foreground'>{t('dialog.landing.excludeHint')}</p>
                 {(() => {
                   const filtered = savedNodes
                     .filter(n => n.id !== sourceNodeForLanding?.id)
                     .filter(n => !n.protocol.includes('⇋'))
+                    .filter(n => n.node_type !== 'routed')
+                    .filter(n => landingTagFilter === 'all' || n.tag === landingTagFilter)
                     .filter(n => {
                       if (!landingFilterText.trim()) return true
                       const s = landingFilterText.toLowerCase()
                       return n.node_name.toLowerCase().includes(s) || n.protocol.toLowerCase().includes(s) || (n.tag && n.tag.toLowerCase().includes(s))
                     })
                   return filtered.length > 0 ? (
-                    <div className='space-y-2'>
-                      {filtered.map((node) => (
+                    <div className={cn('space-y-2', landingScope === 'all' && routedTargetNode && 'pb-20')}>
+                      {filtered.map((node) => {
+                        let cfg: any = null
+                        try { cfg = JSON.parse(node.clash_config) } catch {}
+                        // Tunnel 匹配:tunnel.target 和 node.clash_config.server 可能是同一服务器的不同别名(domain vs IP),
+                        // 严格字符串比较会漏判;按 port 相等 + 「tunnel target 落在 node 所在服务器的任一已知地址(ip/domain/pull_address)」放宽
+                        const nodeServer: any = (remoteServersData?.servers || []).find((s: any) => s.name === node.original_server)
+                        const nodeAliases = new Set<string>([cfg?.server, nodeServer?.ip_address, nodeServer?.domain, nodeServer?.pull_address].filter(Boolean))
+                        const fwdTunnels = cfg?.port != null
+                          ? tunnels.filter((x) => Number(x.target_port) === Number(cfg.port) && nodeAliases.has(x.target_address))
+                          : []
+                        return (
                         <Button
                           key={node.id}
                           variant='outline'
-                          className='w-full justify-start text-left h-auto py-3'
+                          // 单选高亮 — 两种 scope 都通过 routedTargetNode 标记当前选中
+                          className={cn(
+                            'w-full justify-start text-left h-auto py-3',
+                            routedTargetNode?.id === node.id && 'border-primary bg-primary/10 ring-1 ring-primary',
+                          )}
                           onClick={() => {
-                            if (sourceNodeForLanding) {
-                              addLandingNodeMutation.mutate({ sourceNode: sourceNodeForLanding, targetNode: node })
+                            if (!sourceNodeForLanding) return
+                            // 不再点 1 次就触发 mutation,改为选中 → 用户点底部"确认"按钮
+                            setRoutedTargetNode(node)
+                            if (landingScope === 'routed') {
+                              setLandingRoutedLabel(generateRoutedLabel(node.node_name))
                             }
+                            // 滚到顶 — routed scope 下顶部有"已选目标 + 创建路由出站"banner,需要让用户看到
+                            requestAnimationFrame(() => {
+                              landingDialogTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                            })
                           }}
-                          disabled={addLandingNodeMutation.isPending || landingLoading}
+                          disabled={addLandingNodeMutation.isPending || addRoutedLandingMutation.isPending || landingLoading}
                         >
                           <div className='flex flex-col gap-2 w-full items-start'>
                             <div className='flex items-center gap-2 w-full flex-wrap'>
                               <span className='font-medium'><Twemoji>{node.node_name}</Twemoji></span>
+                              {fwdTunnels.length > 0 && (
+                                <Tooltip>
+                                  <TooltipTrigger asChild>
+                                    <Badge variant='outline' className='h-5 w-5 p-0 flex items-center justify-center shrink-0 border-orange-300 text-orange-600 dark:text-orange-400'>
+                                      <Cable className='h-3 w-3' />
+                                    </Badge>
+                                  </TooltipTrigger>
+                                  <TooltipContent>
+                                    <div className='space-y-0.5 text-xs'>
+                                      <div className='font-medium'>被 tunnel 转发</div>
+                                      {fwdTunnels.map((tn: any) => (
+                                        <div key={`${tn.server_id}-${tn.tag}`} className='font-mono'>
+                                          {tn.server_name}:{tn.listen_port} · {tn.tag}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  </TooltipContent>
+                                </Tooltip>
+                              )}
                               <span className='text-xs text-muted-foreground'>{node.protocol} - {node.original_server}</span>
                             </div>
                             {node.tag && <Badge variant='secondary' className='text-xs'>{node.tag}</Badge>}
                           </div>
                         </Button>
-                      ))}
+                        )
+                      })}
                     </div>
                   ) : (
                     <div className='text-center text-sm text-muted-foreground py-8'>
@@ -3906,9 +4981,52 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                     </div>
                   )
                 })()}
+                {/* 整个节点 scope 的确认按钮:选中后显示,sticky 到可滚动容器底部;列表加了 pb-20 留出空间避免遮挡 */}
+                {landingScope === 'all' && routedTargetNode && (
+                  <div className='flex items-center justify-between gap-2 p-2 rounded-md bg-primary/5 border border-primary/40 text-xs sticky bottom-0 shadow-lg backdrop-blur-sm'>
+                    <div className='min-w-0'>
+                      <div className='font-medium truncate'>已选目标:<Twemoji>{routedTargetNode.node_name}</Twemoji></div>
+                      <div className='text-muted-foreground truncate'>{routedTargetNode.protocol} · {routedTargetNode.original_server}</div>
+                    </div>
+                    <Button
+                      size='sm'
+                      className='shrink-0'
+                      onClick={() => {
+                        if (!sourceNodeForLanding || !routedTargetNode) return
+                        // 落地前看目标节点 server:port 是否被某条 tunnel 转发,有就弹框让用户选
+                        let cfg: any = null
+                        try { cfg = JSON.parse(routedTargetNode.clash_config) } catch {}
+                        const targetServer: any = (remoteServersData?.servers || []).find((s: any) => s.name === routedTargetNode.original_server)
+                        const targetAliases = new Set<string>([cfg?.server, targetServer?.ip_address, targetServer?.domain, targetServer?.pull_address].filter(Boolean))
+                        if (cfg?.port != null) {
+                          const tn = tunnels.find((x) => Number(x.target_port) === Number(cfg.port) && targetAliases.has(x.target_address))
+                          if (tn) {
+                            const tnSrv = (remoteServersData?.servers || []).find((s: any) => s.id === tn.server_id) as any
+                            const tnHost = tnSrv?.domain || tnSrv?.ip_address || tnSrv?.pull_address || ''
+                            if (tnHost) {
+                              setLandingTunnelChoice({
+                                tunnelHost: tnHost,
+                                tunnelPort: Number(tn.listen_port),
+                                tunnelServerName: tn.server_name || tnSrv?.name || '',
+                                tunnelTag: tn.tag || '',
+                                directAddress: cfg.server,
+                                directPort: Number(cfg.port),
+                              })
+                              return
+                            }
+                          }
+                        }
+                        addLandingNodeMutation.mutate({ sourceNode: sourceNodeForLanding, targetNode: routedTargetNode })
+                      }}
+                      disabled={addLandingNodeMutation.isPending || landingLoading}
+                    >
+                      {addLandingNodeMutation.isPending ? '创建中...' : '确认落地'}
+                    </Button>
+                  </div>
+                )}
               </TabsContent>
 
-              <TabsContent value='servers' className='space-y-4 pt-2'>
+              {isAdmin && <TabsContent value='servers' className='space-y-4 pt-2'>
                 <p className='text-xs text-muted-foreground'>{t('dialog.landing.serverHint')}</p>
                 {(() => {
                   const sourceServerName = sourceNodeForLanding?.original_server
@@ -3923,6 +5041,10 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                           onClick={() => {
                             setLandingServerId(server.id)
                             setLandingStep('create-inbound')
+                            // 切换到 create-inbound step 后让 dialog 顶部入视野(InboundWizard 内容较长)
+                            requestAnimationFrame(() => {
+                              landingDialogTopRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+                            })
                           }}
                         >
                           <div className='flex items-center gap-2'>
@@ -3936,8 +5058,62 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                     <div className='text-center text-sm text-muted-foreground py-8'>{t('dialog.landing.noOtherServers')}</div>
                   )
                 })()}
-              </TabsContent>
+              </TabsContent>}
+
+              {isAdmin && landingScope === 'all' && <TabsContent value='balancer' className='space-y-3 pt-2'>
+                <p className='text-xs text-muted-foreground'>{t('dialog.landing.balancerHint')}</p>
+                {landingBalancersQuery.isLoading ? (
+                  <div className='flex items-center justify-center gap-2 py-8 text-muted-foreground text-sm'>
+                    <Loader2 className='h-4 w-4 animate-spin' />
+                    {t('dialog.landing.configuringLanding')}
+                  </div>
+                ) : (landingBalancersQuery.data || []).length === 0 ? (
+                  <div className='text-center text-sm text-muted-foreground py-8'>{t('dialog.landing.noBalancers')}</div>
+                ) : (
+                  <div className={cn('space-y-2', landingBalancerTag && 'pb-20')}>
+                    {(landingBalancersQuery.data || []).map((b) => (
+                      <Button
+                        key={b.tag}
+                        variant='outline'
+                        className={cn('w-full justify-start text-left h-auto py-3',
+                          landingBalancerTag === b.tag && 'border-primary bg-primary/10 ring-1 ring-primary')}
+                        onClick={() => setLandingBalancerTag(b.tag)}
+                        disabled={addBalancerLandingMutation.isPending}
+                      >
+                        <div className='flex flex-col gap-1 w-full items-start'>
+                          <div className='flex items-center gap-2 w-full flex-wrap'>
+                            <Scale className='h-3.5 w-3.5' />
+                            <span className='font-medium'>{b.tag}</span>
+                            <Badge variant='secondary' className='text-xs' title={balancerStrategyLabel(txr, b.strategy)}>{b.strategy || 'random'}</Badge>
+                          </div>
+                          <span className='text-xs text-muted-foreground truncate'>{(b.selector || []).join(', ') || '—'}</span>
+                        </div>
+                      </Button>
+                    ))}
+                  </div>
+                )}
+                {landingBalancerTag && (
+                  <div className='flex items-center justify-between gap-2 p-2 rounded-md bg-primary/5 border border-primary/40 text-xs sticky bottom-0 shadow-lg backdrop-blur-sm'>
+                    <div className='min-w-0'>
+                      <div className='font-medium truncate'>{t('dialog.landing.landingBalancerSelected')}: ⚖ {landingBalancerTag}</div>
+                      <div className='text-muted-foreground truncate'>inbound: {sourceNodeForLanding?.inbound_tag}</div>
+                    </div>
+                    <Button
+                      size='sm'
+                      className='shrink-0'
+                      onClick={() => {
+                        if (!sourceNodeForLanding || !landingBalancerTag) return
+                        addBalancerLandingMutation.mutate({ sourceNode: sourceNodeForLanding, balancerTag: landingBalancerTag })
+                      }}
+                      disabled={addBalancerLandingMutation.isPending}
+                    >
+                      {addBalancerLandingMutation.isPending ? '绑定中...' : t('dialog.landing.confirmBalancerLanding')}
+                    </Button>
+                  </div>
+                )}
+              </TabsContent>}
             </Tabs>
+            </>
           ) : (
             <div className='py-2'>
               {landingLoading ? (
@@ -3956,6 +5132,119 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
               )}
             </div>
           )}
+        </DialogContent>
+      </Dialog>
+
+      {/* 落地节点 tunnel 二次确认:目标节点 server:port 命中 tunnel target → 让用户选直连 or 走 tunnel */}
+      <AlertDialog open={!!landingTunnelChoice} onOpenChange={(o) => { if (!o) setLandingTunnelChoice(null) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>通过 Tunnel 落地?</AlertDialogTitle>
+            <AlertDialogDescription className="space-y-2">
+              <div>目标节点 <span className="font-mono">{landingTunnelChoice?.directAddress}:{landingTunnelChoice?.directPort}</span> 同时有 tunnel 指向它:</div>
+              <div className="rounded-md border bg-muted/40 p-2 text-xs font-mono">
+                {landingTunnelChoice?.tunnelServerName} : {landingTunnelChoice?.tunnelPort} (tag: {landingTunnelChoice?.tunnelTag}) → {landingTunnelChoice?.directAddress}:{landingTunnelChoice?.directPort}
+              </div>
+              <div>选「通过 Tunnel」会把出站连接目标替换为 <span className="font-mono">{landingTunnelChoice?.tunnelHost}:{landingTunnelChoice?.tunnelPort}</span>;选「直连节点」保留原地址。</div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => {
+              if (!sourceNodeForLanding || !routedTargetNode) return
+              addLandingNodeMutation.mutate({ sourceNode: sourceNodeForLanding, targetNode: routedTargetNode })
+              setLandingTunnelChoice(null)
+            }}>直连节点</AlertDialogCancel>
+            <AlertDialogAction onClick={() => {
+              if (!sourceNodeForLanding || !routedTargetNode || !landingTunnelChoice) return
+              addLandingNodeMutation.mutate({
+                sourceNode: sourceNodeForLanding,
+                targetNode: routedTargetNode,
+                overrideTarget: { address: landingTunnelChoice.tunnelHost, port: landingTunnelChoice.tunnelPort },
+              })
+              setLandingTunnelChoice(null)
+            }}>通过 Tunnel</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 链式代理对话框 */}
+      <Dialog open={chainProxyDialogOpen} onOpenChange={(open) => {
+        setChainProxyDialogOpen(open)
+        if (!open) setChainProxyFilterText('')
+      }}>
+        <DialogContent className='max-w-2xl flex flex-col max-h-[80vh]'>
+          <DialogHeader>
+            <DialogTitle>{t('dialog.chainProxy.title')}</DialogTitle>
+            <DialogDescription>
+              {t('dialog.chainProxy.description', { name: sourceNodeForChainProxy?.node_name })}
+            </DialogDescription>
+          </DialogHeader>
+          <div className='space-y-2 shrink-0'>
+            <Input
+              placeholder={t('dialog.chainProxy.searchPlaceholder')}
+              value={chainProxyFilterText}
+              onChange={(e) => setChainProxyFilterText(e.target.value)}
+              className='text-sm'
+            />
+            <p className='text-xs text-muted-foreground'>
+              {t('dialog.chainProxy.excludeHint')}
+            </p>
+          </div>
+          <div className='overflow-y-auto min-h-0 py-2'>
+            {(() => {
+              const filteredNodes = savedNodes
+                .filter(node => node.id !== sourceNodeForChainProxy?.id)
+                .filter(node => !node.protocol.includes('⇋'))
+                .filter(node => {
+                  if (!chainProxyFilterText.trim()) return true
+                  const searchText = chainProxyFilterText.toLowerCase()
+                  return (
+                    node.node_name.toLowerCase().includes(searchText) ||
+                    node.protocol.toLowerCase().includes(searchText) ||
+                    (node.tag && node.tag.toLowerCase().includes(searchText))
+                  )
+                })
+
+              return filteredNodes.length > 0 ? (
+                <div className='space-y-2'>
+                  {filteredNodes.map((node) => (
+                    <Button
+                      key={node.id}
+                      variant='outline'
+                      className='w-full justify-start text-left h-auto py-3'
+                      onClick={() => {
+                        if (sourceNodeForChainProxy) {
+                          createRelayNodeMutation.mutate({
+                            sourceNode: sourceNodeForChainProxy,
+                            targetNode: node
+                          })
+                        }
+                      }}
+                      disabled={createRelayNodeMutation.isPending}
+                    >
+                      <div className='flex flex-col gap-2 w-full items-start'>
+                        <div className='flex items-center gap-2 w-full flex-wrap'>
+                          <span className='font-medium'>{node.node_name}</span>
+                          <span className='text-xs text-muted-foreground'>
+                            {node.protocol} - {node.original_server}
+                          </span>
+                        </div>
+                        {node.tag && (
+                          <Badge variant='secondary' className='text-xs'>
+                            {node.tag}
+                          </Badge>
+                        )}
+                      </div>
+                    </Button>
+                  ))}
+                </div>
+              ) : (
+                <div className='text-center text-sm text-muted-foreground py-8'>
+                  {chainProxyFilterText.trim() ? t('dialog.chainProxy.noMatch') : t('dialog.chainProxy.noNodes')}
+                </div>
+              )
+            })()}
+          </div>
         </DialogContent>
       </Dialog>
 
@@ -4170,7 +5459,10 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
               <Button
                 onClick={() => {
                   const newNames = batchRenameText.split('\n').map(line => line.trim()).filter(line => line)
-                  const nodeIds = Array.from(selectedNodeIds)
+                  // 用 savedNodes.filter(...) 跟 dialog 打开时初始化文本框的顺序对齐(见上面 setBatchRenameText 调用处)。
+                  // 之前这里用 Array.from(selectedNodeIds) 拿到的是 Set 插入顺序(= 用户勾选顺序),
+                  // 跟文本框里行的顺序不一致 → newNames[index] 被赋给错的 node → 改完节点名错乱。
+                  const nodeIds = savedNodes.filter(n => selectedNodeIds.has(n.id)).map(n => n.id)
 
                   if (newNames.length === 0) {
                     toast.error(t('toast.enterNodeNames'))
@@ -4381,25 +5673,34 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
         open={quickCreateServerDialogOpen}
         onOpenChange={setQuickCreateServerDialogOpen}
       >
-        <DialogContent className='sm:max-w-md'>
+        <DialogContent className='sm:max-w-md md:max-w-2xl'>
           <DialogHeader>
             <DialogTitle>{t('dialog.serverSelect.title')}</DialogTitle>
             <DialogDescription>{t('dialog.serverSelect.description')}</DialogDescription>
           </DialogHeader>
-          <div className='space-y-2 py-2'>
+          {/* PC(md+) 两列,其他端单列 */}
+          <div className='grid grid-cols-1 md:grid-cols-2 gap-2 py-2'>
             {remoteServers.map((server) => (
               <Button
                 key={server.id}
                 type='button'
                 variant={quickCreateServerId === server.id ? 'default' : 'outline'}
                 className='w-full justify-start'
-                onClick={() => setQuickCreateServerId(server.id)}
+                disabled={!server.xray_running}
+                onClick={() => {
+                  setQuickCreateServerId(server.id)
+                  // 选完滚到底部让"下一步"按钮入视野(服务器多时列表挤掉 footer)
+                  requestAnimationFrame(() => {
+                    quickCreateFooterRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' })
+                  })
+                }}
               >
                 {server.name}
+                {!server.xray_running && <span className='ml-auto text-xs text-destructive'>{t('dialog.serverSelect.xrayNotReady')}</span>}
               </Button>
             ))}
           </div>
-          <DialogFooter>
+          <DialogFooter ref={quickCreateFooterRef}>
             <Button
               type='button'
               variant='outline'
@@ -4472,10 +5773,6 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
                 </div>
                 <div className='flex items-center gap-2'>
                   <CheckCircle2 className='h-4 w-4 text-green-500' />
-                  <span>{t('dialog.quickCreate.outboundPrefix')} <Badge variant='secondary'>{quickCreateResult.outboundTag}</Badge> {t('dialog.quickCreate.outboundSuffix')}</span>
-                </div>
-                <div className='flex items-center gap-2'>
-                  <CheckCircle2 className='h-4 w-4 text-green-500' />
                   <span>{t('dialog.quickCreate.nodesSynced')}</span>
                 </div>
               </div>
@@ -4503,6 +5800,35 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
           serverName={routingServerName}
           allNodes={savedNodes}
         />
+      )}
+      <TunnelManagerDialog
+        open={tunnelDialogOpen}
+        onOpenChange={setTunnelDialogOpen}
+      />
+      <Dialog open={routedOutboundsDialogOpen} onOpenChange={setRoutedOutboundsDialogOpen}>
+        <DialogContent className='sm:max-w-5xl max-h-[85vh] overflow-y-auto'>
+          <DialogHeader>
+            <DialogTitle>路由出站管理</DialogTitle>
+          </DialogHeader>
+          <RoutedOutboundsPanel showHeader={false} />
+        </DialogContent>
+      </Dialog>
+      <SpeedTestDialog
+        open={speedDialogOpen}
+        nodes={savedNodesSorted}
+        onMinimize={() => { setSpeedDialogOpen(false); setSpeedDialogMin(true) }}
+        onClose={() => { setSpeedDialogOpen(false); setSpeedDialogMin(false) }}
+      />
+      {/* 收起态:屏幕右侧垂直居中悬浮按钮,点击重新打开测速工作台 */}
+      {speedDialogMin && !speedDialogOpen && (
+        <button
+          type='button'
+          onClick={() => { setSpeedDialogOpen(true); setSpeedDialogMin(false) }}
+          title={t('speedtest.dialogTitle')}
+          className='fixed right-0 top-1/2 z-50 -translate-y-1/2 rounded-l-lg bg-[#d97757] px-2 py-3 text-white shadow-lg hover:bg-[#c66647]'
+        >
+          <Gauge className='h-5 w-5' />
+        </button>
       )}
     </div>
   )

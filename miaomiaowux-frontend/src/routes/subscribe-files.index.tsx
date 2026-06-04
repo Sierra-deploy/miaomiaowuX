@@ -1,17 +1,40 @@
 // @ts-nocheck
 import { useState, useEffect, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import {
-  format,
-  addDays,
-  isPast,
-  differenceInCalendarDays,
-  isToday,
-} from 'date-fns'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute, redirect, useNavigate } from '@tanstack/react-router'
 import { load as parseYAML, dump as dumpYAML } from 'js-yaml'
 import { Copy } from 'lucide-react'
+import { formatBytes as formatTraffic, formatTrafficGB } from '@/lib/format'
+import {
+  defaultOverrideForm,
+  overrideFormToJSON,
+  jsonToOverrideForm,
+  type OverrideForm,
+} from '@/components/subscribe-files/utils/override-form'
+import { PreviewDialog } from '@/components/subscribe-files/dialogs/preview-dialog'
+import { EditConfigDialog } from '@/components/subscribe-files/dialogs/edit-config-dialog'
+import { EditExternalSubDialog } from '@/components/subscribe-files/dialogs/edit-external-sub-dialog'
+import { EditFileDialog } from '@/components/subscribe-files/dialogs/edit-file-dialog'
+import { EditMetadataDialog } from '@/components/subscribe-files/dialogs/edit-metadata-dialog'
+import { EditNodesHostDialog } from '@/components/subscribe-files/dialogs/edit-nodes-host-dialog'
+import { BatchDeleteProviderDialog } from '@/components/subscribe-files/dialogs/batch-delete-provider-dialog'
+import { ProxyProviderProDialog } from '@/components/subscribe-files/dialogs/proxy-provider-pro-dialog'
+import { ProxyProviderEditDialog } from '@/components/subscribe-files/dialogs/proxy-provider-edit-dialog'
+import { ExternalSubsSection } from '@/components/subscribe-files/components/external-subs-section'
+import { ProxyProvidersSection } from '@/components/subscribe-files/components/proxy-providers-section'
+import { FilesListSection } from '@/components/subscribe-files/components/files-list-section'
+import { useSupportData } from '@/components/subscribe-files/hooks/use-support-data'
+import { useExternalSubs } from '@/components/subscribe-files/hooks/use-external-subs'
+import { useProxyProviders } from '@/components/subscribe-files/hooks/use-proxy-providers'
+import { useUserMeta } from '@/components/subscribe-files/hooks/use-user-meta'
+import { useAllNodes } from '@/components/subscribe-files/hooks/use-all-nodes'
+import { useSubscribeFiles } from '@/components/subscribe-files/hooks/use-subscribe-files'
+import { useNodeEditWorkflow } from '@/components/subscribe-files/hooks/use-node-edit-workflow'
+import {
+  batchCreateByRegion,
+  batchCreateByProtocol,
+} from '@/components/subscribe-files/utils/batch-create-providers'
 import {
   Upload,
   Download,
@@ -25,10 +48,10 @@ import {
   ChevronUp,
   ExternalLink,
   Eye,
-  Calendar as CalendarIcon,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAuthStore } from '@/stores/auth-store'
+import { profileQueryFn } from '@/lib/profile'
 import { api } from '@/lib/api'
 import {
   validateClashConfig,
@@ -41,7 +64,6 @@ import {
   replaceMissingRuleTargets,
 } from '@/lib/rules-node-replacement'
 import { translateOutbound } from '@/lib/sublink/translations'
-import { cn } from '@/lib/utils'
 import { useMediaQuery } from '@/hooks/use-media-query'
 import { useProxyGroupCategories } from '@/hooks/use-proxy-groups'
 import {
@@ -57,7 +79,6 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Calendar } from '@/components/ui/calendar'
 import {
   Card,
   CardContent,
@@ -106,9 +127,8 @@ import {
 } from '@/components/ui/tooltip'
 import { DataTable } from '@/components/data-table'
 import type { DataTableColumn } from '@/components/data-table'
-import { EditNodesDialog } from '@/components/edit-nodes-dialog'
 import { MissingNodesReplaceDialog } from '@/components/missing-nodes-replace-dialog'
-import { MobileEditNodesDialog } from '@/components/mobile-edit-nodes-dialog'
+// TrafficScopePopover 由 files-list-section 内联使用 — 这里只保留服务器列表 + 保存回调透传
 import { Twemoji } from '@/components/twemoji'
 
 export const Route = createFileRoute('/subscribe-files/')({
@@ -125,26 +145,27 @@ type SubscribeFile = {
   id: number
   name: string
   description: string
-  type: 'create' | 'import' | 'upload'
+  type: 'create' | 'import' | 'upload' | 'package'
   filename: string
+  file_short_code: string
+  custom_short_code: string
   auto_sync_custom_rules: boolean
-  expire_at?: string | null
+  template_filename: string
+  selected_tags: string[]
+  selected_node_ids?: number[]
+  selected_custom_rule_ids?: number[]
+  selected_override_script_ids?: number[]
+  stats_server_ids: string
+  traffic_limit: number | null
+  sort_order: number
+  raw_output: boolean
+  created_by: string
   created_at: string
   updated_at: string
   latest_version?: number
 }
 
-const TYPE_COLORS = {
-  create: 'bg-blue-500/10 text-blue-700 dark:text-blue-400',
-  import: 'bg-green-500/10 text-green-700 dark:text-green-400',
-  upload: 'bg-purple-500/10 text-purple-700 dark:text-purple-400',
-}
-
-const TYPE_LABELS = {
-  create: '创建',
-  import: '导入',
-  upload: '上传',
-}
+// TYPE_COLORS 已搬到 ./subscribe-files/components/files-list-section.tsx;TYPE_LABELS 已废弃(改用 t('management.typeLabels.X'))
 
 type ExternalSubscription = {
   id: number
@@ -186,275 +207,28 @@ type ProxyProviderConfig = {
   updated_at: string
 }
 
-// 代理协议类型列表
-const PROXY_TYPES = [
-  'vmess',
-  'vless',
-  'trojan',
-  'ss',
-  'ssr',
-  'socks5',
-  'http',
-  'hysteria',
-  'hysteria2',
-  'tuic',
-  'wireguard',
-  'anytls',
-]
+// 代理协议类型列表搬到 ./subscribe-files/utils/proxy-provider-form.ts(被 ProxyProviderEditDialog 用)
 
-// 地域分裂配置（用于 Pro 批量创建）
-// countryCode 用于 GeoIP 匹配（仅 MMW 模式生效）
-const REGION_CONFIGS = [
-  {
-    name: '香港节点',
-    emoji: '🇭🇰',
-    filter: '🇭🇰|港|HK|hk|Hong Kong|HongKong|hongkong',
-    countryCode: 'HK',
-  },
-  {
-    name: '美国节点',
-    emoji: '🇺🇸',
-    filter:
-      '🇺🇸|美|波特兰|达拉斯|俄勒冈|凤凰城|费利蒙|硅谷|拉斯维加斯|洛杉矶|圣何塞|圣克拉拉|西雅图|芝加哥|US|United States|UnitedStates',
-    countryCode: 'US',
-  },
-  {
-    name: '日本节点',
-    emoji: '🇯🇵',
-    filter: '🇯🇵|日本|川日|东京|大阪|泉日|埼玉|沪日|深日|JP|Japan',
-    countryCode: 'JP',
-  },
-  {
-    name: '新加坡节点',
-    emoji: '🇸🇬',
-    filter: '🇸🇬|新加坡|坡|狮城|SG|Singapore',
-    countryCode: 'SG',
-  },
-  {
-    name: '台湾节点',
-    emoji: '🇹🇼',
-    filter: '🇹🇼|台|新北|彰化|TW|Taiwan',
-    countryCode: 'TW',
-  },
-  {
-    name: '韩国节点',
-    emoji: '🇰🇷',
-    filter: '🇰🇷|韩|KR|Korea|KOR|首尔',
-    countryCode: 'KR',
-  },
-  {
-    name: '加拿大节点',
-    emoji: '🇨🇦',
-    filter: '🇨🇦|加拿大|CA|Canada',
-    countryCode: 'CA',
-  },
-  {
-    name: '英国节点',
-    emoji: '🇬🇧',
-    filter: '🇬🇧|英|UK|伦敦|英格兰|GB|United Kingdom',
-    countryCode: 'GB',
-  },
-  {
-    name: '法国节点',
-    emoji: '🇫🇷',
-    filter: '🇫🇷|法|FR|France|巴黎',
-    countryCode: 'FR',
-  },
-  {
-    name: '德国节点',
-    emoji: '🇩🇪',
-    filter: '🇩🇪|德|DE|Germany|法兰克福',
-    countryCode: 'DE',
-  },
-  {
-    name: '荷兰节点',
-    emoji: '🇳🇱',
-    filter: '🇳🇱|荷|NL|Netherlands|阿姆斯特丹',
-    countryCode: 'NL',
-  },
-  {
-    name: '土耳其节点',
-    emoji: '🇹🇷',
-    filter: '🇹🇷|土耳其|TR|Turkey|伊斯坦布尔',
-    countryCode: 'TR',
-  },
-  {
-    name: '其他地区',
-    emoji: '🌍',
-    filter: '',
-    excludeFilter:
-      '🇭🇰|🇺🇸|🇯🇵|🇸🇬|🇹🇼|🇰🇷|🇨🇦|🇬🇧|🇫🇷|🇩🇪|🇳🇱|🇹🇷|港|HK|hk|Hong Kong|HongKong|hongkong|美|波特兰|达拉斯|俄勒冈|凤凰城|费利蒙|硅谷|拉斯维加斯|洛杉矶|圣何塞|圣克拉拉|西雅图|芝加哥|US|United States|UnitedStates|日本|川日|东京|大阪|泉日|埼玉|沪日|深日|JP|Japan|新加坡|坡|狮城|SG|Singapore|台|新北|彰化|TW|Taiwan|韩|KR|Korea|KOR|首尔|加拿大|CA|Canada|英|UK|伦敦|英格兰|GB|United Kingdom|法|FR|France|巴黎|德|DE|Germany|法兰克福|荷|NL|Netherlands|阿姆斯特丹|土耳其|TR|Turkey|伊斯坦布尔',
-    countryCode: '',
-  },
-]
-
-// 协议分裂配置（用于 Pro 批量创建）
-const PROTOCOL_CONFIGS = [
-  {
-    name: 'anytls',
-    excludeType:
-      'wireguard|vmess|vless|trojan|ss|socks5|http|ssr|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'wireguard',
-    excludeType:
-      'anytls|vmess|vless|trojan|ss|socks5|http|ssr|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'vmess',
-    excludeType:
-      'anytls|wireguard|vless|trojan|ss|socks5|http|ssr|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'vless',
-    excludeType:
-      'anytls|wireguard|vmess|trojan|ss|socks5|http|ssr|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'trojan',
-    excludeType:
-      'anytls|wireguard|vmess|vless|ss|socks5|http|ssr|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'ss',
-    excludeType:
-      'anytls|wireguard|vmess|vless|trojan|socks5|http|ssr|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'socks5',
-    excludeType:
-      'anytls|wireguard|vmess|vless|trojan|ss|http|ssr|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'http',
-    excludeType:
-      'anytls|wireguard|vmess|vless|trojan|ss|socks5|ssr|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'ssr',
-    excludeType:
-      'anytls|wireguard|vmess|vless|trojan|ss|socks5|http|hysteria|tuic|hysteria2',
-  },
-  {
-    name: 'hysteria',
-    excludeType:
-      'anytls|wireguard|vmess|vless|trojan|ss|socks5|http|ssr|tuic|hysteria2',
-  },
-  {
-    name: 'tuic',
-    excludeType:
-      'anytls|wireguard|vmess|vless|trojan|ss|socks5|http|ssr|hysteria|hysteria2',
-  },
-  {
-    name: 'hysteria2',
-    excludeType:
-      'anytls|wireguard|vmess|vless|trojan|ss|socks5|http|ssr|hysteria|tuic',
-  },
-]
 
 // IP 版本选项
-const IP_VERSION_OPTIONS = [
-  { value: '', labelKey: 'default' },
-  { value: 'dual', labelKey: 'dual' },
-  { value: 'ipv4', labelKey: 'ipv4' },
-  { value: 'ipv6', labelKey: 'ipv6' },
-  { value: 'ipv4-prefer', labelKey: 'ipv4-prefer' },
-  { value: 'ipv6-prefer', labelKey: 'ipv6-prefer' },
-]
+// IP_VERSION_OPTIONS 同上,搬到 ./subscribe-files/utils/proxy-provider-form.ts
 
-// Override 表单类型
-type OverrideForm = {
-  tfo: boolean
-  mptcp: boolean
-  udp: boolean
-  udp_over_tcp: boolean
-  skip_cert_verify: boolean
-  dialer_proxy: string
-  interface_name: string
-  routing_mark: string
-  ip_version: '' | 'dual' | 'ipv4' | 'ipv6' | 'ipv4-prefer' | 'ipv6-prefer'
-  additional_prefix: string
-  additional_suffix: string
-}
-
-// 默认 Override 表单值
-const defaultOverrideForm: OverrideForm = {
-  tfo: false,
-  mptcp: false,
-  udp: true,
-  udp_over_tcp: false,
-  skip_cert_verify: false,
-  dialer_proxy: '',
-  interface_name: '',
-  routing_mark: '',
-  ip_version: '',
-  additional_prefix: '',
-  additional_suffix: '',
-}
-
-// Override 表单转 JSON (保存时)
-function overrideFormToJSON(form: OverrideForm): string {
-  const obj: Record<string, any> = {}
-
-  // 只添加非默认值的字段
-  if (form.tfo) obj['tfo'] = true
-  if (form.mptcp) obj['mptcp'] = true
-  if (!form.udp) obj['udp'] = false // 默认 true，只有 false 时添加
-  if (form.udp_over_tcp) obj['udp-over-tcp'] = true
-  if (form.skip_cert_verify) obj['skip-cert-verify'] = true
-  if (form.dialer_proxy) obj['dialer-proxy'] = form.dialer_proxy
-  if (form.interface_name) obj['interface-name'] = form.interface_name
-  if (form.routing_mark) obj['routing-mark'] = parseInt(form.routing_mark)
-  if (form.ip_version) obj['ip-version'] = form.ip_version
-  if (form.additional_prefix) obj['additional-prefix'] = form.additional_prefix
-  if (form.additional_suffix) obj['additional-suffix'] = form.additional_suffix
-
-  return Object.keys(obj).length > 0 ? JSON.stringify(obj) : ''
-}
-
-// JSON 转 Override 表单 (编辑时)
-function jsonToOverrideForm(json: string): OverrideForm {
-  if (!json) return { ...defaultOverrideForm }
-
-  try {
-    const obj = JSON.parse(json)
-    return {
-      tfo: obj['tfo'] ?? false,
-      mptcp: obj['mptcp'] ?? false,
-      udp: obj['udp'] ?? true,
-      udp_over_tcp: obj['udp-over-tcp'] ?? false,
-      skip_cert_verify: obj['skip-cert-verify'] ?? false,
-      dialer_proxy: obj['dialer-proxy'] ?? '',
-      interface_name: obj['interface-name'] ?? '',
-      routing_mark: obj['routing-mark']?.toString() ?? '',
-      ip_version: obj['ip-version'] ?? '',
-      additional_prefix: obj['additional-prefix'] ?? '',
-      additional_suffix: obj['additional-suffix'] ?? '',
-    }
-  } catch {
-    return { ...defaultOverrideForm }
-  }
-}
+// OverrideForm 类型、默认值、↔JSON 互转都搬到了 ./subscribe-files/utils/override-form.ts
+// 见 B1 拆分计划:零行为变更,只是模块化
 
 // 格式化流量
-function formatTraffic(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(2)} KB`
-  if (bytes < 1024 * 1024 * 1024)
-    return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-}
-
-// 格式化流量为GB（用于外部订阅显示）
-function formatTrafficGB(bytes: number): string {
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-}
-
 function SubscribeFilesPage() {
   const { t } = useTranslation('subscribe')
   const { auth } = useAuthStore()
   const queryClient = useQueryClient()
   const navigate = useNavigate()
+  const { data: profileInfo } = useQuery({
+    queryKey: ['profile'],
+    queryFn: profileQueryFn,
+    enabled: Boolean(auth.accessToken),
+    staleTime: 5 * 60 * 1000,
+  })
+  const isAdmin = Boolean(profileInfo?.is_admin)
   const isMobile = useMediaQuery('(max-width: 640px)')
 
   // 获取代理组配置
@@ -484,12 +258,6 @@ function SubscribeFilesPage() {
   const [editingConfigFile, setEditingConfigFile] =
     useState<SubscribeFile | null>(null)
 
-  // 过期时间Popover状态
-  const [expirePopoverFileId, setExpirePopoverFileId] = useState<number | null>(
-    null
-  )
-  const [customDateFileId, setCustomDateFileId] = useState<number | null>(null)
-
   // 编辑节点Dialog状态
   const [editNodesDialogOpen, setEditNodesDialogOpen] = useState(false)
   const [editingNodesFile, setEditingNodesFile] =
@@ -506,6 +274,8 @@ function SubscribeFilesPage() {
 
   // 编辑配置状态
   const [configContent, setConfigContent] = useState('')
+
+  // 流量统计范围抽屉(管理员点订阅"流量"列触发)
 
   // 缺失节点替换对话框状态
   const [missingNodesDialogOpen, setMissingNodesDialogOpen] = useState(false)
@@ -545,7 +315,15 @@ function SubscribeFilesPage() {
     name: '',
     description: '',
     filename: '',
-    expire: undefined as Date | undefined,
+    template_filename: '',
+    selected_tags: [] as string[],
+    selected_node_ids: [] as number[],
+    selected_custom_rule_ids: [] as number[],
+    selected_override_script_ids: [] as number[],
+    stats_server_ids: '',
+    traffic_limit: '' as string,
+    custom_short_code: '',
+    raw_output: false,
   })
 
   // 外部订阅卡片折叠状态 - 默认折叠
@@ -620,307 +398,82 @@ function SubscribeFilesPage() {
   const [previewLoading, setPreviewLoading] = useState(false)
   const [previewConfigName, setPreviewConfigName] = useState('')
 
-  // 获取订阅文件列表
-  const { data: filesData, isLoading } = useQuery({
-    queryKey: ['subscribe-files'],
-    queryFn: async () => {
-      const response = await api.get('/api/admin/subscribe-files')
-      return response.data as { files: SubscribeFile[] }
-    },
-    enabled: Boolean(auth.accessToken),
-  })
-
-  const files = filesData?.files ?? []
-
-  // 获取外部订阅列表
-  const { data: externalSubsData, isLoading: isExternalSubsLoading } = useQuery(
-    {
-      queryKey: ['external-subscriptions'],
-      queryFn: async () => {
-        const response = await api.get('/api/user/external-subscriptions')
-        return response.data as ExternalSubscription[]
-      },
-      enabled: Boolean(auth.accessToken),
-    }
-  )
-
-  const externalSubs = externalSubsData ?? []
-
-  // 获取用户订阅 token（用于代理集合 MMW 模式）
-  const { data: userTokenData } = useQuery({
-    queryKey: ['user-token'],
-    queryFn: async () => {
-      const response = await api.get('/api/user/token')
-      return response.data as { token: string }
-    },
-    enabled: Boolean(auth.accessToken),
-  })
-  const userToken = userTokenData?.token ?? ''
-
-  // 获取用户设置（用于判断是否显示代理集合）
-  const { data: userConfigData } = useQuery({
-    queryKey: ['user-config'],
-    queryFn: async () => {
-      const response = await api.get('/api/user/config')
-      return response.data as { enable_proxy_provider: boolean }
-    },
-    enabled: Boolean(auth.accessToken),
-  })
-  const enableProxyProvider = userConfigData?.enable_proxy_provider ?? false
-
-  // 获取代理集合配置列表（仅在启用时查询）
+  // 订阅文件:list query + 7 个 mutation,聚合到 hook,见 ./subscribe-files/hooks/use-subscribe-files
   const {
-    data: proxyProviderConfigsData,
-    isLoading: isProxyProviderConfigsLoading,
-  } = useQuery({
-    queryKey: ['proxy-provider-configs'],
-    queryFn: async () => {
-      const response = await api.get('/api/user/proxy-provider-configs')
-      return response.data as ProxyProviderConfig[]
-    },
-    enabled: Boolean(auth.accessToken && enableProxyProvider),
-  })
-  const proxyProviderConfigs = proxyProviderConfigsData ?? []
-
-  // 获取所有节点（用于在外部订阅卡片中显示节点名称）
-  const { data: allNodesData } = useQuery({
-    queryKey: ['all-nodes-with-tags'],
-    queryFn: async () => {
-      const response = await api.get('/api/admin/nodes')
-      return response.data as {
-        nodes: Array<{ id: number; node_name: string; tag: string }>
-      }
-    },
-    enabled: Boolean(auth.accessToken && isExternalSubsExpanded),
-  })
-
-  // 按 tag 分组的节点名称
-  const nodesByTag = useMemo(() => {
-    const nodes = allNodesData?.nodes ?? []
-    const grouped: Record<string, string[]> = {}
-    for (const node of nodes) {
-      if (!grouped[node.tag]) {
-        grouped[node.tag] = []
-      }
-      grouped[node.tag].push(node.node_name)
-    }
-    return grouped
-  }, [allNodesData])
-
-  // 导入订阅
-  const importMutation = useMutation({
-    mutationFn: async (data: typeof importForm) => {
-      const response = await api.post('/api/admin/subscribe-files/import', data)
-      return response.data
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['subscribe-files'] })
-      queryClient.invalidateQueries({ queryKey: ['user-subscriptions'] })
-      toast.success(t('toast.importSuccess'))
+    files,
+    isLoading,
+    importMutation,
+    uploadMutation,
+    deleteMutation,
+    updateMetadataMutation,
+    inlineUpdateMutation,
+    reorderMutation,
+    toggleAutoSyncMutation,
+  } = useSubscribeFiles({
+    enabled: Boolean(auth.accessToken),
+    onImportSuccess: () => {
       setImportDialogOpen(false)
       setImportForm({ name: '', description: '', url: '', filename: '' })
     },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.error || t('toast.importFailed'))
-    },
-  })
-
-  // 上传文件
-  const uploadMutation = useMutation({
-    mutationFn: async () => {
-      if (!uploadFile) {
-        throw new Error(t('toast.selectFile'))
-      }
-
-      const formData = new FormData()
-      formData.append('file', uploadFile)
-      formData.append('name', uploadForm.name || uploadFile.name)
-      formData.append('description', uploadForm.description)
-      formData.append('filename', uploadForm.filename || uploadFile.name)
-
-      const response = await api.post(
-        '/api/admin/subscribe-files/upload',
-        formData,
-        {
-          headers: {
-            'Content-Type': 'multipart/form-data',
-          },
-        }
-      )
-      return response.data
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['subscribe-files'] })
-      queryClient.invalidateQueries({ queryKey: ['user-subscriptions'] })
-      toast.success(t('toast.uploadSuccess'))
+    onUploadSuccess: () => {
       setUploadDialogOpen(false)
       setUploadForm({ name: '', description: '', filename: '' })
       setUploadFile(null)
     },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.error || t('toast.uploadFailed'))
-    },
-  })
-
-  // 删除订阅
-  const deleteMutation = useMutation({
-    mutationFn: async (id: number) => {
-      await api.delete(`/api/admin/subscribe-files/${id}`)
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['subscribe-files'] })
-      queryClient.invalidateQueries({ queryKey: ['user-subscriptions'] })
-      toast.success(t('toast.deleteSuccess'))
-    },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.error || t('toast.deleteFailed'))
-    },
-  })
-
-  // 更新订阅元数据
-  const updateMetadataMutation = useMutation({
-    mutationFn: async (payload: { id: number; data: typeof metadataForm }) => {
-      const response = await api.put(
-        `/api/admin/subscribe-files/${payload.id}`,
-        payload.data
-      )
-      return response.data
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['subscribe-files'] })
-      queryClient.invalidateQueries({ queryKey: ['user-subscriptions'] })
-      toast.success(t('toast.updateSuccess'))
+    onMetadataUpdateSuccess: () => {
       setEditMetadataDialogOpen(false)
       setEditingMetadata(null)
-      setMetadataForm({ name: '', description: '', filename: '' })
-    },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.error || t('toast.updateFailed'))
-    },
-  })
-
-  // 删除外部订阅
-  const deleteExternalSubMutation = useMutation({
-    mutationFn: async (id: number) => {
-      await api.delete(`/api/user/external-subscriptions?id=${id}`)
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['external-subscriptions'] })
-      queryClient.invalidateQueries({ queryKey: ['traffic-summary'] })
-      toast.success(t('toast.externalSubDeleted'))
-    },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.error || t('toast.deleteFailed'))
-    },
-  })
-
-  // 更新外部订阅
-  const updateExternalSubMutation = useMutation({
-    mutationFn: async (data: {
-      id: number
-      name: string
-      url: string
-      user_agent: string
-      traffic_mode: string
-    }) => {
-      await api.put(`/api/user/external-subscriptions?id=${data.id}`, {
-        name: data.name,
-        url: data.url,
-        user_agent: data.user_agent,
-        traffic_mode: data.traffic_mode,
+      setMetadataForm({
+        name: '',
+        description: '',
+        filename: '',
+        template_filename: '',
+        selected_tags: [],
+        selected_node_ids: [],
+        selected_custom_rule_ids: [],
+        selected_override_script_ids: [],
+        stats_server_ids: '',
+        traffic_limit: '',
+        custom_short_code: '',
+        raw_output: false,
       })
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['external-subscriptions'] })
-      queryClient.invalidateQueries({ queryKey: ['traffic-summary'] })
-      toast.success(t('toast.externalSubUpdated'))
-    },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.error || t('toast.updateFailed'))
-    },
   })
 
-  // 同步外部订阅
-  const syncExternalSubsMutation = useMutation({
-    mutationFn: async () => {
-      const response = await api.post('/api/admin/sync-external-subscriptions')
-      return response.data
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['external-subscriptions'] })
-      queryClient.invalidateQueries({ queryKey: ['nodes'] })
-      queryClient.invalidateQueries({ queryKey: ['traffic-summary'] })
-      toast.success(t('toast.externalSubSynced'))
-    },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.error || t('toast.syncFailed'))
-    },
-  })
+  // 外部订阅:列表 + 4 个 mutation + 单个同步进行中 id,聚合到 hook,见 ./subscribe-files/hooks/use-external-subs
+  const {
+    externalSubs,
+    isLoading: isExternalSubsLoading,
+    syncingSingleId,
+    deleteMutation: deleteExternalSubMutation,
+    updateMutation: updateExternalSubMutation,
+    syncAllMutation: syncExternalSubsMutation,
+    syncSingleMutation: syncSingleExternalSubMutation,
+  } = useExternalSubs({ enabled: Boolean(auth.accessToken) })
 
-  // 同步单个外部订阅
-  const [syncingSingleId, setSyncingSingleId] = useState<number | null>(null)
-  const syncSingleExternalSubMutation = useMutation({
-    mutationFn: async (id: number) => {
-      setSyncingSingleId(id)
-      const response = await api.post(
-        `/api/admin/sync-external-subscription?id=${id}`
-      )
-      return response.data
-    },
-    onSuccess: (data: any) => {
-      queryClient.invalidateQueries({ queryKey: ['external-subscriptions'] })
-      queryClient.invalidateQueries({ queryKey: ['nodes'] })
-      queryClient.invalidateQueries({ queryKey: ['all-nodes-with-tags'] })
-      queryClient.invalidateQueries({ queryKey: ['traffic-summary'] })
-      toast.success(data.message || t('toast.subscriptionSynced'))
-      setSyncingSingleId(null)
-    },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.error || t('toast.syncFailed'))
-      setSyncingSingleId(null)
-    },
-  })
+  // 用户元信息(token + custom short code + user-config)聚合到 hook,见 ./subscribe-files/hooks/use-user-meta
+  const {
+    userToken,
+    myUserShortCode,
+    myCustomUserShortCode,
+    updateShortCodeMutation: updateMyShortCodeMutation,
+    enableProxyProvider,
+  } = useUserMeta({ enabled: Boolean(auth.accessToken) })
 
-  // 创建代理集合配置
-  const createProxyProviderMutation = useMutation({
-    mutationFn: async (data: {
-      external_subscription_id: number
-      name: string
-      type: string
-      interval: number
-      proxy: string
-      size_limit: number
-      header: string
-      health_check_enabled: boolean
-      health_check_url: string
-      health_check_interval: number
-      health_check_timeout: number
-      health_check_lazy: boolean
-      health_check_expected_status: number
-      filter: string
-      exclude_filter: string
-      exclude_type: string
-      override: string
-      process_mode: string
-    }) => {
-      const response = await api.post('/api/user/proxy-provider-configs', data)
-      // 如果是 MMW 模式，触发缓存刷新
-      if (data.process_mode === 'mmw' && response.data?.id) {
-        try {
-          await api.post(
-            `/api/user/proxy-provider-cache/refresh?id=${response.data.id}`
-          )
-        } catch (e) {
-          console.warn('缓存刷新失败:', e)
-        }
-      }
-      return response.data
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['proxy-provider-configs'] })
-      toast.success(t('toast.proxyProviderCreated'))
+  // 代理集合配置:list query + 5 个 mutation,聚合到 hook,见 ./subscribe-files/hooks/use-proxy-providers
+  const {
+    configs: proxyProviderConfigs,
+    isLoading: isProxyProviderConfigsLoading,
+    createMutation: createProxyProviderMutation,
+    updateMutation: updateProxyProviderMutation,
+    deleteMutation: deleteProxyProviderMutation,
+    batchDeleteMutation: batchDeleteProxyProviderMutation,
+    toggleProcessModeMutation,
+  } = useProxyProviders({
+    enabled: Boolean(auth.accessToken && enableProxyProvider),
+    onCreateSuccess: () => {
       setProxyProviderDialogOpen(false)
-      // 重置表单
+      // 创建后重置 form
       setProxyProviderForm({
         name: '',
         type: 'http',
@@ -942,97 +495,56 @@ function SubscribeFilesPage() {
         process_mode: 'client',
       })
     },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.error || t('toast.createFailed'))
-    },
-  })
-
-  // 更新代理集合配置
-  const updateProxyProviderMutation = useMutation({
-    mutationFn: async (data: {
-      id: number
-      name: string
-      type: string
-      interval: number
-      proxy: string
-      size_limit: number
-      header: string
-      health_check_enabled: boolean
-      health_check_url: string
-      health_check_interval: number
-      health_check_timeout: number
-      health_check_lazy: boolean
-      health_check_expected_status: number
-      filter: string
-      exclude_filter: string
-      exclude_type: string
-      override: string
-      process_mode: string
-    }) => {
-      const response = await api.put(
-        `/api/user/proxy-provider-configs?id=${data.id}`,
-        data
-      )
-      // 如果是 MMW 模式，触发缓存刷新
-      if (data.process_mode === 'mmw') {
-        try {
-          await api.post(`/api/user/proxy-provider-cache/refresh?id=${data.id}`)
-        } catch (e) {
-          console.warn('缓存刷新失败:', e)
-        }
-      }
-      return response.data
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['proxy-provider-configs'] })
-      toast.success(t('toast.proxyProviderUpdated'))
+    onUpdateSuccess: () => {
       setProxyProviderDialogOpen(false)
       setEditingProxyProvider(null)
     },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.error || t('toast.updateFailed'))
+    onBatchDeleteDone: () => {
+      setSelectedProxyProviderIds(new Set())
+      setBatchDeleteDialogOpen(false)
     },
   })
 
-  // 删除代理集合配置
-  const deleteProxyProviderMutation = useMutation({
-    mutationFn: async (id: number) => {
-      await api.delete(`/api/user/proxy-provider-configs?id=${id}`)
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['proxy-provider-configs'] })
-      toast.success(t('toast.proxyProviderDeleted'))
-    },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.error || t('toast.deleteFailed'))
-    },
+  // 全部节点 + 按 tag 分组,见 ./subscribe-files/hooks/use-all-nodes
+  // 编辑元数据 dialog + 列表行内"选择节点" Popover 都需要全节点 — 直接在登录后常驻拉(数据量小)
+  const { allNodesData, allNodesLoaded, nodesByTag } = useAllNodes({
+    enabled: Boolean(auth.accessToken),
   })
 
-  // 批量删除代理集合配置
-  const batchDeleteProxyProviderMutation = useMutation({
-    mutationFn: async (ids: number[]) => {
-      // 并行删除所有选中的配置
-      const results = await Promise.allSettled(
-        ids.map((id) => api.delete(`/api/user/proxy-provider-configs?id=${id}`))
-      )
-      const failed = results.filter((r) => r.status === 'rejected').length
-      if (failed > 0) {
-        throw new Error(t('toast.configDeleteFailed', { count: failed }))
-      }
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['proxy-provider-configs'] })
-      setSelectedProxyProviderIds(new Set())
-      setBatchDeleteDialogOpen(false)
-      toast.success(t('toast.batchDeleteSuccess'))
-    },
-    onError: (error: any) => {
-      queryClient.invalidateQueries({ queryKey: ['proxy-provider-configs'] })
-      setSelectedProxyProviderIds(new Set())
-      setBatchDeleteDialogOpen(false)
-      toast.error(error.message || t('toast.batchDeleteFailed'))
-    },
-  })
+  // 6 个支持数据 query(下拉候选 + 流量统计)聚合到 hook,见 ./subscribe-files/hooks/use-support-data
+  const {
+    templates: templatesData,
+    nodeTags: nodeTagsData,
+    remoteServersRaw: remoteServersData,
+    customRules: customRulesList,
+    overrideScripts: overrideScriptsList,
+    traffic: trafficData,
+    isTrafficLoading,
+  } = useSupportData()
+
+  // 导入订阅
+  // ↑ 7 个订阅文件 mutation 已搬到 ./subscribe-files/hooks/use-subscribe-files
+
+  const handleMoveUp = (file: SubscribeFile) => {
+    const idx = files.findIndex((f) => f.id === file.id)
+    if (idx <= 0) return
+    const ids = files.map((f) => f.id)
+    ;[ids[idx - 1], ids[idx]] = [ids[idx], ids[idx - 1]]
+    reorderMutation.mutate(ids)
+  }
+
+  const handleMoveDown = (file: SubscribeFile) => {
+    const idx = files.findIndex((f) => f.id === file.id)
+    if (idx < 0 || idx >= files.length - 1) return
+    const ids = files.map((f) => f.id)
+    ;[ids[idx], ids[idx + 1]] = [ids[idx + 1], ids[idx]]
+    reorderMutation.mutate(ids)
+  }
+
+  // ↑ 4 个外部订阅 mutation + syncingSingleId 已搬到 ./subscribe-files/hooks/use-external-subs
+
+  // 创建代理集合配置
+  // 上面 5 个代理集合 mutation 已搬到 ./subscribe-files/hooks/use-proxy-providers
 
   // 过滤后的代理集合配置列表
   const filteredProxyProviderConfigs = useMemo(() => {
@@ -1068,260 +580,33 @@ function SubscribeFilesPage() {
     })
   }
 
-  // 快速切换代理集合处理模式
-  const toggleProcessModeMutation = useMutation({
-    mutationFn: async (config: ProxyProviderConfig) => {
-      const newMode = config.process_mode === 'mmw' ? 'client' : 'mmw'
-      await api.put(`/api/user/proxy-provider-configs?id=${config.id}`, {
-        ...config,
-        process_mode: newMode,
-      })
-      return newMode
-    },
-    onSuccess: (newMode) => {
-      queryClient.invalidateQueries({ queryKey: ['proxy-provider-configs'] })
-      toast.success(
-        newMode === 'mmw' ? t('toast.switchedToMmw') : t('toast.switchedToClient')
-      )
-    },
-    onError: (error: any) => {
-      toast.error(error.response?.data?.error || t('toast.switchFailed'))
-    },
-  })
+  // toggleProcessModeMutation 已搬到 ./subscribe-files/hooks/use-proxy-providers
 
-  // 批量创建代理集合 - 按地域
-  // 使用 MMW 模式以支持 GeoIP 匹配
-  const handleBatchCreateByRegion = async () => {
-    if (!proSelectedExternalSub) {
-      toast.error(t('toast.selectExternalSub'))
-      return
-    }
-    if (!proNamePrefix.trim()) {
-      toast.error(t('toast.enterNamePrefix'))
-      return
-    }
+  // 批量创建代理集合(按地域 / 按协议)— 实现搬到 ./subscribe-files/utils/batch-create-providers
+  const handleBatchCreateByRegion = () =>
+    batchCreateByRegion({
+      selectedExternalSub: proSelectedExternalSub,
+      namePrefix: proNamePrefix,
+      enableGeoIPMatching,
+      setCreating: setProCreatingRegion,
+      setResults: setProCreationResults,
+      setNamePrefix: setProNamePrefix,
+      invalidateProviders: () =>
+        queryClient.invalidateQueries({ queryKey: ['proxy-provider-configs'] }),
+      t,
+    })
 
-    setProCreatingRegion(true)
-    setProCreationResults([])
-    const results: Array<{
-      name: string
-      success: boolean
-      error?: string
-      skipped?: boolean
-    }> = []
-    const prefix = proNamePrefix.trim()
-
-    // 先获取外部订阅的节点名称列表（仅用于非 GeoIP 模式）
-    let nodeNames: string[] = []
-    if (!enableGeoIPMatching) {
-      try {
-        const response = await api.get(
-          `/api/user/external-subscriptions/nodes?id=${proSelectedExternalSub.id}`
-        )
-        nodeNames = response.data.node_names || []
-      } catch (error: any) {
-        toast.error(
-          t('toast.getNodeListFailed') + (error.response?.data?.error || error.message)
-        )
-        setProCreatingRegion(false)
-        return
-      }
-
-      if (nodeNames.length === 0) {
-        toast.error(t('toast.noNodesInSub'))
-        setProCreatingRegion(false)
-        return
-      }
-    }
-
-    // 检查每个地区是否有匹配的节点（仅用于非 GeoIP 模式的前端检查）
-    const checkRegionHasNodesLocal = (
-      filter: string,
-      excludeFilter?: string
-    ): boolean => {
-      if (!filter && !excludeFilter) return true // 无过滤条件，认为有节点
-
-      let matchedNodes = nodeNames
-
-      // 应用 filter（包含过滤）- 区分大小写
-      if (filter) {
-        const filterRegex = new RegExp(filter)
-        matchedNodes = matchedNodes.filter((name) => filterRegex.test(name))
-      }
-
-      // 应用 excludeFilter（排除过滤）- 区分大小写
-      if (excludeFilter) {
-        const excludeRegex = new RegExp(excludeFilter)
-        matchedNodes = matchedNodes.filter((name) => !excludeRegex.test(name))
-      }
-
-      return matchedNodes.length > 0
-    }
-
-    // 检查是否有匹配的节点（GeoIP 模式使用后端 API）
-    const checkRegionHasNodes = async (
-      filter: string,
-      excludeFilter?: string,
-      geoIPFilter?: string
-    ): Promise<boolean> => {
-      // 如果开启 GeoIP 匹配，调用后端 API 检查（后端会同时检查正则和 IP 地域）
-      if (enableGeoIPMatching) {
-        try {
-          const response = await api.post(
-            '/api/user/external-subscriptions/check-filter',
-            {
-              subscription_id: proSelectedExternalSub.id,
-              filter: filter || '',
-              exclude_filter: excludeFilter || '',
-              geo_ip_filter: geoIPFilter || '',
-            }
-          )
-          return response.data.match_count > 0
-        } catch (error) {
-          // 如果 API 调用失败，默认不创建该地区（保守处理）
-          console.error('检查过滤器失败:', error)
-          return false
-        }
-      }
-
-      // 非 GeoIP 模式，使用前端检查
-      return checkRegionHasNodesLocal(filter, excludeFilter)
-    }
-
-    let skippedCount = 0
-    for (const region of REGION_CONFIGS) {
-      const providerName = `${prefix}-${region.emoji}${region.name}`
-
-      // 检查该地区是否有匹配的节点
-      const geoIPFilter = enableGeoIPMatching ? region.countryCode || '' : ''
-      const hasNodes = await checkRegionHasNodes(
-        region.filter,
-        region.excludeFilter,
-        geoIPFilter
-      )
-      if (!hasNodes) {
-        results.push({
-          name: providerName,
-          success: false,
-          skipped: true,
-          error: t('proxyProvider.basicDialog.noMatchNodes'),
-        })
-        skippedCount++
-        setProCreationResults([...results])
-        continue
-      }
-
-      try {
-        await api.post('/api/user/proxy-provider-configs', {
-          external_subscription_id: proSelectedExternalSub.id,
-          name: providerName,
-          type: 'http',
-          interval: 3600,
-          proxy: 'DIRECT',
-          size_limit: 0,
-          header: JSON.stringify({ 'User-Agent': ['Clash/v1.18.0'] }),
-          health_check_enabled: true,
-          health_check_url: 'https://www.gstatic.com/generate_204',
-          health_check_interval: 300,
-          health_check_timeout: 5000,
-          health_check_lazy: true,
-          health_check_expected_status: 204,
-          filter: region.filter || '',
-          exclude_filter: region.excludeFilter || '',
-          exclude_type: '',
-          geo_ip_filter: enableGeoIPMatching ? region.countryCode || '' : '', // GeoIP 过滤（仅开启时生效）
-          override: '',
-          process_mode: 'mmw', // 使用 MMW 模式以支持 GeoIP 匹配
-        })
-        results.push({ name: providerName, success: true })
-      } catch (error: any) {
-        results.push({
-          name: providerName,
-          success: false,
-          error: error.response?.data?.error || t('toast.createFailed'),
-        })
-      }
-      // 更新结果以显示进度
-      setProCreationResults([...results])
-    }
-
-    setProCreatingRegion(false)
-    queryClient.invalidateQueries({ queryKey: ['proxy-provider-configs'] })
-
-    const successCount = results.filter((r) => r.success).length
-    const failedCount = results.filter((r) => !r.success && !r.skipped).length
-    if (skippedCount > 0) {
-      toast.success(
-        t('toast.creationComplete', { success: successCount, skipped: skippedCount, failed: failedCount })
-      )
-    } else {
-      toast.success(t('toast.creationCompleteSimple', { success: successCount, total: results.length }))
-    }
-    // 清空{t('proxyProvider.dialog.namePrefix')}
-    setProNamePrefix('')
-  }
-
-  // 批量创建代理集合 - 按协议
-  // 使用 MMW 模式（妙妙屋处理）
-  const handleBatchCreateByProtocol = async () => {
-    if (!proSelectedExternalSub) {
-      toast.error(t('toast.selectExternalSub'))
-      return
-    }
-    if (!proNamePrefix.trim()) {
-      toast.error(t('toast.enterNamePrefix'))
-      return
-    }
-
-    setProCreatingProtocol(true)
-    setProCreationResults([])
-    const results: Array<{ name: string; success: boolean; error?: string }> =
-      []
-    const prefix = proNamePrefix.trim()
-
-    for (const protocol of PROTOCOL_CONFIGS) {
-      const providerName = `${prefix}-${protocol.name}`
-      try {
-        await api.post('/api/user/proxy-provider-configs', {
-          external_subscription_id: proSelectedExternalSub.id,
-          name: providerName,
-          type: 'http',
-          interval: 3600,
-          proxy: 'DIRECT',
-          size_limit: 0,
-          header: JSON.stringify({ 'User-Agent': ['Clash/v1.18.0'] }),
-          health_check_enabled: true,
-          health_check_url: 'https://www.gstatic.com/generate_204',
-          health_check_interval: 300,
-          health_check_timeout: 5000,
-          health_check_lazy: true,
-          health_check_expected_status: 204,
-          filter: '',
-          exclude_filter: '',
-          exclude_type: protocol.excludeType,
-          override: '',
-          process_mode: 'mmw', // 使用 MMW 模式（妙妙屋处理）
-        })
-        results.push({ name: providerName, success: true })
-      } catch (error: any) {
-        results.push({
-          name: providerName,
-          success: false,
-          error: error.response?.data?.error || t('toast.createFailed'),
-        })
-      }
-      // 更新结果以显示进度
-      setProCreationResults([...results])
-    }
-
-    setProCreatingProtocol(false)
-    queryClient.invalidateQueries({ queryKey: ['proxy-provider-configs'] })
-
-    const successCount = results.filter((r) => r.success).length
-    toast.success(t('toast.creationCompleteSimple', { success: successCount, total: results.length }))
-    // 清空{t('proxyProvider.dialog.namePrefix')}
-    setProNamePrefix('')
-  }
+  const handleBatchCreateByProtocol = () =>
+    batchCreateByProtocol({
+      selectedExternalSub: proSelectedExternalSub,
+      namePrefix: proNamePrefix,
+      setCreating: setProCreatingProtocol,
+      setResults: setProCreationResults,
+      setNamePrefix: setProNamePrefix,
+      invalidateProviders: () =>
+        queryClient.invalidateQueries({ queryKey: ['proxy-provider-configs'] }),
+      t,
+    })
 
   // 预览妙妙屋处理后的配置
   const handlePreviewProxyProvider = async (config: ProxyProviderConfig) => {
@@ -1443,52 +728,8 @@ function SubscribeFilesPage() {
     return dumpYAML(yamlObj, { indent: 2, lineWidth: -1 })
   }
 
-  // 获取文件内容
-  const fileContentQuery = useQuery({
-    queryKey: ['rule-file', editingFile?.filename],
-    queryFn: async () => {
-      if (!editingFile) return null
-      const response = await api.get(
-        `/api/admin/rules/${encodeURIComponent(editingFile.filename)}`
-      )
-      return response.data as {
-        name: string
-        content: string
-        latest_version: number
-      }
-    },
-    enabled: Boolean(editingFile && auth.accessToken),
-    refetchOnWindowFocus: false,
-  })
-
-  // 查询配置文件内容（编辑配置用）
-  const configFileContentQuery = useQuery({
-    queryKey: ['subscribe-file-content', editingConfigFile?.filename],
-    queryFn: async () => {
-      if (!editingConfigFile) return null
-      const response = await api.get(
-        `/api/admin/subscribe-files/${encodeURIComponent(editingConfigFile.filename)}/content`
-      )
-      return response.data as { content: string }
-    },
-    enabled: Boolean(editingConfigFile && auth.accessToken),
-    refetchOnWindowFocus: false,
-  })
-
-  // 查询节点列表（编辑节点用）
-  const nodesQuery = useQuery({
-    queryKey: ['nodes'],
-    queryFn: async () => {
-      const response = await api.get('/api/admin/nodes')
-      return response.data as {
-        nodes: Array<{ id: number; node_name: string }>
-      }
-    },
-    enabled: Boolean(editNodesDialogOpen && auth.accessToken),
-    refetchOnWindowFocus: false,
-  })
-
   // 获取用户配置（包含节点排序）
+  // 注意: 与 useUserMeta 共享 queryKey ['user-config']，但这里读的字段更多（node_order/match_rule 等）
   const userConfigQuery = useQuery({
     queryKey: ['user-config'],
     queryFn: async () => {
@@ -1504,92 +745,35 @@ function SubscribeFilesPage() {
     enabled: Boolean(auth.accessToken),
   })
 
-  // 查询配置文件内容（编辑节点用）
-  const nodesConfigQuery = useQuery({
-    queryKey: ['nodes-config-content', editingNodesFile?.filename],
-    queryFn: async () => {
-      if (!editingNodesFile) return null
-      const response = await api.get(
-        `/api/admin/subscribe-files/${encodeURIComponent(editingNodesFile.filename)}/content`
-      )
-      return response.data as { content: string }
-    },
-    enabled: Boolean(editingNodesFile && auth.accessToken),
-    refetchOnWindowFocus: false,
-  })
-
-  // 保存文件
-  const saveMutation = useMutation({
-    mutationFn: async (payload: { file: string; content: string }) => {
-      const response = await api.put(
-        `/api/admin/rules/${encodeURIComponent(payload.file)}`,
-        {
-          content: payload.content,
-        }
-      )
-      return response.data as { version: number }
-    },
-    onSuccess: () => {
-      toast.success(t('toast.ruleSaved'))
+  // 节点编辑工作流: 5 queries + 2 mutations
+  const {
+    fileContentQuery,
+    configFileContentQuery,
+    nodesQuery,
+    nodesConfigQuery,
+    saveMutation,
+    saveConfigMutation,
+  } = useNodeEditWorkflow({
+    enabled: Boolean(auth.accessToken),
+    editingFile,
+    editingConfigFile,
+    editingNodesFile,
+    editNodesDialogOpen,
+    onSaveSuccess: () => {
       setIsDirty(false)
       setValidationError(null)
-      queryClient.invalidateQueries({
-        queryKey: ['rule-file', editingFile?.filename],
-      })
-      // 关闭编辑对话框
       setEditDialogOpen(false)
       setEditingFile(null)
       setEditorValue('')
     },
-    onError: (error) => {
-      handleServerError(error)
-    },
-  })
-
-  // 保存配置文件内容
-  const saveConfigMutation = useMutation({
-    mutationFn: async (payload: { filename: string; content: string }) => {
-      const response = await api.put(
-        `/api/admin/subscribe-files/${encodeURIComponent(payload.filename)}/content`,
-        {
-          content: payload.content,
-        }
-      )
-      return response.data
-    },
-    onSuccess: () => {
-      toast.success(t('toast.configSaved'))
-      queryClient.invalidateQueries({
-        queryKey: ['subscribe-file-content', editingConfigFile?.filename],
-      })
-      queryClient.invalidateQueries({ queryKey: ['subscribe-files'] })
+    onSaveConfigSuccess: () => {
       setEditConfigDialogOpen(false)
       setEditingConfigFile(null)
       setConfigContent('')
     },
-    onError: (error) => {
-      handleServerError(error)
-    },
   })
 
-  const toggleAutoSyncMutation = useMutation({
-    mutationFn: async (payload: { id: number; enabled: boolean }) => {
-      const response = await api.patch(
-        `/api/admin/subscribe-files/${payload.id}`,
-        {
-          auto_sync_custom_rules: payload.enabled,
-        }
-      )
-      return response.data
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['subscribe-files'] })
-      toast.success(t('toast.syncSettingUpdated'))
-    },
-    onError: (error) => {
-      handleServerError(error)
-    },
-  })
+  // toggleAutoSyncMutation 已搬到 ./subscribe-files/hooks/use-subscribe-files
 
   // 当文件内容加载完成时，更新编辑器
   useEffect(() => {
@@ -1693,7 +877,8 @@ function SubscribeFilesPage() {
       toast.error(t('toast.selectFile'))
       return
     }
-    uploadMutation.mutate()
+    // hook 化后 uploadMutation 的 mutationFn 显式接收 file + form,不再 closure 主页面 state
+    uploadMutation.mutate({ file: uploadFile, form: uploadForm })
   }
 
   const handleDelete = (id: number) => {
@@ -1706,7 +891,15 @@ function SubscribeFilesPage() {
       name: file.name,
       description: file.description,
       filename: file.filename,
-      expire: file.expire_at ? new Date(file.expire_at) : undefined,
+      template_filename: file.template_filename || '',
+      selected_tags: file.selected_tags || [],
+      selected_node_ids: file.selected_node_ids || [],
+      selected_custom_rule_ids: file.selected_custom_rule_ids || [],
+      selected_override_script_ids: file.selected_override_script_ids || [],
+      stats_server_ids: file.stats_server_ids || '',
+      traffic_limit: file.traffic_limit != null ? String(file.traffic_limit) : '',
+      custom_short_code: file.custom_short_code || '',
+      raw_output: file.raw_output || false,
     })
     setEditMetadataDialogOpen(true)
   }
@@ -1727,13 +920,16 @@ function SubscribeFilesPage() {
         name: metadataForm.name,
         description: metadataForm.description,
         filename: metadataForm.filename,
-        expire_at: metadataForm.expire
-          ? (() => {
-              const endOfDay = new Date(metadataForm.expire)
-              endOfDay.setHours(23, 59, 59, 999)
-              return endOfDay.toISOString()
-            })()
-          : '',
+        template_filename: metadataForm.template_filename,
+        // 提交时:节点选择模式(selected_node_ids 非空)清空 selected_tags;反之亦然(避免双重过滤)
+        selected_tags: metadataForm.selected_node_ids.length > 0 ? [] : metadataForm.selected_tags,
+        selected_node_ids: metadataForm.selected_node_ids,
+        selected_custom_rule_ids: metadataForm.selected_custom_rule_ids,
+        selected_override_script_ids: metadataForm.selected_override_script_ids,
+        stats_server_ids: metadataForm.stats_server_ids,
+        traffic_limit: metadataForm.traffic_limit ? parseFloat(metadataForm.traffic_limit) : null,
+        custom_short_code: metadataForm.custom_short_code,
+        raw_output: metadataForm.raw_output,
       },
     })
   }
@@ -2515,10 +1711,20 @@ function SubscribeFilesPage() {
   }
 
   // 计算可用节点
+  // 按 userConfig.node_order 排序,跟节点管理页保持一致(管理页里用户手动拖拽过的顺序);
+  // 没在 node_order 里的节点(新增的)排到后面,内部按 nodes 数组原顺序(后端默认 created_at DESC)。
   const availableNodes = useMemo(() => {
     if (!nodesQuery.data?.nodes) return []
 
-    const allNodeNames = nodesQuery.data.nodes.map((n) => n.node_name)
+    const nodeOrder = userConfigQuery.data?.node_order || []
+    const orderMap = new Map<number, number>()
+    nodeOrder.forEach((id, index) => orderMap.set(id, index))
+    const sortedNodes = [...nodesQuery.data.nodes].sort((a, b) => {
+      const ai = orderMap.get(a.id) ?? Number.POSITIVE_INFINITY
+      const bi = orderMap.get(b.id) ?? Number.POSITIVE_INFINITY
+      return ai - bi
+    })
+    const allNodeNames = sortedNodes.map((n) => n.node_name)
 
     if (showAllNodes) {
       return allNodeNames
@@ -2532,7 +1738,7 @@ function SubscribeFilesPage() {
 
     // 只返回未使用的节点
     return allNodeNames.filter((name) => !usedNodes.has(name))
-  }, [nodesQuery.data, proxyGroups, showAllNodes])
+  }, [nodesQuery.data, proxyGroups, showAllNodes, userConfigQuery.data?.node_order])
 
   // 处理编辑节点对话框关闭
   const handleEditNodesDialogOpenChange = (open: boolean) => {
@@ -2725,2004 +1931,309 @@ function SubscribeFilesPage() {
           </div>
         </div>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>{t('management.fileList.title')} ({files.length})</CardTitle>
-            <CardDescription>{t('management.fileList.description')}</CardDescription>
-          </CardHeader>
-          <CardContent>
-            {isLoading ? (
-              <div className='text-muted-foreground py-8 text-center'>
-                {t('actions.loading', { ns: 'common' })}
-              </div>
-            ) : files.length === 0 ? (
-              <div className='text-muted-foreground py-8 text-center'>
-                {t('management.noFilesHint')}
-              </div>
-            ) : (
-              <DataTable
-                data={files}
-                getRowKey={(file) => file.id}
-                emptyText={t('management.noFilesHint')}
-                columns={
-                  [
-                    {
-                      header: t('management.fileList.subscriptionName'),
-                      cell: (file) => (
-                        <div className='flex flex-wrap items-center gap-2'>
-                          <Badge
-                            variant='outline'
-                            className={TYPE_COLORS[file.type]}
-                          >
-                            {t(`management.typeLabels.${file.type}`)}
-                          </Badge>
-                          <span className='font-medium'>{file.name}</span>
-                          {file.latest_version && (
-                            <Badge variant='secondary'>
-                              v{file.latest_version}
-                            </Badge>
-                          )}
-                        </div>
-                      ),
-                    },
-                    {
-                      header: t('management.fileList.descriptionCol'),
-                      cell: (file) =>
-                        file.description ? (
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <span className='text-muted-foreground block cursor-help truncate text-sm'>
-                                {file.description}
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent className='max-w-xs'>
-                              {file.description}
-                            </TooltipContent>
-                          </Tooltip>
-                        ) : (
-                          <span className='text-muted-foreground text-sm'>
-                            -
-                          </span>
-                        ),
-                      cellClassName: 'max-w-[200px]',
-                    },
-                    {
-                      header: t('management.fileList.lastUpdated'),
-                      cell: (file) => (
-                        <span className='text-muted-foreground text-sm whitespace-nowrap'>
-                          {file.updated_at
-                            ? dateFormatter.format(new Date(file.updated_at))
-                            : '-'}
-                        </span>
-                      ),
-                      width: '160px',
-                    },
-                    {
-                      header: t('management.fileList.expireDate'),
-                      cell: (file) => {
-                        const handleQuickExpire = (
-                          days: number | 'expired' | Date
-                        ) => {
-                          let newExpireAt: string | null = null
+        {/* 订阅文件列表 Card section — 拆到 ./subscribe-files/components/files-list-section */}
+        <FilesListSection
+          files={files}
+          loading={isLoading}
+          isAdmin={isAdmin}
+          trafficData={trafficData}
+          isTrafficLoading={isTrafficLoading}
+          myUserShortCode={myUserShortCode}
+          myCustomUserShortCode={myCustomUserShortCode}
+          templates={templatesData ?? []}
+          dateFormatter={dateFormatter}
+          onEditMetadata={handleEditMetadata}
+          onEditConfig={handleEditConfig}
+          onDelete={handleDelete}
+          onMoveUp={handleMoveUp}
+          onMoveDown={handleMoveDown}
+          onToggleAutoSync={handleToggleAutoSync}
+          trafficScopeServers={(remoteServersData?.servers ?? []).map((s: any) => ({ id: s.id, name: s.name }))}
+          savingTrafficScope={inlineUpdateMutation.isPending}
+          onSaveTrafficScope={(file, statsServerIds) => {
+            // 同原 drawer 逻辑:发完整 payload,只改 stats_server_ids,其它字段维持现状
+            inlineUpdateMutation.mutate({
+              id: file.id,
+              data: {
+                name: file.name,
+                description: (file as any).description || '',
+                filename: file.filename,
+                type: file.type,
+                url: (file as any).url || '',
+                template_filename: (file as any).template_filename || '',
+                selected_tags: (file as any).selected_tags || [],
+                selected_node_ids: (file as any).selected_node_ids || [],
+                selected_custom_rule_ids: (file as any).selected_custom_rule_ids || [],
+                selected_override_script_ids: (file as any).selected_override_script_ids || [],
+                stats_server_ids: statsServerIds,
+                // 透传原值:不强转 0,避免"原本 NULL/未设置"被 inline update 持久化成 0,导致流量计算被覆盖为 0。
+                traffic_limit: (file as any).traffic_limit,
+                custom_short_code: (file as any).custom_short_code || '',
+                raw_output: (file as any).raw_output ?? false,
+              },
+            })
+          }}
+          inlineUpdate={(payload) => inlineUpdateMutation.mutate(payload)}
+          updateUserShortCode={(value) => updateMyShortCodeMutation.mutate(value)}
+          updateMetadataPending={updateMetadataMutation.isPending}
+          deletePending={deleteMutation.isPending}
+          allNodes={(allNodesData?.nodes ?? []).map((n: any) => ({
+            id: n.id,
+            node_name: n.node_name,
+            protocol: n.protocol || '',
+            original_server: n.original_server || '',
+            tag: n.tag || '',
+          }))}
+          savingSelectedNodes={inlineUpdateMutation.isPending}
+          onSaveSelectedNodes={(file, nodeIds) => {
+            // 行内快捷"选择节点":发完整 payload,只改 selected_node_ids + 清空 selected_tags,其它字段维持现状
+            inlineUpdateMutation.mutate({
+              id: file.id,
+              data: {
+                name: file.name,
+                description: (file as any).description || '',
+                filename: file.filename,
+                type: file.type,
+                url: (file as any).url || '',
+                template_filename: file.template_filename || '',
+                selected_tags: [],
+                selected_node_ids: nodeIds,
+                selected_custom_rule_ids: (file as any).selected_custom_rule_ids || [],
+                selected_override_script_ids: (file as any).selected_override_script_ids || [],
+                stats_server_ids: (file as any).stats_server_ids || '',
+                traffic_limit: (file as any).traffic_limit,
+                custom_short_code: (file as any).custom_short_code || '',
+                raw_output: (file as any).raw_output ?? false,
+              },
+            })
+          }}
+        />
 
-                          if (days === 'expired') {
-                            newExpireAt = new Date().toISOString()
-                          } else if (days instanceof Date) {
-                            newExpireAt = days.toISOString()
-                          } else {
-                            const baseDate = file.expire_at
-                              ? new Date(file.expire_at)
-                              : new Date()
-                            newExpireAt = addDays(baseDate, days).toISOString()
-                          }
+        {/* 外部订阅 Card section — 拆到 ./subscribe-files/components/external-subs-section */}
+        <ExternalSubsSection
+          externalSubs={externalSubs}
+          loading={isExternalSubsLoading}
+          nodesByTag={nodesByTag}
+          allNodesLoaded={allNodesLoaded}
+          expanded={isExternalSubsExpanded}
+          onExpandedChange={setIsExternalSubsExpanded}
+          syncingSingleId={syncingSingleId}
+          dateFormatter={dateFormatter}
+          actions={{
+            syncAll: () => syncExternalSubsMutation.mutate(),
+            syncAllPending: syncExternalSubsMutation.isPending,
+            syncSingle: (id) => syncSingleExternalSubMutation.mutate(id),
+            update: (payload) => updateExternalSubMutation.mutate(payload),
+            updatePending: updateExternalSubMutation.isPending,
+            delete: (id) => deleteExternalSubMutation.mutate(id),
+            deletePending: deleteExternalSubMutation.isPending,
+          }}
+          onEdit={(sub, form) => {
+            setEditingExternalSub(sub)
+            setEditExternalSubForm(form)
+            setEditExternalSubDialogOpen(true)
+          }}
+        />
 
-                          updateMetadataMutation.mutate(
-                            {
-                              id: file.id,
-                              data: {
-                                name: file.name,
-                                description: file.description,
-                                auto_sync_custom_rules:
-                                  file.auto_sync_custom_rules,
-                                expire_at: newExpireAt,
-                              },
-                            },
-                            {
-                              onSuccess: () => {
-                                setExpirePopoverFileId(null)
-                                setCustomDateFileId(null)
-                                toast.success(t('management.fileList.expireUpdated'))
-                              },
-                            }
-                          )
-                        }
-
-                        const getExpirationStatus = () => {
-                          if (!file.expire_at) return null
-
-                          const expireDate = new Date(file.expire_at)
-
-                          // 先检查是否是今天过期
-                          if (isToday(expireDate)) {
-                            return {
-                              status: 'expiring',
-                              label: t('management.fileList.todayExpire'),
-                              className:
-                                'bg-yellow-500/10 text-yellow-700 dark:text-yellow-400',
-                            }
-                          }
-
-                          // 再检查是否已过期
-                          if (isPast(expireDate)) {
-                            return {
-                              status: 'expired',
-                              label: t('management.fileList.expired'),
-                              className:
-                                'bg-red-500/10 text-red-700 dark:text-red-400',
-                            }
-                          }
-
-                          // 计算剩余天数（使用日历天数）
-                          const daysRemaining = differenceInCalendarDays(
-                            expireDate,
-                            new Date()
-                          )
-
-                          if (daysRemaining <= 7) {
-                            return {
-                              status: 'expiring',
-                              label: t('management.fileList.daysRemaining', { days: daysRemaining }),
-                              className:
-                                'bg-yellow-500/10 text-yellow-700 dark:text-yellow-400',
-                            }
-                          }
-
-                          return {
-                            status: 'valid',
-                            label: format(expireDate, 'yyyy-MM-dd HH:mm'),
-                            className:
-                              'bg-green-500/10 text-green-700 dark:text-green-400',
-                          }
-                        }
-
-                        const expirationStatus = getExpirationStatus()
-
-                        return (
-                          <Popover
-                            open={expirePopoverFileId === file.id}
-                            onOpenChange={(open) =>
-                              setExpirePopoverFileId(open ? file.id : null)
-                            }
-                          >
-                            <PopoverTrigger asChild>
-                              <Button
-                                variant='ghost'
-                                size='sm'
-                                className='h-8 px-2 whitespace-nowrap'
-                              >
-                                {expirationStatus ? (
-                                  <Badge
-                                    variant='outline'
-                                    className={expirationStatus.className}
-                                  >
-                                    {expirationStatus.label}
-                                  </Badge>
-                                ) : (
-                                  <span className='text-muted-foreground text-sm'>
-                                    {t('management.fileList.notSet')}
-                                  </span>
-                                )}
-                              </Button>
-                            </PopoverTrigger>
-                            <PopoverContent
-                              className='w-auto p-2'
-                              align='start'
-                            >
-                              <div className='flex flex-col gap-2'>
-                                <Button
-                                  variant='outline'
-                                  size='sm'
-                                  onClick={() => handleQuickExpire(30)}
-                                  disabled={updateMetadataMutation.isPending}
-                                >
-                                  {t('management.fileList.extend30Days')}
-                                </Button>
-                                <Button
-                                  variant='outline'
-                                  size='sm'
-                                  onClick={() => handleQuickExpire('expired')}
-                                  disabled={updateMetadataMutation.isPending}
-                                >
-                                  {t('management.fileList.markExpired')}
-                                </Button>
-                                <Popover
-                                  open={customDateFileId === file.id}
-                                  onOpenChange={(open) =>
-                                    setCustomDateFileId(open ? file.id : null)
-                                  }
-                                >
-                                  <PopoverTrigger asChild>
-                                    <Button variant='outline' size='sm'>
-                                      <CalendarIcon className='mr-2 h-4 w-4' />
-                                      {t('management.fileList.selectTime')}
-                                    </Button>
-                                  </PopoverTrigger>
-                                  <PopoverContent
-                                    className='w-auto p-0'
-                                    align='start'
-                                  >
-                                    <Calendar
-                                      mode='single'
-                                      selected={
-                                        file.expire_at
-                                          ? new Date(file.expire_at)
-                                          : undefined
-                                      }
-                                      onSelect={(date) => {
-                                        if (date) {
-                                          handleQuickExpire(date)
-                                        }
-                                      }}
-                                      disabled={(date) => date < new Date()}
-                                      initialFocus
-                                    />
-                                  </PopoverContent>
-                                </Popover>
-                                {file.expire_at && (
-                                  <Button
-                                    variant='outline'
-                                    size='sm'
-                                    onClick={() => {
-                                      updateMetadataMutation.mutate(
-                                        {
-                                          id: file.id,
-                                          data: {
-                                            name: file.name,
-                                            description: file.description,
-                                            auto_sync_custom_rules:
-                                              file.auto_sync_custom_rules,
-                                            expire_at: null,
-                                          },
-                                        },
-                                        {
-                                          onSuccess: () => {
-                                            setExpirePopoverFileId(null)
-                                            toast.success(t('management.fileList.expireCleared'))
-                                          },
-                                        }
-                                      )
-                                    }}
-                                    disabled={updateMetadataMutation.isPending}
-                                    className='text-destructive hover:text-destructive'
-                                  >
-                                    {t('management.fileList.clearExpireTime')}
-                                  </Button>
-                                )}
-                              </div>
-                            </PopoverContent>
-                          </Popover>
-                        )
-                      },
-                      width: '180px',
-                    },
-                    {
-                      header: t('management.fileList.ruleSync'),
-                      cell: (file) => (
-                        <Switch
-                          checked={file.auto_sync_custom_rules || false}
-                          onCheckedChange={(checked) =>
-                            handleToggleAutoSync(file.id, checked)
-                          }
-                        />
-                      ),
-                      headerClassName: 'text-center',
-                      cellClassName: 'text-center',
-                      width: '90px',
-                    },
-                    {
-                      header: t('management.fileList.actions'),
-                      cell: (file) => (
-                        <div className='flex items-center gap-1'>
-                          <Button
-                            variant='ghost'
-                            size='sm'
-                            onClick={() => handleEditMetadata(file)}
-                            disabled={updateMetadataMutation.isPending}
-                          >
-                            <Settings className='h-4 w-4' />
-                          </Button>
-                          <Button
-                            variant='ghost'
-                            size='sm'
-                            onClick={() => handleEditConfig(file)}
-                          >
-                            <Edit className='h-4 w-4' />
-                          </Button>
-                          <AlertDialog>
-                            <AlertDialogTrigger asChild>
-                              <Button
-                                variant='ghost'
-                                size='sm'
-                                className='text-destructive hover:text-destructive'
-                                disabled={deleteMutation.isPending}
-                              >
-                                <Trash2 className='h-4 w-4' />
-                              </Button>
-                            </AlertDialogTrigger>
-                            <AlertDialogContent>
-                              <AlertDialogHeader>
-                                <AlertDialogTitle>{t('management.fileList.deleteConfirmTitle')}</AlertDialogTitle>
-                                <AlertDialogDescription>
-                                  {t('management.fileList.deleteConfirmDesc', { name: file.name })}
-                                </AlertDialogDescription>
-                              </AlertDialogHeader>
-                              <AlertDialogFooter>
-                                <AlertDialogCancel>{t('actions.cancel', { ns: 'common' })}</AlertDialogCancel>
-                                <AlertDialogAction
-                                  onClick={() => handleDelete(file.id)}
-                                >
-                                  {t('actions.delete', { ns: 'common' })}
-                                </AlertDialogAction>
-                              </AlertDialogFooter>
-                            </AlertDialogContent>
-                          </AlertDialog>
-                        </div>
-                      ),
-                      headerClassName: 'text-center',
-                      cellClassName: 'text-center',
-                      width: '120px',
-                    },
-                  ] as DataTableColumn<SubscribeFile>[]
-                }
-                mobileCard={{
-                  header: (file) => (
-                    <div className='mb-1 flex items-center justify-between gap-2'>
-                      <div className='flex min-w-0 flex-1 items-center gap-2'>
-                        <Badge
-                          variant='outline'
-                          className={TYPE_COLORS[file.type]}
-                        >
-                          {t(`management.typeLabels.${file.type}`)}
-                        </Badge>
-                        <div className='truncate text-sm font-medium'>
-                          {file.name}
-                        </div>
-                      </div>
-                      <AlertDialog>
-                        <AlertDialogTrigger asChild>
-                          <Button
-                            variant='outline'
-                            size='icon'
-                            className='text-destructive hover:text-destructive hover:bg-destructive/10 size-8 shrink-0'
-                            disabled={deleteMutation.isPending}
-                            onClick={(e) => e.stopPropagation()}
-                          >
-                            <Trash2 className='size-4' />
-                          </Button>
-                        </AlertDialogTrigger>
-                        <AlertDialogContent>
-                          <AlertDialogHeader>
-                            <AlertDialogTitle>{t('management.fileList.deleteConfirmTitle')}</AlertDialogTitle>
-                            <AlertDialogDescription>
-                              {t('management.fileList.deleteConfirmDesc', { name: file.name })}
-                            </AlertDialogDescription>
-                          </AlertDialogHeader>
-                          <AlertDialogFooter>
-                            <AlertDialogCancel>{t('actions.cancel', { ns: 'common' })}</AlertDialogCancel>
-                            <AlertDialogAction
-                              onClick={() => handleDelete(file.id)}
-                            >
-                              {t('actions.delete', { ns: 'common' })}
-                            </AlertDialogAction>
-                          </AlertDialogFooter>
-                        </AlertDialogContent>
-                      </AlertDialog>
-                    </div>
-                  ),
-                  fields: [
-                    {
-                      label: t('management.fileList.mobileDescriptionLabel'),
-                      value: (file) => (
-                        <span className='line-clamp-1 text-xs'>
-                          {file.description}
-                        </span>
-                      ),
-                      hidden: (file) => !file.description,
-                    },
-                    {
-                      label: t('management.fileList.mobileFileLabel'),
-                      value: (file) => (
-                        <span className='font-mono break-all'>
-                          {file.filename}
-                        </span>
-                      ),
-                    },
-                    {
-                      label: t('management.fileList.mobileUpdateTimeLabel'),
-                      value: (file) => (
-                        <div className='flex flex-wrap items-center gap-2'>
-                          <span>
-                            {file.updated_at
-                              ? dateFormatter.format(new Date(file.updated_at))
-                              : '-'}
-                          </span>
-                          {file.latest_version && (
-                            <>
-                              <span className='text-muted-foreground'>·</span>
-                              <Badge variant='secondary' className='text-xs'>
-                                v{file.latest_version}
-                              </Badge>
-                            </>
-                          )}
-                        </div>
-                      ),
-                    },
-                    {
-                      label: t('management.fileList.mobileRuleSyncLabel'),
-                      value: (file) => (
-                        <div className='flex items-center gap-2'>
-                          <Switch
-                            checked={file.auto_sync_custom_rules || false}
-                            onCheckedChange={(checked) =>
-                              handleToggleAutoSync(file.id, checked)
-                            }
-                          />
-                          <span className='text-xs'>
-                            {file.auto_sync_custom_rules ? t('management.fileList.ruleSyncEnabled') : t('management.fileList.ruleSyncDisabled')}
-                          </span>
-                        </div>
-                      ),
-                    },
-                  ],
-                  actions: (file) => (
-                    <>
-                      <Button
-                        variant='outline'
-                        size='sm'
-                        className='flex-1'
-                        onClick={() => handleEditMetadata(file)}
-                        disabled={updateMetadataMutation.isPending}
-                      >
-                        <Settings className='mr-1 h-4 w-4' />
-                        {t('management.fileList.editInfo')}
-                      </Button>
-                      <Button
-                        variant='outline'
-                        size='sm'
-                        className='flex-1'
-                        onClick={() => handleEditConfig(file)}
-                      >
-                        <Edit className='mr-1 h-4 w-4' />
-                        {t('management.fileList.editConfig')}
-                      </Button>
-                    </>
-                  ),
-                }}
-              />
-            )}
-          </CardContent>
-        </Card>
-
-        {/* 外部订阅卡片 - 默认折叠 */}
-        <Collapsible
-          open={isExternalSubsExpanded}
-          onOpenChange={setIsExternalSubsExpanded}
-        >
-          <Card>
-            <CollapsibleTrigger asChild>
-              <CardHeader className='cursor-pointer'>
-                <div className='flex items-center justify-between'>
-                  <div>
-                    <CardTitle className='flex items-center gap-2'>
-                      <ExternalLink className='h-5 w-5' />
-                      {t('externalSub.title')} ({externalSubs.length})
-                    </CardTitle>
-                    <CardDescription>
-                      {t('externalSub.description')}
-                    </CardDescription>
-                  </div>
-                  {isExternalSubsExpanded ? (
-                    <ChevronUp className='h-5 w-5' />
-                  ) : (
-                    <ChevronDown className='h-5 w-5' />
-                  )}
-                </div>
-              </CardHeader>
-            </CollapsibleTrigger>
-            <CollapsibleContent className='CollapsibleContent'>
-              <CardContent>
-                {/* 同步按钮 */}
-                <div className='mb-4 flex justify-end'>
-                  <Button
-                    variant='outline'
-                    size='sm'
-                    onClick={() => syncExternalSubsMutation.mutate()}
-                    disabled={
-                      syncExternalSubsMutation.isPending ||
-                      externalSubs.length === 0
-                    }
-                  >
-                    <RefreshCw
-                      className={`mr-2 h-4 w-4 ${syncExternalSubsMutation.isPending ? 'animate-spin' : ''}`}
-                    />
-                    {syncExternalSubsMutation.isPending
-                      ? t('externalSub.syncing')
-                      : t('externalSub.syncAll')}
-                  </Button>
-                </div>
-
-                {isExternalSubsLoading ? (
-                  <div className='text-muted-foreground py-8 text-center'>
-                    {t('actions.loading', { ns: 'common' })}
-                  </div>
-                ) : externalSubs.length === 0 ? (
-                  <div className='text-muted-foreground py-8 text-center'>
-                    {t('externalSub.noSubs')}
-                  </div>
-                ) : (
-                  <DataTable
-                    data={externalSubs}
-                    getRowKey={(sub) => sub.id}
-                    emptyText={t('externalSub.noSubsShort')}
-                    columns={
-                      [
-                        {
-                          header: t('externalSub.columns.name'),
-                          cell: (sub) => sub.name,
-                          cellClassName: 'font-medium',
-                        },
-                        {
-                          header: t('externalSub.columns.subscriptionUrl'),
-                          cell: (sub) => (
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <div className='text-muted-foreground max-w-[200px] cursor-help truncate font-mono text-sm'>
-                                  {sub.url}
-                                </div>
-                              </TooltipTrigger>
-                              <TooltipContent className='max-w-md font-mono text-xs break-all'>
-                                {sub.url}
-                              </TooltipContent>
-                            </Tooltip>
-                          ),
-                        },
-                        {
-                          header: t('externalSub.columns.nodeCount'),
-                          cell: (sub) => {
-                            const nodes = nodesByTag[sub.name] ?? []
-                            // 优先使用实际查询到的节点数量，如果还没加载则使用数据库存储的数量
-                            const nodeCount = allNodesData
-                              ? nodes.length
-                              : sub.node_count
-                            return (
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Badge
-                                    variant='secondary'
-                                    className='cursor-help'
-                                  >
-                                    {nodeCount}
-                                  </Badge>
-                                </TooltipTrigger>
-                                <TooltipContent className='max-h-60 max-w-64 overflow-y-auto p-2'>
-                                  <div className='mb-1 text-xs font-medium'>
-                                    {t('externalSub.nodesOf', { name: sub.name })}
-                                  </div>
-                                  {nodes.length > 0 ? (
-                                    <ul className='space-y-0.5'>
-                                      {nodes.map((nodeName, idx) => (
-                                        <li
-                                          key={idx}
-                                          className='truncate text-xs'
-                                        >
-                                          <Twemoji>{nodeName}</Twemoji>
-                                        </li>
-                                      ))}
-                                    </ul>
-                                  ) : (
-                                    <div className='text-xs'>{t('externalSub.noNodes')}</div>
-                                  )}
-                                </TooltipContent>
-                              </Tooltip>
-                            )
-                          },
-                          headerClassName: 'text-center',
-                          cellClassName: 'text-center',
-                        },
-                        {
-                          header: t('externalSub.columns.trafficUsage'),
-                          cell: (sub) => {
-                            if (sub.total <= 0) {
-                              return (
-                                <span className='text-muted-foreground text-sm'>
-                                  -
-                                </span>
-                              )
-                            }
-                            // 根据 traffic_mode 计算已用流量
-                            const mode = sub.traffic_mode || 'both'
-                            const used =
-                              mode === 'download'
-                                ? sub.download
-                                : mode === 'upload'
-                                  ? sub.upload
-                                  : sub.upload + sub.download
-                            const percentage = Math.min(
-                              (used / sub.total) * 100,
-                              100
-                            )
-                            const remaining = Math.max(sub.total - used, 0)
-                            const modeLabel =
-                              mode === 'download'
-                                ? t('externalSub.downloadOnly')
-                                : mode === 'upload'
-                                  ? t('externalSub.uploadOnly')
-                                  : t('externalSub.uploadAndDownload')
-                            return (
-                              <div className='flex items-center gap-1'>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <div className='w-20 cursor-help space-y-1'>
-                                      <Progress
-                                        value={percentage}
-                                        className='h-2'
-                                      />
-                                      <div className='text-muted-foreground text-center text-xs'>
-                                        {percentage.toFixed(0)}%
-                                      </div>
-                                    </div>
-                                  </TooltipTrigger>
-                                  <TooltipContent className='space-y-1'>
-                                    <div className='text-xs'>
-                                      <span className='font-medium'>
-                                        {t('externalSub.upload')}:{' '}
-                                      </span>
-                                      {formatTrafficGB(sub.upload)}
-                                    </div>
-                                    <div className='text-xs'>
-                                      <span className='font-medium'>
-                                        {t('externalSub.download')}:{' '}
-                                      </span>
-                                      {formatTrafficGB(sub.download)}
-                                    </div>
-                                    <div className='text-xs'>
-                                      <span className='font-medium'>
-                                        {t('externalSub.total')}:{' '}
-                                      </span>
-                                      {formatTrafficGB(sub.total)}
-                                    </div>
-                                    <div className='text-xs'>
-                                      <span className='font-medium'>
-                                        {t('externalSub.remaining')}:{' '}
-                                      </span>
-                                      {formatTrafficGB(remaining)}
-                                    </div>
-                                    <div className='text-muted-foreground text-xs'>
-                                      {t('externalSub.statsMode')}: {modeLabel}
-                                    </div>
-                                  </TooltipContent>
-                                </Tooltip>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <Button
-                                      variant='ghost'
-                                      size='icon'
-                                      className='h-6 w-6'
-                                      onClick={() => {
-                                        // 循环切换: both -> download -> upload -> both
-                                        const nextMode =
-                                          mode === 'both'
-                                            ? 'download'
-                                            : mode === 'download'
-                                              ? 'upload'
-                                              : 'both'
-                                        updateExternalSubMutation.mutate({
-                                          id: sub.id,
-                                          name: sub.name,
-                                          url: sub.url,
-                                          user_agent: sub.user_agent,
-                                          traffic_mode: nextMode,
-                                        })
-                                      }}
-                                      disabled={
-                                        updateExternalSubMutation.isPending
-                                      }
-                                    >
-                                      {mode === 'download' ? (
-                                        <Download className='h-3 w-3' />
-                                      ) : mode === 'upload' ? (
-                                        <Upload className='h-3 w-3' />
-                                      ) : (
-                                        <svg
-                                          className='h-3 w-3'
-                                          viewBox='0 0 24 24'
-                                          fill='none'
-                                          stroke='currentColor'
-                                          strokeWidth='2'
-                                          strokeLinecap='round'
-                                          strokeLinejoin='round'
-                                        >
-                                          <path d='M12 5v14M5 12l7-7 7 7M5 12l7 7 7-7' />
-                                        </svg>
-                                      )}
-                                    </Button>
-                                  </TooltipTrigger>
-                                  <TooltipContent>
-                                    <span>{t('externalSub.switchStatsMode')}: {modeLabel}</span>
-                                  </TooltipContent>
-                                </Tooltip>
-                              </div>
-                            )
-                          },
-                          width: '140px',
-                        },
-                        {
-                          header: t('externalSub.columns.expireTime'),
-                          cell: (sub) =>
-                            sub.expire ? (
-                              <span className='text-sm'>
-                                {dateFormatter.format(new Date(sub.expire))}
-                              </span>
-                            ) : (
-                              <span className='text-muted-foreground text-sm'>
-                                -
-                              </span>
-                            ),
-                        },
-                        {
-                          header: t('externalSub.columns.lastSync'),
-                          cell: (sub) => (
-                            <span className='text-muted-foreground text-sm'>
-                              {sub.last_sync_at
-                                ? dateFormatter.format(
-                                    new Date(sub.last_sync_at)
-                                  )
-                                : '-'}
-                            </span>
-                          ),
-                        },
-                        {
-                          header: t('externalSub.columns.actions'),
-                          cell: (sub) => (
-                            <div className='flex items-center gap-1'>
-                              <Button
-                                variant='ghost'
-                                size='sm'
-                                onClick={() => {
-                                  setEditingExternalSub(sub)
-                                  setEditExternalSubForm({
-                                    name: sub.name,
-                                    url: sub.url,
-                                    user_agent: sub.user_agent,
-                                    traffic_mode: sub.traffic_mode || 'both',
-                                  })
-                                  setEditExternalSubDialogOpen(true)
-                                }}
-                              >
-                                <Edit className='h-4 w-4' />
-                              </Button>
-                              <Button
-                                variant='ghost'
-                                size='sm'
-                                onClick={() =>
-                                  syncSingleExternalSubMutation.mutate(sub.id)
-                                }
-                                disabled={
-                                  syncingSingleId === sub.id ||
-                                  syncExternalSubsMutation.isPending
-                                }
-                              >
-                                <RefreshCw
-                                  className={`h-4 w-4 ${syncingSingleId === sub.id ? 'animate-spin' : ''}`}
-                                />
-                              </Button>
-                              <AlertDialog>
-                                <AlertDialogTrigger asChild>
-                                  <Button
-                                    variant='ghost'
-                                    size='sm'
-                                    className='text-destructive hover:text-destructive'
-                                    disabled={
-                                      deleteExternalSubMutation.isPending
-                                    }
-                                  >
-                                    <Trash2 className='h-4 w-4' />
-                                  </Button>
-                                </AlertDialogTrigger>
-                                <AlertDialogContent>
-                                  <AlertDialogHeader>
-                                    <AlertDialogTitle>
-                                      {t('externalSub.deleteConfirmTitle')}
-                                    </AlertDialogTitle>
-                                    <AlertDialogDescription>
-                                      {t('externalSub.deleteConfirmDesc', { name: sub.name })}
-                                    </AlertDialogDescription>
-                                  </AlertDialogHeader>
-                                  <AlertDialogFooter>
-                                    <AlertDialogCancel>{t('actions.cancel', { ns: 'common' })}</AlertDialogCancel>
-                                    <AlertDialogAction
-                                      onClick={() =>
-                                        deleteExternalSubMutation.mutate(sub.id)
-                                      }
-                                    >
-                                      {t('actions.delete', { ns: 'common' })}
-                                    </AlertDialogAction>
-                                  </AlertDialogFooter>
-                                </AlertDialogContent>
-                              </AlertDialog>
-                            </div>
-                          ),
-                          headerClassName: 'text-center',
-                          cellClassName: 'text-center',
-                          width: '130px',
-                        },
-                      ] as DataTableColumn<ExternalSubscription>[]
-                    }
-                    mobileCard={{
-                      header: (sub) => {
-                        const nodes = nodesByTag[sub.name] ?? []
-                        // 优先使用实际查询到的节点数量，如果还没加载则使用数据库存储的数量
-                        const nodeCount = allNodesData
-                          ? nodes.length
-                          : sub.node_count
-                        return (
-                          <div className='mb-1 flex items-center justify-between gap-2'>
-                            <div className='flex min-w-0 flex-1 items-center gap-2'>
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Badge
-                                    variant='secondary'
-                                    className='cursor-help'
-                                  >
-                                    {t('externalSub.nodeCountLabel', { count: nodeCount })}
-                                  </Badge>
-                                </TooltipTrigger>
-                                <TooltipContent className='max-h-60 max-w-64 overflow-y-auto p-2'>
-                                  <div className='mb-1 text-xs font-medium'>
-                                    {t('externalSub.nodesOf', { name: sub.name })}
-                                  </div>
-                                  {nodes.length > 0 ? (
-                                    <ul className='space-y-0.5'>
-                                      {nodes.map((nodeName, idx) => (
-                                        <li
-                                          key={idx}
-                                          className='truncate text-xs'
-                                        >
-                                          <Twemoji>{nodeName}</Twemoji>
-                                        </li>
-                                      ))}
-                                    </ul>
-                                  ) : (
-                                    <div className='text-xs'>{t('externalSub.noNodes')}</div>
-                                  )}
-                                </TooltipContent>
-                              </Tooltip>
-                              <div className='truncate text-sm font-medium'>
-                                {sub.name}
-                              </div>
-                            </div>
-                            <div className='flex items-center gap-1'>
-                              <Button
-                                variant='outline'
-                                size='icon'
-                                className='size-8 shrink-0'
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  setEditingExternalSub(sub)
-                                  setEditExternalSubForm({
-                                    name: sub.name,
-                                    url: sub.url,
-                                    user_agent: sub.user_agent,
-                                    traffic_mode: sub.traffic_mode || 'both',
-                                  })
-                                  setEditExternalSubDialogOpen(true)
-                                }}
-                              >
-                                <Edit className='size-4' />
-                              </Button>
-                              <Button
-                                variant='outline'
-                                size='icon'
-                                className='size-8 shrink-0'
-                                disabled={
-                                  syncingSingleId === sub.id ||
-                                  syncExternalSubsMutation.isPending
-                                }
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  syncSingleExternalSubMutation.mutate(sub.id)
-                                }}
-                              >
-                                <RefreshCw
-                                  className={`size-4 ${syncingSingleId === sub.id ? 'animate-spin' : ''}`}
-                                />
-                              </Button>
-                              <AlertDialog>
-                                <AlertDialogTrigger asChild>
-                                  <Button
-                                    variant='outline'
-                                    size='icon'
-                                    className='text-destructive hover:text-destructive hover:bg-destructive/10 size-8 shrink-0'
-                                    disabled={
-                                      deleteExternalSubMutation.isPending
-                                    }
-                                    onClick={(e) => e.stopPropagation()}
-                                  >
-                                    <Trash2 className='size-4' />
-                                  </Button>
-                                </AlertDialogTrigger>
-                                <AlertDialogContent>
-                                  <AlertDialogHeader>
-                                    <AlertDialogTitle>
-                                      {t('externalSub.deleteConfirmTitle')}
-                                    </AlertDialogTitle>
-                                    <AlertDialogDescription>
-                                      {t('externalSub.deleteConfirmDesc', { name: sub.name })}
-                                    </AlertDialogDescription>
-                                  </AlertDialogHeader>
-                                  <AlertDialogFooter>
-                                    <AlertDialogCancel>{t('actions.cancel', { ns: 'common' })}</AlertDialogCancel>
-                                    <AlertDialogAction
-                                      onClick={() =>
-                                        deleteExternalSubMutation.mutate(sub.id)
-                                      }
-                                    >
-                                      {t('actions.delete', { ns: 'common' })}
-                                    </AlertDialogAction>
-                                  </AlertDialogFooter>
-                                </AlertDialogContent>
-                              </AlertDialog>
-                            </div>
-                          </div>
-                        )
-                      },
-                      fields: [
-                        {
-                          label: t('externalSub.mobileUrlLabel'),
-                          value: (sub) => (
-                            <span className='font-mono text-xs break-all'>
-                              {sub.url}
-                            </span>
-                          ),
-                        },
-                        {
-                          label: t('externalSub.mobileTrafficLabel'),
-                          value: (sub) => {
-                            if (sub.total <= 0) {
-                              return (
-                                <span className='text-muted-foreground'>-</span>
-                              )
-                            }
-                            // 根据 traffic_mode 计算已用流量
-                            const mode = sub.traffic_mode || 'both'
-                            const used =
-                              mode === 'download'
-                                ? sub.download
-                                : mode === 'upload'
-                                  ? sub.upload
-                                  : sub.upload + sub.download
-                            const percentage = Math.min(
-                              (used / sub.total) * 100,
-                              100
-                            )
-                            const remaining = Math.max(sub.total - used, 0)
-                            const modeLabel =
-                              mode === 'download'
-                                ? t('externalSub.downloadOnly')
-                                : mode === 'upload'
-                                  ? t('externalSub.uploadOnly')
-                                  : t('externalSub.uploadAndDownload')
-                            return (
-                              <div className='flex items-center gap-2'>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <div className='flex flex-1 cursor-help items-center gap-2'>
-                                      <Progress
-                                        value={percentage}
-                                        className='h-2 max-w-20 flex-1'
-                                      />
-                                      <span className='text-xs whitespace-nowrap'>
-                                        {formatTrafficGB(used)} /{' '}
-                                        {formatTrafficGB(sub.total)}
-                                      </span>
-                                    </div>
-                                  </TooltipTrigger>
-                                  <TooltipContent className='space-y-1'>
-                                    <div className='text-xs'>
-                                      <span className='font-medium'>
-                                        {t('externalSub.upload')}:{' '}
-                                      </span>
-                                      {formatTrafficGB(sub.upload)}
-                                    </div>
-                                    <div className='text-xs'>
-                                      <span className='font-medium'>
-                                        {t('externalSub.download')}:{' '}
-                                      </span>
-                                      {formatTrafficGB(sub.download)}
-                                    </div>
-                                    <div className='text-xs'>
-                                      <span className='font-medium'>
-                                        {t('externalSub.remaining')}:{' '}
-                                      </span>
-                                      {formatTrafficGB(remaining)}
-                                    </div>
-                                    <div className='text-muted-foreground text-xs'>
-                                      {t('externalSub.statsMode')}: {modeLabel}
-                                    </div>
-                                  </TooltipContent>
-                                </Tooltip>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <Button
-                                      variant='ghost'
-                                      size='icon'
-                                      className='h-6 w-6 shrink-0'
-                                      onClick={(e) => {
-                                        e.stopPropagation()
-                                        // 循环切换: both -> download -> upload -> both
-                                        const nextMode =
-                                          mode === 'both'
-                                            ? 'download'
-                                            : mode === 'download'
-                                              ? 'upload'
-                                              : 'both'
-                                        updateExternalSubMutation.mutate({
-                                          id: sub.id,
-                                          name: sub.name,
-                                          url: sub.url,
-                                          user_agent: sub.user_agent,
-                                          traffic_mode: nextMode,
-                                        })
-                                      }}
-                                      disabled={
-                                        updateExternalSubMutation.isPending
-                                      }
-                                    >
-                                      {mode === 'download' ? (
-                                        <Download className='h-3 w-3' />
-                                      ) : mode === 'upload' ? (
-                                        <Upload className='h-3 w-3' />
-                                      ) : (
-                                        <svg
-                                          className='h-3 w-3'
-                                          viewBox='0 0 24 24'
-                                          fill='none'
-                                          stroke='currentColor'
-                                          strokeWidth='2'
-                                          strokeLinecap='round'
-                                          strokeLinejoin='round'
-                                        >
-                                          <path d='M12 5v14M5 12l7-7 7 7M5 12l7 7 7-7' />
-                                        </svg>
-                                      )}
-                                    </Button>
-                                  </TooltipTrigger>
-                                  <TooltipContent>
-                                    <span>{t('externalSub.switchStatsMode')}: {modeLabel}</span>
-                                  </TooltipContent>
-                                </Tooltip>
-                              </div>
-                            )
-                          },
-                        },
-                        {
-                          label: t('externalSub.mobileExpireLabel'),
-                          value: (sub) =>
-                            sub.expire
-                              ? dateFormatter.format(new Date(sub.expire))
-                              : '-',
-                        },
-                        {
-                          label: t('externalSub.mobileLastSyncLabel'),
-                          value: (sub) =>
-                            sub.last_sync_at
-                              ? dateFormatter.format(new Date(sub.last_sync_at))
-                              : '-',
-                        },
-                      ],
-                    }}
-                  />
-                )}
-              </CardContent>
-            </CollapsibleContent>
-          </Card>
-        </Collapsible>
-
-        {/* 代理集合配置 - 仅在启用时显示 */}
+        {/* 代理集合配置 Card section — 拆到 ./subscribe-files/components/proxy-providers-section */}
         {enableProxyProvider && (
-          <Collapsible
-            open={isProxyProvidersExpanded}
-            onOpenChange={setIsProxyProvidersExpanded}
-          >
-            <Card>
-              <CollapsibleTrigger asChild>
-                <CardHeader className='hover:bg-muted/50 cursor-pointer transition-colors'>
-                  <div className='flex items-center justify-between'>
-                    <div>
-                      <CardTitle className='text-base'>{t('proxyProvider.title')}</CardTitle>
-                      <CardDescription>
-                        {t('proxyProvider.description')}
-                      </CardDescription>
-                    </div>
-                    <div className='flex items-center gap-2'>
-                      <Badge variant='secondary'>
-                        {t('proxyProvider.configCount', { count: proxyProviderConfigs.length })}
-                      </Badge>
-                      {isProxyProvidersExpanded ? (
-                        <ChevronUp className='h-4 w-4' />
-                      ) : (
-                        <ChevronDown className='h-4 w-4' />
-                      )}
-                    </div>
-                  </div>
-                </CardHeader>
-              </CollapsibleTrigger>
-              <CollapsibleContent>
-                <CardContent className='pt-0'>
-                  {/* 操作栏 */}
-                  <div className='mb-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between'>
-                    {/* 左侧：选中状态 */}
-                    <div className='flex items-center gap-2'>
-                      {selectedProxyProviderIds.size > 0 && (
-                        <>
-                          <Badge variant='secondary'>
-                            {t('proxyProvider.selectedCount', { count: selectedProxyProviderIds.size })}
-                          </Badge>
-                          <Button
-                            size='sm'
-                            variant='destructive'
-                            onClick={() => setBatchDeleteDialogOpen(true)}
-                          >
-                            <Trash2 className='mr-1 h-4 w-4' />
-                            {t('proxyProvider.batchDelete')}
-                          </Button>
-                        </>
-                      )}
-                    </div>
-                    {/* 右侧：创建按钮 */}
-                    <div className='flex flex-col gap-2 sm:flex-row'>
-                      <Button
-                        size='sm'
-                        variant='outline'
-                        className='w-full sm:w-auto'
-                        onClick={() => {
-                          setProSelectedExternalSub(null)
-                          setProCreationResults([])
-                          setProxyProviderProDialogOpen(true)
-                        }}
-                      >
-                        <Settings className='mr-2 h-4 w-4' />
-                        {t('proxyProvider.createBasic')}
-                      </Button>
-                      <Button
-                        size='sm'
-                        className='w-full sm:w-auto'
-                        onClick={() => {
-                          setEditingProxyProvider(null)
-                          setSelectedExternalSub(null)
-                          setProxyProviderForm({
-                            name: '',
-                            type: 'http',
-                            interval: 3600,
-                            proxy: 'DIRECT',
-                            size_limit: 0,
-                            header_user_agent: 'Clash/v1.18.0',
-                            header_authorization: '',
-                            health_check_enabled: true,
-                            health_check_url:
-                              'https://www.gstatic.com/generate_204',
-                            health_check_interval: 300,
-                            health_check_timeout: 5000,
-                            health_check_lazy: true,
-                            health_check_expected_status: 204,
-                            filter: '',
-                            exclude_filter: '',
-                            exclude_type: [],
-                            override: { ...defaultOverrideForm },
-                            process_mode: 'client',
-                          })
-                          setProxyProviderDialogOpen(true)
-                        }}
-                      >
-                        <Settings className='mr-2 h-4 w-4' />
-                        {t('proxyProvider.createAdvanced')}
-                      </Button>
-                    </div>
-                  </div>
-                  {/* 订阅筛选按钮 - 点击自动选中/反选该订阅下的所有代理集合 */}
-                  {externalSubs.length > 0 && (
-                    <div className='mb-4 flex flex-wrap gap-2'>
-                      <Button
-                        size='sm'
-                        variant={
-                          proxyProviderFilterSubId === 'all'
-                            ? 'default'
-                            : 'outline'
-                        }
-                        onClick={() => {
-                          setProxyProviderFilterSubId('all')
-                          // 切换逻辑：如果已全选则取消，否则选中所有
-                          const allIds = new Set(
-                            proxyProviderConfigs.map((c) => c.id)
-                          )
-                          const isAllSelected =
-                            proxyProviderConfigs.length > 0 &&
-                            proxyProviderConfigs.every((c) =>
-                              selectedProxyProviderIds.has(c.id)
-                            )
-                          if (isAllSelected) {
-                            setSelectedProxyProviderIds(new Set())
-                          } else {
-                            setSelectedProxyProviderIds(allIds)
-                          }
-                        }}
-                      >
-                        {t('proxyProvider.allFilter')} ({proxyProviderConfigs.length})
-                      </Button>
-                      {externalSubs.map((sub) => {
-                        const subConfigs = proxyProviderConfigs.filter(
-                          (c) => c.external_subscription_id === sub.id
-                        )
-                        if (subConfigs.length === 0) return null
-                        const subConfigIds = new Set(
-                          subConfigs.map((c) => c.id)
-                        )
-                        // 检查是否已全选该订阅下的配置
-                        const isAllSelected =
-                          subConfigs.length > 0 &&
-                          subConfigs.every((c) =>
-                            selectedProxyProviderIds.has(c.id)
-                          )
-                        return (
-                          <Button
-                            key={sub.id}
-                            size='sm'
-                            variant={
-                              proxyProviderFilterSubId === sub.id
-                                ? 'default'
-                                : 'outline'
-                            }
-                            onClick={() => {
-                              setProxyProviderFilterSubId(sub.id)
-                              if (isAllSelected) {
-                                // 已全选，则取消选中
-                                setSelectedProxyProviderIds(new Set())
-                              } else {
-                                // 未全选，则选中该订阅下的所有配置
-                                setSelectedProxyProviderIds(subConfigIds)
-                              }
-                            }}
-                          >
-                            {sub.name} ({subConfigs.length})
-                          </Button>
-                        )
-                      })}
-                    </div>
-                  )}
-                  {isProxyProviderConfigsLoading ? (
-                    <div className='text-muted-foreground py-4 text-center'>
-                      {t('actions.loading', { ns: 'common' })}
-                    </div>
-                  ) : filteredProxyProviderConfigs.length === 0 ? (
-                    <div className='text-muted-foreground py-8 text-center'>
-                      <p>{t('proxyProvider.noConfigs')}</p>
-                      <p className='mt-1 text-sm'>
-                        {t('proxyProvider.noConfigsHint')}
-                      </p>
-                    </div>
-                  ) : (
-                    <DataTable
-                      data={filteredProxyProviderConfigs}
-                      getRowKey={(config) => config.id}
-                      columns={
-                        [
-                          {
-                            key: 'select',
-                            header: (
-                              <Checkbox
-                                checked={
-                                  filteredProxyProviderConfigs.length > 0 &&
-                                  filteredProxyProviderConfigs.every((c) =>
-                                    selectedProxyProviderIds.has(c.id)
-                                  )
-                                }
-                                onCheckedChange={handleSelectAllProxyProviders}
-                                aria-label={t('proxyProvider.selectAll')}
-                              />
-                            ),
-                            cell: (config) => (
-                              <Checkbox
-                                checked={selectedProxyProviderIds.has(
-                                  config.id
-                                )}
-                                onCheckedChange={(checked) =>
-                                  handleSelectProxyProvider(
-                                    config.id,
-                                    checked as boolean
-                                  )
-                                }
-                                aria-label={t('proxyProvider.selectItem', { name: config.name })}
-                              />
-                            ),
-                            width: '40px',
-                            cellClassName: 'text-center',
-                            headerClassName: 'text-center',
-                          },
-                          {
-                            key: 'name',
-                            header: t('proxyProvider.columns.name'),
-                            cell: (config) => (
-                              <div className='font-medium'>{config.name}</div>
-                            ),
-                          },
-                          {
-                            key: 'external_subscription',
-                            header: t('proxyProvider.columns.linkedSub'),
-                            cell: (config) => {
-                              const sub = externalSubs.find(
-                                (s) => s.id === config.external_subscription_id
-                              )
-                              return sub ? (
-                                <Badge variant='outline'>{sub.name}</Badge>
-                              ) : (
-                                <span className='text-muted-foreground'>
-                                  {t('proxyProvider.unknown')}
-                                </span>
-                              )
-                            },
-                          },
-                          {
-                            key: 'process_mode',
-                            header: t('proxyProvider.columns.processMode'),
-                            cell: (config) => (
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Button
-                                    variant='ghost'
-                                    size='sm'
-                                    className='h-auto p-0.5'
-                                    onClick={() =>
-                                      toggleProcessModeMutation.mutate(config)
-                                    }
-                                    disabled={
-                                      toggleProcessModeMutation.isPending
-                                    }
-                                  >
-                                    <Badge
-                                      variant={
-                                        config.process_mode === 'mmw'
-                                          ? 'default'
-                                          : 'secondary'
-                                      }
-                                      className='cursor-pointer hover:opacity-80'
-                                    >
-                                      {config.process_mode === 'mmw'
-                                        ? t('proxyProvider.mmwProcess')
-                                        : t('proxyProvider.clientProcess')}
-                                    </Badge>
-                                  </Button>
-                                </TooltipTrigger>
-                                <TooltipContent>
-                                  {t('proxyProvider.switchTo')}{config.process_mode === 'mmw'
-                                    ? t('proxyProvider.clientProcess')
-                                    : t('proxyProvider.mmwProcess')}
-                                </TooltipContent>
-                              </Tooltip>
-                            ),
-                            headerClassName: 'text-center',
-                            cellClassName: 'text-center',
-                          },
-                          {
-                            key: 'filter',
-                            header: t('proxyProvider.columns.filterRule'),
-                            cell: (config) => (
-                              <div className='text-muted-foreground max-w-[150px] truncate text-xs'>
-                                {config.filter ||
-                                config.exclude_filter ||
-                                config.exclude_type ? (
-                                  <span>
-                                    {config.filter && t('proxyProvider.filterKeep', { filter: config.filter })}
-                                    {config.exclude_filter &&
-                                      ` ${t('proxyProvider.filterExclude', { filter: config.exclude_filter })}`}
-                                    {config.exclude_type &&
-                                      ` ${t('proxyProvider.filterExcludeType', { filter: config.exclude_type })}`}
-                                  </span>
-                                ) : (
-                                  '-'
-                                )}
-                              </div>
-                            ),
-                          },
-                          {
-                            key: 'actions',
-                            header: t('proxyProvider.columns.actions'),
-                            cell: (config) => (
-                              <div className='flex items-center gap-1'>
-                                {config.process_mode === 'mmw' && (
-                                  <Tooltip>
-                                    <TooltipTrigger asChild>
-                                      <Button
-                                        variant='ghost'
-                                        size='sm'
-                                        onClick={() =>
-                                          handlePreviewProxyProvider(config)
-                                        }
-                                      >
-                                        <Eye className='h-4 w-4' />
-                                      </Button>
-                                    </TooltipTrigger>
-                                    <TooltipContent>
-                                      {t('proxyProvider.previewResult')}
-                                    </TooltipContent>
-                                  </Tooltip>
-                                )}
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <Button
-                                      variant='ghost'
-                                      size='sm'
-                                      onClick={() => {
-                                        // 编辑配置
-                                        setEditingProxyProvider(config)
-                                        const sub = externalSubs.find(
-                                          (s) =>
-                                            s.id ===
-                                            config.external_subscription_id
-                                        )
-                                        setSelectedExternalSub(sub || null)
-                                        // 解析 header JSON
-                                        let headerUserAgent = 'Clash/v1.18.0'
-                                        let headerAuthorization = ''
-                                        if (config.header) {
-                                          try {
-                                            const headerObj = JSON.parse(
-                                              config.header
-                                            )
-                                            if (headerObj['User-Agent']) {
-                                              headerUserAgent = Array.isArray(
-                                                headerObj['User-Agent']
-                                              )
-                                                ? headerObj['User-Agent'].join(
-                                                    ', '
-                                                  )
-                                                : headerObj['User-Agent']
-                                            }
-                                            if (headerObj['Authorization']) {
-                                              headerAuthorization =
-                                                Array.isArray(
-                                                  headerObj['Authorization']
-                                                )
-                                                  ? headerObj[
-                                                      'Authorization'
-                                                    ][0]
-                                                  : headerObj['Authorization']
-                                            }
-                                          } catch {}
-                                        }
-                                        setProxyProviderForm({
-                                          name: config.name,
-                                          type: config.type,
-                                          interval: config.interval,
-                                          proxy: config.proxy,
-                                          size_limit: config.size_limit,
-                                          header_user_agent: headerUserAgent,
-                                          header_authorization:
-                                            headerAuthorization,
-                                          health_check_enabled:
-                                            config.health_check_enabled,
-                                          health_check_url:
-                                            config.health_check_url,
-                                          health_check_interval:
-                                            config.health_check_interval,
-                                          health_check_timeout:
-                                            config.health_check_timeout,
-                                          health_check_lazy:
-                                            config.health_check_lazy,
-                                          health_check_expected_status:
-                                            config.health_check_expected_status,
-                                          filter: config.filter,
-                                          exclude_filter: config.exclude_filter,
-                                          exclude_type: config.exclude_type
-                                            ? config.exclude_type
-                                                .split(',')
-                                                .map((s) => s.trim())
-                                            : [],
-                                          override: jsonToOverrideForm(
-                                            config.override
-                                          ),
-                                          process_mode: config.process_mode as
-                                            | 'client'
-                                            | 'mmw',
-                                        })
-                                        setProxyProviderDialogOpen(true)
-                                      }}
-                                    >
-                                      <Edit className='h-4 w-4' />
-                                    </Button>
-                                  </TooltipTrigger>
-                                  <TooltipContent>{t('proxyProvider.editConfig')}</TooltipContent>
-                                </Tooltip>
-                                <Tooltip>
-                                  <TooltipTrigger asChild>
-                                    <Button
-                                      variant='ghost'
-                                      size='sm'
-                                      onClick={() => {
-                                        // 复制 YAML 配置
-                                        const sub = externalSubs.find(
-                                          (s) =>
-                                            s.id ===
-                                            config.external_subscription_id
-                                        )
-                                        if (!sub) return
-                                        setSelectedExternalSub(sub)
-                                        // 解析 header
-                                        let headerUserAgent = ''
-                                        let headerAuthorization = ''
-                                        if (config.header) {
-                                          try {
-                                            const headerObj = JSON.parse(
-                                              config.header
-                                            )
-                                            if (headerObj['User-Agent']) {
-                                              headerUserAgent = Array.isArray(
-                                                headerObj['User-Agent']
-                                              )
-                                                ? headerObj['User-Agent'].join(
-                                                    ', '
-                                                  )
-                                                : headerObj['User-Agent']
-                                            }
-                                            if (headerObj['Authorization']) {
-                                              headerAuthorization =
-                                                Array.isArray(
-                                                  headerObj['Authorization']
-                                                )
-                                                  ? headerObj[
-                                                      'Authorization'
-                                                    ][0]
-                                                  : headerObj['Authorization']
-                                            }
-                                          } catch {}
-                                        }
-                                        // 生成 YAML
-                                        const isClientMode =
-                                          config.process_mode === 'client'
-                                        const yamlConfig: Record<string, any> =
-                                          {
-                                            type: config.type,
-                                            path: `./proxy_providers/${config.name}.yaml`,
-                                            interval: config.interval,
-                                          }
-                                        if (isClientMode) {
-                                          yamlConfig.url = sub.url
-                                        } else {
-                                          const baseUrl =
-                                            typeof window !== 'undefined'
-                                              ? window.location.origin
-                                              : ''
-                                          yamlConfig.url = `${baseUrl}/api/proxy-provider/${config.id}?token=${userToken}`
-                                        }
-                                        if (
-                                          config.proxy &&
-                                          config.proxy !== 'DIRECT'
-                                        ) {
-                                          yamlConfig.proxy = config.proxy
-                                        }
-                                        if (config.size_limit > 0) {
-                                          yamlConfig['size-limit'] =
-                                            config.size_limit
-                                        }
-                                        if (
-                                          headerUserAgent ||
-                                          headerAuthorization
-                                        ) {
-                                          yamlConfig.header = {}
-                                          if (headerUserAgent) {
-                                            yamlConfig.header['User-Agent'] =
-                                              headerUserAgent
-                                                .split(',')
-                                                .map((s) => s.trim())
-                                          }
-                                          if (headerAuthorization) {
-                                            yamlConfig.header['Authorization'] =
-                                              [headerAuthorization]
-                                          }
-                                        }
-                                        if (config.health_check_enabled) {
-                                          yamlConfig['health-check'] = {
-                                            enable: true,
-                                            url: config.health_check_url,
-                                            interval:
-                                              config.health_check_interval,
-                                            timeout:
-                                              config.health_check_timeout,
-                                            lazy: config.health_check_lazy,
-                                            'expected-status':
-                                              config.health_check_expected_status,
-                                          }
-                                        }
-                                        if (isClientMode) {
-                                          if (config.filter)
-                                            yamlConfig.filter = config.filter
-                                          if (config.exclude_filter)
-                                            yamlConfig['exclude-filter'] =
-                                              config.exclude_filter
-                                          if (config.exclude_type)
-                                            yamlConfig['exclude-type'] =
-                                              config.exclude_type
-                                          if (config.override) {
-                                            try {
-                                              yamlConfig.override = JSON.parse(
-                                                config.override
-                                              )
-                                            } catch {}
-                                          }
-                                        }
-                                        const yamlObj: Record<string, any> = {}
-                                        yamlObj[config.name] = yamlConfig
-                                        const yamlStr = dumpYAML(yamlObj, {
-                                          indent: 2,
-                                          lineWidth: -1,
-                                        })
-                                        navigator.clipboard.writeText(yamlStr)
-                                        toast.success(t('proxyProvider.configCopied'))
-                                      }}
-                                    >
-                                      <Copy className='h-4 w-4' />
-                                    </Button>
-                                  </TooltipTrigger>
-                                  <TooltipContent>{t('proxyProvider.copyConfig')}</TooltipContent>
-                                </Tooltip>
-                                <AlertDialog>
-                                  <AlertDialogTrigger asChild>
-                                    <Button
-                                      variant='ghost'
-                                      size='sm'
-                                      className='text-destructive hover:text-destructive'
-                                    >
-                                      <Trash2 className='h-4 w-4' />
-                                    </Button>
-                                  </AlertDialogTrigger>
-                                  <AlertDialogContent>
-                                    <AlertDialogHeader>
-                                      <AlertDialogTitle>
-                                        {t('externalSub.deleteConfirmTitle')}
-                                      </AlertDialogTitle>
-                                      <AlertDialogDescription>
-                                        {t('proxyProvider.deleteConfirmDesc', { name: config.name })}
-                                      </AlertDialogDescription>
-                                    </AlertDialogHeader>
-                                    <AlertDialogFooter>
-                                      <AlertDialogCancel>
-                                        {t('actions.cancel', { ns: 'common' })}
-                                      </AlertDialogCancel>
-                                      <AlertDialogAction
-                                        onClick={() =>
-                                          deleteProxyProviderMutation.mutate(
-                                            config.id
-                                          )
-                                        }
-                                      >
-                                        {t('actions.delete', { ns: 'common' })}
-                                      </AlertDialogAction>
-                                    </AlertDialogFooter>
-                                  </AlertDialogContent>
-                                </AlertDialog>
-                              </div>
-                            ),
-                            headerClassName: 'text-center',
-                            cellClassName: 'text-center',
-                            width: '120px',
-                          },
-                        ] as DataTableColumn<ProxyProviderConfig>[]
-                      }
-                      mobileCard={{
-                        header: (config) => (
-                          <div className='mb-1 flex items-center justify-between gap-2'>
-                            <div className='flex min-w-0 flex-1 items-center gap-2'>
-                              <Checkbox
-                                checked={selectedProxyProviderIds.has(
-                                  config.id
-                                )}
-                                onCheckedChange={(checked) =>
-                                  handleSelectProxyProvider(
-                                    config.id,
-                                    checked as boolean
-                                  )
-                                }
-                                onClick={(e) => e.stopPropagation()}
-                                aria-label={t('proxyProvider.selectItem', { name: config.name })}
-                                className='shrink-0'
-                              />
-                              <Tooltip>
-                                <TooltipTrigger asChild>
-                                  <Button
-                                    variant='ghost'
-                                    size='sm'
-                                    className='h-auto shrink-0 p-0'
-                                    onClick={(e) => {
-                                      e.stopPropagation()
-                                      toggleProcessModeMutation.mutate(config)
-                                    }}
-                                    disabled={
-                                      toggleProcessModeMutation.isPending
-                                    }
-                                  >
-                                    <Badge
-                                      variant={
-                                        config.process_mode === 'mmw'
-                                          ? 'default'
-                                          : 'secondary'
-                                      }
-                                      className='cursor-pointer hover:opacity-80'
-                                    >
-                                      {config.process_mode === 'mmw'
-                                        ? t('proxyProvider.mmwShort')
-                                        : t('proxyProvider.clientShort')}
-                                    </Badge>
-                                  </Button>
-                                </TooltipTrigger>
-                                <TooltipContent>
-                                  {t('proxyProvider.switchTo')}{config.process_mode === 'mmw'
-                                    ? t('proxyProvider.clientProcess')
-                                    : t('proxyProvider.mmwProcess')}
-                                </TooltipContent>
-                              </Tooltip>
-                              <div className='truncate text-sm font-medium'>
-                                {config.name}
-                              </div>
-                            </div>
-                            <div className='flex items-center gap-1'>
-                              {config.process_mode === 'mmw' && (
-                                <Button
-                                  variant='outline'
-                                  size='icon'
-                                  className='size-8 shrink-0'
-                                  onClick={(e) => {
-                                    e.stopPropagation()
-                                    handlePreviewProxyProvider(config)
-                                  }}
-                                >
-                                  <Eye className='size-4' />
-                                </Button>
-                              )}
-                              <Button
-                                variant='outline'
-                                size='icon'
-                                className='size-8 shrink-0'
-                                onClick={(e) => {
-                                  e.stopPropagation()
-                                  // 编辑
-                                  setEditingProxyProvider(config)
-                                  const sub = externalSubs.find(
-                                    (s) =>
-                                      s.id === config.external_subscription_id
-                                  )
-                                  setSelectedExternalSub(sub || null)
-                                  let headerUserAgent = 'Clash/v1.18.0'
-                                  let headerAuthorization = ''
-                                  if (config.header) {
-                                    try {
-                                      const headerObj = JSON.parse(
-                                        config.header
-                                      )
-                                      if (headerObj['User-Agent']) {
-                                        headerUserAgent = Array.isArray(
-                                          headerObj['User-Agent']
-                                        )
-                                          ? headerObj['User-Agent'].join(', ')
-                                          : headerObj['User-Agent']
-                                      }
-                                      if (headerObj['Authorization']) {
-                                        headerAuthorization = Array.isArray(
-                                          headerObj['Authorization']
-                                        )
-                                          ? headerObj['Authorization'][0]
-                                          : headerObj['Authorization']
-                                      }
-                                    } catch {}
-                                  }
-                                  setProxyProviderForm({
-                                    name: config.name,
-                                    type: config.type,
-                                    interval: config.interval,
-                                    proxy: config.proxy,
-                                    size_limit: config.size_limit,
-                                    header_user_agent: headerUserAgent,
-                                    header_authorization: headerAuthorization,
-                                    health_check_enabled:
-                                      config.health_check_enabled,
-                                    health_check_url: config.health_check_url,
-                                    health_check_interval:
-                                      config.health_check_interval,
-                                    health_check_timeout:
-                                      config.health_check_timeout,
-                                    health_check_lazy: config.health_check_lazy,
-                                    health_check_expected_status:
-                                      config.health_check_expected_status,
-                                    filter: config.filter,
-                                    exclude_filter: config.exclude_filter,
-                                    exclude_type: config.exclude_type
-                                      ? config.exclude_type
-                                          .split(',')
-                                          .map((s) => s.trim())
-                                      : [],
-                                    override: jsonToOverrideForm(
-                                      config.override
-                                    ),
-                                    process_mode: config.process_mode as
-                                      | 'client'
-                                      | 'mmw',
-                                  })
-                                  setProxyProviderDialogOpen(true)
-                                }}
-                              >
-                                <Edit className='size-4' />
-                              </Button>
-                              <AlertDialog>
-                                <AlertDialogTrigger asChild>
-                                  <Button
-                                    variant='outline'
-                                    size='icon'
-                                    className='text-destructive size-8 shrink-0'
-                                    onClick={(e) => e.stopPropagation()}
-                                  >
-                                    <Trash2 className='size-4' />
-                                  </Button>
-                                </AlertDialogTrigger>
-                                <AlertDialogContent>
-                                  <AlertDialogHeader>
-                                    <AlertDialogTitle>
-                                      {t('externalSub.deleteConfirmTitle')}
-                                    </AlertDialogTitle>
-                                    <AlertDialogDescription>
-                                      {t('proxyProvider.deleteConfirmDesc', { name: config.name })}
-                                    </AlertDialogDescription>
-                                  </AlertDialogHeader>
-                                  <AlertDialogFooter>
-                                    <AlertDialogCancel>{t('actions.cancel', { ns: 'common' })}</AlertDialogCancel>
-                                    <AlertDialogAction
-                                      onClick={() =>
-                                        deleteProxyProviderMutation.mutate(
-                                          config.id
-                                        )
-                                      }
-                                    >
-                                      {t('actions.delete', { ns: 'common' })}
-                                    </AlertDialogAction>
-                                  </AlertDialogFooter>
-                                </AlertDialogContent>
-                              </AlertDialog>
-                            </div>
-                          </div>
-                        ),
-                        fields: [
-                          {
-                            label: t('proxyProvider.mobileLinkedSubLabel'),
-                            value: (config) => {
-                              const sub = externalSubs.find(
-                                (s) => s.id === config.external_subscription_id
-                              )
-                              return sub?.name || t('proxyProvider.unknown')
-                            },
-                          },
-                          {
-                            label: t('proxyProvider.mobileFilterLabel'),
-                            value: (config) =>
-                              config.filter ||
-                              config.exclude_filter ||
-                              config.exclude_type ||
-                              '-',
-                          },
-                        ],
-                      }}
-                    />
-                  )}
-                </CardContent>
-              </CollapsibleContent>
-            </Card>
-          </Collapsible>
+          <ProxyProvidersSection
+            configs={proxyProviderConfigs}
+            filteredConfigs={filteredProxyProviderConfigs}
+            loading={isProxyProviderConfigsLoading}
+            externalSubs={externalSubs}
+            expanded={isProxyProvidersExpanded}
+            onExpandedChange={setIsProxyProvidersExpanded}
+            filterSubId={proxyProviderFilterSubId}
+            onFilterSubIdChange={setProxyProviderFilterSubId}
+            selectedIds={selectedProxyProviderIds}
+            onSelectedIdsChange={setSelectedProxyProviderIds}
+            onSelectAll={(checked) => handleSelectAllProxyProviders(checked)}
+            onSelectOne={(id, checked) => handleSelectProxyProvider(id, checked)}
+            onOpenBatchDelete={() => setBatchDeleteDialogOpen(true)}
+            onOpenCreateBasic={() => {
+              setProSelectedExternalSub(null)
+              setProCreationResults([])
+              setProxyProviderProDialogOpen(true)
+            }}
+            onOpenCreateAdvanced={() => {
+              setEditingProxyProvider(null)
+              setSelectedExternalSub(null)
+              setProxyProviderForm({
+                name: '',
+                type: 'http',
+                interval: 3600,
+                proxy: 'DIRECT',
+                size_limit: 0,
+                header_user_agent: 'Clash/v1.18.0',
+                header_authorization: '',
+                health_check_enabled: true,
+                health_check_url: 'https://www.gstatic.com/generate_204',
+                health_check_interval: 300,
+                health_check_timeout: 5000,
+                health_check_lazy: true,
+                health_check_expected_status: 204,
+                filter: '',
+                exclude_filter: '',
+                exclude_type: [],
+                override: { ...defaultOverrideForm },
+                process_mode: 'client',
+              })
+              setProxyProviderDialogOpen(true)
+            }}
+            onEdit={(config) => {
+              // 解析 header JSON,填充表单,打开编辑对话框(原 inline 60+ 行逻辑)
+              setEditingProxyProvider(config)
+              const sub = externalSubs.find((s) => s.id === config.external_subscription_id)
+              setSelectedExternalSub(sub || null)
+              let headerUserAgent = 'Clash/v1.18.0'
+              let headerAuthorization = ''
+              if (config.header) {
+                try {
+                  const headerObj = JSON.parse(config.header)
+                  if (headerObj['User-Agent']) {
+                    headerUserAgent = Array.isArray(headerObj['User-Agent'])
+                      ? headerObj['User-Agent'].join(', ')
+                      : headerObj['User-Agent']
+                  }
+                  if (headerObj['Authorization']) {
+                    headerAuthorization = Array.isArray(headerObj['Authorization'])
+                      ? headerObj['Authorization'][0]
+                      : headerObj['Authorization']
+                  }
+                } catch {}
+              }
+              setProxyProviderForm({
+                name: config.name,
+                type: config.type,
+                interval: config.interval,
+                proxy: config.proxy,
+                size_limit: config.size_limit,
+                header_user_agent: headerUserAgent,
+                header_authorization: headerAuthorization,
+                health_check_enabled: config.health_check_enabled,
+                health_check_url: config.health_check_url,
+                health_check_interval: config.health_check_interval,
+                health_check_timeout: config.health_check_timeout,
+                health_check_lazy: config.health_check_lazy,
+                health_check_expected_status: config.health_check_expected_status,
+                filter: config.filter,
+                exclude_filter: config.exclude_filter,
+                exclude_type: config.exclude_type ? config.exclude_type.split(',').map((s) => s.trim()) : [],
+                override: jsonToOverrideForm(config.override),
+                process_mode: config.process_mode as 'client' | 'mmw',
+              })
+              setProxyProviderDialogOpen(true)
+            }}
+            onCopyYAML={(config) => {
+              // 生成并复制 YAML(原 inline 80+ 行逻辑)
+              const sub = externalSubs.find((s) => s.id === config.external_subscription_id)
+              if (!sub) return
+              setSelectedExternalSub(sub)
+              let headerUserAgent = ''
+              let headerAuthorization = ''
+              if (config.header) {
+                try {
+                  const headerObj = JSON.parse(config.header)
+                  if (headerObj['User-Agent']) {
+                    headerUserAgent = Array.isArray(headerObj['User-Agent'])
+                      ? headerObj['User-Agent'].join(', ')
+                      : headerObj['User-Agent']
+                  }
+                  if (headerObj['Authorization']) {
+                    headerAuthorization = Array.isArray(headerObj['Authorization'])
+                      ? headerObj['Authorization'][0]
+                      : headerObj['Authorization']
+                  }
+                } catch {}
+              }
+              const isClientMode = config.process_mode === 'client'
+              const yamlConfig: Record<string, any> = {
+                type: config.type,
+                path: `./proxy_providers/${config.name}.yaml`,
+                interval: config.interval,
+              }
+              if (isClientMode) {
+                yamlConfig.url = sub.url
+              } else {
+                const baseUrl = typeof window !== 'undefined' ? window.location.origin : ''
+                yamlConfig.url = `${baseUrl}/api/proxy-provider/${config.id}?token=${userToken}`
+              }
+              if (config.proxy && config.proxy !== 'DIRECT') yamlConfig.proxy = config.proxy
+              if (config.size_limit > 0) yamlConfig['size-limit'] = config.size_limit
+              if (headerUserAgent || headerAuthorization) {
+                yamlConfig.header = {}
+                if (headerUserAgent) {
+                  yamlConfig.header['User-Agent'] = headerUserAgent.split(',').map((s) => s.trim())
+                }
+                if (headerAuthorization) yamlConfig.header['Authorization'] = [headerAuthorization]
+              }
+              if (config.health_check_enabled) {
+                yamlConfig['health-check'] = {
+                  enable: true,
+                  url: config.health_check_url,
+                  interval: config.health_check_interval,
+                  timeout: config.health_check_timeout,
+                  lazy: config.health_check_lazy,
+                  'expected-status': config.health_check_expected_status,
+                }
+              }
+              if (isClientMode) {
+                if (config.filter) yamlConfig.filter = config.filter
+                if (config.exclude_filter) yamlConfig['exclude-filter'] = config.exclude_filter
+                if (config.exclude_type) yamlConfig['exclude-type'] = config.exclude_type
+                if (config.override) {
+                  try {
+                    yamlConfig.override = JSON.parse(config.override)
+                  } catch {}
+                }
+              }
+              const yamlObj: Record<string, any> = {}
+              yamlObj[config.name] = yamlConfig
+              const yamlStr = dumpYAML(yamlObj, { indent: 2, lineWidth: -1 })
+              navigator.clipboard.writeText(yamlStr)
+              toast.success(t('proxyProvider.configCopied'))
+            }}
+            onPreview={handlePreviewProxyProvider}
+            actions={{
+              toggleProcessMode: (config) => toggleProcessModeMutation.mutate(config),
+              togglePending: toggleProcessModeMutation.isPending,
+              delete: (id) => deleteProxyProviderMutation.mutate(id),
+            }}
+          />
         )}
       </section>
 
-      {/* 编辑文件 Dialog */}
-      <Dialog
+      {/* 编辑文件 Dialog — 拆到 ./subscribe-files/dialogs/edit-file-dialog */}
+      <EditFileDialog
         open={editDialogOpen}
         onOpenChange={(open) => {
           setEditDialogOpen(open)
           if (!open) {
-            // 关闭对话框时清理状态
             setEditingFile(null)
             setEditorValue('')
             setIsDirty(false)
             setValidationError(null)
           }
         }}
-      >
-        <DialogContent className='flex h-[90vh] max-w-4xl flex-col p-0'>
-          <DialogHeader className='px-6 pt-6'>
-            <DialogTitle>{editingFile?.name || t('editFile.title')}</DialogTitle>
-            <DialogDescription>
-              {t('editFile.editFilename', { filename: editingFile?.filename })}
-            </DialogDescription>
-          </DialogHeader>
+        file={editingFile}
+        value={editorValue}
+        onValueChange={(next) => {
+          setEditorValue(next)
+          setIsDirty(next !== (fileContentQuery.data?.content ?? ''))
+          if (validationError) setValidationError(null)
+        }}
+        isDirty={isDirty}
+        validationError={validationError}
+        latestVersion={fileContentQuery.data?.latest_version}
+        loading={fileContentQuery.isLoading}
+        saving={saveMutation.isPending}
+        onSave={handleSave}
+        onReset={handleReset}
+      />
 
-          <div className='flex flex-1 flex-col overflow-hidden px-6'>
-            <div className='flex items-center gap-3 py-4'>
-              <Button
-                size='sm'
-                onClick={handleSave}
-                disabled={
-                  !editingFile ||
-                  !isDirty ||
-                  saveMutation.isPending ||
-                  fileContentQuery.isLoading
-                }
-              >
-                {saveMutation.isPending ? t('editFile.saving') : t('editFile.saveChanges')}
-              </Button>
-              <Button
-                size='sm'
-                variant='outline'
-                disabled={
-                  !isDirty ||
-                  fileContentQuery.isLoading ||
-                  saveMutation.isPending
-                }
-                onClick={handleReset}
-              >
-                {t('editFile.revertChanges')}
-              </Button>
-              {fileContentQuery.data?.latest_version ? (
-                <Badge variant='secondary'>
-                  {t('editFile.version', { version: fileContentQuery.data.latest_version })}
-                </Badge>
-              ) : null}
-            </div>
-
-            {validationError ? (
-              <div className='border-destructive/60 bg-destructive/10 text-destructive mb-4 rounded-md border p-3 text-sm'>
-                {validationError}
-              </div>
-            ) : null}
-
-            <div className='bg-muted/20 mb-4 flex-1 overflow-hidden rounded-lg border'>
-              {fileContentQuery.isLoading ? (
-                <div className='text-muted-foreground p-4 text-center'>
-                  {t('actions.loading', { ns: 'common' })}
-                </div>
-              ) : (
-                <Textarea
-                  value={editorValue}
-                  onChange={(event) => {
-                    const nextValue = event.target.value
-                    setEditorValue(nextValue)
-                    setIsDirty(
-                      nextValue !== (fileContentQuery.data?.content ?? '')
-                    )
-                    if (validationError) {
-                      setValidationError(null)
-                    }
-                  }}
-                  className='h-full w-full resize-none border-0 bg-transparent font-mono text-sm focus-visible:ring-0 focus-visible:ring-offset-0'
-                  disabled={!editingFile || saveMutation.isPending}
-                  spellCheck={false}
-                />
-              )}
-            </div>
-          </div>
-
-          <DialogFooter className='px-6 pb-6'>
-            <Button variant='outline' onClick={() => setEditDialogOpen(false)}>
-              {t('actions.close', { ns: 'common' })}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* 编辑订阅信息 Dialog */}
-      <Dialog
+      {/* 编辑订阅信息 Dialog — 拆到 ./subscribe-files/dialogs/edit-metadata-dialog */}
+      <EditMetadataDialog
         open={editMetadataDialogOpen}
         onOpenChange={(open) => {
           setEditMetadataDialogOpen(open)
@@ -4732,112 +2243,39 @@ function SubscribeFilesPage() {
               name: '',
               description: '',
               filename: '',
-              expire: undefined,
+              template_filename: '',
+              selected_tags: [],
+              selected_node_ids: [],
+              selected_custom_rule_ids: [],
+              selected_override_script_ids: [],
+              stats_server_ids: '',
+              traffic_limit: '',
+              custom_short_code: '',
+              raw_output: false,
             })
           }
         }}
-      >
-        <DialogContent className='sm:max-w-lg'>
-          <DialogHeader>
-            <DialogTitle>{t('editMetadata.title')}</DialogTitle>
-            <DialogDescription>{t('editMetadata.description')}</DialogDescription>
-          </DialogHeader>
-          <div className='space-y-4 py-4'>
-            <div className='space-y-2'>
-              <Label htmlFor='metadata-name'>{t('form.subscriptionName')} *</Label>
-              <Input
-                id='metadata-name'
-                value={metadataForm.name}
-                onChange={(e) =>
-                  setMetadataForm({ ...metadataForm, name: e.target.value })
-                }
-                placeholder={t('editMetadata.namePlaceholder')}
-              />
-            </div>
-            <div className='space-y-2'>
-              <Label htmlFor='metadata-description'>{t('form.description')} ({t('actions.optional', { ns: 'common' })})</Label>
-              <Textarea
-                id='metadata-description'
-                value={metadataForm.description}
-                onChange={(e) =>
-                  setMetadataForm({
-                    ...metadataForm,
-                    description: e.target.value,
-                  })
-                }
-                placeholder={t('editMetadata.descriptionPlaceholder')}
-                rows={3}
-              />
-            </div>
-            <div className='space-y-2'>
-              <Label htmlFor='metadata-filename'>{t('form.filename')} *</Label>
-              <Input
-                id='metadata-filename'
-                value={metadataForm.filename}
-                onChange={(e) =>
-                  setMetadataForm({ ...metadataForm, filename: e.target.value })
-                }
-                placeholder={t('editMetadata.filenamePlaceholder')}
-              />
-              <p className='text-muted-foreground text-xs'>
-                {t('editMetadata.filenameHint')}
-              </p>
-            </div>
-            <div className='space-y-2'>
-              <Label>{t('editMetadata.expireDateLabel')}</Label>
-              <Popover>
-                <PopoverTrigger asChild>
-                  <Button
-                    variant='outline'
-                    className={cn(
-                      'w-full justify-start text-left font-normal',
-                      !metadataForm.expire && 'text-muted-foreground'
-                    )}
-                  >
-                    <CalendarIcon className='mr-2 h-4 w-4' />
-                    {metadataForm.expire ? (
-                      format(metadataForm.expire, 'PPP')
-                    ) : (
-                      <span>{t('editMetadata.noExpireDate')}</span>
-                    )}
-                  </Button>
-                </PopoverTrigger>
-                <PopoverContent className='w-auto p-0' align='start'>
-                  <Calendar
-                    mode='single'
-                    selected={metadataForm.expire}
-                    onSelect={(date) =>
-                      setMetadataForm({ ...metadataForm, expire: date })
-                    }
-                    initialFocus
-                  />
-                </PopoverContent>
-              </Popover>
-              <p className='text-muted-foreground text-xs'>
-                {t('editMetadata.expireDateHint')}
-              </p>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              variant='outline'
-              onClick={() => setEditMetadataDialogOpen(false)}
-              disabled={updateMetadataMutation.isPending}
-            >
-              {t('actions.cancel', { ns: 'common' })}
-            </Button>
-            <Button
-              onClick={handleUpdateMetadata}
-              disabled={updateMetadataMutation.isPending}
-            >
-              {updateMetadataMutation.isPending ? t('actions.saving', { ns: 'common' }) : t('actions.save', { ns: 'common' })}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        form={metadataForm}
+        onFormChange={setMetadataForm}
+        templates={templatesData ?? []}
+        customRules={customRulesList ?? []}
+        overrideScripts={overrideScriptsList ?? []}
+        nodeTags={nodeTagsData ?? []}
+        allNodes={(allNodesData?.nodes ?? []).map((n: any) => ({
+          id: n.id,
+          node_name: n.node_name,
+          protocol: n.protocol || '',
+          original_server: n.original_server || '',
+          tag: n.tag || '',
+        }))}
+        remoteServers={remoteServersData?.servers ?? []}
+        onSubmit={handleUpdateMetadata}
+        saving={updateMetadataMutation.isPending}
+        isAdmin={isAdmin}
+      />
 
-      {/* 编辑配置对话框 */}
-      <Dialog
+      {/* 编辑配置对话框 — 拆到 ./subscribe-files/dialogs/edit-config-dialog */}
+      <EditConfigDialog
         open={editConfigDialogOpen}
         onOpenChange={(open) => {
           setEditConfigDialogOpen(open)
@@ -4846,133 +2284,45 @@ function SubscribeFilesPage() {
             setConfigContent('')
           }
         }}
-      >
-        <DialogContent className='flex max-h-[90vh] w-[95vw] flex-col sm:w-[80vw] sm:!max-w-[80vw]'>
-          <DialogHeader>
-            <DialogTitle>{t('editConfig.title', { name: editingConfigFile?.name })}</DialogTitle>
-            <DialogDescription>{editingConfigFile?.filename}</DialogDescription>
-            <div className='flex justify-center gap-2 md:justify-end'>
-              <Button
-                variant='outline'
-                size='sm'
-                className='flex-1 md:flex-none'
-                onClick={() => handleEditNodes(editingConfigFile!)}
-              >
-                <Edit className='mr-2 h-4 w-4' />
-                {t('editConfig.editNodes')}
-              </Button>
-              <Button
-                size='sm'
-                className='flex-1 md:flex-none'
-                onClick={handleSaveConfig}
-                disabled={saveConfigMutation.isPending}
-              >
-                <Save className='mr-2 h-4 w-4' />
-                {saveConfigMutation.isPending ? t('editFile.saving') : t('actions.save', { ns: 'common' })}
-              </Button>
-            </div>
-          </DialogHeader>
-          <div className='flex-1 space-y-4 overflow-y-auto'>
-            <div className='bg-muted/30 rounded-lg border'>
-              <Textarea
-                value={configContent}
-                onChange={(e) => setConfigContent(e.target.value)}
-                className='min-h-[400px] resize-none border-0 bg-transparent font-mono text-xs'
-                placeholder={t('editConfig.loadingConfig')}
-              />
-            </div>
-            <div className='flex justify-end gap-2'>
-              <Button
-                onClick={handleSaveConfig}
-                disabled={saveConfigMutation.isPending}
-              >
-                <Save className='mr-2 h-4 max-w-md' />
-                {saveConfigMutation.isPending ? t('editFile.saving') : t('actions.save', { ns: 'common' })}
-              </Button>
-            </div>
-            <div className='bg-muted/50 rounded-lg border p-4'>
-              <h3 className='mb-2 font-semibold'>{t('editConfig.usageTitle')}</h3>
-              <ul className='text-muted-foreground space-y-1 text-sm'>
-                <li>• {t('editConfig.usageStep1')}</li>
-                <li>• {t('editConfig.usageStep2')}</li>
-                <li>• {t('editConfig.usageStep3')}</li>
-                <li>• {t('editConfig.usageStep4')}</li>
-              </ul>
-            </div>
-          </div>
-        </DialogContent>
-      </Dialog>
+        file={editingConfigFile}
+        content={configContent}
+        onContentChange={setConfigContent}
+        onSave={handleSaveConfig}
+        saving={saveConfigMutation.isPending}
+        onEditNodes={handleEditNodes}
+      />
 
-      {/* 编辑节点对话框 */}
-      {!isMobile ? (
-        <EditNodesDialog
-          open={editNodesDialogOpen}
-          onOpenChange={handleEditNodesDialogOpenChange}
-          title={t('editConfig.editNodesTitle', { name: editingNodesFile?.name })}
-          proxyGroups={proxyGroups}
-          availableNodes={availableNodes}
-          allNodes={nodesQuery.data?.nodes || []}
-          onProxyGroupsChange={setProxyGroups}
-          onSave={handleSaveNodes}
-          isSaving={saveConfigMutation.isPending}
-          showAllNodes={showAllNodes}
-          onShowAllNodesChange={setShowAllNodes}
-          onRemoveNodeFromGroup={handleRemoveNodeFromGroup}
-          onRemoveGroup={handleRemoveGroup}
-          onRenameGroup={handleRenameGroup}
-          saveButtonText={t('editConfig.applyAndSave')}
-          showSpecialNodesAtBottom={true}
-          proxyProviderConfigs={enableProxyProvider ? proxyProviderConfigs : []}
-        />
-      ) : (
-        <MobileEditNodesDialog
-          open={editNodesDialogOpen}
-          onOpenChange={handleEditNodesDialogOpenChange}
-          proxyGroups={proxyGroups}
-          availableNodes={availableNodes}
-          allNodes={nodesQuery.data?.nodes || []}
-          onProxyGroupsChange={setProxyGroups}
-          onSave={handleSaveNodes}
-          onRemoveNodeFromGroup={handleRemoveNodeFromGroup}
-          onRemoveGroup={handleRemoveGroup}
-          onRenameGroup={handleRenameGroup}
-          showSpecialNodesAtBottom={true}
-          proxyProviderConfigs={enableProxyProvider ? proxyProviderConfigs : []}
-        />
-      )}
+      {/* 编辑节点对话框 — 拆到 ./subscribe-files/dialogs/edit-nodes-host-dialog(适配桌面/移动两套) */}
+      <EditNodesHostDialog
+        open={editNodesDialogOpen}
+        onOpenChange={handleEditNodesDialogOpenChange}
+        isMobile={isMobile}
+        fileName={editingNodesFile?.name}
+        proxyGroups={proxyGroups}
+        availableNodes={availableNodes}
+        allNodes={nodesQuery.data?.nodes || []}
+        onProxyGroupsChange={setProxyGroups}
+        onSave={handleSaveNodes}
+        saving={saveConfigMutation.isPending}
+        showAllNodes={showAllNodes}
+        onShowAllNodesChange={setShowAllNodes}
+        onRemoveNodeFromGroup={handleRemoveNodeFromGroup}
+        onRemoveGroup={handleRemoveGroup}
+        onRenameGroup={handleRenameGroup}
+        proxyProviderConfigs={enableProxyProvider ? proxyProviderConfigs : []}
+      />
 
-      {/* 批量删除代理集合确认对话框 */}
-      <AlertDialog
+      {/* 批量删除代理集合确认对话框 — 拆到 ./subscribe-files/dialogs/batch-delete-provider-dialog */}
+      <BatchDeleteProviderDialog
         open={batchDeleteDialogOpen}
         onOpenChange={setBatchDeleteDialogOpen}
-      >
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{t('proxyProvider.batchDeleteConfirmTitle')}</AlertDialogTitle>
-            <AlertDialogDescription>
-              {t('proxyProvider.batchDeleteConfirmDesc', { count: selectedProxyProviderIds.size })}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>{t('actions.cancel', { ns: 'common' })}</AlertDialogCancel>
-            <AlertDialogAction
-              onClick={() =>
-                batchDeleteProxyProviderMutation.mutate(
-                  Array.from(selectedProxyProviderIds)
-                )
-              }
-              disabled={batchDeleteProxyProviderMutation.isPending}
-            >
-              {batchDeleteProxyProviderMutation.isPending
-                ? t('proxyProvider.deleting')
-                : t('proxyProvider.confirmDelete')}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+        count={selectedProxyProviderIds.size}
+        onConfirm={() => batchDeleteProxyProviderMutation.mutate(Array.from(selectedProxyProviderIds))}
+        deleting={batchDeleteProxyProviderMutation.isPending}
+      />
 
-      {/* 代理集合配置对话框 */}
-      <Dialog
+      {/* 代理集合配置对话框 — 拆到 ./subscribe-files/dialogs/proxy-provider-edit-dialog */}
+      <ProxyProviderEditDialog
         open={proxyProviderDialogOpen}
         onOpenChange={(open) => {
           setProxyProviderDialogOpen(open)
@@ -4981,791 +2331,63 @@ function SubscribeFilesPage() {
             setEditingProxyProvider(null)
           }
         }}
-      >
-        <DialogContent className='max-h-[85vh] w-[95vw] overflow-y-auto sm:w-auto sm:!max-w-fit'>
-          <DialogHeader>
-            <DialogTitle>
-              {editingProxyProvider ? t('proxyProvider.dialog.editTitle') : t('proxyProvider.dialog.createTitle')}
-            </DialogTitle>
-            <DialogDescription>
-              {editingProxyProvider
-                ? t('proxyProvider.dialog.editDesc', { name: editingProxyProvider.name })
-                : selectedExternalSub
-                  ? t('proxyProvider.dialog.createForSubDesc', { name: selectedExternalSub.name })
-                  : t('proxyProvider.dialog.createNewDesc')}
-            </DialogDescription>
-          </DialogHeader>
-          <div className='w-full sm:w-[600px] sm:max-w-[80vw]'>
-            <div className='space-y-6'>
-              {/* 基础配置 */}
-              <div className='space-y-4'>
-                <h4 className='text-sm font-medium'>{t('proxyProvider.dialog.basicConfig')}</h4>
-                <div className='grid grid-cols-1 gap-4 sm:grid-cols-2'>
-                  {/* 外部订阅选择器 - 仅在创建模式下显示 */}
-                  {!editingProxyProvider && (
-                    <div className='space-y-2 sm:col-span-2'>
-                      <Label htmlFor='pp-subscription'>{t('proxyProvider.dialog.externalSubLabel')} *</Label>
-                      <select
-                        id='pp-subscription'
-                        className='border-input flex h-9 w-full rounded-md border bg-transparent px-3 py-1 text-sm shadow-sm transition-colors'
-                        value={selectedExternalSub?.id || ''}
-                        onChange={(e) => {
-                          const sub = externalSubs.find(
-                            (s) => s.id === Number(e.target.value)
-                          )
-                          setSelectedExternalSub(sub || null)
-                        }}
-                      >
-                        <option value=''>{t('proxyProvider.dialog.selectExternalSub')}</option>
-                        {externalSubs.map((sub) => (
-                          <option key={sub.id} value={sub.id}>
-                            {sub.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
-                  <div className='space-y-2'>
-                    <Label htmlFor='pp-name'>{t('proxyProvider.dialog.providerName')}</Label>
-                    <Input
-                      id='pp-name'
-                      value={proxyProviderForm.name}
-                      onChange={(e) =>
-                        setProxyProviderForm((prev) => ({
-                          ...prev,
-                          name: e.target.value,
-                        }))
-                      }
-                      placeholder={t('proxyProvider.dialog.providerNamePlaceholder')}
-                    />
-                  </div>
-                  {/* 妙妙屋处理模式显示 URL */}
-                  {proxyProviderForm.process_mode === 'mmw' && (
-                    <div className='space-y-2'>
-                      <Label>{t('proxyProvider.dialog.subscriptionUrl')}</Label>
-                      <div className='flex items-center gap-2'>
-                        <Input
-                          value={(() => {
-                            const baseUrl =
-                              typeof window !== 'undefined'
-                                ? window.location.origin
-                                : ''
-                            const configId =
-                              editingProxyProvider?.id || '{config_id}'
-                            return `${baseUrl}/api/proxy-provider/${configId}?token=${userToken || '{user_token}'}`
-                          })()}
-                          readOnly
-                          className='bg-muted font-mono text-xs'
-                        />
-                        <Button
-                          type='button'
-                          variant='outline'
-                          size='sm'
-                          onClick={() => {
-                            const baseUrl =
-                              typeof window !== 'undefined'
-                                ? window.location.origin
-                                : ''
-                            const configId =
-                              editingProxyProvider?.id || '{config_id}'
-                            const url = `${baseUrl}/api/proxy-provider/${configId}?token=${userToken || '{user_token}'}`
-                            navigator.clipboard.writeText(url)
-                            toast.success(t('proxyProvider.dialog.urlCopied'))
-                          }}
-                        >
-                          <Copy className='h-4 w-4' />
-                        </Button>
-                      </div>
-                      {!editingProxyProvider && (
-                        <p className='text-muted-foreground text-xs'>
-                          {t('proxyProvider.dialog.configIdHint')}
-                        </p>
-                      )}
-                    </div>
-                  )}
-                  <div className='space-y-2'>
-                    <Label htmlFor='pp-type'>{t('proxyProvider.dialog.type')}</Label>
-                    <select
-                      id='pp-type'
-                      className='border-input flex h-9 w-full rounded-md border bg-transparent px-3 py-1 text-sm shadow-sm transition-colors'
-                      value={proxyProviderForm.type}
-                      onChange={(e) =>
-                        setProxyProviderForm((prev) => ({
-                          ...prev,
-                          type: e.target.value,
-                        }))
-                      }
-                    >
-                      <option value='http'>http</option>
-                      <option value='file'>file</option>
-                    </select>
-                  </div>
-                  <div className='space-y-2'>
-                    <Label htmlFor='pp-interval'>{t('proxyProvider.dialog.updateInterval')}</Label>
-                    <Input
-                      id='pp-interval'
-                      type='number'
-                      value={proxyProviderForm.interval}
-                      onChange={(e) =>
-                        setProxyProviderForm((prev) => ({
-                          ...prev,
-                          interval: parseInt(e.target.value) || 3600,
-                        }))
-                      }
-                    />
-                  </div>
-                  <div className='space-y-2'>
-                    <Label htmlFor='pp-proxy'>{t('proxyProvider.dialog.downloadProxy')}</Label>
-                    <Input
-                      id='pp-proxy'
-                      value={proxyProviderForm.proxy}
-                      onChange={(e) =>
-                        setProxyProviderForm((prev) => ({
-                          ...prev,
-                          proxy: e.target.value,
-                        }))
-                      }
-                      placeholder='DIRECT'
-                    />
-                  </div>
-                  <div className='space-y-2'>
-                    <Label htmlFor='pp-size-limit'>{t('proxyProvider.dialog.fileSizeLimit')}</Label>
-                    <Input
-                      id='pp-size-limit'
-                      type='number'
-                      value={proxyProviderForm.size_limit}
-                      onChange={(e) =>
-                        setProxyProviderForm((prev) => ({
-                          ...prev,
-                          size_limit: parseInt(e.target.value) || 0,
-                        }))
-                      }
-                    />
-                  </div>
-                </div>
-              </div>
+        editing={editingProxyProvider}
+        externalSubs={externalSubs}
+        selectedExternalSub={selectedExternalSub}
+        onSelectedExternalSubChange={setSelectedExternalSub}
+        form={proxyProviderForm}
+        onFormChange={setProxyProviderForm}
+        userToken={userToken}
+        previewYAML={generateProxyProviderYAML()}
+        saving={createProxyProviderMutation.isPending || updateProxyProviderMutation.isPending}
+        onSave={() => {
+          // 构建 header JSON(原内联 onClick 提交逻辑,移到这里集中)
+          const headerObj: Record<string, string[]> = {}
+          if (proxyProviderForm.header_user_agent) {
+            headerObj['User-Agent'] = proxyProviderForm.header_user_agent.split(',').map((s) => s.trim())
+          }
+          if (proxyProviderForm.header_authorization) {
+            headerObj['Authorization'] = [proxyProviderForm.header_authorization]
+          }
 
-              {/* 请求头配置 */}
-              <div className='space-y-4'>
-                <h4 className='text-sm font-medium'>{t('proxyProvider.dialog.requestHeaders')}</h4>
-                <div className='grid grid-cols-1 gap-4 sm:grid-cols-2'>
-                  <div className='space-y-2'>
-                    <Label htmlFor='pp-user-agent'>User-Agent</Label>
-                    <Input
-                      id='pp-user-agent'
-                      value={proxyProviderForm.header_user_agent}
-                      onChange={(e) =>
-                        setProxyProviderForm((prev) => ({
-                          ...prev,
-                          header_user_agent: e.target.value,
-                        }))
-                      }
-                      placeholder='Clash/v1.18.0'
-                    />
-                  </div>
-                  <div className='space-y-2'>
-                    <Label htmlFor='pp-authorization'>Authorization</Label>
-                    <Input
-                      id='pp-authorization'
-                      value={proxyProviderForm.header_authorization}
-                      onChange={(e) =>
-                        setProxyProviderForm((prev) => ({
-                          ...prev,
-                          header_authorization: e.target.value,
-                        }))
-                      }
-                      placeholder={t('proxyProvider.dialog.authTokenPlaceholder')}
-                    />
-                  </div>
-                </div>
-              </div>
+          const payload = {
+            name: proxyProviderForm.name,
+            type: proxyProviderForm.type,
+            interval: proxyProviderForm.interval,
+            proxy: proxyProviderForm.proxy,
+            size_limit: proxyProviderForm.size_limit,
+            header: Object.keys(headerObj).length > 0 ? JSON.stringify(headerObj) : '',
+            health_check_enabled: proxyProviderForm.health_check_enabled,
+            health_check_url: proxyProviderForm.health_check_url,
+            health_check_interval: proxyProviderForm.health_check_interval,
+            health_check_timeout: proxyProviderForm.health_check_timeout,
+            health_check_lazy: proxyProviderForm.health_check_lazy,
+            health_check_expected_status: proxyProviderForm.health_check_expected_status,
+            filter: proxyProviderForm.filter,
+            exclude_filter: proxyProviderForm.exclude_filter,
+            exclude_type: proxyProviderForm.exclude_type.join(','),
+            override: overrideFormToJSON(proxyProviderForm.override),
+            process_mode: proxyProviderForm.process_mode,
+          }
 
-              {/* 健康检查配置 */}
-              <div className='space-y-4'>
-                <div className='flex items-center justify-between'>
-                  <h4 className='text-sm font-medium'>{t('proxyProvider.dialog.healthCheck')}</h4>
-                  <Switch
-                    checked={proxyProviderForm.health_check_enabled}
-                    onCheckedChange={(checked) =>
-                      setProxyProviderForm((prev) => ({
-                        ...prev,
-                        health_check_enabled: checked,
-                      }))
-                    }
-                  />
-                </div>
-                {proxyProviderForm.health_check_enabled && (
-                  <div className='grid grid-cols-1 gap-4 sm:grid-cols-2'>
-                    <div className='space-y-2 sm:col-span-2'>
-                      <Label htmlFor='pp-hc-url'>{t('proxyProvider.dialog.healthCheckUrl')}</Label>
-                      <Input
-                        id='pp-hc-url'
-                        value={proxyProviderForm.health_check_url}
-                        onChange={(e) =>
-                          setProxyProviderForm((prev) => ({
-                            ...prev,
-                            health_check_url: e.target.value,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div className='space-y-2'>
-                      <Label htmlFor='pp-hc-interval'>{t('proxyProvider.dialog.healthCheckInterval')}</Label>
-                      <Input
-                        id='pp-hc-interval'
-                        type='number'
-                        value={proxyProviderForm.health_check_interval}
-                        onChange={(e) =>
-                          setProxyProviderForm((prev) => ({
-                            ...prev,
-                            health_check_interval:
-                              parseInt(e.target.value) || 300,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div className='space-y-2'>
-                      <Label htmlFor='pp-hc-timeout'>{t('proxyProvider.dialog.healthCheckTimeout')}</Label>
-                      <Input
-                        id='pp-hc-timeout'
-                        type='number'
-                        value={proxyProviderForm.health_check_timeout}
-                        onChange={(e) =>
-                          setProxyProviderForm((prev) => ({
-                            ...prev,
-                            health_check_timeout:
-                              parseInt(e.target.value) || 5000,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div className='space-y-2'>
-                      <Label htmlFor='pp-hc-status'>{t('proxyProvider.dialog.healthCheckExpectedStatus')}</Label>
-                      <Input
-                        id='pp-hc-status'
-                        type='number'
-                        value={proxyProviderForm.health_check_expected_status}
-                        onChange={(e) =>
-                          setProxyProviderForm((prev) => ({
-                            ...prev,
-                            health_check_expected_status:
-                              parseInt(e.target.value) || 204,
-                          }))
-                        }
-                      />
-                    </div>
-                    <div className='flex items-center space-x-2'>
-                      <Checkbox
-                        id='pp-hc-lazy'
-                        checked={proxyProviderForm.health_check_lazy}
-                        onCheckedChange={(checked) =>
-                          setProxyProviderForm((prev) => ({
-                            ...prev,
-                            health_check_lazy: !!checked,
-                          }))
-                        }
-                      />
-                      <Label htmlFor='pp-hc-lazy' className='text-sm'>
-                        {t('proxyProvider.dialog.lazyMode')}
-                      </Label>
-                    </div>
-                  </div>
-                )}
-              </div>
-
-              {/* 高级配置处理方式 */}
-              <div className='space-y-3'>
-                <h4 className='text-sm font-medium'>{t('proxyProvider.dialog.advancedProcessMode')}</h4>
-                <div className='grid grid-cols-1 gap-2 sm:grid-cols-2'>
-                  <Button
-                    type='button'
-                    variant={
-                      proxyProviderForm.process_mode === 'client'
-                        ? 'default'
-                        : 'outline'
-                    }
-                    className='flex h-auto flex-col items-start px-4 py-3 text-left'
-                    onClick={() =>
-                      setProxyProviderForm((prev) => ({
-                        ...prev,
-                        process_mode: 'client',
-                      }))
-                    }
-                  >
-                    <span className='font-medium'>{t('proxyProvider.dialog.clientProcessLabel')}</span>
-                    <span className='text-xs font-normal opacity-70'>
-                      {t('proxyProvider.dialog.clientProcessDesc')}
-                    </span>
-                  </Button>
-                  <Button
-                    type='button'
-                    variant={
-                      proxyProviderForm.process_mode === 'mmw'
-                        ? 'default'
-                        : 'outline'
-                    }
-                    className='flex h-auto flex-col items-start px-4 py-3 text-left'
-                    onClick={() =>
-                      setProxyProviderForm((prev) => ({
-                        ...prev,
-                        process_mode: 'mmw',
-                      }))
-                    }
-                  >
-                    <span className='font-medium'>{t('proxyProvider.dialog.mmwProcessLabel')}</span>
-                    <span className='text-xs font-normal opacity-70'>
-                      {t('proxyProvider.dialog.mmwProcessDesc')}
-                    </span>
-                  </Button>
-                </div>
-              </div>
-
-              {/* 高级配置 */}
-              <div className='space-y-4'>
-                <h4 className='text-sm font-medium'>
-                  {t('proxyProvider.dialog.advancedConfig')}{' '}
-                  {proxyProviderForm.process_mode === 'client'
-                    ? t('proxyProvider.dialog.advancedConfigOutput')
-                    : t('proxyProvider.dialog.advancedConfigMmw')}
-                </h4>
-                <div className='grid grid-cols-1 gap-4 sm:grid-cols-2'>
-                  <div className='space-y-2'>
-                    <Label htmlFor='pp-filter'>{t('proxyProvider.dialog.nodeFilter')}</Label>
-                    <Input
-                      id='pp-filter'
-                      value={proxyProviderForm.filter}
-                      onChange={(e) =>
-                        setProxyProviderForm((prev) => ({
-                          ...prev,
-                          filter: e.target.value,
-                        }))
-                      }
-                      placeholder={t('proxyProvider.dialog.nodeFilterPlaceholder')}
-                    />
-                    <p className='text-muted-foreground text-xs'>
-                      {t('proxyProvider.dialog.nodeFilterHint')}
-                    </p>
-                  </div>
-                  <div className='space-y-2'>
-                    <Label htmlFor='pp-exclude-filter'>{t('proxyProvider.dialog.nodeExclude')}</Label>
-                    <Input
-                      id='pp-exclude-filter'
-                      value={proxyProviderForm.exclude_filter}
-                      onChange={(e) =>
-                        setProxyProviderForm((prev) => ({
-                          ...prev,
-                          exclude_filter: e.target.value,
-                        }))
-                      }
-                      placeholder={t('proxyProvider.dialog.nodeExcludePlaceholder')}
-                    />
-                    <p className='text-muted-foreground text-xs'>
-                      {t('proxyProvider.dialog.nodeExcludeHint')}
-                    </p>
-                  </div>
-                </div>
-                <div className='space-y-2'>
-                  <Label>{t('proxyProvider.dialog.excludeProtocolType')}</Label>
-                  <div className='flex flex-wrap gap-1.5'>
-                    {PROXY_TYPES.map((type) => {
-                      const isSelected =
-                        proxyProviderForm.exclude_type.includes(type)
-                      return (
-                        <Button
-                          key={type}
-                          type='button'
-                          variant={isSelected ? 'default' : 'outline'}
-                          size='sm'
-                          className='h-7 px-2.5 text-xs'
-                          onClick={() => {
-                            if (isSelected) {
-                              setProxyProviderForm((prev) => ({
-                                ...prev,
-                                exclude_type: prev.exclude_type.filter(
-                                  (t) => t !== type
-                                ),
-                              }))
-                            } else {
-                              setProxyProviderForm((prev) => ({
-                                ...prev,
-                                exclude_type: [...prev.exclude_type, type],
-                              }))
-                            }
-                          }}
-                        >
-                          {type}
-                        </Button>
-                      )
-                    })}
-                  </div>
-                </div>
-                {/* 覆写配置 */}
-                <div className='space-y-3'>
-                  <h4 className='text-sm font-medium'>{t('proxyProvider.dialog.overrideConfig')}</h4>
-
-                  {/* 连接设置 */}
-                  <div className='space-y-2'>
-                    <Label className='text-muted-foreground text-xs'>
-                      {t('proxyProvider.dialog.connectionSettings')}
-                    </Label>
-                    <div className='grid grid-cols-1 gap-3 sm:grid-cols-2'>
-                      <div className='flex items-center justify-between'>
-                        <Label htmlFor='pp-override-tfo' className='text-xs'>
-                          TCP Fast Open
-                        </Label>
-                        <Switch
-                          id='pp-override-tfo'
-                          checked={proxyProviderForm.override.tfo}
-                          onCheckedChange={(checked) =>
-                            setProxyProviderForm((prev) => ({
-                              ...prev,
-                              override: { ...prev.override, tfo: checked },
-                            }))
-                          }
-                        />
-                      </div>
-                      <div className='flex items-center justify-between'>
-                        <Label htmlFor='pp-override-mptcp' className='text-xs'>
-                          Multipath TCP
-                        </Label>
-                        <Switch
-                          id='pp-override-mptcp'
-                          checked={proxyProviderForm.override.mptcp}
-                          onCheckedChange={(checked) =>
-                            setProxyProviderForm((prev) => ({
-                              ...prev,
-                              override: { ...prev.override, mptcp: checked },
-                            }))
-                          }
-                        />
-                      </div>
-                      <div className='flex items-center justify-between'>
-                        <Label htmlFor='pp-override-udp' className='text-xs'>
-                          {t('proxyProvider.dialog.enableUdp')}
-                        </Label>
-                        <Switch
-                          id='pp-override-udp'
-                          checked={proxyProviderForm.override.udp}
-                          onCheckedChange={(checked) =>
-                            setProxyProviderForm((prev) => ({
-                              ...prev,
-                              override: { ...prev.override, udp: checked },
-                            }))
-                          }
-                        />
-                      </div>
-                      <div className='flex items-center justify-between'>
-                        <Label htmlFor='pp-override-uot' className='text-xs'>
-                          UDP over TCP
-                        </Label>
-                        <Switch
-                          id='pp-override-uot'
-                          checked={proxyProviderForm.override.udp_over_tcp}
-                          onCheckedChange={(checked) =>
-                            setProxyProviderForm((prev) => ({
-                              ...prev,
-                              override: {
-                                ...prev.override,
-                                udp_over_tcp: checked,
-                              },
-                            }))
-                          }
-                        />
-                      </div>
-                      <div className='flex items-center justify-between sm:col-span-2'>
-                        <Label
-                          htmlFor='pp-override-skip-cert'
-                          className='text-xs'
-                        >
-                          {t('proxyProvider.dialog.skipCertVerify')}
-                        </Label>
-                        <Switch
-                          id='pp-override-skip-cert'
-                          checked={proxyProviderForm.override.skip_cert_verify}
-                          onCheckedChange={(checked) =>
-                            setProxyProviderForm((prev) => ({
-                              ...prev,
-                              override: {
-                                ...prev.override,
-                                skip_cert_verify: checked,
-                              },
-                            }))
-                          }
-                        />
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 代理设置 */}
-                  <div className='space-y-2'>
-                    <Label
-                      htmlFor='pp-override-dialer-proxy'
-                      className='text-muted-foreground text-xs'
-                    >
-                      {t('proxyProvider.dialog.chainProxy')}
-                    </Label>
-                    <Input
-                      id='pp-override-dialer-proxy'
-                      value={proxyProviderForm.override.dialer_proxy}
-                      onChange={(e) =>
-                        setProxyProviderForm((prev) => ({
-                          ...prev,
-                          override: {
-                            ...prev.override,
-                            dialer_proxy: e.target.value,
-                          },
-                        }))
-                      }
-                      placeholder={t('proxyProvider.dialog.chainProxyPlaceholder')}
-                      className='h-8 text-sm'
-                    />
-                  </div>
-
-                  {/* 网络设置 */}
-                  <div className='space-y-2'>
-                    <Label className='text-muted-foreground text-xs'>
-                      {t('proxyProvider.dialog.networkSettings')}
-                    </Label>
-                    <div className='grid grid-cols-1 gap-3 sm:grid-cols-2'>
-                      <div className='space-y-1'>
-                        <Label
-                          htmlFor='pp-override-interface'
-                          className='text-xs'
-                        >
-                          {t('proxyProvider.dialog.outboundInterface')}
-                        </Label>
-                        <Input
-                          id='pp-override-interface'
-                          value={proxyProviderForm.override.interface_name}
-                          onChange={(e) =>
-                            setProxyProviderForm((prev) => ({
-                              ...prev,
-                              override: {
-                                ...prev.override,
-                                interface_name: e.target.value,
-                              },
-                            }))
-                          }
-                          placeholder={t('proxyProvider.dialog.outboundInterfacePlaceholder')}
-                          className='h-8 text-sm'
-                        />
-                      </div>
-                      <div className='space-y-1'>
-                        <Label
-                          htmlFor='pp-override-routing-mark'
-                          className='text-xs'
-                        >
-                          {t('proxyProvider.dialog.routingMark')}
-                        </Label>
-                        <Input
-                          id='pp-override-routing-mark'
-                          value={proxyProviderForm.override.routing_mark}
-                          onChange={(e) =>
-                            setProxyProviderForm((prev) => ({
-                              ...prev,
-                              override: {
-                                ...prev.override,
-                                routing_mark: e.target.value,
-                              },
-                            }))
-                          }
-                          placeholder={t('proxyProvider.dialog.routingMarkPlaceholder')}
-                          className='h-8 text-sm'
-                        />
-                      </div>
-                    </div>
-                    <div className='space-y-1'>
-                      <Label
-                        htmlFor='pp-override-ip-version'
-                        className='text-xs'
-                      >
-                        {t('proxyProvider.dialog.ipVersionLabel')}
-                      </Label>
-                      <Select
-                        value={proxyProviderForm.override.ip_version}
-                        onValueChange={(value) =>
-                          setProxyProviderForm((prev) => ({
-                            ...prev,
-                            override: {
-                              ...prev.override,
-                              ip_version: value as OverrideForm['ip_version'],
-                            },
-                          }))
-                        }
-                      >
-                        <SelectTrigger
-                          id='pp-override-ip-version'
-                          className='h-8 text-sm'
-                        >
-                          <SelectValue placeholder={t('proxyProvider.dialog.ipVersionPlaceholder')} />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {IP_VERSION_OPTIONS.map((opt) => (
-                            <SelectItem
-                              key={opt.value}
-                              value={opt.value || '_default'}
-                            >
-                              {t(`ipVersion.${opt.labelKey}`, { defaultValue: opt.labelKey })}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </div>
-                  </div>
-
-                  {/* 节点名称修改 */}
-                  <div className='space-y-2'>
-                    <Label className='text-muted-foreground text-xs'>
-                      {t('proxyProvider.dialog.nodeNameModify')}
-                    </Label>
-                    <div className='grid grid-cols-1 gap-3 sm:grid-cols-2'>
-                      <div className='space-y-1'>
-                        <Label htmlFor='pp-override-prefix' className='text-xs'>
-                          {t('proxyProvider.dialog.namePrefix')}
-                        </Label>
-                        <Input
-                          id='pp-override-prefix'
-                          value={proxyProviderForm.override.additional_prefix}
-                          onChange={(e) =>
-                            setProxyProviderForm((prev) => ({
-                              ...prev,
-                              override: {
-                                ...prev.override,
-                                additional_prefix: e.target.value,
-                              },
-                            }))
-                          }
-                          placeholder={t('proxyProvider.dialog.namePrefixPlaceholder')}
-                          className='h-8 text-sm'
-                        />
-                      </div>
-                      <div className='space-y-1'>
-                        <Label htmlFor='pp-override-suffix' className='text-xs'>
-                          {t('proxyProvider.dialog.nameSuffix')}
-                        </Label>
-                        <Input
-                          id='pp-override-suffix'
-                          value={proxyProviderForm.override.additional_suffix}
-                          onChange={(e) =>
-                            setProxyProviderForm((prev) => ({
-                              ...prev,
-                              override: {
-                                ...prev.override,
-                                additional_suffix: e.target.value,
-                              },
-                            }))
-                          }
-                          placeholder={t('proxyProvider.dialog.nameSuffixPlaceholder')}
-                          className='h-8 text-sm'
-                        />
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* 生成的配置预览 */}
-              <div className='space-y-2'>
-                <div className='flex items-center justify-between'>
-                  <h4 className='text-sm font-medium'>{t('proxyProvider.dialog.configPreview')}</h4>
-                  <Button
-                    variant='outline'
-                    size='sm'
-                    onClick={() => {
-                      const preview = generateProxyProviderYAML()
-                      navigator.clipboard.writeText(preview)
-                      toast.success(t('proxyProvider.configCopied'))
-                    }}
-                  >
-                    <Copy className='mr-1 h-4 w-4' />
-                    {t('proxyProvider.dialog.copyBtn')}
-                  </Button>
-                </div>
-                <pre className='bg-muted overflow-x-auto rounded-md p-3 text-xs whitespace-pre-wrap'>
-                  {generateProxyProviderYAML()}
-                </pre>
-              </div>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              variant='outline'
-              onClick={() => setProxyProviderDialogOpen(false)}
-            >
-              {t('actions.cancel', { ns: 'common' })}
-            </Button>
-            <Button
-              onClick={() => {
-                // 构建 header JSON
-                const headerObj: Record<string, string[]> = {}
-                if (proxyProviderForm.header_user_agent) {
-                  headerObj['User-Agent'] = proxyProviderForm.header_user_agent
-                    .split(',')
-                    .map((s) => s.trim())
-                }
-                if (proxyProviderForm.header_authorization) {
-                  headerObj['Authorization'] = [
-                    proxyProviderForm.header_authorization,
-                  ]
-                }
-
-                const payload = {
-                  name: proxyProviderForm.name,
-                  type: proxyProviderForm.type,
-                  interval: proxyProviderForm.interval,
-                  proxy: proxyProviderForm.proxy,
-                  size_limit: proxyProviderForm.size_limit,
-                  header:
-                    Object.keys(headerObj).length > 0
-                      ? JSON.stringify(headerObj)
-                      : '',
-                  health_check_enabled: proxyProviderForm.health_check_enabled,
-                  health_check_url: proxyProviderForm.health_check_url,
-                  health_check_interval:
-                    proxyProviderForm.health_check_interval,
-                  health_check_timeout: proxyProviderForm.health_check_timeout,
-                  health_check_lazy: proxyProviderForm.health_check_lazy,
-                  health_check_expected_status:
-                    proxyProviderForm.health_check_expected_status,
-                  filter: proxyProviderForm.filter,
-                  exclude_filter: proxyProviderForm.exclude_filter,
-                  exclude_type: proxyProviderForm.exclude_type.join(','),
-                  override: overrideFormToJSON(proxyProviderForm.override),
-                  process_mode: proxyProviderForm.process_mode,
-                }
-
-                if (editingProxyProvider) {
-                  // 编辑模式
-                  updateProxyProviderMutation.mutate({
-                    id: editingProxyProvider.id,
-                    external_subscription_id:
-                      editingProxyProvider.external_subscription_id,
-                    ...payload,
-                  })
-                } else {
-                  // 创建模式
-                  if (!selectedExternalSub) {
-                    toast.error(t('proxyProvider.dialog.selectExternalSubFirst'))
-                    return
-                  }
-                  createProxyProviderMutation.mutate({
-                    external_subscription_id: selectedExternalSub.id,
-                    ...payload,
-                  })
-                }
-              }}
-              disabled={
-                !proxyProviderForm.name ||
-                (!editingProxyProvider && !selectedExternalSub) ||
-                createProxyProviderMutation.isPending ||
-                updateProxyProviderMutation.isPending
-              }
-            >
-              {editingProxyProvider ? t('proxyProvider.dialog.updateConfig') : t('proxyProvider.dialog.saveConfig')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          if (editingProxyProvider) {
+            updateProxyProviderMutation.mutate({
+              id: editingProxyProvider.id,
+              external_subscription_id: editingProxyProvider.external_subscription_id,
+              ...payload,
+            })
+          } else {
+            if (!selectedExternalSub) {
+              toast.error(t('proxyProvider.dialog.selectExternalSubFirst'))
+              return
+            }
+            createProxyProviderMutation.mutate({
+              external_subscription_id: selectedExternalSub.id,
+              ...payload,
+            })
+          }
+        }}
+      />
 
       <MissingNodesReplaceDialog
         open={missingNodesDialogOpen}
@@ -5778,285 +2400,62 @@ function SubscribeFilesPage() {
         confirmText={t('editConfig.applyReplace')}
       />
 
-      {/* 代理集合Pro对话框 */}
-      <Dialog
+      {/* 流量统计范围已改为内联 Popover,由 files-list-section 在流量列按钮上挂载 */}
+
+      {/* 代理集合Pro对话框 — 拆到 ./subscribe-files/dialogs/proxy-provider-pro-dialog */}
+      <ProxyProviderProDialog
         open={proxyProviderProDialogOpen}
         onOpenChange={setProxyProviderProDialogOpen}
-      >
-        <DialogContent className='max-w-md'>
-          <DialogHeader>
-            <DialogTitle>{t('proxyProvider.basicDialog.title')}</DialogTitle>
-            <DialogDescription>
-              {t('proxyProvider.basicDialog.description')}
-            </DialogDescription>
-          </DialogHeader>
+        externalSubs={externalSubs}
+        selectedExternalSub={proSelectedExternalSub}
+        onSelectedExternalSubChange={(sub) => {
+          setProSelectedExternalSub(sub)
+          // 切换外部订阅时清空上次的创建结果(原 onValueChange 内联行为)
+          setProCreationResults([])
+        }}
+        namePrefix={proNamePrefix}
+        onNamePrefixChange={setProNamePrefix}
+        enableGeoIPMatching={enableGeoIPMatching}
+        onEnableGeoIPMatchingChange={setEnableGeoIPMatching}
+        onBatchCreateByRegion={handleBatchCreateByRegion}
+        onBatchCreateByProtocol={handleBatchCreateByProtocol}
+        creatingRegion={proCreatingRegion}
+        creatingProtocol={proCreatingProtocol}
+        creationResults={proCreationResults}
+      />
 
-          <div className='space-y-4'>
-            {/* 选择外部订阅 */}
-            <div className='space-y-2'>
-              <Label>{t('proxyProvider.basicDialog.selectExternalSub')}</Label>
-              <Select
-                value={proSelectedExternalSub?.id?.toString() || ''}
-                onValueChange={(v) => {
-                  const sub = externalSubs.find((s) => s.id === parseInt(v))
-                  setProSelectedExternalSub(sub || null)
-                  setProNamePrefix(sub?.name || '')
-                  setProCreationResults([])
-                }}
-              >
-                <SelectTrigger>
-                  <SelectValue placeholder={t('proxyProvider.basicDialog.selectExternalSubPlaceholder')} />
-                </SelectTrigger>
-                <SelectContent>
-                  {externalSubs.map((sub) => (
-                    <SelectItem key={sub.id} value={sub.id.toString()}>
-                      {sub.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+      {/* 代理集合预览对话框（MMW 模式） — 拆到 ./subscribe-files/dialogs/preview-dialog */}
+      <PreviewDialog
+        open={previewDialogOpen}
+        onOpenChange={setPreviewDialogOpen}
+        configName={previewConfigName}
+        content={previewContent}
+        loading={previewLoading}
+      />
 
-            {/* 名称前缀输入框 */}
-            <div className='space-y-2'>
-              <Label>{t('proxyProvider.basicDialog.namePrefix')}</Label>
-              <Input
-                placeholder={t('proxyProvider.basicDialog.namePrefixPlaceholder')}
-                value={proNamePrefix}
-                onChange={(e) => setProNamePrefix(e.target.value)}
-              />
-              <p className='text-muted-foreground text-xs'>
-                {t('proxyProvider.basicDialog.namePrefixHint')}
-              </p>
-            </div>
-
-            {/* 根据IP位置分组开关 */}
-            <div className='flex items-center justify-between'>
-              <div className='space-y-0.5'>
-                <Label>{t('proxyProvider.basicDialog.groupByIp')}</Label>
-                <p className='text-muted-foreground text-xs'>
-                  {t('proxyProvider.basicDialog.groupByIpHint')}
-                </p>
-              </div>
-              <Switch
-                checked={enableGeoIPMatching}
-                onCheckedChange={setEnableGeoIPMatching}
-              />
-            </div>
-
-            {/* 分裂按钮 */}
-            <div className='flex gap-2'>
-              <Button
-                className='flex-1'
-                disabled={
-                  !proSelectedExternalSub ||
-                  !proNamePrefix.trim() ||
-                  proCreatingRegion ||
-                  proCreatingProtocol
-                }
-                onClick={handleBatchCreateByRegion}
-              >
-                {proCreatingRegion && (
-                  <RefreshCw className='mr-2 h-4 w-4 animate-spin' />
-                )}
-                {t('proxyProvider.basicDialog.splitByRegion')}
-              </Button>
-              <Button
-                className='flex-1'
-                variant='outline'
-                disabled={
-                  !proSelectedExternalSub ||
-                  !proNamePrefix.trim() ||
-                  proCreatingRegion ||
-                  proCreatingProtocol
-                }
-                onClick={handleBatchCreateByProtocol}
-              >
-                {proCreatingProtocol && (
-                  <RefreshCw className='mr-2 h-4 w-4 animate-spin' />
-                )}
-                {t('proxyProvider.basicDialog.splitByProtocol')}
-              </Button>
-            </div>
-
-            {/* 创建结果 */}
-            {proCreationResults.length > 0 && (
-              <div className='space-y-2'>
-                <Label>
-                  {t('proxyProvider.basicDialog.creationResults')} ({proCreationResults.filter((r) => r.success).length}
-                  /{proCreationResults.length})
-                </Label>
-                <ScrollArea className='h-[200px] rounded-md border p-2'>
-                  {proCreationResults.map((result, idx) => (
-                    <div
-                      key={idx}
-                      className='flex items-center gap-2 py-1 text-sm'
-                    >
-                      {result.success ? (
-                        <Badge variant='default' className='bg-green-500'>
-                          {t('proxyProvider.basicDialog.success')}
-                        </Badge>
-                      ) : (
-                        <Badge variant='destructive'>{t('proxyProvider.basicDialog.failed')}</Badge>
-                      )}
-                      <span className='flex-1 truncate'>{result.name}</span>
-                      {result.error && (
-                        <span className='text-destructive text-xs'>
-                          ({result.error})
-                        </span>
-                      )}
-                    </div>
-                  ))}
-                </ScrollArea>
-              </div>
-            )}
-          </div>
-
-          <DialogFooter>
-            <Button
-              variant='outline'
-              onClick={() => setProxyProviderProDialogOpen(false)}
-            >
-              {t('actions.close', { ns: 'common' })}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* 代理集合预览对话框（MMW 模式） */}
-      <Dialog open={previewDialogOpen} onOpenChange={setPreviewDialogOpen}>
-        <DialogContent className='max-h-[80vh] max-w-3xl'>
-          <DialogHeader>
-            <DialogTitle>{t('proxyProvider.previewTitle', { name: previewConfigName })}</DialogTitle>
-            <DialogDescription>{t('proxyProvider.previewDesc')}</DialogDescription>
-          </DialogHeader>
-
-          <div className='relative'>
-            {previewLoading ? (
-              <div className='flex items-center justify-center py-8'>
-                <RefreshCw className='text-muted-foreground h-6 w-6 animate-spin' />
-                <span className='text-muted-foreground ml-2'>{t('actions.loading', { ns: 'common' })}</span>
-              </div>
-            ) : (
-              <ScrollArea className='h-[50vh] rounded-md border'>
-                <pre className='p-4 font-mono text-xs break-all whitespace-pre-wrap'>
-                  {previewContent}
-                </pre>
-              </ScrollArea>
-            )}
-          </div>
-
-          <DialogFooter className='flex-row gap-2 sm:justify-between'>
-            <Button
-              variant='outline'
-              size='sm'
-              onClick={() => {
-                navigator.clipboard.writeText(previewContent)
-                toast.success(t('proxyProvider.copiedToClipboard'))
-              }}
-              disabled={previewLoading || !previewContent}
-            >
-              <Copy className='mr-2 h-4 w-4' />
-              {t('actions.copy', { ns: 'common' })}
-            </Button>
-            <Button
-              variant='outline'
-              onClick={() => setPreviewDialogOpen(false)}
-            >
-              {t('actions.close', { ns: 'common' })}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      {/* 编辑外部订阅对话框 */}
-      <Dialog
+      {/* 编辑外部订阅对话框 — 拆到 ./subscribe-files/dialogs/edit-external-sub-dialog */}
+      <EditExternalSubDialog
         open={editExternalSubDialogOpen}
         onOpenChange={(open) => {
           setEditExternalSubDialogOpen(open)
-          if (!open) {
-            setEditingExternalSub(null)
-          }
+          if (!open) setEditingExternalSub(null)
         }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t('externalSub.editTitle')}</DialogTitle>
-            <DialogDescription>
-              {t('externalSub.editDescription')}
-            </DialogDescription>
-          </DialogHeader>
-          <div className='space-y-4'>
-            <div className='space-y-2'>
-              <Label>{t('externalSub.addressLabel')}</Label>
-              <Input
-                value={editExternalSubForm.url}
-                onChange={(e) =>
-                  setEditExternalSubForm((prev) => ({
-                    ...prev,
-                    url: e.target.value,
-                  }))
-                }
-                placeholder='https://example.com/subscribe'
-              />
-            </div>
-            <div className='space-y-2'>
-              <Label>{t('externalSub.trafficStatsMode')}</Label>
-              <Select
-                value={editExternalSubForm.traffic_mode}
-                onValueChange={(value: 'download' | 'upload' | 'both') =>
-                  setEditExternalSubForm((prev) => ({
-                    ...prev,
-                    traffic_mode: value,
-                  }))
-                }
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value='both'>
-                    {t('externalSub.trafficStatsModeDownloadUpload')}
-                  </SelectItem>
-                  <SelectItem value='download'>{t('externalSub.trafficStatsModeDownload')}</SelectItem>
-                  <SelectItem value='upload'>{t('externalSub.trafficStatsModeUpload')}</SelectItem>
-                </SelectContent>
-              </Select>
-              <p className='text-muted-foreground text-xs'>
-                {t('externalSub.trafficStatsModeHint')}
-              </p>
-            </div>
-          </div>
-          <DialogFooter>
-            <Button
-              variant='outline'
-              onClick={() => setEditExternalSubDialogOpen(false)}
-            >
-              {t('actions.cancel', { ns: 'common' })}
-            </Button>
-            <Button
-              onClick={() => {
-                if (editingExternalSub) {
-                  updateExternalSubMutation.mutate({
-                    id: editingExternalSub.id,
-                    name: editingExternalSub.name,
-                    url: editExternalSubForm.url,
-                    user_agent: editingExternalSub.user_agent,
-                    traffic_mode: editExternalSubForm.traffic_mode,
-                  })
-                  setEditExternalSubDialogOpen(false)
-                  setEditingExternalSub(null)
-                }
-              }}
-              disabled={
-                updateExternalSubMutation.isPending || !editExternalSubForm.url
-              }
-            >
-              {t('actions.save', { ns: 'common' })}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        editing={editingExternalSub}
+        form={editExternalSubForm}
+        onFormChange={setEditExternalSubForm}
+        onSubmit={(editing, form) => {
+          updateExternalSubMutation.mutate({
+            id: editing.id,
+            name: editing.name,
+            url: form.url,
+            user_agent: editing.user_agent,
+            traffic_mode: form.traffic_mode,
+          })
+          setEditExternalSubDialogOpen(false)
+          setEditingExternalSub(null)
+        }}
+        saving={updateExternalSubMutation.isPending}
+      />
     </main>
   )
 }

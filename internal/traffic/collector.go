@@ -70,6 +70,12 @@ type Collector struct {
 
 	OnServerOffline func(ctx context.Context, serverName, ip string)
 
+	// 已激活的 ticker 引用,用于支持 hot-reload(系统设置改 interval 时立即生效)。
+	// 由 Start 内部赋值, SetInterval / SetSpeedInterval 在已运行时会 Reset。
+	tickerMu      sync.Mutex
+	tickerTraffic *time.Ticker
+	tickerSpeed   *time.Ticker
+
 	// 本地服务器的速度跟踪
 	speedMu      sync.RWMutex
 	serverSpeeds map[int64]*ServerSpeed           // serverID -> 速度数据
@@ -90,17 +96,30 @@ func NewCollector(repo *storage.TrafficRepository) *Collector {
 	}
 }
 
-// 设置采集间隔
+// SetInterval 设置 traffic 采集间隔。如果 Start() 已在跑,会立即 Reset ticker(hot-reload)。
 func (c *Collector) SetInterval(interval time.Duration) {
-	if interval > 0 {
-		c.interval = interval
+	if interval <= 0 {
+		return
 	}
+	c.interval = interval
+	c.tickerMu.Lock()
+	if c.tickerTraffic != nil {
+		c.tickerTraffic.Reset(interval)
+	}
+	c.tickerMu.Unlock()
 }
 
+// SetSpeedInterval 同 SetInterval,作用于 speed 采集 ticker。
 func (c *Collector) SetSpeedInterval(interval time.Duration) {
-	if interval > 0 {
-		c.speedInterval = interval
+	if interval <= 0 {
+		return
 	}
+	c.speedInterval = interval
+	c.tickerMu.Lock()
+	if c.tickerSpeed != nil {
+		c.tickerSpeed.Reset(interval)
+	}
+	c.tickerMu.Unlock()
 }
 
 // 开始流量收集循环
@@ -112,6 +131,14 @@ func (c *Collector) Start(ctx context.Context) {
 
 	ticker := time.NewTicker(c.interval)
 	defer ticker.Stop()
+	c.tickerMu.Lock()
+	c.tickerTraffic = ticker
+	c.tickerMu.Unlock()
+	defer func() {
+		c.tickerMu.Lock()
+		c.tickerTraffic = nil
+		c.tickerMu.Unlock()
+	}()
 
 	for {
 		select {
@@ -301,12 +328,16 @@ func (c *Collector) ProcessMetrics(ctx context.Context, serverID int64, metrics 
 		}
 	}
 
-	// 处理用户流量
-	for username, data := range stats.User {
-		if err := c.repo.UpsertUserTraffic(ctx, serverID, username, data.Uplink, data.Downlink); err != nil {
-			log.Printf("[Traffic Collector] Failed to upsert user traffic for %s: %v", username, err)
-		}
-	}
+	// 处理用户流量。
+	// xray stats 的 key 是 email,可能是:
+	//   - 主账号 email(== mmwx username,历史约定),直接落库
+	//   - 子账号 email(<username>__<routed_label>),通过 user_subaccounts 反查归到 username
+	//   - _admin__ 前缀的占位 client,流量丢弃(管理员测试用,不属任何用户)
+	// !!! 必须先按 username 聚合再写库 — 直接每个 email 调一次 UpsertUserTraffic,
+	// 多个 email 映射到同一 username 时,UpsertUserTraffic 内部按"cumulative 计数器减 LastUplink"算 delta,
+	// 同一行 LastUplink 在循环里被一会儿写成 jimlee 的累计、一会儿写成 wtt 的累计,delta 会一会儿负(被当 xray 重启
+	// 把整个 LastUplink 推进 total)、一会儿正(整段累计当 delta 加),一轮 collector 把流量指数级放大。
+	aggregateAndUpsertUserTraffic(ctx, c.repo, serverID, stats.User)
 
 	log.Printf("[Traffic Collector] Processed metrics for server %d: %d inbounds, %d outbounds, %d users",
 		serverID, len(stats.Inbound), len(stats.Outbound), len(stats.User))
@@ -334,17 +365,54 @@ func (c *Collector) ProcessRemoteMetrics(ctx context.Context, serverID int64, st
 		}
 	}
 
-	// 处理用户流量
-	for username, data := range stats.User {
-		if err := c.repo.UpsertUserTraffic(ctx, serverID, username, data.Uplink, data.Downlink); err != nil {
-			log.Printf("[Traffic Collector] Failed to upsert remote user traffic for %s: %v", username, err)
-		}
-	}
+	// 用户流量同上 — 必须先按 username 聚合
+	aggregateAndUpsertUserTraffic(ctx, c.repo, serverID, stats.User)
 
 	log.Printf("[Traffic Collector] Processed remote metrics for server %d: %d inbounds, %d outbounds, %d users",
 		serverID, len(stats.Inbound), len(stats.Outbound), len(stats.User))
 
 	return nil
+}
+
+// aggregateAndUpsertUserTraffic 把 stats.User(key=email)里所有归到同一 username 的 cumulative 计数器加总,
+// 然后只对每个 username 调一次 UpsertUserTraffic。cumulative 计数器之和仍是 cumulative(每个组件计数器自身单调
+// 递增),delta 计算照常成立。
+//
+// 同时**并行双写** user_email_traffic — 保留 email 维度,供前端 drilldown 看"用户每个节点的流量"。
+// 老 user_traffic 是套餐扣减热路径,继续按 username 聚合;新表是 email 细分,只用于细粒度展示。
+func aggregateAndUpsertUserTraffic(ctx context.Context, repo userTrafficRepo, serverID int64, userStats map[string]TrafficData) {
+	type sum struct{ uplink, downlink int64 }
+	byUsername := make(map[string]*sum)
+	for emailKey, data := range userStats {
+		// 双写新表 — email 维度原样保留,即使 ResolveUsernameByEmail 解析不到 username 也写
+		// (野 client 也算"该 server 的 email 流量",前端可显示成"未识别节点")
+		if err := repo.UpsertUserEmailTraffic(ctx, serverID, emailKey, data.Uplink, data.Downlink); err != nil {
+			log.Printf("[Traffic Collector] Failed to upsert user email traffic for %s on server %d: %v", emailKey, serverID, err)
+		}
+
+		username := repo.ResolveUsernameByEmail(ctx, emailKey)
+		if username == "" {
+			continue
+		}
+		if s, ok := byUsername[username]; ok {
+			s.uplink += data.Uplink
+			s.downlink += data.Downlink
+		} else {
+			byUsername[username] = &sum{uplink: data.Uplink, downlink: data.Downlink}
+		}
+	}
+	for username, s := range byUsername {
+		if err := repo.UpsertUserTraffic(ctx, serverID, username, s.uplink, s.downlink); err != nil {
+			log.Printf("[Traffic Collector] Failed to upsert user traffic for %s on server %d: %v", username, serverID, err)
+		}
+	}
+}
+
+// userTrafficRepo 只取 collector 实际用到的方法,避免去 import 整个 storage 接口
+type userTrafficRepo interface {
+	ResolveUsernameByEmail(ctx context.Context, email string) string
+	UpsertUserTraffic(ctx context.Context, serverID int64, username string, uplink, downlink int64) error
+	UpsertUserEmailTraffic(ctx context.Context, serverID int64, email string, uplink, downlink int64) error
 }
 
 // 为所有服务器创建每日快照
@@ -461,6 +529,14 @@ func (c *Collector) CollectFromRemoteServer(ctx context.Context, server storage.
 func (c *Collector) StartSpeedCollection(ctx context.Context) {
 	ticker := time.NewTicker(c.speedInterval)
 	defer ticker.Stop()
+	c.tickerMu.Lock()
+	c.tickerSpeed = ticker
+	c.tickerMu.Unlock()
+	defer func() {
+		c.tickerMu.Lock()
+		c.tickerSpeed = nil
+		c.tickerMu.Unlock()
+	}()
 
 	log.Printf("[Speed Collector] Starting speed collection with %v interval", c.speedInterval)
 

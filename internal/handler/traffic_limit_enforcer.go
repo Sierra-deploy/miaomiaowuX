@@ -11,13 +11,17 @@ import (
 type TrafficLimitEnforcer struct {
 	repo         *storage.TrafficRepository
 	remoteManage *RemoteManageHandler
+	pusher       *LimiterConfigPusher
 }
 
-func NewTrafficLimitEnforcer(repo *storage.TrafficRepository, remoteManage *RemoteManageHandler) *TrafficLimitEnforcer {
-	return &TrafficLimitEnforcer{repo: repo, remoteManage: remoteManage}
+func NewTrafficLimitEnforcer(repo *storage.TrafficRepository, remoteManage *RemoteManageHandler, pusher *LimiterConfigPusher) *TrafficLimitEnforcer {
+	return &TrafficLimitEnforcer{repo: repo, remoteManage: remoteManage, pusher: pusher}
 }
 
 func (e *TrafficLimitEnforcer) Start(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
 	log.Printf("[TrafficLimitEnforcer] Starting with interval: %v", interval)
 	e.CheckAll(ctx)
 
@@ -49,11 +53,19 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 			log.Printf("[TrafficLimitEnforcer] User %s package expired at %s, removing from inbounds and clearing package",
 				user.Username, user.PackageEndDate.Format("2006-01-02"))
 			e.removeUserFromAllInbounds(ctx, user.Username)
+			// 用户私有路由出站(routed_owner='user'):父 inbound 来自套餐分配的节点,
+			// 套餐到期后失去访问权,所以一并 suspend(凭据保留供续费恢复)。
+			suspendUserPrivateRouted(ctx, e.remoteManage, e.repo, user.Username)
 			if err := e.repo.DeleteUserInboundConfigs(ctx, user.Username); err != nil {
 				log.Printf("[TrafficLimitEnforcer] Failed to delete inbound configs for %s: %v", user.Username, err)
 			}
 			if err := e.repo.RemovePackageFromUser(ctx, user.Username); err != nil {
 				log.Printf("[TrafficLimitEnforcer] Failed to remove package from %s: %v", user.Username, err)
+			}
+			// 套餐过期跟 user delete 一样,需要通知所有 agent limiter 同步移除该用户
+			// 否则 agent 内存里的 limiter UserInfo 还有这个用户,旧 IP 复用时仍能匹配 bucket。
+			if e.pusher != nil {
+				go e.pusher.PushToAllServersForUser(context.Background(), user.Username)
 			}
 			continue
 		}
@@ -73,24 +85,27 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 			continue
 		}
 
-		totalTraffic, err := e.repo.GetUserTotalTraffic(ctx, user.Username)
+		// 加权流量:每行 user_email_traffic 乘以节点在套餐内的倍率(routed 子节点继承父节点)
+		totalTraffic, err := e.repo.GetUserWeightedTraffic(ctx, user.Username, pkg)
 		if err != nil {
 			log.Printf("[TrafficLimitEnforcer] Failed to get traffic for %s: %v", user.Username, err)
 			continue
 		}
 
 		wasOverLimit, _ := e.repo.IsUserOverLimit(ctx, user.Username)
-		isOverLimit := totalTraffic >= pkg.TrafficLimitBytes
+		isOverLimit := totalTraffic*pkg.TrafficMultiplier() >= pkg.TrafficLimitBytes
 
 		if isOverLimit && !wasOverLimit {
 			log.Printf("[TrafficLimitEnforcer] User %s exceeded limit (%d/%d bytes), removing from inbounds",
 				user.Username, totalTraffic, pkg.TrafficLimitBytes)
 			e.removeUserFromAllInbounds(ctx, user.Username)
+			suspendUserPrivateRouted(ctx, e.remoteManage, e.repo, user.Username)
 			e.repo.UpdateUserOverLimit(ctx, user.Username, true)
 		} else if !isOverLimit && wasOverLimit {
 			log.Printf("[TrafficLimitEnforcer] User %s back under limit (%d/%d bytes), restoring inbounds",
 				user.Username, totalTraffic, pkg.TrafficLimitBytes)
 			e.restoreUserToInbounds(ctx, user)
+			resumeUserPrivateRouted(ctx, e.remoteManage, e.repo, user.Username)
 			e.repo.UpdateUserOverLimit(ctx, user.Username, false)
 		}
 	}

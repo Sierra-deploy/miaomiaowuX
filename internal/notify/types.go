@@ -9,6 +9,7 @@ const (
 	EventServerOffline    EventType = "server_offline"
 	EventServerOnline     EventType = "server_online"
 	EventTrafficThreshold EventType = "traffic_threshold"
+	EventIPBan            EventType = "ip_ban"
 )
 
 type Config struct {

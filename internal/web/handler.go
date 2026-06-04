@@ -82,6 +82,9 @@ func serveIndex(w http.ResponseWriter, r *http.Request) {
 	initOnce.Do(initialize)
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	// index.html 引用的是带内容哈希的 JS 资源,本身不能被浏览器长缓存,
+	// 否则发布新版本后浏览器仍加载旧 bundle(导致动态菜单等新功能不生效)。
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 	if r.Method == http.MethodHead {
 		w.WriteHeader(http.StatusOK)
 		return

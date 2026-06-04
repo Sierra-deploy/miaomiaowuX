@@ -36,9 +36,14 @@ func certDeployPaths(domain, dir string) (certPath, keyPath string) {
 }
 
 type CertificateHandler struct {
-	repo       *storage.TrafficRepository
-	wsHandler  *RemoteWSHandler
-	acmeClient *acme.Client
+	repo                *storage.TrafficRepository
+	wsHandler           *RemoteWSHandler
+	acmeClient          *acme.Client
+	onMasterURLChanged  func(ctx context.Context, newURL string)
+}
+
+func (h *CertificateHandler) SetOnMasterURLChanged(fn func(ctx context.Context, newURL string)) {
+	h.onMasterURLChanged = fn
 }
 
 // 创建一个新的CertificateHandler。
@@ -147,6 +152,11 @@ func (h *CertificateHandler) requireAdmin(r *http.Request) bool {
 	username := auth.UsernameFromContext(r.Context())
 	if username == "" {
 		return false
+	}
+	// 全局 API token 走 auth.RequireToken 之后会得到 "api-token-admin" 虚拟用户名,
+	// 该虚拟用户不在 db 里,GetUser 会失败 → 必须短路放行,跟 auth.RequireAdmin 同款行为。
+	if username == "api-token-admin" {
+		return true
 	}
 	user, err := h.repo.GetUser(r.Context(), username)
 	if err != nil {
@@ -352,19 +362,35 @@ func (h *CertificateHandler) requestLocalCertificate(cert *storage.Certificate) 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
+	appendLog := func(msg string) {
+		_ = h.repo.AppendCertificateLog(ctx, cert.ID, msg)
+	}
+
+	appendLog("开始申请证书: " + cert.Domain)
+
 	certReq, err := h.buildCertRequest(ctx, cert)
 	if err != nil {
 		log.Printf("[Certificate] buildCertRequest failed for %s: %v", cert.Domain, err)
+		appendLog("构建请求失败: " + err.Error())
 		_ = h.repo.UpdateCertificateStatus(ctx, cert.ID, storage.CertStatusFailed, err.Error())
 		return
 	}
 
+	appendLog(fmt.Sprintf("验证方式: %s, CA: %s", certReq.ChallengeMode, certReq.Provider))
+	if certReq.ChallengeMode == "dns" {
+		appendLog("DNS 提供商: " + certReq.DNSProvider)
+	}
+	appendLog("正在向 CA 请求证书...")
+
 	result, err := h.acmeClient.ObtainCertificateV2(ctx, certReq)
 	if err != nil {
 		log.Printf("[Certificate] ObtainCertificate failed for %s: %v", cert.Domain, err)
+		appendLog("证书申请失败: " + err.Error())
 		_ = h.repo.UpdateCertificateStatus(ctx, cert.ID, storage.CertStatusFailed, err.Error())
 		return
 	}
+
+	appendLog(fmt.Sprintf("证书颁发成功, 有效期至 %s", result.ExpiryDate.Format("2006-01-02")))
 
 	if err := h.repo.UpdateCertificateIssued(ctx, cert.ID, result.CertPath, result.KeyPath, result.CertPEM, result.KeyPEM, result.IssueDate, result.ExpiryDate); err != nil {
 		log.Printf("[Certificate] UpdateCertificateIssued failed for %s: %v", cert.Domain, err)
@@ -383,16 +409,26 @@ func (h *CertificateHandler) requestRemoteCertificate(cert *storage.Certificate)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	appendLog := func(msg string) {
+		_ = h.repo.AppendCertificateLog(ctx, cert.ID, msg)
+	}
+
+	appendLog("开始远程证书申请: " + cert.Domain)
+
 	// 获取远程服务器令牌
 	server, err := h.repo.GetRemoteServer(ctx, cert.RemoteServerID)
 	if err != nil {
 		log.Printf("[Certificate] GetRemoteServer failed: %v", err)
+		appendLog("获取远程服务器信息失败: " + err.Error())
 		_ = h.repo.UpdateCertificateStatus(ctx, cert.ID, storage.CertStatusFailed, "获取远程服务器信息失败")
 		return
 	}
 
+	appendLog("目标服务器: " + server.Name)
+
 	if !h.wsHandler.IsConnected(server.Token) {
 		log.Printf("[Certificate] Remote server %s is not connected", server.Name)
+		appendLog("远程服务器未连接")
 		_ = h.repo.UpdateCertificateStatus(ctx, cert.ID, storage.CertStatusFailed, "远程服务器未连接")
 		return
 	}
@@ -404,12 +440,16 @@ func (h *CertificateHandler) requestRemoteCertificate(cert *storage.Certificate)
 		dnsProvider, dnsErr := h.repo.GetDNSProvider(ctx, cert.DNSProviderID)
 		if dnsErr != nil {
 			log.Printf("[Certificate] GetDNSProvider failed: %v", dnsErr)
+			appendLog("获取 DNS 凭证失败")
 			_ = h.repo.UpdateCertificateStatus(ctx, cert.ID, storage.CertStatusFailed, "获取DNS凭证失败")
 			return
 		}
 		dnsProviderType = dnsProvider.ProviderType
 		dnsCredentials = dnsProvider.Credentials
+		appendLog("DNS 提供商: " + dnsProviderType)
 	}
+
+	appendLog("正在通过 WebSocket 发送证书请求...")
 
 	// 通过 WebSocket 发送证书请求
 	payload := WSCertRequestPayload{
@@ -839,6 +879,27 @@ func (h *CertificateHandler) deployToRemoteServer(server *storage.RemoteServer, 
 	}
 }
 
+// DeployCertToServerSync 同步把证书下发到指定 agent 的 xray 证书目录,返回 agent 上的 cert/key 路径。
+// 用于「添加 tls 入站时自动确保证书已在 agent 上」,避免证书缺失导致 xray 加载失败(502)。
+// Reload 用 "none":证书只写文件,真正生效由随后的 add inbound(gRPC) 触发,避免无谓重启。
+func (h *CertificateHandler) DeployCertToServerSync(ctx context.Context, server *storage.RemoteServer, cert *storage.Certificate) (string, string, error) {
+	name := certDeployFilename(cert.Domain)
+	certPath := "/usr/local/etc/xray/certs/" + name + ".pem"
+	keyPath := "/usr/local/etc/xray/certs/" + name + ".key"
+	payload := WSCertDeployPayload{
+		Domain:   cert.Domain,
+		CertPEM:  cert.CertPEM,
+		KeyPEM:   cert.KeyPEM,
+		CertPath: certPath,
+		KeyPath:  keyPath,
+		Reload:   "none",
+	}
+	if err := h.deployRemoteCertificateHTTP(ctx, server, payload); err != nil {
+		return "", "", err
+	}
+	return certPath, keyPath, nil
+}
+
 // 将证书部署到所有连接的远程服务器。
 func (h *CertificateHandler) deployToAllRemotes(domain, certPEM, keyPEM, certPath, keyPath, reloadTarget string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -1121,7 +1182,11 @@ func (h *CertificateHandler) DeleteDNSProvider(w http.ResponseWriter, r *http.Re
 
 // UploadCertificate 处理手动上传证书（UI 和 API Token 均可调用）。
 // POST /api/admin/certificates/upload
-// 参数: domain, cert_pem (base64), key_pem (base64)
+// 参数: domain, cert_pem, key_pem
+//   - cert_pem / key_pem 兼容两种格式:
+//     1. 裸 PEM 文本(以 "-----BEGIN" 开头,Certimate 等 webhook 直接发的格式)
+//     2. base64 编码后的 PEM(原 UI 上传路径)
+//   仅按首字符判别,base64 编码后的 PEM 不会以 "-----BEGIN" 开头(对应 base64 是 "LS0tLS1CRUdJTi"),不会冲突。
 func (h *CertificateHandler) UploadCertificate(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		respondJSON(w, http.StatusMethodNotAllowed, map[string]any{"success": false, "message": "Method not allowed"})
@@ -1148,14 +1213,26 @@ func (h *CertificateHandler) UploadCertificate(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	certBytes, err := base64.StdEncoding.DecodeString(req.CertPEM)
+	decodePEMOrBase64 := func(input, label string) ([]byte, error) {
+		s := strings.TrimSpace(input)
+		if strings.HasPrefix(s, "-----BEGIN") {
+			return []byte(s), nil
+		}
+		decoded, err := base64.StdEncoding.DecodeString(s)
+		if err != nil {
+			return nil, fmt.Errorf("%s 不是合法的 PEM 文本或 base64 编码: %v", label, err)
+		}
+		return decoded, nil
+	}
+
+	certBytes, err := decodePEMOrBase64(req.CertPEM, "cert_pem")
 	if err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "cert_pem base64 解码失败"})
+		respondJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": err.Error()})
 		return
 	}
-	keyBytes, err := base64.StdEncoding.DecodeString(req.KeyPEM)
+	keyBytes, err := decodePEMOrBase64(req.KeyPEM, "key_pem")
 	if err != nil {
-		respondJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": "key_pem base64 解码失败"})
+		respondJSON(w, http.StatusBadRequest, map[string]any{"success": false, "message": err.Error()})
 		return
 	}
 

@@ -37,8 +37,17 @@ func (h *RemoteManageHandler) deployTunnelConfig(ctx context.Context, server *st
 	domainConf := strings.ReplaceAll(string(domainTpl), "{domain}", domain)
 	domainConf = strings.ReplaceAll(domainConf, "{root_domain}", rootDomain)
 	domainConf = strings.ReplaceAll(domainConf, "{cert_name}", certName)
-	domainConf = strings.ReplaceAll(domainConf, "{static_root_path}", server.SiteValue)
+	staticRoot := server.SiteValue
+	if staticRoot == "" {
+		staticRoot = "/usr/local/nginx/html"
+	}
+	domainConf = strings.ReplaceAll(domainConf, "{static_root_path}", staticRoot)
 	domainConf = strings.ReplaceAll(domainConf, "{proxy_pass_server}", server.SiteValue)
+
+	clearPayload, _ := json.Marshal(map[string]int{"port": 443})
+	if _, err := h.forwardToRemoteServer(ctx, server.ID, http.MethodPost, "/api/child/nginx/clear-stream-port", clearPayload); err != nil {
+		log.Printf("[DeployTunnel] clear stream port 443 on server %d: %v (non-fatal)", server.ID, err)
+	}
 
 	sslPayload, _ := json.Marshal(map[string]any{
 		"domain":        domain,
@@ -60,8 +69,25 @@ func (h *RemoteManageHandler) deployTunnelConfig(ctx context.Context, server *st
 	}
 	configJSON := strings.ReplaceAll(string(configTpl), "{proxy_domain}", proxyDomain)
 
+	var xrayConfig map[string]any
+	if err := json.Unmarshal([]byte(configJSON), &xrayConfig); err != nil {
+		return fmt.Errorf("解析 Xray 模板配置失败: %w", err)
+	}
+
+	// 同机部署时，主控域名路由到 nginx，否则主控 HTTPS 不可达
+	if server.IPAddress == "127.0.0.1" {
+		if masterDomain := getDomainFromMasterURL(h.repo, ctx); masterDomain != "" && masterDomain != domain {
+			h.addWebsiteTunnelConfig(xrayConfig, masterDomain)
+		}
+	} else {
+		// 非主控部署直接使用服务器添加时的domain
+		h.addWebsiteTunnelConfig(xrayConfig, domain)
+	}
+
+	updatedConfig, _ := json.MarshalIndent(xrayConfig, "", "    ")
+
 	configPayload, _ := json.Marshal(map[string]string{
-		"config": configJSON,
+		"config": string(updatedConfig),
 	})
 	if _, err := h.forwardToRemoteServer(ctx, server.ID, http.MethodPost, "/api/child/xray/config", configPayload); err != nil {
 		return fmt.Errorf("下发 Xray 配置失败: %w", err)
@@ -92,5 +118,11 @@ func (h *RemoteManageHandler) deployTunnelConfig(ctx context.Context, server *st
 	}
 
 	log.Printf("[DeployTunnel] Completed tunnel config deployment for server %d (%s), domain=%s", server.ID, server.Name, domain)
+
+	// 通知 agent 更新本地 steal_mode
+	if h.wsHandler != nil {
+		_ = h.wsHandler.SendConfigUpdate(server.ID, map[string]string{"steal_mode": "tunnel"})
+	}
+
 	return nil
 }

@@ -90,7 +90,7 @@ func WithWebrootDir(dir string) ClientOption {
 // 创建一个新的 ACME 客户端。
 func NewClient(opts ...ClientOption) *Client {
 	c := &Client{
-		certDir:  "/etc/mmwx/certs",
+		certDir:  "data/certs",
 		staging:  false,
 		httpPort: ":80",
 	}
@@ -266,8 +266,7 @@ func (c *Client) setupDNSChallenge(client *lego.Client, req CertRequest) error {
 	}
 
 	if err := client.Challenge.SetDNS01Provider(provider,
-		dns01.AddRecursiveNameservers([]string{"8.8.8.8:53", "1.1.1.1:53"}),
-		dns01.DisableAuthoritativeNssPropagationRequirement(),
+		dns01.PropagationWait(20*time.Second, true),
 	); err != nil {
 		return fmt.Errorf("set DNS-01 provider: %w", err)
 	}

@@ -211,6 +211,12 @@ func (h *TemplateV3Handler) handlePreviewWithTags(w http.ResponseWriter, r *http
 		sortNodesByNodeOrder(nodes, settings.NodeOrder)
 	}
 
+	// 构建节点 ID -> 名称映射（用于链式代理解析）
+	nodeIDToName := make(map[int64]string, len(nodes))
+	for _, node := range nodes {
+		nodeIDToName[node.ID] = node.NodeName
+	}
+
 	// Filter nodes by selected tags and enabled status
 	var proxies []map[string]any
 	selectedTagsSet := make(map[string]bool)
@@ -230,6 +236,12 @@ func (h *TemplateV3Handler) handlePreviewWithTags(w http.ResponseWriter, r *http
 		var proxyConfig map[string]any
 		if err := json.Unmarshal([]byte(node.ClashConfig), &proxyConfig); err != nil {
 			continue
+		}
+		// 链式代理：根据 chain_proxy_node_id 注入 dialer-proxy
+		if node.ChainProxyNodeID != nil {
+			if targetName, ok := nodeIDToName[*node.ChainProxyNodeID]; ok {
+				proxyConfig["dialer-proxy"] = targetName
+			}
 		}
 		proxies = append(proxies, proxyConfig)
 	}

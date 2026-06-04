@@ -151,6 +151,9 @@ var (
 	ErrNodeNotFound                 = errors.New("node not found")
 	ErrSubscribeFileNotFound        = errors.New("subscribe file not found")
 	ErrSubscribeFileExists          = errors.New("subscribe file already exists")
+	ErrCustomShortCodeExists        = errors.New("该短码已被占用，请更换一个")
+	ErrSharedServerNotFound         = errors.New("shared server not found")
+	ErrFederatedServerNotFound      = errors.New("federated server not found")
 	ErrUserSettingsNotFound         = errors.New("user settings not found")
 	ErrExternalSubscriptionNotFound = errors.New("external subscription not found")
 	ErrExternalSubscriptionExists   = errors.New("external subscription already exists")
@@ -191,10 +194,82 @@ type Package struct {
 	CycleDays         int       `json:"cycle_days"`       // 包裹持续时间（天）
 	IsReset           bool      `json:"is_reset"`         // 流量是否按月重置
 	ResetDay          int       `json:"reset_day"`        // 重置的月份日期 (1-31)
-	Nodes             []int64   `json:"nodes"`            // 关联节点 ID
+	Nodes             []int64   `json:"nodes"`              // 关联节点 ID
+	NodeMultipliers   map[int64]float64 `json:"node_multipliers,omitempty"` // node_id → 倍率;遗留套餐为 nil = 全部按 1
+	SpeedLimitMbps    float64   `json:"speed_limit_mbps"`   // 限速 (Mbps)，0=不限
+	DeviceLimit       int       `json:"device_limit"`       // 设备数限制，0=不限
+	AutoSpeedRules    []AutoSpeedLimitRule `json:"auto_speed_rules,omitempty"`
 	ShortCode         string    `json:"short_code"`
+	TrafficMode       string    `json:"traffic_mode"`
+	TemplateFilename  string    `json:"template_filename"` // 套餐绑的 V3 模板;空 = 走系统默认模板
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+func (p *Package) TrafficMultiplier() int64 {
+	if p.TrafficMode == "twoway" {
+		return 2
+	}
+	return 1
+}
+
+// MultiplierForNode 返回某节点在该套餐内的倍率。
+// routed 子节点(自身不在套餐 NodeMultipliers 里)传入 parentNodeID,自动回退到父物理节点的倍率;
+// 都查不到 → 1.0(默认权重)。
+func (p *Package) MultiplierForNode(nodeID int64, parentNodeID *int64) float64 {
+	if p == nil || len(p.NodeMultipliers) == 0 {
+		return 1.0
+	}
+	if m, ok := p.NodeMultipliers[nodeID]; ok && m > 0 {
+		return m
+	}
+	if parentNodeID != nil {
+		if m, ok := p.NodeMultipliers[*parentNodeID]; ok && m > 0 {
+			return m
+		}
+	}
+	return 1.0
+}
+
+// serializeNodeMultipliers 把 map 序列化为 JSON,**清理掉不在 nodes 列表里的残留 key**
+// (取消勾选节点时 UI 可能没同步删 map 项,在这里兜底);全部省略默认值 1.0 节省空间。
+// nil/空/全是 1.0 → 返回 "{}"。
+func serializeNodeMultipliers(m map[int64]float64, nodes []int64) string {
+	if len(m) == 0 {
+		return "{}"
+	}
+	keep := make(map[string]float64, len(m))
+	allowed := make(map[int64]bool, len(nodes))
+	for _, id := range nodes {
+		allowed[id] = true
+	}
+	for id, v := range m {
+		if !allowed[id] {
+			continue
+		}
+		if v <= 0 || v == 1.0 {
+			continue
+		}
+		keep[fmt.Sprintf("%d", id)] = v
+	}
+	if len(keep) == 0 {
+		return "{}"
+	}
+	b, err := json.Marshal(keep)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+type AutoSpeedLimitRule struct {
+	Type             string  `json:"type"`               // "sustained" | "burst"
+	ThresholdMbps    float64 `json:"threshold_mbps"`     // 触发阈值 (Mbps)
+	SustainedSeconds int     `json:"sustained_seconds"`  // sustained: 持续时长; burst: 单次最短时长
+	WindowSeconds    int     `json:"window_seconds"`     // burst: 时间窗口
+	BurstCount       int     `json:"burst_count"`        // burst: 窗口内触发次数
+	LimitMbps        float64 `json:"limit_mbps"`         // 限速后速率 (Mbps)
+	LimitDuration    int     `json:"limit_duration"`     // 限速持续时间 (秒)
 }
 
 // Node代表存储在数据库中的代理节点。
@@ -210,9 +285,26 @@ type Node struct {
 	Tag            string
 	Tags           []string // 多标签支持（兼容旧版单Tag）
 	OriginalServer string
-	InboundTag     string // 关联入站标签（用于将节点链接到入站）
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	OriginalDomain   string // IP 解析功能专用：解析为 IP 前的原始域名（用于"恢复域名"）。与 OriginalServer（服务器名/路由键）严格区分
+	InboundTag       string // 关联入站标签（用于将节点链接到入站）
+	ChainProxyNodeID *int64 // 链式代理目标节点 ID
+	NodeType          string // 'physical' (默认) 或 'routed' (路由出站虚拟节点)
+	ParentNodeID      *int64 // routed 节点指向其父物理节点
+	RoutedOutboundTag string // routed 节点专用:绑定的 outbound tag(空 = 非 routed 节点);常用查询展示
+	RoutedOwner       string // routed 节点专用:'shared'(默认,admin 创建,进入套餐池) | 'user'(用户私有路由出站)
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+// RoutedNodeDetail 路由出站节点的完整元数据,通过专用 GetRoutedNodeDetail 读取。
+// 包含 Node 基本字段 + routed_* 字段。
+type RoutedNodeDetail struct {
+	Node
+	RoutedOutboundTag      string
+	RoutedOutboundJSON     string
+	RoutedRuleMarktag      string
+	RoutedAdminEmail       string
+	RoutedAdminCredential  string
 }
 
 // SubscribeFile 表示订阅文件配置。
@@ -223,10 +315,19 @@ type SubscribeFile struct {
 	URL                 string
 	Type                string
 	Filename            string
-	FileShortCode       string     // 用于复合短链接中文件识别的 3 字符代码
-	CustomShortCode     string     // 用户自定义的文件短码
-	AutoSyncCustomRules bool       // 是否自动同步自定义规则到该文件
-	ExpireAt            *time.Time // 可选的过期时间戳
+	FileShortCode       string   // 用于短链接的 3 字符代码（自动生成）
+	CustomShortCode     string   // 用户自定义短码（唯一，优先）
+	AutoSyncCustomRules bool
+	TemplateFilename    string   // 绑定的 V3 模板文件名
+	SelectedTags        []string // 选中的节点标签（DB 中 JSON 数组）— legacy,与 SelectedNodeIDs 二选一
+	SelectedNodeIDs     []int64  // 选中的节点 ID（DB 中 JSON 数组）— 优先于 SelectedTags;空 → 回退 tag 过滤
+	SelectedCustomRuleIDs     []int64 // 该订阅生效的覆写规则 ID（空=全部启用的生效）
+	SelectedOverrideScriptIDs []int64 // 该订阅生效的覆写脚本 ID（空=全部启用的生效）
+	StatsServerIDs      string   // 流量统计服务器 ID（逗号分隔 remote_servers.id）
+	TrafficLimit        *float64 // 手动流量上限(GB)，nil=跟随服务器
+	SortOrder           int
+	RawOutput           bool
+	CreatedBy           string // 创建者用户名
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 }
@@ -235,12 +336,13 @@ type SubscribeFile struct {
 type UserSettings struct {
 	Username             string
 	ForceSyncExternal    bool
-	MatchRule            string     // “节点名称”或“服务器端口”
-	SyncScope            string     // “saved_only”或“all” - 同步外部订阅的范围
+	MatchRule            string     // "节点名称"或"服务器端口"
+	SyncScope            string     // "saved_only"或"all" - 同步外部订阅的范围
 	KeepNodeName         bool       // 同步时保留原始节点名称
 	CacheExpireMinutes   int        // 缓存过期时间（分钟）
 	SyncTraffic          bool       // 同步外部订阅的流量信息
 	NodeNameFilter       string     // 正则表达式过滤节点名称
+	AppendSubInfo        bool       // 同步外部订阅时把剩余流量/天数拼到节点名后(同步自 mmw v0.7.3)
 	CustomRulesEnabled   bool       // 启用自定义规则功能
 	EnableShortLink      bool       // 启用订阅短链接功能
 	UseNewTemplateSystem bool       // 使用新的模板系统（基于数据库），默认true
@@ -275,6 +377,21 @@ type SystemConfig struct {
 	NotifyTrafficThreshold      bool
 	NotifyDailyTrafficTime      string // "HH:MM"，默认 "08:00"
 	NotifyTrafficThresholdPercent int  // 0-100，默认 80
+	EnableOverrideScripts       bool   // 启用覆写脚本功能
+	SilentMode                  bool   // 静默模式：所有请求返回404，仅订阅接口可用
+	SilentModeTimeout           int    // 获取订阅后恢复访问的分钟数，默认15
+	EnableMiaomiaowuFeatures    bool   // 启用妙妙屋功能（模板、订阅管理等菜单）
+	DefaultTemplateFilename     string // 默认模板文件名（rule_templates/目录下）
+	// 兼容妙妙屋短链接:旧版 mmw 用 /<code> 形式,新版 mmwx 用 /x/<code>。
+	// 开启后,直接 GET /<code>(无 /x/ 前缀)会尝试匹配同 code 的 /x/ 短链;命中则放行,
+	// 未命中按安全规则计入暴力枚举失败计数。
+	EnableMmwShortLinkCompat bool
+
+	// 节点名称倍率前缀:订阅生成时,套餐内 multiplier != 1 的节点 name 前面加
+	// "{Left}{multiplier}{Right}" 前缀;Left/Right 默认 「」,用户可改。
+	NodeNameMultiplierPrefixEnabled bool
+	NodeNameMultiplierLeft          string
+	NodeNameMultiplierRight         string
 }
 
 // ExternalSubscription表示用户导入的外部订阅URL。
@@ -299,10 +416,24 @@ type ExternalSubscription struct {
 type CustomRule struct {
 	ID        int64
 	Name      string
-	Type      string // “dns”、“规则”、“规则提供者”
-	Mode      string // “替换”、“前置”
+	Type      string // "dns"、"规则"、"规则提供者"
+	Mode      string // "替换"、"前置"
 	Content   string
 	Enabled   bool
+	CreatedBy string // 创建者用户名(用户权限隔离);'' 视为 admin 历史数据
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// OverrideScript 表示 JavaScript 覆写脚本。
+type OverrideScript struct {
+	ID        int64
+	Username  string
+	Name      string
+	Hook      string // "post_fetch" | "pre_save_nodes"
+	Content   string
+	Enabled   bool
+	SortOrder int
 	CreatedAt time.Time
 	UpdatedAt time.Time
 }
@@ -312,8 +443,8 @@ type CustomRuleApplication struct {
 	ID              int64
 	SubscribeFileID int64
 	CustomRuleID    int64
-	RuleType        string // “dns”、“规则”、“规则提供者”
-	RuleMode        string // “替换”、“前置”
+	RuleType        string // "dns"、"规则"、"规则提供者"
+	RuleMode        string // "替换"、"前置"
 	AppliedContent  string // 已应用的 JSON 序列化内容
 	ContentHash     string // 内容的 SHA256 哈希值用于快速比较
 	AppliedAt       time.Time
@@ -443,7 +574,15 @@ type RemoteServer struct {
 	StealMode             string     `json:"steal_mode,omitempty"` // "tunnel" | "fallback"，默认 tunnel
 	SiteType              string     `json:"site_type,omitempty"`  // "static" | "proxy"
 	SiteValue             string     `json:"site_value,omitempty"` // 静态路径或反向代理地址
+	XrayMode              string     `json:"xray_mode"`            // "external" (默认) 或 "embedded"
 	TimeOffsetSeconds     *int64     `json:"time_offset_seconds,omitempty"` // agent 与主控的时钟偏差（秒）
+	TrafficUsedOffset     int64      `json:"traffic_used_offset"`
+	// 流量统计规则: "both"(默认,上行+下行) / "upload"(仅上行) / "download"(仅下行)
+	// 影响:主控聚合该服务器节点流量时按规则累加。**用户流量不受此字段影响**,
+	// 用户已用流量按套餐 traffic_mode(oneway/twoway)单独算。
+	TrafficStatsMode string `json:"traffic_stats_mode"`
+	IsFederated           bool       `json:"is_federated"`       // 是否为接入的"分享服务器"(联邦)，非持久化字段
+	FederationPrefix      string     `json:"federation_prefix"`  // 分享服务器上新增入站的 tag 前缀，非持久化字段
 	CreatedAt             time.Time  `json:"created_at"`
 	UpdatedAt             time.Time  `json:"updated_at"`
 }
@@ -584,6 +723,46 @@ CREATE TABLE IF NOT EXISTS traffic_records (
 		return fmt.Errorf("migrate traffic_records: %w", err)
 	}
 
+	// 节点测速结果(PRO speed_test)。source: master_local(主控本机) / 预留 home_tester。
+	const speedTestResultsSchema = `
+CREATE TABLE IF NOT EXISTS speed_test_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    node_id INTEGER NOT NULL,
+    node_name TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'master_local',
+    down_mbps REAL NOT NULL DEFAULT 0,
+    latency_ms INTEGER NOT NULL DEFAULT -1,
+    test_bytes INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'ok',
+    error TEXT NOT NULL DEFAULT '',
+    tested_by TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_speed_test_node ON speed_test_results(node_id);
+`
+	if _, err := r.db.Exec(speedTestResultsSchema); err != nil {
+		return fmt.Errorf("migrate speed_test_results: %w", err)
+	}
+	// 出口 IP 列(老库幂等加列):测速时经代理回显的对端 IP,用于核对出站链路是否符合预期。
+	if err := r.ensureTableColumn("speed_test_results", "egress_ip", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate speed_test_results.egress_ip: %w", err)
+	}
+
+	// 家用测速端(PRO speed_test Phase 2):反向 WS 连入主控,凭 token_hash 认证。
+	const speedTestersSchema = `
+CREATE TABLE IF NOT EXISTS speed_testers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL DEFAULT '',
+    token_hash TEXT NOT NULL UNIQUE,
+    created_by TEXT NOT NULL DEFAULT '',
+    last_seen TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+`
+	if _, err := r.db.Exec(speedTestersSchema); err != nil {
+		return fmt.Errorf("migrate speed_testers: %w", err)
+	}
+
 	const userTrafficRecordsSchema = `
 CREATE TABLE IF NOT EXISTS user_traffic_records (
     username TEXT NOT NULL,
@@ -609,6 +788,24 @@ CREATE TABLE IF NOT EXISTS user_tokens (
 
 	if _, err := r.db.Exec(userTokenSchema); err != nil {
 		return fmt.Errorf("migrate user_tokens: %w", err)
+	}
+
+	// 每用户 API 令牌(供 MCP / 程序化访问)。与订阅 token、全局 api_token 隔离;
+	// 库里只存 token 的 sha256(token_hash),明文仅创建时返回一次。鉴权时按 hash 解析出 username,
+	// 权限完全等同该用户登录态(普通用户令牌调 admin 接口会被 RequireAdmin 拦截)。
+	const userAPITokenSchema = `
+CREATE TABLE IF NOT EXISTS user_api_tokens (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    username     TEXT NOT NULL,
+    name         TEXT NOT NULL DEFAULT '',
+    token_hash   TEXT NOT NULL UNIQUE,
+    created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_used_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_user_api_tokens_username ON user_api_tokens(username);
+`
+	if _, err := r.db.Exec(userAPITokenSchema); err != nil {
+		return fmt.Errorf("migrate user_api_tokens: %w", err)
 	}
 
 	// 如果 user_short_code 列不存在，则将其添加到 user_tokens 表中（3 字符代码）
@@ -663,6 +860,12 @@ CREATE TABLE IF NOT EXISTS users (
 		return err
 	}
 
+	// users.email 反查索引 — ResolveUsernameByEmail 在 collector 每个 tick 对每个 email 都查一次,
+	// 用户量上百时全表扫累积可观。email 字段允许 NULL,索引会忽略 NULL 行,体积小。
+	if _, err := r.db.Exec(`CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)`); err != nil {
+		return fmt.Errorf("create idx_users_email: %w", err)
+	}
+
 	if err := r.ensureUserColumn("nickname", "TEXT"); err != nil {
 		return err
 	}
@@ -697,6 +900,88 @@ CREATE TABLE IF NOT EXISTS users (
 	}
 	if err := r.ensureUserColumn("recovery_codes", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
 		return err
+	}
+
+	// === Telegram bot 相关 ===
+	// users 加 3 列:tg_id / tg_handle / 绑定时间。tg_id 用 INTEGER 是因为 TG userId 是 int64,
+	// 部分唯一索引(WHERE telegram_id IS NOT NULL)允许多用户都 NULL,但已绑必须唯一。
+	if err := r.ensureUserColumn("telegram_id", "INTEGER"); err != nil {
+		return err
+	}
+	if err := r.ensureUserColumn("telegram_username", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := r.ensureUserColumn("telegram_bound_at", "TIMESTAMP"); err != nil {
+		return err
+	}
+	// 用户自助通知开关(/notify on):默认关,开启后 bot 每日推流量 + 临期到期提醒。
+	if err := r.ensureUserColumn("tg_notify_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if _, err := r.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id) WHERE telegram_id IS NOT NULL;`); err != nil {
+		return fmt.Errorf("create telegram_id index: %w", err)
+	}
+
+	// invite_codes:邀请码主表。kind=new 创建新账号,kind=bind 绑定到已有账号。
+	// 设计要点:revoked + used_count < max_uses + expires_at(若设)未到 三者都满足才算"可用"。
+	// package_id 仅 kind=new 时有用;kind=bind 必须填 bind_username,锁定到一个具体账号。
+	const inviteCodeSchema = `
+CREATE TABLE IF NOT EXISTS invite_codes (
+    code           TEXT PRIMARY KEY,
+    kind           TEXT NOT NULL CHECK (kind IN ('new', 'bind')),
+    bind_username  TEXT NOT NULL DEFAULT '',
+    created_by     TEXT NOT NULL,
+    package_id     INTEGER,
+    max_uses       INTEGER NOT NULL DEFAULT 1,
+    used_count     INTEGER NOT NULL DEFAULT 0,
+    expires_at     TIMESTAMP,
+    revoked        INTEGER NOT NULL DEFAULT 0,
+    remark         TEXT NOT NULL DEFAULT '',
+    created_at     TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    duration_months INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_invite_codes_created_by ON invite_codes(created_by);
+CREATE INDEX IF NOT EXISTS idx_invite_codes_kind ON invite_codes(kind);
+`
+	if _, err := r.db.Exec(inviteCodeSchema); err != nil {
+		return fmt.Errorf("migrate invite_codes: %w", err)
+	}
+	// 老库补列(已存在则忽略错误):kind=new 注册时账号有效期 = now + N 月。
+	_, _ = r.db.Exec("ALTER TABLE invite_codes ADD COLUMN duration_months INTEGER NOT NULL DEFAULT 0")
+
+	// invite_code_uses:邀请码使用记录(单次邀请码 max_uses=1 时唯一,但多次邀请码允许多行)。
+	// 主键 (code, username) 防止同一用户重复消耗同一码。
+	const inviteCodeUsesSchema = `
+CREATE TABLE IF NOT EXISTS invite_code_uses (
+    code       TEXT NOT NULL,
+    username   TEXT NOT NULL,
+    tg_id      INTEGER,
+    used_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (code, username)
+);
+CREATE INDEX IF NOT EXISTS idx_invite_code_uses_username ON invite_code_uses(username);
+`
+	if _, err := r.db.Exec(inviteCodeUsesSchema); err != nil {
+		return fmt.Errorf("migrate invite_code_uses: %w", err)
+	}
+
+	// tg_audit:所有 TG 操作审计(注册/绑定/解绑/admin 命令)。
+	// 用于排查"TG 账号被盗后接管"事件;默认 90 天 retention(扫描任务可后续加)。
+	const tgAuditSchema = `
+CREATE TABLE IF NOT EXISTS tg_audit (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    tg_id     INTEGER,
+    username  TEXT NOT NULL DEFAULT '',
+    action    TEXT NOT NULL,
+    detail    TEXT NOT NULL DEFAULT '',
+    at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_tg_audit_tg_id ON tg_audit(tg_id);
+CREATE INDEX IF NOT EXISTS idx_tg_audit_username ON tg_audit(username);
+CREATE INDEX IF NOT EXISTS idx_tg_audit_at ON tg_audit(at);
+`
+	if _, err := r.db.Exec(tgAuditSchema); err != nil {
+		return fmt.Errorf("migrate tg_audit: %w", err)
 	}
 
 	const historySchema = `
@@ -776,14 +1061,57 @@ CREATE INDEX IF NOT EXISTS idx_nodes_enabled ON nodes(enabled);
 		return err
 	}
 
+	// IP 解析功能专用列：记录解析为 IP 前的原始域名（与 original_server 区分，后者是服务器名/路由键）
+	if err := r.ensureNodeColumn("original_domain", "TEXT"); err != nil {
+		return err
+	}
+
 	// 如果 inbound_tag 列不存在，则将其添加到现有节点表中
 	if err := r.ensureNodeColumn("inbound_tag", "TEXT"); err != nil {
+		return err
+	}
+	if err := r.ensureNodeColumn("chain_proxy_node_id", "INTEGER"); err != nil {
+		return err
+	}
+
+	// 路由出站(routed node)字段:把一条 routing rule + 一个 outbound 当作虚拟节点
+	// 挂在物理父节点下,被套餐绑定后自动给用户开子账号并加入 rule.user 数组。
+	// node_type = 'physical' (默认) | 'routed'
+	if err := r.ensureNodeColumn("node_type", "TEXT NOT NULL DEFAULT 'physical'"); err != nil {
+		return err
+	}
+	if err := r.ensureNodeColumn("parent_node_id", "INTEGER"); err != nil {
+		return err
+	}
+	if err := r.ensureNodeColumn("routed_outbound_tag", "TEXT"); err != nil {
+		return err
+	}
+	if err := r.ensureNodeColumn("routed_outbound_json", "TEXT"); err != nil {
+		return err
+	}
+	if err := r.ensureNodeColumn("routed_rule_marktag", "TEXT"); err != nil {
+		return err
+	}
+	if err := r.ensureNodeColumn("routed_admin_email", "TEXT"); err != nil {
+		return err
+	}
+	if err := r.ensureNodeColumn("routed_admin_credential", "TEXT"); err != nil {
+		return err
+	}
+	// routed_owner: 'shared' (默认, 管理员创建, 进入套餐池) | 'user' (普通用户私有路由出站)
+	if err := r.ensureNodeColumn("routed_owner", "TEXT NOT NULL DEFAULT 'shared'"); err != nil {
 		return err
 	}
 
 	// 确保列存在后创建标签索引
 	if _, err := r.db.Exec(`CREATE INDEX IF NOT EXISTS idx_nodes_tag ON nodes(tag);`); err != nil {
 		return fmt.Errorf("create tag index: %w", err)
+	}
+	if _, err := r.db.Exec(`CREATE INDEX IF NOT EXISTS idx_nodes_type ON nodes(node_type);`); err != nil {
+		return fmt.Errorf("create node_type index: %w", err)
+	}
+	if _, err := r.db.Exec(`CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_node_id);`); err != nil {
+		return fmt.Errorf("create parent_node_id index: %w", err)
 	}
 
 	const subscribeFilesSchema = `
@@ -792,7 +1120,7 @@ CREATE TABLE IF NOT EXISTS subscribe_files (
     name TEXT NOT NULL,
     description TEXT,
     url TEXT NOT NULL,
-    type TEXT NOT NULL CHECK (type IN ('create','import','upload')),
+    type TEXT NOT NULL CHECK (type IN ('create','import','upload','package')),
     filename TEXT NOT NULL,
     expire_at TIMESTAMP,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -932,6 +1260,11 @@ CREATE INDEX IF NOT EXISTS idx_external_subscriptions_url ON external_subscripti
 
 	// 将node_order添加到user_settings表（用于显示顺序的节点ID的JSON数组）
 	if err := r.ensureUserSettingsColumn("node_order", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+
+	// 同步外部订阅时拼接订阅元信息(剩余流量/天数)到节点名(同步自 mmw v0.7.3)
+	if err := r.ensureUserSettingsColumn("append_sub_info", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 
@@ -1082,7 +1415,7 @@ CREATE INDEX IF NOT EXISTS idx_custom_rules_enabled ON custom_rules(enabled);
 		return fmt.Errorf("migrate custom_rules: %w", err)
 	}
 
-	// 迁移现有的 custom_rules 表以支持“追加”模式
+	// 迁移现有的 custom_rules 表以支持"追加"模式
 	if err := r.migrateCustomRulesAppendMode(); err != nil {
 		return fmt.Errorf("migrate custom_rules append mode: %w", err)
 	}
@@ -1090,6 +1423,51 @@ CREATE INDEX IF NOT EXISTS idx_custom_rules_enabled ON custom_rules(enabled);
 	// 将 auto_sync_custom_rules 列添加到 subscribe_files 表
 	if err := r.ensureSubscribeFileColumn("auto_sync_custom_rules", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
+	}
+	if err := r.ensureSubscribeFileColumn("template_filename", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := r.ensureSubscribeFileColumn("selected_custom_rule_ids", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+	if err := r.ensureSubscribeFileColumn("selected_override_script_ids", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+	if err := r.ensureSubscribeFileColumn("selected_tags", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+	// 节点选择(取代 selected_tags 的精确粒度;非空 → 按 ID 过滤;空 → 回退 selected_tags 兼容老数据)
+	if err := r.ensureSubscribeFileColumn("selected_node_ids", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+	if err := r.ensureSubscribeFileColumn("stats_server_ids", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := r.ensureSubscribeFileColumn("traffic_limit", "REAL"); err != nil {
+		return err
+	}
+	if err := r.ensureSubscribeFileColumn("sort_order", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSubscribeFileColumn("raw_output", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSubscribeFileColumn("created_by", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+
+	// 老 schema 的 subscribe_files.type CHECK 只允许 ('create','import','upload')，
+	// 但代码层（subscribe_files.go SubscribeTypePackage）已经在写 'package'，导致 PackageAssign
+	// 的 autoGenerateSubscription 写入失败。这里 idempotent rebuild 加上 'package'。
+	if err := r.ensureSubscribeFileTypeAllowsPackage(); err != nil {
+		return fmt.Errorf("migrate subscribe_files type CHECK: %w", err)
+	}
+
+	// 用户权限功能:custom_rules 加 created_by 列(custom_rules 表已在前面创建)。
+	// templates 的 created_by 迁移下移到 templates 建表之后(见下方),否则全新库会因表未建而报错。
+	// (override_scripts 已有 username, subscribe_files 已有 created_by。)历史行 created_by='' 视为 admin 创建。
+	if err := r.ensureTableColumn("custom_rules", "created_by", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate custom_rules.created_by: %w", err)
 	}
 
 	// 创建 custom_rule_applications 表用于跟踪应用的内容
@@ -1113,6 +1491,54 @@ CREATE INDEX IF NOT EXISTS idx_custom_rule_applications_rule ON custom_rule_appl
 
 	if _, err := r.db.Exec(customRuleApplicationsSchema); err != nil {
 		return fmt.Errorf("migrate custom_rule_applications: %w", err)
+	}
+
+	const overrideScriptsSchema = `
+CREATE TABLE IF NOT EXISTS override_scripts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    name TEXT NOT NULL,
+    hook TEXT NOT NULL,
+    content TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    sort_order INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_override_scripts_username ON override_scripts(username);
+CREATE INDEX IF NOT EXISTS idx_override_scripts_hook ON override_scripts(hook);
+`
+	if _, err := r.db.Exec(overrideScriptsSchema); err != nil {
+		return fmt.Errorf("migrate override_scripts: %w", err)
+	}
+
+	if err := r.ensureSystemConfigColumn("enable_override_scripts", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("ensure enable_override_scripts column: %w", err)
+	}
+	if err := r.ensureSystemConfigColumn("silent_mode", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("ensure silent_mode column: %w", err)
+	}
+	if err := r.ensureSystemConfigColumn("silent_mode_timeout", "INTEGER NOT NULL DEFAULT 15"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("enable_miaomiaowu_features", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("enable_mmw_short_link_compat", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("default_template_filename", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	// 节点名称倍率前缀:订阅生成时把套餐内 multiplier != 1 的节点 name 前缀加上 "{left}{mult}{right}"
+	if err := r.ensureSystemConfigColumn("node_name_multiplier_prefix_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("node_name_multiplier_left", "TEXT NOT NULL DEFAULT '「'"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("node_name_multiplier_right", "TEXT NOT NULL DEFAULT '」'"); err != nil {
+		return err
 	}
 
 	const xrayServersSchema = `
@@ -1174,6 +1600,9 @@ CREATE INDEX IF NOT EXISTS idx_packages_name ON packages(name);
 
 	// 如果不存在，则将 short_code 列添加到包表中
 	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN short_code TEXT DEFAULT ''")
+
+	// 节点倍率(套餐级 per-node):JSON {"<node_id>": multiplier}。空 = 全部按 1.0
+	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN node_multipliers TEXT DEFAULT '{}'")
 
 	// 为已有 package 补全短码
 	if err := r.generateMissingPackageShortCodes(); err != nil {
@@ -1339,6 +1768,31 @@ CREATE INDEX IF NOT EXISTS idx_remote_servers_status ON remote_servers(status);
 	if err := r.ensureRemoteServerColumn("time_offset_seconds", "INTEGER"); err != nil {
 		return err
 	}
+	if err := r.ensureRemoteServerColumn("xray_mode", "TEXT NOT NULL DEFAULT 'external'"); err != nil {
+		return err
+	}
+	if err := r.ensureRemoteServerColumn("traffic_used_offset", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// 服务器层流量统计规则: both / upload / download
+	// 影响节点流量聚合该服务器贡献的方向,用户流量仍按套餐 traffic_mode 算,二者独立。
+	if err := r.ensureRemoteServerColumn("sort_order", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureRemoteServerColumn("traffic_stats_mode", "TEXT NOT NULL DEFAULT 'both'"); err != nil {
+		return err
+	}
+
+	// 套餐限速字段
+	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN speed_limit_mbps REAL NOT NULL DEFAULT 0")
+	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN device_limit INTEGER NOT NULL DEFAULT 0")
+	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN auto_speed_limit_json TEXT DEFAULT ''")
+	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN traffic_mode TEXT NOT NULL DEFAULT 'oneway'")
+	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN template_filename TEXT NOT NULL DEFAULT ''")
+
+	// 用户限速覆写字段
+	_, _ = r.db.Exec("ALTER TABLE users ADD COLUMN speed_limit_override REAL")
+	_, _ = r.db.Exec("ALTER TABLE users ADD COLUMN device_limit_override INTEGER")
 
 	// 批量入站表 - 跟踪跨多个服务器批量添加的入站
 	const batchInboundsSchema = `
@@ -1428,6 +1882,32 @@ CREATE INDEX IF NOT EXISTS idx_user_traffic_username ON user_traffic(username);
 		return fmt.Errorf("migrate user_traffic: %w", err)
 	}
 
+	// user_email_traffic 跟 user_traffic 字段完全对齐,只是 key 换成 email — 保留 Xray stats 的
+	// per-client 维度。collector 同一次循环里同时 UPSERT user_traffic(按 username 聚合,套餐扣减
+	// 等热路径继续走它)和 user_email_traffic(per-email,前端 drilldown 等细粒度场景用)。
+	const userEmailTrafficSchema = `
+CREATE TABLE IF NOT EXISTS user_email_traffic (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER NOT NULL,
+    email TEXT NOT NULL,
+    uplink INTEGER NOT NULL DEFAULT 0,
+    downlink INTEGER NOT NULL DEFAULT 0,
+    total_uplink INTEGER NOT NULL DEFAULT 0,
+    total_downlink INTEGER NOT NULL DEFAULT 0,
+    last_uplink INTEGER NOT NULL DEFAULT 0,
+    last_downlink INTEGER NOT NULL DEFAULT 0,
+    cycle_start TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(server_id, email),
+    FOREIGN KEY (server_id) REFERENCES xray_servers(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_user_email_traffic_server_id ON user_email_traffic(server_id);
+CREATE INDEX IF NOT EXISTS idx_user_email_traffic_email ON user_email_traffic(email);
+`
+	if _, err := r.db.Exec(userEmailTrafficSchema); err != nil {
+		return fmt.Errorf("migrate user_email_traffic: %w", err)
+	}
+
 	// 流量快照表 - 存储每日流量快照以了解历史趋势
 	const trafficSnapshotsSchema = `
 CREATE TABLE IF NOT EXISTS traffic_snapshots (
@@ -1506,6 +1986,11 @@ CREATE INDEX IF NOT EXISTS idx_templates_category ON templates(category);
 		return fmt.Errorf("migrate templates: %w", err)
 	}
 
+	// 用户权限功能:templates 加 created_by 列(必须在 templates 建表之后,否则全新库会"no such table")。
+	if err := r.ensureTableColumn("templates", "created_by", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return fmt.Errorf("migrate templates.created_by: %w", err)
+	}
+
 	// 代理提供商配置表
 	const proxyProviderConfigsSchema = `
 CREATE TABLE IF NOT EXISTS proxy_provider_configs (
@@ -1561,7 +2046,7 @@ CREATE TABLE IF NOT EXISTS certificates (
     expiry_date TIMESTAMP,
     issue_date TIMESTAMP,
     auto_renew INTEGER NOT NULL DEFAULT 1,
-    challenge_mode TEXT NOT NULL DEFAULT 'standalone' CHECK (challenge_mode IN ('standalone', 'webroot', 'dns')),
+    challenge_mode TEXT NOT NULL DEFAULT 'standalone' CHECK (challenge_mode IN ('standalone', 'webroot', 'dns', 'manual')),
     webroot_path TEXT,
     remote_server_id INTEGER NOT NULL DEFAULT 0,
     message TEXT,
@@ -1594,10 +2079,10 @@ CREATE INDEX IF NOT EXISTS idx_certificates_expiry_date ON certificates(expiry_d
 		r.db.Exec(fmt.Sprintf("ALTER TABLE certificates ADD COLUMN %s %s", col.name, col.def))
 	}
 
-	// 迁移：如果 CHECK 约束已过时，则重建表（challenge_mode 中缺少“dns”）
+	// 迁移：如果 CHECK 约束已过时，则重建表（challenge_mode 中缺少 dns 或 manual）
 	var checkSQL string
 	row := r.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='certificates'`)
-	if row.Scan(&checkSQL) == nil && !strings.Contains(checkSQL, "'dns'") {
+	if row.Scan(&checkSQL) == nil && (!strings.Contains(checkSQL, "'dns'") || !strings.Contains(checkSQL, "'manual'")) {
 		r.db.Exec(`ALTER TABLE certificates RENAME TO _certificates_old`)
 		r.db.Exec(certificatesSchema)
 		r.db.Exec(`INSERT INTO certificates SELECT * FROM _certificates_old`)
@@ -1650,6 +2135,77 @@ CREATE TABLE IF NOT EXISTS user_outbounds (
 		return fmt.Errorf("migrate user_outbounds: %w", err)
 	}
 
+	// 用户子账号:一个 mmwx 用户在某 routed 节点上的 xray client 凭据。
+	// is_active=0 表示已下线(从 inbound clients + routing rule.user 移除),但凭据保留供续费恢复用。
+	const userSubaccountsSchema = `
+CREATE TABLE IF NOT EXISTS user_subaccounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    routed_node_id INTEGER NOT NULL,
+    email TEXT NOT NULL,
+    credential_json TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(routed_node_id, username),
+    UNIQUE(routed_node_id, email),
+    FOREIGN KEY(username) REFERENCES users(username) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_subacc_user ON user_subaccounts(username);
+CREATE INDEX IF NOT EXISTS idx_subacc_email ON user_subaccounts(email);
+CREATE INDEX IF NOT EXISTS idx_subacc_routed ON user_subaccounts(routed_node_id);
+`
+	if _, err := r.db.Exec(userSubaccountsSchema); err != nil {
+		return fmt.Errorf("migrate user_subaccounts: %w", err)
+	}
+
+	// xray 配置快照:主控维护的 agent xray 完整 config.json 版本链,用于
+	//   (1) 跑路兜底 — agent 端 VPS 跑路换机后,从主控下发 current 一键恢复
+	//   (2) 反向兜底 — 主控端跑路新部署后,从 agent 自动拉回 current 反向恢复
+	//   (3) 历史回滚 — 用户配置改错可挑历史 snapshot 下发回滚
+	//   (4) inbound list cache 的 source — 套餐绑/解绑批量算 cred 时,从 current snapshot 派生 inbound protocol/settings
+	// status 状态机:
+	//   - 'current': 每 server 至多 1 行,代表"主控所知 agent 当前实际配置"
+	//   - 'old':     被替换的历史版本,可用于回滚展示
+	//   - 'pending_recovery': agent 之前 status=offline 后重连且 hash 漂移,master 不自动接管,
+	//                        把上报内容写到这个状态等用户在 UI 决策(恢复 current / 接受为新 current)
+	// source 标识:
+	//   - 'agent_report':        首连 / 重连同步时由 agent 上报创建
+	//   - 'master_write':        master 主动写 agent 配置后 refresh 创建
+	//   - 'manual_accept':       用户在 UI 上接受 pending_recovery 升级为 current
+	const xrayConfigSnapshotsSchema = `
+CREATE TABLE IF NOT EXISTS server_xray_config_snapshots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id   INTEGER NOT NULL,
+    config_json TEXT    NOT NULL,
+    config_hash TEXT    NOT NULL,
+    source      TEXT    NOT NULL,
+    status      TEXT    NOT NULL,
+    created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (server_id) REFERENCES remote_servers(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_xray_snap_server_status ON server_xray_config_snapshots(server_id, status);
+CREATE INDEX IF NOT EXISTS idx_xray_snap_server_created ON server_xray_config_snapshots(server_id, created_at DESC);
+`
+	if _, err := r.db.Exec(xrayConfigSnapshotsSchema); err != nil {
+		return fmt.Errorf("migrate server_xray_config_snapshots: %w", err)
+	}
+
+	// 用户路由出站操作日志:记录每条创建/删除,用于每日次数限制。
+	// 单条 routing 变更都会触发 agent 重启 xray,所以必须按"操作次数"限速而不仅按"当前持有数量"。
+	const userRoutedOutboundActionsSchema = `
+CREATE TABLE IF NOT EXISTS user_routed_outbound_actions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    action TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_uroa_user_time ON user_routed_outbound_actions(username, created_at);
+`
+	if _, err := r.db.Exec(userRoutedOutboundActionsSchema); err != nil {
+		return fmt.Errorf("migrate user_routed_outbound_actions: %w", err)
+	}
+
 	const trafficThresholdNotifiedSchema = `
 CREATE TABLE IF NOT EXISTS traffic_threshold_notified (
     server_id INTEGER PRIMARY KEY,
@@ -1660,7 +2216,85 @@ CREATE TABLE IF NOT EXISTS traffic_threshold_notified (
 		return fmt.Errorf("migrate traffic_threshold_notified: %w", err)
 	}
 
+	// 服务器分享(联邦)相关表:必须在迁移阶段建好,因为 ListRemoteServers 会 EXISTS 查询 federated_servers。
+	if err := r.ensureSharedServersTable(context.Background()); err != nil {
+		return fmt.Errorf("migrate shared_servers: %w", err)
+	}
+	if err := r.ensureFederatedServersTable(context.Background()); err != nil {
+		return fmt.Errorf("migrate federated_servers: %w", err)
+	}
+
+	// 一次性数据修复:旧 ResolveUsernameByEmail 不识别 users.email 作为主账号 inbound 的 client.email,
+	// 把流量记到 username=email 的孤行(如 user_traffic.username='share@2ha.me' 而不是 'share')。
+	// 修复后需把孤行 merge 回 username 行 — last_uplink/downlink 必须相加(下一轮 collector 会按合并后
+	// 的 cumulative 算 delta,基线必须包含两个旧客户端的累计)。
+	if err := r.mergeOrphanEmailTrafficRows(context.Background()); err != nil {
+		return fmt.Errorf("migrate user_traffic email merge: %w", err)
+	}
+
 	return nil
+}
+
+// mergeOrphanEmailTrafficRows 一次性数据修复(幂等):
+//
+// 把 user_traffic 中 username 等于某个 users.email 的"孤行"合并到对应 username 行,
+// last_*/total_* 相加(基线累计),然后删除孤行。同样处理 user_email_traffic.email 的展示一致性
+// 不需要 — user_email_traffic 本就 by email,无需迁移。
+//
+// 幂等标记写入 system_settings,key='_migrate_merge_email_traffic_done'。下次启动检测到就跳过。
+func (r *TrafficRepository) mergeOrphanEmailTrafficRows(ctx context.Context) error {
+	const doneKey = "_migrate_merge_email_traffic_done"
+	var done string
+	_ = r.db.QueryRowContext(ctx, `SELECT value FROM system_settings WHERE key = ?`, doneKey).Scan(&done)
+	if done == "1" {
+		return nil
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// 合并 — ON CONFLICT 时 total_*/last_* 相加,保留下一轮 delta 计算的基线正确。
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO user_traffic (server_id, username, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at)
+SELECT src.server_id, u.username,
+       src.uplink, src.downlink,
+       src.total_uplink, src.total_downlink,
+       src.last_uplink, src.last_downlink,
+       src.cycle_start, src.updated_at
+FROM user_traffic src
+JOIN users u ON u.email = src.username
+WHERE u.email IS NOT NULL AND u.email != '' AND u.username != u.email
+ON CONFLICT(server_id, username) DO UPDATE SET
+    total_uplink   = user_traffic.total_uplink   + excluded.total_uplink,
+    total_downlink = user_traffic.total_downlink + excluded.total_downlink,
+    last_uplink    = user_traffic.last_uplink    + excluded.last_uplink,
+    last_downlink  = user_traffic.last_downlink  + excluded.last_downlink,
+    updated_at     = CURRENT_TIMESTAMP
+`); err != nil {
+		return fmt.Errorf("merge orphan rows: %w", err)
+	}
+
+	// 删除已合并的孤行。
+	if _, err := tx.ExecContext(ctx, `
+DELETE FROM user_traffic
+WHERE username IN (
+    SELECT email FROM users WHERE email IS NOT NULL AND email != '' AND username != email
+)
+`); err != nil {
+		return fmt.Errorf("delete merged rows: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO system_settings (key, value) VALUES (?, '1')
+ON CONFLICT(key) DO UPDATE SET value = '1'
+`, doneKey); err != nil {
+		return fmt.Errorf("mark migration done: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 // 返回按创建顺序排列的所有已配置订阅链接。
@@ -2022,6 +2656,36 @@ func (r *TrafficRepository) ensureNodeColumn(name, definition string) error {
 	return nil
 }
 
+// ensureTableColumn 通用列迁移:表名作参数,列不存在时 ALTER ADD。
+// 注意 table 必须是代码内写死的常量(非用户输入),避免 SQL 注入。
+func (r *TrafficRepository) ensureTableColumn(table, name, definition string) error {
+	rows, err := r.db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return fmt.Errorf("%s table info: %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid        int
+			colName    string
+			colType    string
+			notNull    int
+			defaultVal sql.NullString
+			pk         int
+		)
+		if err := rows.Scan(&cid, &colName, &colType, &notNull, &defaultVal, &pk); err != nil {
+			return fmt.Errorf("scan %s table info: %w", table, err)
+		}
+		if strings.EqualFold(colName, name) {
+			return nil
+		}
+	}
+	if _, err := r.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, name, definition)); err != nil {
+		return fmt.Errorf("add column %s.%s: %w", table, name, err)
+	}
+	return nil
+}
+
 func (r *TrafficRepository) ensureUserSettingsColumn(name, definition string) error {
 	rows, err := r.db.Query(`PRAGMA table_info(user_settings)`)
 	if err != nil {
@@ -2055,7 +2719,7 @@ func (r *TrafficRepository) ensureUserSettingsColumn(name, definition string) er
 }
 
 func (r *TrafficRepository) migrateCustomRulesAppendMode() error {
-	// 通过尝试插入虚拟行来检查表是否已经支持“追加”模式
+	// 通过尝试插入虚拟行来检查表是否已经支持"追加"模式
 	// 如果失败，我们需要重新创建表
 	tx, err := r.db.Begin()
 	if err != nil {
@@ -2148,6 +2812,70 @@ func (r *TrafficRepository) ensureSubscribeFileColumn(name, definition string) e
 		return fmt.Errorf("add column %s: %w", name, err)
 	}
 
+	return nil
+}
+
+// ensureSubscribeFileTypeAllowsPackage 把 subscribe_files.type 的 CHECK 约束扩成支持 'package'。
+// 老 schema 是 CHECK (type IN ('create','import','upload'))，但代码层早就有 SubscribeTypePackage='package'，
+// PackageAssign 自动生成订阅会因为约束失败。SQLite 不支持改 CHECK，只能 rebuild 表。
+// idempotent：检测到 sql 里已有 'package' 直接 return。
+func (r *TrafficRepository) ensureSubscribeFileTypeAllowsPackage() error {
+	var schema string
+	err := r.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='subscribe_files'`).Scan(&schema)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil // 表还不存在，新装会用包含 'package' 的 schema（本次部署同时改了 schema 常量）
+		}
+		return fmt.Errorf("read subscribe_files schema: %w", err)
+	}
+	if strings.Contains(schema, "'package'") {
+		return nil
+	}
+
+	oldCheck := "CHECK (type IN ('create','import','upload'))"
+	newCheck := "CHECK (type IN ('create','import','upload','package'))"
+	if !strings.Contains(schema, oldCheck) {
+		// 不是预期的老 CHECK，可能 schema 已经手动改过别的形态，保守起见不动
+		return fmt.Errorf("subscribe_files schema 未找到预期 CHECK 子句，请手工检查:\n%s", schema)
+	}
+
+	newTableSQL := strings.Replace(schema, oldCheck, newCheck, 1)
+	// 只替换 CREATE TABLE 语句里的表名（首个出现）
+	newTableSQL = strings.Replace(newTableSQL, "subscribe_files", "subscribe_files_new", 1)
+
+	tx, err := r.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(newTableSQL); err != nil {
+		return fmt.Errorf("create subscribe_files_new: %w  sql=%s", err, newTableSQL)
+	}
+	// 字段顺序一致，可以直接 SELECT *
+	if _, err := tx.Exec("INSERT INTO subscribe_files_new SELECT * FROM subscribe_files"); err != nil {
+		return fmt.Errorf("copy rows: %w", err)
+	}
+	if _, err := tx.Exec("DROP TABLE subscribe_files"); err != nil {
+		return fmt.Errorf("drop old: %w", err)
+	}
+	if _, err := tx.Exec("ALTER TABLE subscribe_files_new RENAME TO subscribe_files"); err != nil {
+		return fmt.Errorf("rename: %w", err)
+	}
+	// 重建 indexes（DROP TABLE 把它们也带走了）
+	idxStmts := []string{
+		`CREATE INDEX IF NOT EXISTS idx_subscribe_files_type ON subscribe_files(type)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_subscribe_files_file_short_code ON subscribe_files(file_short_code) WHERE file_short_code != ''`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_subscribe_files_custom_short_code ON subscribe_files(custom_short_code) WHERE custom_short_code != ''`,
+	}
+	for _, s := range idxStmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("rebuild index: %w  sql=%s", err, s)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
 	return nil
 }
 
@@ -2564,10 +3292,17 @@ func generateFileShortCode() (string, error) {
 	return string(bytes), nil
 }
 
-// 为用户短代码生成随机的 3 个字符的字符串。
+// 为用户短代码生成随机字符串,长度随机 3-10 位。
+// 随机长度 + 不可由用户自定义,使短码不可枚举,从根本上消除"自定义短码冲突可用性预言机"问题。
 func generateUserShortCode() (string, error) {
 	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	const length = 3
+
+	// 先随机决定长度(3-10)
+	lenByte := make([]byte, 1)
+	if _, err := rand.Read(lenByte); err != nil {
+		return "", fmt.Errorf("generate random length: %w", err)
+	}
+	length := 3 + int(lenByte[0])%8 // 3..10
 
 	bytes := make([]byte, length)
 	if _, err := rand.Read(bytes); err != nil {
@@ -2736,7 +3471,7 @@ func (r *TrafficRepository) GetAllPackageShortCodes(ctx context.Context) (map[st
 }
 
 // ResetAllSubscriptionShortURLs 重置所有 subscribe_files 的文件短代码。
-// 当用户单击设置中的“重置短链接”按钮时会调用此函数。
+// 当用户单击设置中的"重置短链接"按钮时会调用此函数。
 func (r *TrafficRepository) ResetAllSubscriptionShortURLs(ctx context.Context) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
@@ -2955,6 +3690,28 @@ func (r *TrafficRepository) GetAllUserShortCodes(ctx context.Context) (map[strin
 	return codes, rows.Err()
 }
 
+// ListUserShortCodeInfo 批量返回所有用户的 user_short_code 和 custom_user_short_code,
+// 避免 user list handler N+1 query。复用已有的 UserShortCodeInfo struct(见下方)。
+func (r *TrafficRepository) ListUserShortCodeInfo(ctx context.Context) (map[string]UserShortCodeInfo, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT username, COALESCE(user_short_code, ''), COALESCE(custom_user_short_code, '') FROM user_tokens`)
+	if err != nil {
+		return nil, fmt.Errorf("list user short code info: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]UserShortCodeInfo)
+	for rows.Next() {
+		var u UserShortCodeInfo
+		if err := rows.Scan(&u.Username, &u.UserShortCode, &u.CustomUserShortCode); err != nil {
+			return nil, fmt.Errorf("scan user short code info: %w", err)
+		}
+		out[u.Username] = u
+	}
+	return out, rows.Err()
+}
+
 func (r *TrafficRepository) UpdateUserCustomShortCode(ctx context.Context, username, code string) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
@@ -2972,7 +3729,7 @@ func (r *TrafficRepository) UpdateUserCustomShortCode(ctx context.Context, usern
 	res, err := r.db.ExecContext(ctx, `UPDATE user_tokens SET custom_user_short_code = ?, updated_at = CURRENT_TIMESTAMP WHERE username = ?`, code, username)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
-			return errors.New("该自定义连接已被使用")
+			return errors.New("该短码已被占用，请更换一个")
 		}
 		return fmt.Errorf("update user custom short code: %w", err)
 	}
@@ -3136,11 +3893,13 @@ type User struct {
 	Role         string
 	IsActive     bool
 	Remark       string
-	PackageID      int64
-	IsReset        bool
-	ResetDay       int
-	PackageEndDate *time.Time
-	TOTPSecret    string
+	PackageID           int64
+	IsReset             bool
+	ResetDay            int
+	PackageEndDate      *time.Time
+	SpeedLimitOverride  *float64
+	DeviceLimitOverride *int
+	TOTPSecret          string
 	TOTPEnabled   bool
 	RecoveryCodes string
 	CreatedAt      time.Time
@@ -3263,7 +4022,7 @@ func (r *TrafficRepository) ListUsers(ctx context.Context, limit int) ([]User, e
 		limit = 10
 	}
 
-	rows, err := r.db.QueryContext(ctx, `SELECT username, password_hash, COALESCE(email, ''), COALESCE(nickname, ''), COALESCE(avatar_url, ''), COALESCE(role, ''), is_active, COALESCE(remark, ''), COALESCE(package_id, 0), COALESCE(is_reset, 0), COALESCE(reset_day, 1), package_end_date, created_at, updated_at FROM users ORDER BY created_at ASC LIMIT ?`, limit)
+	rows, err := r.db.QueryContext(ctx, `SELECT username, password_hash, COALESCE(email, ''), COALESCE(nickname, ''), COALESCE(avatar_url, ''), COALESCE(role, ''), is_active, COALESCE(remark, ''), COALESCE(package_id, 0), COALESCE(is_reset, 0), COALESCE(reset_day, 1), package_end_date, speed_limit_override, device_limit_override, created_at, updated_at FROM users ORDER BY created_at ASC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
@@ -3274,7 +4033,9 @@ func (r *TrafficRepository) ListUsers(ctx context.Context, limit int) ([]User, e
 		var user User
 		var active, isReset int
 		var endDate sql.NullTime
-		if err := rows.Scan(&user.Username, &user.PasswordHash, &user.Email, &user.Nickname, &user.AvatarURL, &user.Role, &active, &user.Remark, &user.PackageID, &isReset, &user.ResetDay, &endDate, &user.CreatedAt, &user.UpdatedAt); err != nil {
+		var speedOverride sql.NullFloat64
+		var deviceOverride sql.NullInt64
+		if err := rows.Scan(&user.Username, &user.PasswordHash, &user.Email, &user.Nickname, &user.AvatarURL, &user.Role, &active, &user.Remark, &user.PackageID, &isReset, &user.ResetDay, &endDate, &speedOverride, &deviceOverride, &user.CreatedAt, &user.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
 		if user.Nickname == "" {
@@ -3287,6 +4048,14 @@ func (r *TrafficRepository) ListUsers(ctx context.Context, limit int) ([]User, e
 		user.IsReset = isReset != 0
 		if endDate.Valid {
 			user.PackageEndDate = &endDate.Time
+		}
+		if speedOverride.Valid {
+			v := speedOverride.Float64
+			user.SpeedLimitOverride = &v
+		}
+		if deviceOverride.Valid {
+			v := int(deviceOverride.Int64)
+			user.DeviceLimitOverride = &v
 		}
 		users = append(users, user)
 	}
@@ -3828,6 +4597,44 @@ func (r *TrafficRepository) GetUserSubscriptionIDs(ctx context.Context, username
 }
 
 // 使用提供的列表替换用户的所有订阅。
+// UserShortCodeInfo 用户短码信息(同步自 mmw v0.7.3)
+type UserShortCodeInfo struct {
+	Username            string `json:"username"`
+	UserShortCode       string `json:"user_short_code"`
+	CustomUserShortCode string `json:"custom_user_short_code"`
+}
+
+// GetUsersBySubscriptionID 返回某订阅文件分配给哪些用户 + 每个用户的短码,
+// 用于管理 UI 集中编辑用户短码(同步自 mmw v0.7.3)。
+func (r *TrafficRepository) GetUsersBySubscriptionID(ctx context.Context, subscriptionID int64) ([]UserShortCodeInfo, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+
+	const stmt = `
+		SELECT ut.username, COALESCE(ut.user_short_code, ''), COALESCE(ut.custom_user_short_code, '')
+		FROM user_subscriptions us
+		INNER JOIN user_tokens ut ON us.username = ut.username
+		WHERE us.subscription_id = ?
+		ORDER BY ut.username ASC
+	`
+	rows, err := r.db.QueryContext(ctx, stmt, subscriptionID)
+	if err != nil {
+		return nil, fmt.Errorf("get users by subscription ID: %w", err)
+	}
+	defer rows.Close()
+
+	var users []UserShortCodeInfo
+	for rows.Next() {
+		var u UserShortCodeInfo
+		if err := rows.Scan(&u.Username, &u.UserShortCode, &u.CustomUserShortCode); err != nil {
+			return nil, fmt.Errorf("scan user short code: %w", err)
+		}
+		users = append(users, u)
+	}
+	return users, rows.Err()
+}
+
 func (r *TrafficRepository) SetUserSubscriptions(ctx context.Context, username string, subscriptionIDs []int64) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
@@ -3888,14 +4695,12 @@ func (r *TrafficRepository) GetUserSubscriptions(ctx context.Context, username s
 		return nil, errors.New("username is required")
 	}
 
-	const stmt = `
-		SELECT s.id, s.name, COALESCE(s.description, ''), COALESCE(s.url, ''), s.type, s.filename, COALESCE(s.file_short_code, ''), COALESCE(s.auto_sync_custom_rules, 0), s.expire_at, s.created_at, s.updated_at
+	// 用 subscribeFileSelectClause 统一列定义,避免手抄列表跟 scanSubscribeFile 的 20 列对不上
+	rows, err := r.db.QueryContext(ctx, `SELECT `+subscribeFileSelectClause("s")+`
 		FROM subscribe_files s
 		INNER JOIN user_subscriptions us ON s.id = us.subscription_id
 		WHERE us.username = ?
-		ORDER BY s.created_at DESC
-	`
-	rows, err := r.db.QueryContext(ctx, stmt, username)
+		ORDER BY s.sort_order ASC, s.created_at DESC`, username)
 	if err != nil {
 		return nil, fmt.Errorf("get user subscriptions: %w", err)
 	}
@@ -3903,15 +4708,9 @@ func (r *TrafficRepository) GetUserSubscriptions(ctx context.Context, username s
 
 	var subscriptions []SubscribeFile
 	for rows.Next() {
-		var sub SubscribeFile
-		var autoSync int
-		var expireAt sql.NullTime
-		if err := rows.Scan(&sub.ID, &sub.Name, &sub.Description, &sub.URL, &sub.Type, &sub.Filename, &sub.FileShortCode, &autoSync, &expireAt, &sub.CreatedAt, &sub.UpdatedAt); err != nil {
+		sub, err := scanSubscribeFile(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan subscription: %w", err)
-		}
-		sub.AutoSyncCustomRules = autoSync != 0
-		if expireAt.Valid {
-			sub.ExpireAt = &expireAt.Time
 		}
 		subscriptions = append(subscriptions, sub)
 	}
@@ -3935,11 +4734,11 @@ func (r *TrafficRepository) GetUserSettings(ctx context.Context, username string
 		return settings, errors.New("username is required")
 	}
 
-	const stmt = `SELECT username, force_sync_external, COALESCE(match_rule, 'node_name'), COALESCE(sync_scope, 'saved_only'), COALESCE(keep_node_name, 1), COALESCE(cache_expire_minutes, 0), COALESCE(sync_traffic, 0), COALESCE(node_name_filter, '剩余|流量|到期|订阅|时间|重置'), COALESCE(custom_rules_enabled, 0), COALESCE(enable_short_link, 0), COALESCE(use_new_template_system, 1), COALESCE(enable_proxy_provider, 0), COALESCE(node_order, '[]'), COALESCE(debug_enabled, 0), COALESCE(debug_log_path, ''), debug_started_at, created_at, updated_at FROM user_settings WHERE username = ? LIMIT 1`
-	var forceSyncInt, keepNodeNameInt, syncTrafficInt, customRulesEnabledInt, enableShortLinkInt, useNewTemplateSystemInt, enableProxyProviderInt, debugEnabledInt int
+	const stmt = `SELECT username, force_sync_external, COALESCE(match_rule, 'node_name'), COALESCE(sync_scope, 'saved_only'), COALESCE(keep_node_name, 1), COALESCE(cache_expire_minutes, 0), COALESCE(sync_traffic, 0), COALESCE(node_name_filter, '剩余|流量|到期|订阅|时间|重置'), COALESCE(append_sub_info, 0), COALESCE(custom_rules_enabled, 0), COALESCE(enable_short_link, 0), COALESCE(use_new_template_system, 1), COALESCE(enable_proxy_provider, 0), COALESCE(node_order, '[]'), COALESCE(debug_enabled, 0), COALESCE(debug_log_path, ''), debug_started_at, created_at, updated_at FROM user_settings WHERE username = ? LIMIT 1`
+	var forceSyncInt, keepNodeNameInt, syncTrafficInt, appendSubInfoInt, customRulesEnabledInt, enableShortLinkInt, useNewTemplateSystemInt, enableProxyProviderInt, debugEnabledInt int
 	var nodeOrderJSON string
 	var debugStartedAt sql.NullTime
-	err := r.db.QueryRowContext(ctx, stmt, username).Scan(&settings.Username, &forceSyncInt, &settings.MatchRule, &settings.SyncScope, &keepNodeNameInt, &settings.CacheExpireMinutes, &syncTrafficInt, &settings.NodeNameFilter, &customRulesEnabledInt, &enableShortLinkInt, &useNewTemplateSystemInt, &enableProxyProviderInt, &nodeOrderJSON, &debugEnabledInt, &settings.DebugLogPath, &debugStartedAt, &settings.CreatedAt, &settings.UpdatedAt)
+	err := r.db.QueryRowContext(ctx, stmt, username).Scan(&settings.Username, &forceSyncInt, &settings.MatchRule, &settings.SyncScope, &keepNodeNameInt, &settings.CacheExpireMinutes, &syncTrafficInt, &settings.NodeNameFilter, &appendSubInfoInt, &customRulesEnabledInt, &enableShortLinkInt, &useNewTemplateSystemInt, &enableProxyProviderInt, &nodeOrderJSON, &debugEnabledInt, &settings.DebugLogPath, &debugStartedAt, &settings.CreatedAt, &settings.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return settings, ErrUserSettingsNotFound
@@ -3950,6 +4749,7 @@ func (r *TrafficRepository) GetUserSettings(ctx context.Context, username string
 	settings.ForceSyncExternal = forceSyncInt == 1
 	settings.KeepNodeName = keepNodeNameInt == 1
 	settings.SyncTraffic = syncTrafficInt == 1
+	settings.AppendSubInfo = appendSubInfoInt == 1
 	settings.CustomRulesEnabled = customRulesEnabledInt == 1
 	settings.EnableShortLink = enableShortLinkInt == 1
 	settings.UseNewTemplateSystem = useNewTemplateSystemInt == 1
@@ -4025,6 +4825,11 @@ func (r *TrafficRepository) UpsertUserSettings(ctx context.Context, settings Use
 		debugEnabledInt = 1
 	}
 
+	appendSubInfoInt := 0
+	if settings.AppendSubInfo {
+		appendSubInfoInt = 1
+	}
+
 	matchRule := strings.TrimSpace(settings.MatchRule)
 	if matchRule == "" {
 		matchRule = "node_name"
@@ -4052,8 +4857,8 @@ func (r *TrafficRepository) UpsertUserSettings(ctx context.Context, settings Use
 	nodeNameFilter := settings.NodeNameFilter
 
 	const stmt = `
-		INSERT INTO user_settings (username, force_sync_external, match_rule, sync_scope, keep_node_name, cache_expire_minutes, sync_traffic, node_name_filter, custom_rules_enabled, enable_short_link, use_new_template_system, enable_proxy_provider, node_order, debug_enabled, debug_log_path, debug_started_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		INSERT INTO user_settings (username, force_sync_external, match_rule, sync_scope, keep_node_name, cache_expire_minutes, sync_traffic, node_name_filter, append_sub_info, custom_rules_enabled, enable_short_link, use_new_template_system, enable_proxy_provider, node_order, debug_enabled, debug_log_path, debug_started_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 		ON CONFLICT(username) DO UPDATE SET
 			force_sync_external = excluded.force_sync_external,
 			match_rule = excluded.match_rule,
@@ -4062,6 +4867,7 @@ func (r *TrafficRepository) UpsertUserSettings(ctx context.Context, settings Use
 			cache_expire_minutes = excluded.cache_expire_minutes,
 			sync_traffic = excluded.sync_traffic,
 			node_name_filter = excluded.node_name_filter,
+			append_sub_info = excluded.append_sub_info,
 			custom_rules_enabled = excluded.custom_rules_enabled,
 			enable_short_link = excluded.enable_short_link,
 			use_new_template_system = excluded.use_new_template_system,
@@ -4073,7 +4879,7 @@ func (r *TrafficRepository) UpsertUserSettings(ctx context.Context, settings Use
 			updated_at = CURRENT_TIMESTAMP
 	`
 
-	if _, err := r.db.ExecContext(ctx, stmt, username, forceSyncInt, matchRule, syncScope, keepNodeNameInt, cacheExpireMinutes, syncTrafficInt, nodeNameFilter, customRulesEnabledInt, enableShortLinkInt, useNewTemplateSystemInt, enableProxyProviderInt, nodeOrderJSON, debugEnabledInt, settings.DebugLogPath, settings.DebugStartedAt); err != nil {
+	if _, err := r.db.ExecContext(ctx, stmt, username, forceSyncInt, matchRule, syncScope, keepNodeNameInt, cacheExpireMinutes, syncTrafficInt, nodeNameFilter, appendSubInfoInt, customRulesEnabledInt, enableShortLinkInt, useNewTemplateSystemInt, enableProxyProviderInt, nodeOrderJSON, debugEnabledInt, settings.DebugLogPath, settings.DebugStartedAt); err != nil {
 		return fmt.Errorf("upsert user settings: %w", err)
 	}
 
@@ -4313,10 +5119,10 @@ func (r *TrafficRepository) ListCustomRules(ctx context.Context, ruleType string
 	var args []interface{}
 
 	if ruleType != "" {
-		query = `SELECT id, name, type, mode, content, enabled, created_at, updated_at FROM custom_rules WHERE type = ? ORDER BY created_at DESC`
+		query = `SELECT id, name, type, mode, content, enabled, COALESCE(created_by,''), created_at, updated_at FROM custom_rules WHERE type = ? ORDER BY created_at DESC`
 		args = append(args, ruleType)
 	} else {
-		query = `SELECT id, name, type, mode, content, enabled, created_at, updated_at FROM custom_rules ORDER BY created_at DESC`
+		query = `SELECT id, name, type, mode, content, enabled, COALESCE(created_by,''), created_at, updated_at FROM custom_rules ORDER BY created_at DESC`
 	}
 
 	rows, err := r.db.QueryContext(ctx, query, args...)
@@ -4329,7 +5135,7 @@ func (r *TrafficRepository) ListCustomRules(ctx context.Context, ruleType string
 	for rows.Next() {
 		var rule CustomRule
 		var enabled int
-		if err := rows.Scan(&rule.ID, &rule.Name, &rule.Type, &rule.Mode, &rule.Content, &enabled, &rule.CreatedAt, &rule.UpdatedAt); err != nil {
+		if err := rows.Scan(&rule.ID, &rule.Name, &rule.Type, &rule.Mode, &rule.Content, &enabled, &rule.CreatedBy, &rule.CreatedAt, &rule.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan custom rule: %w", err)
 		}
 		rule.Enabled = enabled != 0
@@ -4353,11 +5159,11 @@ func (r *TrafficRepository) GetCustomRule(ctx context.Context, id int64) (*Custo
 		return nil, errors.New("custom rule id is required")
 	}
 
-	const query = `SELECT id, name, type, mode, content, enabled, created_at, updated_at FROM custom_rules WHERE id = ?`
+	const query = `SELECT id, name, type, mode, content, enabled, COALESCE(created_by,''), created_at, updated_at FROM custom_rules WHERE id = ?`
 
 	var rule CustomRule
 	var enabled int
-	err := r.db.QueryRowContext(ctx, query, id).Scan(&rule.ID, &rule.Name, &rule.Type, &rule.Mode, &rule.Content, &enabled, &rule.CreatedAt, &rule.UpdatedAt)
+	err := r.db.QueryRowContext(ctx, query, id).Scan(&rule.ID, &rule.Name, &rule.Type, &rule.Mode, &rule.Content, &enabled, &rule.CreatedBy, &rule.CreatedAt, &rule.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrCustomRuleNotFound
@@ -4406,14 +5212,14 @@ func (r *TrafficRepository) CreateCustomRule(ctx context.Context, rule *CustomRu
 		return errors.New("custom rule content is required")
 	}
 
-	const stmt = `INSERT INTO custom_rules (name, type, mode, content, enabled, created_at, updated_at) VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+	const stmt = `INSERT INTO custom_rules (name, type, mode, content, enabled, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
 
 	enabled := 0
 	if rule.Enabled {
 		enabled = 1
 	}
 
-	result, err := r.db.ExecContext(ctx, stmt, rule.Name, rule.Type, rule.Mode, rule.Content, enabled)
+	result, err := r.db.ExecContext(ctx, stmt, rule.Name, rule.Type, rule.Mode, rule.Content, enabled, rule.CreatedBy)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return errors.New("custom rule with this name and type already exists")
@@ -4536,10 +5342,10 @@ func (r *TrafficRepository) ListEnabledCustomRules(ctx context.Context, ruleType
 	var args []interface{}
 
 	if ruleType != "" {
-		query = `SELECT id, name, type, mode, content, enabled, created_at, updated_at FROM custom_rules WHERE type = ? AND enabled = 1 ORDER BY created_at DESC`
+		query = `SELECT id, name, type, mode, content, enabled, COALESCE(created_by, ''), created_at, updated_at FROM custom_rules WHERE type = ? AND enabled = 1 ORDER BY created_at DESC`
 		args = append(args, ruleType)
 	} else {
-		query = `SELECT id, name, type, mode, content, enabled, created_at, updated_at FROM custom_rules WHERE enabled = 1 ORDER BY created_at DESC`
+		query = `SELECT id, name, type, mode, content, enabled, COALESCE(created_by, ''), created_at, updated_at FROM custom_rules WHERE enabled = 1 ORDER BY created_at DESC`
 	}
 
 	rows4, err := r.db.QueryContext(ctx, query, args...)
@@ -4552,7 +5358,7 @@ func (r *TrafficRepository) ListEnabledCustomRules(ctx context.Context, ruleType
 	for rows4.Next() {
 		var rule CustomRule
 		var enabled int
-		if err := rows4.Scan(&rule.ID, &rule.Name, &rule.Type, &rule.Mode, &rule.Content, &enabled, &rule.CreatedAt, &rule.UpdatedAt); err != nil {
+		if err := rows4.Scan(&rule.ID, &rule.Name, &rule.Type, &rule.Mode, &rule.Content, &enabled, &rule.CreatedBy, &rule.CreatedAt, &rule.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan custom rule: %w", err)
 		}
 		rule.Enabled = enabled != 0
@@ -4720,12 +5526,10 @@ func (r *TrafficRepository) GetSubscribeFilesWithAutoSync(ctx context.Context) (
 		return nil, errors.New("traffic repository not initialized")
 	}
 
-	const query = `SELECT id, name, COALESCE(description, ''), url, type, filename, COALESCE(file_short_code, ''), auto_sync_custom_rules, expire_at, created_at, updated_at
+	rows, err := r.db.QueryContext(ctx, `SELECT `+subscribeFileSelectCols+`
 		FROM subscribe_files
 		WHERE auto_sync_custom_rules = 1
-		ORDER BY created_at DESC`
-
-	rows, err := r.db.QueryContext(ctx, query)
+		ORDER BY sort_order ASC, created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("get subscribe files with auto sync: %w", err)
 	}
@@ -4733,15 +5537,9 @@ func (r *TrafficRepository) GetSubscribeFilesWithAutoSync(ctx context.Context) (
 
 	var files []SubscribeFile
 	for rows.Next() {
-		var file SubscribeFile
-		var autoSync int
-		var expireAt sql.NullTime
-		if err := rows.Scan(&file.ID, &file.Name, &file.Description, &file.URL, &file.Type, &file.Filename, &file.FileShortCode, &autoSync, &expireAt, &file.CreatedAt, &file.UpdatedAt); err != nil {
+		file, err := scanSubscribeFile(rows)
+		if err != nil {
 			return nil, fmt.Errorf("scan subscribe file: %w", err)
-		}
-		file.AutoSyncCustomRules = autoSync != 0
-		if expireAt.Valid {
-			file.ExpireAt = &expireAt.Time
 		}
 		files = append(files, file)
 	}
@@ -5084,7 +5882,14 @@ SELECT proxy_groups_source_url, client_compatibility_mode, COALESCE(enable_short
        COALESCE(notify_enabled, 0), COALESCE(telegram_bot_token, ''), COALESCE(telegram_chat_id, ''),
        COALESCE(notify_login, 0), COALESCE(notify_subscribe_fetch, 0), COALESCE(notify_daily_traffic, 0),
        COALESCE(notify_server_offline, 0), COALESCE(notify_server_online, 0), COALESCE(notify_traffic_threshold, 0),
-       COALESCE(notify_daily_traffic_time, '08:00'), COALESCE(notify_traffic_threshold_percent, 80)
+       COALESCE(notify_daily_traffic_time, '08:00'), COALESCE(notify_traffic_threshold_percent, 80),
+       COALESCE(enable_override_scripts, 0),
+       COALESCE(silent_mode, 0), COALESCE(silent_mode_timeout, 15),
+       COALESCE(enable_miaomiaowu_features, 1), COALESCE(default_template_filename, ''),
+       COALESCE(enable_mmw_short_link_compat, 0),
+       COALESCE(node_name_multiplier_prefix_enabled, 0),
+       COALESCE(node_name_multiplier_left, '「'),
+       COALESCE(node_name_multiplier_right, '」')
 FROM system_config
 WHERE id = 1
 `
@@ -5093,6 +5898,9 @@ WHERE id = 1
 	var compatibilityMode, enableShortLink, agentLogEnabled int
 	var notifyEnabled, notifyLogin, notifySubFetch, notifyDailyTraffic int
 	var notifyServerOffline, notifyServerOnline, notifyTrafficThreshold int
+	var enableOverrideScripts, silentMode, silentModeTimeout int
+	var enableMiaomiaowuFeatures, enableMmwShortLinkCompat int
+	var nodeNameMultPrefixEnabled int
 	err := r.db.QueryRowContext(ctx, query).Scan(
 		&cfg.ProxyGroupsSourceURL, &compatibilityMode, &enableShortLink,
 		&cfg.SpeedCollectInterval, &cfg.TrafficCollectInterval,
@@ -5102,10 +5910,15 @@ WHERE id = 1
 		&notifyLogin, &notifySubFetch, &notifyDailyTraffic,
 		&notifyServerOffline, &notifyServerOnline, &notifyTrafficThreshold,
 		&cfg.NotifyDailyTrafficTime, &cfg.NotifyTrafficThresholdPercent,
+		&enableOverrideScripts,
+		&silentMode, &silentModeTimeout,
+		&enableMiaomiaowuFeatures, &cfg.DefaultTemplateFilename,
+		&enableMmwShortLinkCompat,
+		&nodeNameMultPrefixEnabled, &cfg.NodeNameMultiplierLeft, &cfg.NodeNameMultiplierRight,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return SystemConfig{EnableShortLink: true, SpeedCollectInterval: 3, TrafficCollectInterval: 60, TrafficCheckInterval: 120, HeartbeatInterval: 30, NotifyDailyTrafficTime: "08:00", NotifyTrafficThresholdPercent: 80}, nil
+			return SystemConfig{EnableShortLink: true, SpeedCollectInterval: 3, TrafficCollectInterval: 60, TrafficCheckInterval: 120, HeartbeatInterval: 30, NotifyDailyTrafficTime: "08:00", NotifyTrafficThresholdPercent: 80, SilentModeTimeout: 15, EnableMiaomiaowuFeatures: true}, nil
 		}
 		return SystemConfig{}, fmt.Errorf("query system config: %w", err)
 	}
@@ -5120,6 +5933,15 @@ WHERE id = 1
 	cfg.NotifyServerOffline = notifyServerOffline != 0
 	cfg.NotifyServerOnline = notifyServerOnline != 0
 	cfg.NotifyTrafficThreshold = notifyTrafficThreshold != 0
+	cfg.EnableOverrideScripts = enableOverrideScripts != 0
+	cfg.SilentMode = silentMode != 0
+	cfg.SilentModeTimeout = silentModeTimeout
+	if cfg.SilentModeTimeout <= 0 {
+		cfg.SilentModeTimeout = 15
+	}
+	cfg.EnableMiaomiaowuFeatures = enableMiaomiaowuFeatures != 0
+	cfg.EnableMmwShortLinkCompat = enableMmwShortLinkCompat != 0
+	cfg.NodeNameMultiplierPrefixEnabled = nodeNameMultPrefixEnabled != 0
 	return cfg, nil
 }
 
@@ -5147,6 +5969,15 @@ SET proxy_groups_source_url = ?,
     notify_traffic_threshold = ?,
     notify_daily_traffic_time = ?,
     notify_traffic_threshold_percent = ?,
+    enable_override_scripts = ?,
+    silent_mode = ?,
+    silent_mode_timeout = ?,
+    enable_miaomiaowu_features = ?,
+    default_template_filename = ?,
+    enable_mmw_short_link_compat = ?,
+    node_name_multiplier_prefix_enabled = ?,
+    node_name_multiplier_left = ?,
+    node_name_multiplier_right = ?,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = 1
 `
@@ -5171,13 +6002,33 @@ WHERE id = 1
 		return 0
 	}
 
+	silentModeTimeout := cfg.SilentModeTimeout
+	if silentModeTimeout <= 0 {
+		silentModeTimeout = 15
+	}
+
+	// 默认分隔符兜底(老配置可能 nil/空)
+	nnmLeft := cfg.NodeNameMultiplierLeft
+	if nnmLeft == "" {
+		nnmLeft = "「"
+	}
+	nnmRight := cfg.NodeNameMultiplierRight
+	if nnmRight == "" {
+		nnmRight = "」"
+	}
+
 	result, err := r.db.ExecContext(ctx, updateStmt, cfg.ProxyGroupsSourceURL, compatibilityMode, enableShortLink,
 		cfg.SpeedCollectInterval, cfg.TrafficCollectInterval, cfg.TrafficCheckInterval, cfg.HeartbeatInterval,
 		agentLogEnabled,
 		boolToInt(cfg.NotifyEnabled), cfg.TelegramBotToken, cfg.TelegramChatID,
 		boolToInt(cfg.NotifyLogin), boolToInt(cfg.NotifySubscribeFetch), boolToInt(cfg.NotifyDailyTraffic),
 		boolToInt(cfg.NotifyServerOffline), boolToInt(cfg.NotifyServerOnline), boolToInt(cfg.NotifyTrafficThreshold),
-		cfg.NotifyDailyTrafficTime, cfg.NotifyTrafficThresholdPercent)
+		cfg.NotifyDailyTrafficTime, cfg.NotifyTrafficThresholdPercent,
+		boolToInt(cfg.EnableOverrideScripts),
+		boolToInt(cfg.SilentMode), silentModeTimeout,
+		boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename,
+		boolToInt(cfg.EnableMmwShortLinkCompat),
+		boolToInt(cfg.NodeNameMultiplierPrefixEnabled), nnmLeft, nnmRight)
 	if err != nil {
 		return fmt.Errorf("update system config: %w", err)
 	}
@@ -5193,15 +6044,22 @@ INSERT INTO system_config (id, proxy_groups_source_url, client_compatibility_mod
     speed_collect_interval, traffic_collect_interval, traffic_check_interval, heartbeat_interval, agent_log_enabled,
     notify_enabled, telegram_bot_token, telegram_chat_id, notify_login, notify_subscribe_fetch,
     notify_daily_traffic, notify_server_offline, notify_server_online, notify_traffic_threshold,
-    notify_daily_traffic_time, notify_traffic_threshold_percent)
-VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    notify_daily_traffic_time, notify_traffic_threshold_percent, enable_override_scripts,
+    silent_mode, silent_mode_timeout, enable_miaomiaowu_features, default_template_filename, enable_mmw_short_link_compat,
+    node_name_multiplier_prefix_enabled, node_name_multiplier_left, node_name_multiplier_right)
+VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 		if _, err := r.db.ExecContext(ctx, insertStmt, cfg.ProxyGroupsSourceURL, compatibilityMode, enableShortLink,
 			cfg.SpeedCollectInterval, cfg.TrafficCollectInterval, cfg.TrafficCheckInterval, cfg.HeartbeatInterval, agentLogEnabled,
 			boolToInt(cfg.NotifyEnabled), cfg.TelegramBotToken, cfg.TelegramChatID,
 			boolToInt(cfg.NotifyLogin), boolToInt(cfg.NotifySubscribeFetch), boolToInt(cfg.NotifyDailyTraffic),
 			boolToInt(cfg.NotifyServerOffline), boolToInt(cfg.NotifyServerOnline), boolToInt(cfg.NotifyTrafficThreshold),
-			cfg.NotifyDailyTrafficTime, cfg.NotifyTrafficThresholdPercent); err != nil {
+			cfg.NotifyDailyTrafficTime, cfg.NotifyTrafficThresholdPercent,
+			boolToInt(cfg.EnableOverrideScripts),
+			boolToInt(cfg.SilentMode), silentModeTimeout,
+			boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename,
+			boolToInt(cfg.EnableMmwShortLinkCompat),
+			boolToInt(cfg.NodeNameMultiplierPrefixEnabled), nnmLeft, nnmRight); err != nil {
 			return fmt.Errorf("insert system config: %w", err)
 		}
 	}
@@ -5256,14 +6114,81 @@ func (r *TrafficRepository) GetServerTrafficUsed(ctx context.Context, serverID i
 		return 0, errors.New("traffic repository not initialized")
 	}
 
-	// 总结该服务器的nod​​e_traffic的所有上行链路+下行链路
-	const query = `SELECT COALESCE(SUM(uplink + downlink), 0) FROM node_traffic WHERE server_id = ?`
+	// 应用服务器层 traffic_stats_mode:
+	//   both(默认) → uplink+downlink;upload → 仅 uplink;download → 仅 downlink。
+	// 用户流量按套餐 traffic_mode 走,不在此处处理。
+	mode := "both"
+	_ = r.db.QueryRowContext(ctx, `SELECT COALESCE(traffic_stats_mode, 'both') FROM remote_servers WHERE id = ?`, serverID).Scan(&mode)
+	expr := "uplink + downlink"
+	switch mode {
+	case "upload":
+		expr = "uplink"
+	case "download":
+		expr = "downlink"
+	}
+
 	var total int64
+	query := fmt.Sprintf(`SELECT COALESCE(SUM(%s), 0) FROM node_traffic WHERE server_id = ?`, expr)
 	err := r.db.QueryRowContext(ctx, query, serverID).Scan(&total)
 	if err != nil {
 		return 0, fmt.Errorf("get server traffic used: %w", err)
 	}
 	return total, nil
+}
+
+func (r *TrafficRepository) GetRemoteServerTrafficTotals(ctx context.Context, serverIDs []int64) (limit int64, used int64, err error) {
+	if r == nil || r.db == nil {
+		return 0, 0, errors.New("traffic repository not initialized")
+	}
+	for _, id := range serverIDs {
+		server, sErr := r.GetRemoteServer(ctx, id)
+		if sErr != nil {
+			continue
+		}
+		aggregated, _ := r.GetServerTrafficUsed(ctx, id)
+		used += aggregated + server.TrafficUsedOffset
+		limit += server.TrafficLimit
+	}
+	return limit, used, nil
+}
+
+func (r *TrafficRepository) GetAllRemoteServersTrafficTotals(ctx context.Context) (limit int64, used int64, err error) {
+	if r == nil || r.db == nil {
+		return 0, 0, errors.New("traffic repository not initialized")
+	}
+	servers, err := r.ListRemoteServers(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, s := range servers {
+		aggregated, _ := r.GetServerTrafficUsed(ctx, s.ID)
+		used += aggregated + s.TrafficUsedOffset
+		limit += s.TrafficLimit
+	}
+	return limit, used, nil
+}
+
+// GetInboundTagServerMap 批量获取所有 inbound tag → server_id 映射
+func (r *TrafficRepository) GetInboundTagServerMap(ctx context.Context) (map[string]int64, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	const query = `SELECT tag, server_id FROM batch_inbounds`
+	rows, err := r.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("get inbound tag server map: %w", err)
+	}
+	defer rows.Close()
+	result := make(map[string]int64)
+	for rows.Next() {
+		var tag string
+		var serverID int64
+		if err := rows.Scan(&tag, &serverID); err != nil {
+			return nil, err
+		}
+		result[tag] = serverID
+	}
+	return result, nil
 }
 
 // 批量入站 CRUD 操作
@@ -5576,7 +6501,8 @@ func (r *TrafficRepository) ListPackages(ctx context.Context) ([]Package, error)
 
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
-		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(short_code, ''), created_at, updated_at
+		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
+		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), COALESCE(template_filename, ''), COALESCE(node_multipliers, '{}'), created_at, updated_at
 		FROM packages
 		ORDER BY created_at DESC
 	`
@@ -5591,21 +6517,27 @@ func (r *TrafficRepository) ListPackages(ctx context.Context) ([]Package, error)
 	for rows.Next() {
 		var pkg Package
 		var isReset int
-		var nodesJSON string
+		var nodesJSON, autoSpeedJSON, nodeMultJSON string
 		err := rows.Scan(&pkg.ID, &pkg.Name, &pkg.Description, &pkg.TrafficLimitBytes,
-			&pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON, &pkg.ShortCode, &pkg.CreatedAt, &pkg.UpdatedAt)
+			&pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON, &pkg.SpeedLimitMbps, &pkg.DeviceLimit,
+			&autoSpeedJSON, &pkg.ShortCode, &pkg.TrafficMode, &pkg.TemplateFilename, &nodeMultJSON, &pkg.CreatedAt, &pkg.UpdatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("scan package: %w", err)
 		}
 		pkg.IsReset = isReset != 0
 		pkg.TrafficLimitGB = float64(pkg.TrafficLimitBytes) / (1024 * 1024 * 1024)
 
-		// 反序列化节点 JSON
 		pkg.Nodes = []int64{}
 		if nodesJSON != "" && nodesJSON != "[]" {
 			if err := json.Unmarshal([]byte(nodesJSON), &pkg.Nodes); err != nil {
 				pkg.Nodes = []int64{}
 			}
+		}
+		if autoSpeedJSON != "" {
+			json.Unmarshal([]byte(autoSpeedJSON), &pkg.AutoSpeedRules)
+		}
+		if nodeMultJSON != "" && nodeMultJSON != "{}" {
+			json.Unmarshal([]byte(nodeMultJSON), &pkg.NodeMultipliers)
 		}
 
 		packages = append(packages, pkg)
@@ -5626,17 +6558,19 @@ func (r *TrafficRepository) GetPackage(ctx context.Context, id int64) (*Package,
 
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
-		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(short_code, ''), created_at, updated_at
+		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
+		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), COALESCE(template_filename, ''), COALESCE(node_multipliers, '{}'), created_at, updated_at
 		FROM packages
 		WHERE id = ?
 	`
 
 	var pkg Package
 	var isReset int
-	var nodesJSON string
+	var nodesJSON, autoSpeedJSON, nodeMultJSON string
 	err := r.db.QueryRowContext(ctx, query, id).Scan(&pkg.ID, &pkg.Name, &pkg.Description,
-		&pkg.TrafficLimitBytes, &pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON, &pkg.ShortCode,
-		&pkg.CreatedAt, &pkg.UpdatedAt)
+		&pkg.TrafficLimitBytes, &pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON,
+		&pkg.SpeedLimitMbps, &pkg.DeviceLimit, &autoSpeedJSON, &pkg.ShortCode, &pkg.TrafficMode,
+		&pkg.TemplateFilename, &nodeMultJSON, &pkg.CreatedAt, &pkg.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrPackageNotFound
@@ -5647,12 +6581,17 @@ func (r *TrafficRepository) GetPackage(ctx context.Context, id int64) (*Package,
 	pkg.IsReset = isReset != 0
 	pkg.TrafficLimitGB = float64(pkg.TrafficLimitBytes) / (1024 * 1024 * 1024)
 
-	// 反序列化节点 JSON
 	pkg.Nodes = []int64{}
 	if nodesJSON != "" && nodesJSON != "[]" {
 		if err := json.Unmarshal([]byte(nodesJSON), &pkg.Nodes); err != nil {
 			pkg.Nodes = []int64{}
 		}
+	}
+	if autoSpeedJSON != "" {
+		json.Unmarshal([]byte(autoSpeedJSON), &pkg.AutoSpeedRules)
+	}
+	if nodeMultJSON != "" && nodeMultJSON != "{}" {
+		json.Unmarshal([]byte(nodeMultJSON), &pkg.NodeMultipliers)
 	}
 
 	return &pkg, nil
@@ -5671,17 +6610,19 @@ func (r *TrafficRepository) GetPackageByName(ctx context.Context, name string) (
 
 	const query = `
 		SELECT id, name, COALESCE(description, ''), traffic_limit_bytes, cycle_days,
-		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(short_code, ''), created_at, updated_at
+		       is_reset, reset_day, COALESCE(nodes, '[]'), COALESCE(speed_limit_mbps, 0), COALESCE(device_limit, 0),
+		       COALESCE(auto_speed_limit_json, ''), COALESCE(short_code, ''), COALESCE(traffic_mode, 'oneway'), COALESCE(template_filename, ''), COALESCE(node_multipliers, '{}'), created_at, updated_at
 		FROM packages
 		WHERE name = ?
 	`
 
 	var pkg Package
 	var isReset int
-	var nodesJSON string
+	var nodesJSON, autoSpeedJSON, nodeMultJSON string
 	err := r.db.QueryRowContext(ctx, query, name).Scan(&pkg.ID, &pkg.Name, &pkg.Description,
-		&pkg.TrafficLimitBytes, &pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON, &pkg.ShortCode,
-		&pkg.CreatedAt, &pkg.UpdatedAt)
+		&pkg.TrafficLimitBytes, &pkg.CycleDays, &isReset, &pkg.ResetDay, &nodesJSON,
+		&pkg.SpeedLimitMbps, &pkg.DeviceLimit, &autoSpeedJSON, &pkg.ShortCode, &pkg.TrafficMode,
+		&pkg.TemplateFilename, &nodeMultJSON, &pkg.CreatedAt, &pkg.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrPackageNotFound
@@ -5692,12 +6633,17 @@ func (r *TrafficRepository) GetPackageByName(ctx context.Context, name string) (
 	pkg.IsReset = isReset != 0
 	pkg.TrafficLimitGB = float64(pkg.TrafficLimitBytes) / (1024 * 1024 * 1024)
 
-	// 反序列化节点 JSON
 	pkg.Nodes = []int64{}
 	if nodesJSON != "" && nodesJSON != "[]" {
 		if err := json.Unmarshal([]byte(nodesJSON), &pkg.Nodes); err != nil {
 			pkg.Nodes = []int64{}
 		}
+	}
+	if autoSpeedJSON != "" {
+		json.Unmarshal([]byte(autoSpeedJSON), &pkg.AutoSpeedRules)
+	}
+	if nodeMultJSON != "" && nodeMultJSON != "{}" {
+		json.Unmarshal([]byte(nodeMultJSON), &pkg.NodeMultipliers)
 	}
 	return &pkg, nil
 }
@@ -5724,6 +6670,15 @@ func (r *TrafficRepository) CreatePackage(ctx context.Context, pkg Package) (int
 		return 0, fmt.Errorf("serialize nodes: %w", err)
 	}
 
+	var autoSpeedJSON string
+	if len(pkg.AutoSpeedRules) > 0 {
+		b, _ := json.Marshal(pkg.AutoSpeedRules)
+		autoSpeedJSON = string(b)
+	}
+
+	// node_multipliers 序列化:仅保留 nodes 列表里的 key,nil/空 map → "{}"
+	nodeMultJSON := serializeNodeMultipliers(pkg.NodeMultipliers, pkg.Nodes)
+
 	// 生成短码
 	shortCode, err := generatePackageShortCode()
 	if err != nil {
@@ -5731,8 +6686,8 @@ func (r *TrafficRepository) CreatePackage(ctx context.Context, pkg Package) (int
 	}
 
 	const query = `
-		INSERT INTO packages (name, description, traffic_limit_bytes, cycle_days, is_reset, reset_day, nodes, short_code)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO packages (name, description, traffic_limit_bytes, cycle_days, is_reset, reset_day, nodes, speed_limit_mbps, device_limit, auto_speed_limit_json, short_code, traffic_mode, template_filename, node_multipliers)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	isReset := 0
@@ -5740,8 +6695,13 @@ func (r *TrafficRepository) CreatePackage(ctx context.Context, pkg Package) (int
 		isReset = 1
 	}
 
+	trafficMode := pkg.TrafficMode
+	if trafficMode == "" {
+		trafficMode = "oneway"
+	}
+
 	result, err := r.db.ExecContext(ctx, query, name, pkg.Description, pkg.TrafficLimitBytes,
-		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), shortCode)
+		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, autoSpeedJSON, shortCode, trafficMode, pkg.TemplateFilename, nodeMultJSON)
 	if err != nil {
 		return 0, fmt.Errorf("create package: %w", err)
 	}
@@ -5775,10 +6735,19 @@ func (r *TrafficRepository) UpdatePackage(ctx context.Context, pkg Package) erro
 		return fmt.Errorf("serialize nodes: %w", err)
 	}
 
+	var autoSpeedJSON string
+	if len(pkg.AutoSpeedRules) > 0 {
+		b, _ := json.Marshal(pkg.AutoSpeedRules)
+		autoSpeedJSON = string(b)
+	}
+
+	nodeMultJSON := serializeNodeMultipliers(pkg.NodeMultipliers, pkg.Nodes)
+
 	const query = `
 		UPDATE packages
 		SET name = ?, description = ?, traffic_limit_bytes = ?, cycle_days = ?,
-		    is_reset = ?, reset_day = ?, nodes = ?, updated_at = CURRENT_TIMESTAMP
+		    is_reset = ?, reset_day = ?, nodes = ?, speed_limit_mbps = ?, device_limit = ?,
+		    auto_speed_limit_json = ?, traffic_mode = ?, template_filename = ?, node_multipliers = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE id = ?
 	`
 
@@ -5787,8 +6756,13 @@ func (r *TrafficRepository) UpdatePackage(ctx context.Context, pkg Package) erro
 		isReset = 1
 	}
 
+	trafficMode := pkg.TrafficMode
+	if trafficMode == "" {
+		trafficMode = "oneway"
+	}
+
 	result, err := r.db.ExecContext(ctx, query, name, pkg.Description, pkg.TrafficLimitBytes,
-		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.ID)
+		pkg.CycleDays, isReset, pkg.ResetDay, string(nodesJSON), pkg.SpeedLimitMbps, pkg.DeviceLimit, autoSpeedJSON, trafficMode, pkg.TemplateFilename, nodeMultJSON, pkg.ID)
 	if err != nil {
 		return fmt.Errorf("update package: %w", err)
 	}
@@ -5949,9 +6923,99 @@ func (r *TrafficRepository) GetUserInboundConfigs(ctx context.Context, username 
 	return configs, rows.Err()
 }
 
+func (r *TrafficRepository) GetUserInboundConfigsByServer(ctx context.Context, serverID int64) ([]UserInboundConfig, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, username, server_id, inbound_tag, protocol, credential_json, created_at FROM user_inbound_configs WHERE server_id = ?`, serverID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var configs []UserInboundConfig
+	for rows.Next() {
+		var c UserInboundConfig
+		if err := rows.Scan(&c.ID, &c.Username, &c.ServerID, &c.InboundTag, &c.Protocol, &c.CredentialJSON, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		configs = append(configs, c)
+	}
+	return configs, rows.Err()
+}
+
 func (r *TrafficRepository) DeleteUserInboundConfigs(ctx context.Context, username string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM user_inbound_configs WHERE username = ?`, username)
 	return err
+}
+
+// ListAllUserInboundConfigs 全量返回所有用户的 inbound 凭据。
+// 用于 credential_email_migrator 一次性扫描老格式 email 凭据。规模 = 用户数 × 套餐 inbound 数,
+// 个人项目级别预计 < 千行,无需分页。
+func (r *TrafficRepository) ListAllUserInboundConfigs(ctx context.Context) ([]UserInboundConfig, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, username, server_id, inbound_tag, protocol, credential_json, created_at FROM user_inbound_configs`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var configs []UserInboundConfig
+	for rows.Next() {
+		var c UserInboundConfig
+		if err := rows.Scan(&c.ID, &c.Username, &c.ServerID, &c.InboundTag, &c.Protocol, &c.CredentialJSON, &c.CreatedAt); err != nil {
+			return nil, err
+		}
+		configs = append(configs, c)
+	}
+	return configs, rows.Err()
+}
+
+// UpdateUserInboundCredentialJSONByID 按 user_inbound_configs.id 原地更新 credential_json。
+// 用 id 而非 (username, server_id, inbound_tag) 三元组 — 该三元组不是 UNIQUE,
+// 同 user 在同一 inbound 上可以有多条 client(EnsureAdminInboundClient 引入的 mmw 迁移 client、
+// 历史多 client 测试等),按三元组更新会一次性把多行变成同一 credential_json。
+func (r *TrafficRepository) UpdateUserInboundCredentialJSONByID(ctx context.Context, id int64, credJSON string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE user_inbound_configs SET credential_json = ? WHERE id = ?`,
+		credJSON, id)
+	return err
+}
+
+func (r *TrafficRepository) DeleteUserInboundConfig(ctx context.Context, username string, serverID int64, inboundTag string) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM user_inbound_configs WHERE username = ? AND server_id = ? AND inbound_tag = ?`, username, serverID, inboundTag)
+	return err
+}
+
+// EnsureAdminInboundClient 把一个 xray inbound client 凭据登记给 admin。
+// 按 (username, server_id, inbound_tag, credential_json) 四元组去重 — 已存在则跳过,
+// 不存在才插入。返回 wasNew=true 表示本次新插入。
+//
+// 用途:迁移时把 server 上已存在 email 的 xray client(mmw 时代手工配的)绑定到系统 admin,
+// 让 mmwx 主控能识别这些 client 的归属、做流量统计 / routing 限定。
+//
+// 一个 inbound 上多个 client 各算一行(不强 UNIQUE);credential_json 是去重 key,
+// 同 client 反复扫描不会重复入库。
+func (r *TrafficRepository) EnsureAdminInboundClient(ctx context.Context, username string, serverID int64, inboundTag, protocol, credentialJSON string) (bool, error) {
+	if r == nil || r.db == nil {
+		return false, errors.New("traffic repository not initialized")
+	}
+	var existsID int64
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id FROM user_inbound_configs
+		 WHERE username = ? AND server_id = ? AND inbound_tag = ? AND credential_json = ?
+		 LIMIT 1`,
+		username, serverID, inboundTag, credentialJSON,
+	).Scan(&existsID)
+	if err == nil && existsID > 0 {
+		return false, nil
+	}
+	if err != nil && err != sql.ErrNoRows {
+		return false, err
+	}
+	if _, err := r.db.ExecContext(ctx,
+		`INSERT INTO user_inbound_configs (username, server_id, inbound_tag, protocol, credential_json) VALUES (?, ?, ?, ?, ?)`,
+		username, serverID, inboundTag, protocol, credentialJSON,
+	); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (r *TrafficRepository) GetUserInboundConfig(ctx context.Context, username string, serverID int64, inboundTag string) (*UserInboundConfig, error) {
@@ -6023,9 +7087,219 @@ func (r *TrafficRepository) DeleteUserOutboundsByUsername(ctx context.Context, u
 	return err
 }
 
+// UserSubaccount 记录一个 mmwx 用户在某 routed 节点上的 xray client 凭据。
+// is_active=0 表示已下线(凭据保留供续费恢复),=1 表示已下发到 inbound + routing rule.user。
+type UserSubaccount struct {
+	ID             int64
+	Username       string
+	RoutedNodeID   int64
+	Email          string
+	CredentialJSON string
+	IsActive       bool
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// UpsertUserSubaccount 新建或更新一个子账号。续费时若已存在,credential 不变(由调用方决定);
+// 这里只负责持久化传入字段。
+func (r *TrafficRepository) UpsertUserSubaccount(ctx context.Context, sa UserSubaccount) (int64, error) {
+	active := 0
+	if sa.IsActive {
+		active = 1
+	}
+	res, err := r.db.ExecContext(ctx, `
+		INSERT INTO user_subaccounts (username, routed_node_id, email, credential_json, is_active, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(routed_node_id, username) DO UPDATE SET
+			email = excluded.email,
+			credential_json = excluded.credential_json,
+			is_active = excluded.is_active,
+			updated_at = CURRENT_TIMESTAMP
+	`, sa.Username, sa.RoutedNodeID, sa.Email, sa.CredentialJSON, active)
+	if err != nil {
+		return 0, err
+	}
+	if sa.ID > 0 {
+		return sa.ID, nil
+	}
+	id, _ := res.LastInsertId()
+	return id, nil
+}
+
+func (r *TrafficRepository) GetUserSubaccount(ctx context.Context, routedNodeID int64, username string) (*UserSubaccount, error) {
+	var sa UserSubaccount
+	var active int
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id, username, routed_node_id, email, credential_json, is_active, created_at, updated_at
+		FROM user_subaccounts WHERE routed_node_id = ? AND username = ?
+	`, routedNodeID, username).Scan(&sa.ID, &sa.Username, &sa.RoutedNodeID, &sa.Email, &sa.CredentialJSON, &active, &sa.CreatedAt, &sa.UpdatedAt)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sa.IsActive = active == 1
+	return &sa, nil
+}
+
+func (r *TrafficRepository) ListUserSubaccounts(ctx context.Context, username string) ([]UserSubaccount, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, username, routed_node_id, email, credential_json, is_active, created_at, updated_at
+		FROM user_subaccounts WHERE username = ? ORDER BY routed_node_id
+	`, username)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UserSubaccount
+	for rows.Next() {
+		var sa UserSubaccount
+		var active int
+		if err := rows.Scan(&sa.ID, &sa.Username, &sa.RoutedNodeID, &sa.Email, &sa.CredentialJSON, &active, &sa.CreatedAt, &sa.UpdatedAt); err != nil {
+			return nil, err
+		}
+		sa.IsActive = active == 1
+		out = append(out, sa)
+	}
+	return out, rows.Err()
+}
+
+func (r *TrafficRepository) ListSubaccountsByRoutedNode(ctx context.Context, routedNodeID int64) ([]UserSubaccount, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, username, routed_node_id, email, credential_json, is_active, created_at, updated_at
+		FROM user_subaccounts WHERE routed_node_id = ? ORDER BY username
+	`, routedNodeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []UserSubaccount
+	for rows.Next() {
+		var sa UserSubaccount
+		var active int
+		if err := rows.Scan(&sa.ID, &sa.Username, &sa.RoutedNodeID, &sa.Email, &sa.CredentialJSON, &active, &sa.CreatedAt, &sa.UpdatedAt); err != nil {
+			return nil, err
+		}
+		sa.IsActive = active == 1
+		out = append(out, sa)
+	}
+	return out, rows.Err()
+}
+
+// ListActiveSubaccountsByServerName 用于 limiter 下发:列出某 server 上所有 active 子账号
+// 以及其挂的 inbound_tag(继承自父物理节点)。需要 JOIN nodes 表拿 inbound 信息。
+type ActiveSubaccountForLimiter struct {
+	Username   string
+	Email      string
+	InboundTag string
+}
+
+func (r *TrafficRepository) ListActiveSubaccountsByServerName(ctx context.Context, serverName string) ([]ActiveSubaccountForLimiter, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT sa.username, sa.email, COALESCE(n.inbound_tag, '')
+		FROM user_subaccounts sa
+		INNER JOIN nodes n ON sa.routed_node_id = n.id
+		WHERE sa.is_active = 1 AND n.original_server = ? AND n.node_type = 'routed'
+	`, serverName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ActiveSubaccountForLimiter
+	for rows.Next() {
+		var a ActiveSubaccountForLimiter
+		if err := rows.Scan(&a.Username, &a.Email, &a.InboundTag); err != nil {
+			return nil, err
+		}
+		if a.InboundTag == "" {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// SetSubaccountActive 切换 is_active(下线/恢复),不动 credential。
+func (r *TrafficRepository) SetSubaccountActive(ctx context.Context, id int64, active bool) error {
+	v := 0
+	if active {
+		v = 1
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE user_subaccounts SET is_active = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, v, id)
+	return err
+}
+
+func (r *TrafficRepository) DeleteUserSubaccount(ctx context.Context, id int64) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM user_subaccounts WHERE id = ?`, id)
+	return err
+}
+
+// ListSubaccountEmailToUsername 一次性拉所有子账号 email → 父用户名的映射。
+// 适合每日通知 / 报表这种"一次跑、需要把流量按主账号聚合"的场景,避免对每条流量逐行查 DB。
+func (r *TrafficRepository) ListSubaccountEmailToUsername(ctx context.Context) (map[string]string, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT email, username FROM user_subaccounts`)
+	if err != nil {
+		return nil, fmt.Errorf("list subaccount mappings: %w", err)
+	}
+	defer rows.Close()
+	m := make(map[string]string)
+	for rows.Next() {
+		var email, username string
+		if err := rows.Scan(&email, &username); err != nil {
+			return nil, fmt.Errorf("scan subaccount mapping: %w", err)
+		}
+		if email != "" && username != "" {
+			m[email] = username
+		}
+	}
+	return m, nil
+}
+
+// ResolveUsernameByEmail 把 xray 上报的 stats.User key (email) 反查到 mmwx 用户名。
+// 优先级:
+//  1. user_subaccounts.email → username (子账号路径)
+//  2. 以 "_admin__" 开头 → 返回空(占位 admin 流量丢弃)
+//  3. 否则原值返回(主账号路径,email == username 是 mmwx 历史约定)
+//
+// 该函数应在流量采集热路径上调用,后续可加内存 cache 优化。
+func (r *TrafficRepository) ResolveUsernameByEmail(ctx context.Context, email string) string {
+	if email == "" {
+		return ""
+	}
+	if strings.HasPrefix(email, "_admin__") {
+		return ""
+	}
+	var username string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT username FROM user_subaccounts WHERE email = ? LIMIT 1`, email).Scan(&username)
+	if err == nil && username != "" {
+		return username
+	}
+	// 用户直接 inbound 凭据有时把 client.email 设成主账号 email(如 share@2ha.me) —
+	// 既不符合 `<username>__<tag>` 新格式,也不在 user_subaccounts,
+	// fallback `return email` 会把流量记到 username=email 的孤行,管理员页按 username 查不到。
+	// 这里反查 users.email → username,把这类流量归回主账号。
+	err = r.db.QueryRowContext(ctx,
+		`SELECT username FROM users WHERE email = ? LIMIT 1`, email).Scan(&username)
+	if err == nil && username != "" {
+		return username
+	}
+	// 新格式 inbound 凭据 email = `<username>__<inbound_tag>`(generateCredential 生成);
+	// routed 子账户老格式 `<username>__<id>__<label>` 没命中 user_subaccounts 时也走这里(取首段一致)。
+	if i := strings.Index(email, "__"); i > 0 {
+		return email[:i]
+	}
+	return email
+}
+
 func (r *TrafficRepository) ListUsersWithPackage(ctx context.Context) ([]User, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT username, password_hash, COALESCE(email, ''), COALESCE(nickname, ''), COALESCE(avatar_url, ''), COALESCE(role, ''), is_active, COALESCE(remark, ''), COALESCE(package_id, 0), COALESCE(is_reset, 0), COALESCE(reset_day, 1), package_end_date, created_at, updated_at FROM users WHERE package_id IS NOT NULL AND package_id > 0`)
+		`SELECT username, password_hash, COALESCE(email, ''), COALESCE(nickname, ''), COALESCE(avatar_url, ''), COALESCE(role, ''), is_active, COALESCE(remark, ''), COALESCE(package_id, 0), COALESCE(is_reset, 0), COALESCE(reset_day, 1), package_end_date, speed_limit_override, device_limit_override, created_at, updated_at FROM users WHERE package_id IS NOT NULL AND package_id > 0`)
 	if err != nil {
 		return nil, err
 	}
@@ -6035,13 +7309,23 @@ func (r *TrafficRepository) ListUsersWithPackage(ctx context.Context) ([]User, e
 		var u User
 		var active, isReset int
 		var endDate sql.NullTime
-		if err := rows.Scan(&u.Username, &u.PasswordHash, &u.Email, &u.Nickname, &u.AvatarURL, &u.Role, &active, &u.Remark, &u.PackageID, &isReset, &u.ResetDay, &endDate, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		var speedOverride sql.NullFloat64
+		var deviceOverride sql.NullInt64
+		if err := rows.Scan(&u.Username, &u.PasswordHash, &u.Email, &u.Nickname, &u.AvatarURL, &u.Role, &active, &u.Remark, &u.PackageID, &isReset, &u.ResetDay, &endDate, &speedOverride, &deviceOverride, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, err
 		}
 		u.IsActive = active != 0
 		u.IsReset = isReset != 0
 		if endDate.Valid {
 			u.PackageEndDate = &endDate.Time
+		}
+		if speedOverride.Valid {
+			v := speedOverride.Float64
+			u.SpeedLimitOverride = &v
+		}
+		if deviceOverride.Valid {
+			v := int(deviceOverride.Int64)
+			u.DeviceLimitOverride = &v
 		}
 		users = append(users, u)
 	}
@@ -6053,6 +7337,139 @@ func (r *TrafficRepository) GetUserTotalTraffic(ctx context.Context, username st
 	err := r.db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(uplink + downlink), 0) FROM user_traffic WHERE username = ?`, username).Scan(&total)
 	return total, err
+}
+
+// GetUserWeightedTraffic 按 pkg.NodeMultipliers 加权汇总该用户的流量。
+// 数据源:user_email_traffic(每行 email 维度),email 形态:
+//   - <username>__<inbound_tag>:主账号在某 inbound 的流量,反查 nodes(server_name+inbound_tag)→ 节点 → 倍率
+//   - 子账号:命中 user_subaccounts → routed_node_id → routed 节点 → 父节点 → 父倍率
+//   - 其它(主账号无 __ 分隔等)→ 兜底按 1.0 计算
+// 套餐 nil 或 NodeMultipliers 空 → 等价于 GetUserTotalTraffic 在 email 维度的求和(全部按 1)。
+func (r *TrafficRepository) GetUserWeightedTraffic(ctx context.Context, username string, pkg *Package) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return 0, errors.New("username is required")
+	}
+
+	// 套餐空 / 无倍率配置 → 直接用 user_traffic(按 username 聚合,等价于全 1)
+	if pkg == nil || len(pkg.NodeMultipliers) == 0 {
+		return r.GetUserTotalTraffic(ctx, username)
+	}
+
+	// 预加载:server_id → server.name(反查主账号节点用)
+	serverNames := make(map[int64]string)
+	srvRows, err := r.db.QueryContext(ctx, `SELECT id, name FROM remote_servers`)
+	if err != nil {
+		return 0, fmt.Errorf("list servers: %w", err)
+	}
+	for srvRows.Next() {
+		var id int64
+		var name string
+		if err := srvRows.Scan(&id, &name); err == nil {
+			serverNames[id] = name
+		}
+	}
+	srvRows.Close()
+
+	// 预加载:user_subaccounts(email → routed_node_id);仅本用户的
+	subaccNodeID := make(map[string]int64)
+	saRows, err := r.db.QueryContext(ctx,
+		`SELECT email, routed_node_id FROM user_subaccounts WHERE username = ?`, username)
+	if err != nil {
+		return 0, fmt.Errorf("list subaccounts: %w", err)
+	}
+	for saRows.Next() {
+		var email string
+		var nid int64
+		if err := saRows.Scan(&email, &nid); err == nil {
+			subaccNodeID[email] = nid
+		}
+	}
+	saRows.Close()
+
+	// 预加载:nodes 缓存(id → {id, parent_node_id, original_server, inbound_tag})
+	// 给 routed 节点拿父 ID + 给主账号反查 server+inbound → id
+	nodeByID := make(map[int64]struct {
+		ParentID *int64
+	})
+	nodeByServerTag := make(map[string]int64) // key=server_name+"\x00"+inbound_tag
+	nRows, err := r.db.QueryContext(ctx,
+		`SELECT id, parent_node_id, COALESCE(original_server,''), COALESCE(inbound_tag,'') FROM nodes`)
+	if err != nil {
+		return 0, fmt.Errorf("list nodes: %w", err)
+	}
+	for nRows.Next() {
+		var id int64
+		var parentID *int64
+		var srv, tag string
+		if err := nRows.Scan(&id, &parentID, &srv, &tag); err != nil {
+			continue
+		}
+		nodeByID[id] = struct{ ParentID *int64 }{ParentID: parentID}
+		if srv != "" && tag != "" {
+			nodeByServerTag[srv+"\x00"+tag] = id
+		}
+	}
+	nRows.Close()
+
+	// 扫该用户所有 email 流量行
+	prefix := username + "__"
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT server_id, email, uplink, downlink FROM user_email_traffic WHERE email = ? OR email LIKE ?`,
+		username, prefix+"%")
+	if err != nil {
+		return 0, fmt.Errorf("query user_email_traffic: %w", err)
+	}
+	defer rows.Close()
+
+	var weighted float64
+	for rows.Next() {
+		var serverID, uplink, downlink int64
+		var email string
+		if err := rows.Scan(&serverID, &email, &uplink, &downlink); err != nil {
+			continue
+		}
+		bytes := uplink + downlink
+
+		// 子账号路径(routed)
+		if nid, ok := subaccNodeID[email]; ok {
+			var parent *int64
+			if meta, ok2 := nodeByID[nid]; ok2 {
+				parent = meta.ParentID
+			}
+			weighted += float64(bytes) * pkg.MultiplierForNode(nid, parent)
+			continue
+		}
+
+		// 主账号 inbound 路径:<username>__<inbound_tag>
+		if strings.HasPrefix(email, prefix) {
+			tag := email[len(prefix):]
+			srvName := serverNames[serverID]
+			if srvName != "" {
+				if nid, ok := nodeByServerTag[srvName+"\x00"+tag]; ok {
+					weighted += float64(bytes) * pkg.MultiplierForNode(nid, nil)
+					continue
+				}
+			}
+		}
+
+		// 兜底:无法识别节点 → 按 1 算(包括 email == username 的历史孤行)
+		weighted += float64(bytes)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("scan user_email_traffic: %w", err)
+	}
+	return int64(weighted), nil
+}
+
+func (r *TrafficRepository) UpdateUserLimitOverrides(ctx context.Context, username string, speedOverride *float64, deviceOverride *int) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE users SET speed_limit_override = ?, device_limit_override = ?, updated_at = CURRENT_TIMESTAMP WHERE username = ?`,
+		speedOverride, deviceOverride, username)
+	return err
 }
 
 func (r *TrafficRepository) UpdateUserOverLimit(ctx context.Context, username string, isOverLimit bool) error {
@@ -6206,6 +7623,81 @@ func (r *TrafficRepository) SetSystemSetting(ctx context.Context, key, value str
 	return nil
 }
 
+func (r *TrafficRepository) CountRemoteServers(ctx context.Context) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	var count int64
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM remote_servers`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count remote servers: %w", err)
+	}
+	return count, nil
+}
+
+func (r *TrafficRepository) CountUsers(ctx context.Context) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	var count int64
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM users`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count users: %w", err)
+	}
+	return count, nil
+}
+
+// CountUserTemplates / CountUserOverrideScripts / CountUserSubscribeFiles
+// 统计某用户创建的资源数量,用于"普通用户配额"校验。created_by/username 空串视为 admin 创建。
+func (r *TrafficRepository) CountUserTemplates(ctx context.Context, username string) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM templates WHERE created_by = ?`, username).Scan(&n)
+	return n, err
+}
+
+func (r *TrafficRepository) CountUserOverrideScripts(ctx context.Context, username string) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM override_scripts WHERE username = ?`, username).Scan(&n)
+	return n, err
+}
+
+func (r *TrafficRepository) CountUserSubscribeFiles(ctx context.Context, username string) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM subscribe_files WHERE created_by = ?`, username).Scan(&n)
+	return n, err
+}
+
+func (r *TrafficRepository) CountUserCustomRules(ctx context.Context, username string) (int, error) {
+	var n int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM custom_rules WHERE created_by = ?`, username).Scan(&n)
+	return n, err
+}
+
+// LicenseUsage 返回当前本机激活的"license usage 三联":
+//   servers — 在线远程服务器(用心跳判定,activated 但未离线即算占用一个 server 名额)
+//   nodes   — 启用中的节点条目
+//   users   — 启用中的非管理员用户(管理员不占 license 名额)
+//
+// 设计意图:让 license 服务器看到的 used_* 跟"plan 限额检查"用到的口径一致,避免出现
+// "面板显示 used=N,但 enforce 时按 M 判定"的语义偏差。
+func (r *TrafficRepository) LicenseUsage(ctx context.Context) (servers, nodes, users int, err error) {
+	if r == nil || r.db == nil {
+		return 0, 0, 0, errors.New("traffic repository not initialized")
+	}
+	// connected = 心跳正常;若全部 offline 这台主控其实没在用 license,但我们仍记 0 即可。
+	if err = r.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM remote_servers WHERE status = 'connected'`).Scan(&servers); err != nil {
+		return 0, 0, 0, fmt.Errorf("count active servers: %w", err)
+	}
+	if err = r.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM nodes WHERE enabled = 1`).Scan(&nodes); err != nil {
+		return 0, 0, 0, fmt.Errorf("count enabled nodes: %w", err)
+	}
+	if err = r.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM users WHERE is_active = 1 AND role != 'admin'`).Scan(&users); err != nil {
+		return 0, 0, 0, fmt.Errorf("count active non-admin users: %w", err)
+	}
+	return servers, nodes, users, nil
+}
+
 // 远程服务器CRUD操作
 
 // 返回所有远程服务器。
@@ -6225,9 +7717,14 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		COALESCE(agent_token, ''), agent_token_expires_at, last_agent_token_refresh,
 		COALESCE(use_443, 0), COALESCE(steal_mode, 'tunnel'),
 		COALESCE(site_type, ''), COALESCE(site_value, ''),
+		COALESCE(xray_mode, 'external'),
 		COALESCE(time_offset_seconds, 0),
+		COALESCE(traffic_used_offset, 0),
+		COALESCE(traffic_stats_mode, 'both'),
+		EXISTS(SELECT 1 FROM federated_servers fs WHERE fs.server_id = remote_servers.id),
+		COALESCE((SELECT prefix FROM federated_servers fs WHERE fs.server_id = remote_servers.id), ''),
 		created_at, updated_at
-		FROM remote_servers ORDER BY created_at DESC`
+		FROM remote_servers ORDER BY sort_order ASC, id ASC`
 	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("list remote servers: %w", err)
@@ -6253,7 +7750,12 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 			&server.AgentToken, &agentTokenExpiresAt, &lastAgentTokenRefresh,
 			&server.Use443, &server.StealMode,
 			&server.SiteType, &server.SiteValue,
+			&server.XrayMode,
 			&timeOffsetSeconds,
+			&server.TrafficUsedOffset,
+			&server.TrafficStatsMode,
+			&server.IsFederated,
+			&server.FederationPrefix,
 			&server.CreatedAt, &server.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan remote server: %w", err)
 		}
@@ -6322,6 +7824,12 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		COALESCE(agent_token, ''), agent_token_expires_at, last_agent_token_refresh,
 		COALESCE(use_443, 0), COALESCE(steal_mode, 'tunnel'),
 		COALESCE(site_type, ''), COALESCE(site_value, ''),
+		COALESCE(xray_mode, 'external'),
+		COALESCE(traffic_limit, 0), COALESCE(traffic_reset_day, 0),
+		COALESCE(current_upload_speed, 0), COALESCE(current_download_speed, 0),
+		COALESCE(xray_running, 0), COALESCE(xray_version, ''),
+		COALESCE(traffic_used_offset, 0),
+		COALESCE(traffic_stats_mode, 'both'),
 		created_at, updated_at
 		FROM remote_servers WHERE id = ?`
 
@@ -6329,6 +7837,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 	var lastHeartbeat, tokenExpiresAt, lastTokenRefresh, lastPullAt sql.NullTime
 	var bootTime, xrayBootTime sql.NullString
 	var agentTokenExpiresAt, lastAgentTokenRefresh sql.NullTime
+	var xrayRunningInt int
 	err := r.db.QueryRowContext(ctx, query, id).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.Domain,
 		&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 		&tokenExpiresAt, &lastTokenRefresh,
@@ -6337,6 +7846,12 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		&server.AgentToken, &agentTokenExpiresAt, &lastAgentTokenRefresh,
 		&server.Use443, &server.StealMode,
 		&server.SiteType, &server.SiteValue,
+		&server.XrayMode,
+		&server.TrafficLimit, &server.TrafficResetDay,
+		&server.CurrentUploadSpeed, &server.CurrentDownloadSpeed,
+		&xrayRunningInt, &server.XrayVersion,
+		&server.TrafficUsedOffset,
+		&server.TrafficStatsMode,
 		&server.CreatedAt, &server.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -6345,6 +7860,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		return nil, fmt.Errorf("get remote server: %w", err)
 	}
 
+	server.XrayRunning = xrayRunningInt != 0
 	if lastHeartbeat.Valid {
 		server.LastHeartbeat = &lastHeartbeat.Time
 	}
@@ -6386,6 +7902,7 @@ func (r *TrafficRepository) GetRemoteServerByToken(ctx context.Context, token st
 		COALESCE(agent_token, ''), agent_token_expires_at, last_agent_token_refresh,
 		COALESCE(use_443, 0), COALESCE(steal_mode, 'tunnel'),
 		COALESCE(site_type, ''), COALESCE(site_value, ''),
+		COALESCE(xray_mode, 'external'),
 		created_at, updated_at
 		FROM remote_servers WHERE token = ?`
 
@@ -6400,6 +7917,7 @@ func (r *TrafficRepository) GetRemoteServerByToken(ctx context.Context, token st
 		&server.AgentToken, &agentTokenExpiresAt, &lastAgentTokenRefresh,
 		&server.Use443, &server.StealMode,
 		&server.SiteType, &server.SiteValue,
+		&server.XrayMode,
 		&server.CreatedAt, &server.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -6450,6 +7968,7 @@ func (r *TrafficRepository) GetRemoteServerByName(ctx context.Context, name stri
 		COALESCE(agent_token, ''), agent_token_expires_at, last_agent_token_refresh,
 		COALESCE(use_443, 0), COALESCE(steal_mode, 'tunnel'),
 		COALESCE(site_type, ''), COALESCE(site_value, ''),
+		COALESCE(xray_mode, 'external'),
 		created_at, updated_at
 		FROM remote_servers WHERE name = ?`
 
@@ -6465,6 +7984,7 @@ func (r *TrafficRepository) GetRemoteServerByName(ctx context.Context, name stri
 		&server.AgentToken, &agentTokenExpiresAt, &lastAgentTokenRefresh,
 		&server.Use443, &server.StealMode,
 		&server.SiteType, &server.SiteValue,
+		&server.XrayMode,
 		&server.CreatedAt, &server.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -6528,13 +8048,23 @@ func (r *TrafficRepository) CreateRemoteServer(ctx context.Context, server *Remo
 	// 将令牌有效期设置为从现在起 7 天
 	tokenExpiresAt := time.Now().Add(7 * 24 * time.Hour)
 
-	const stmt = `INSERT INTO remote_servers (name, token, status, ip_address, domain, token_expires_at, last_token_refresh, connection_mode, pull_address, pull_port, pull_token, use_443, steal_mode, site_type, site_value, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+	const stmt = `INSERT INTO remote_servers (name, token, status, ip_address, domain, token_expires_at, last_token_refresh, connection_mode, listen_port, pull_address, pull_port, pull_token, use_443, steal_mode, site_type, site_value, xray_mode, traffic_limit, traffic_used_offset, traffic_reset_day, traffic_stats_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
 
 	stealMode := server.StealMode
 	if stealMode == "" {
-		stealMode = "tunnel"
+		// 历史默认 "tunnel" 改为 "default" — 没显式选 tunnel/fallback 的就是"默认部署模式",
+		// 跟 handler 那里的默认保持一致
+		stealMode = "default"
 	}
-	result, err := r.db.ExecContext(ctx, stmt, server.Name, server.Token, server.Status, server.IPAddress, server.Domain, tokenExpiresAt, server.ConnectionMode, server.PullAddress, server.PullPort, server.PullToken, server.Use443, stealMode, server.SiteType, server.SiteValue)
+	xrayMode := server.XrayMode
+	if xrayMode == "" {
+		xrayMode = "external"
+	}
+	statsMode := strings.TrimSpace(server.TrafficStatsMode)
+	if statsMode != "upload" && statsMode != "download" {
+		statsMode = "both"
+	}
+	result, err := r.db.ExecContext(ctx, stmt, server.Name, server.Token, server.Status, server.IPAddress, server.Domain, tokenExpiresAt, server.ConnectionMode, server.ListenPort, server.PullAddress, server.PullPort, server.PullToken, server.Use443, stealMode, server.SiteType, server.SiteValue, xrayMode, server.TrafficLimit, server.TrafficUsedOffset, server.TrafficResetDay, statsMode)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return ErrRemoteServerExists
@@ -6605,17 +8135,44 @@ func (r *TrafficRepository) UpdateRemoteServerHeartbeat(ctx context.Context, tok
 	return nil
 }
 
+// MarkRemoteServerOfflineByID 立即把指定服务器标记为离线(不等 60s 心跳超时)。
+// 返回 (prevStatus, name, ip, err);如果 prev == connected 才算"真的下线",调用方据此决定要不要发通知。
+// 用途:WS 断开时立刻下推下线状态(不然要等 traffic collector 下一轮才检测,可能 60s+)。
+func (r *TrafficRepository) MarkRemoteServerOfflineByID(ctx context.Context, serverID int64) (string, string, string, error) {
+	if r == nil || r.db == nil {
+		return "", "", "", errors.New("traffic repository not initialized")
+	}
+	var prevStatus, name, ip string
+	checkStmt := `SELECT name, status, COALESCE(ip_address, '') FROM remote_servers WHERE id = ?`
+	if err := r.db.QueryRowContext(ctx, checkStmt, serverID).Scan(&name, &prevStatus, &ip); err != nil {
+		return "", "", "", fmt.Errorf("check server status: %w", err)
+	}
+	if prevStatus != RemoteServerStatusConnected {
+		// 已经不是 connected 就不动 — 避免重复发下线通知(比如已经被 collector 标过了)
+		return prevStatus, name, ip, nil
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE remote_servers SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = ?`,
+		RemoteServerStatusOffline, serverID, RemoteServerStatusConnected,
+	)
+	if err != nil {
+		return prevStatus, name, ip, fmt.Errorf("mark server offline: %w", err)
+	}
+	return prevStatus, name, ip, nil
+}
+
 // UpdateRemoteServerLastActivity 通过服务器 ID 更新 last_heartbeat。
 // 当收到流量数据时会调用此方法，从而无需单独的心跳。
-func (r *TrafficRepository) UpdateRemoteServerLastActivity(ctx context.Context, serverID int64) error {
+// 返回 (prevStatus, serverName, ipAddress, err);调用方可比对 prev 决定要不要发上线通知。
+func (r *TrafficRepository) UpdateRemoteServerLastActivity(ctx context.Context, serverID int64) (string, string, string, error) {
 	if r == nil || r.db == nil {
-		return errors.New("traffic repository not initialized")
+		return "", "", "", errors.New("traffic repository not initialized")
 	}
 
 	// 首先检查当前状态以记录状态更改
-	var currentStatus, serverName string
-	checkStmt := `SELECT name, status FROM remote_servers WHERE id = ?`
-	if err := r.db.QueryRowContext(ctx, checkStmt, serverID).Scan(&serverName, &currentStatus); err == nil {
+	var currentStatus, serverName, ipAddress string
+	checkStmt := `SELECT name, status, COALESCE(ip_address, '') FROM remote_servers WHERE id = ?`
+	if err := r.db.QueryRowContext(ctx, checkStmt, serverID).Scan(&serverName, &currentStatus, &ipAddress); err == nil {
 		if currentStatus == RemoteServerStatusOffline {
 			log.Printf("[Online Detection] Server %s (ID=%d) status changing: OFFLINE -> CONNECTED (received traffic data)",
 				serverName, serverID)
@@ -6626,10 +8183,10 @@ func (r *TrafficRepository) UpdateRemoteServerLastActivity(ctx context.Context, 
 
 	_, err := r.db.ExecContext(ctx, stmt, RemoteServerStatusConnected, serverID)
 	if err != nil {
-		return fmt.Errorf("update remote server last activity: %w", err)
+		return currentStatus, serverName, ipAddress, fmt.Errorf("update remote server last activity: %w", err)
 	}
 
-	return nil
+	return currentStatus, serverName, ipAddress, nil
 }
 
 // UpdateRemoteServerHeartbeatWithRestart 通过重新启动检测来更新心跳。
@@ -6911,8 +8468,10 @@ func (r *TrafficRepository) UpdateRemoteServerConfig(ctx context.Context, id int
 		return errors.New("remote server id is required")
 	}
 
-	// 验证连接模式
-	if connectionMode != "" && connectionMode != ConnectionModePush && connectionMode != ConnectionModePull && connectionMode != ConnectionModeWebSocket {
+	// 验证连接模式 — push/pull/websocket/auto 都合法。
+	// 漏 "auto" 历史 bug:add server 路径写入 connection_mode='auto',update 时这里
+	// 报"invalid connection mode",handler 吞错只 log → 前端看到 success 实际 pull_address 没更新。
+	if connectionMode != "" && connectionMode != ConnectionModePush && connectionMode != ConnectionModePull && connectionMode != ConnectionModeWebSocket && connectionMode != ConnectionModeAuto {
 		return errors.New("invalid connection mode")
 	}
 
@@ -7023,13 +8582,24 @@ func (r *TrafficRepository) UpdateRemoteServerSpeedByToken(ctx context.Context, 
 }
 
 // 在扫描后更新 X 射线状态。
-func (r *TrafficRepository) UpdateRemoteServerXrayStatus(ctx context.Context, id int64, running bool, version string) error {
+// UpdateRemoteServerXrayStatus 更新 xray 运行状态,并返回更新前的 xray_running 值,
+// 供调用方比对变化(主控会在状态翻转时发 TG 通知)。
+func (r *TrafficRepository) UpdateRemoteServerXrayStatus(ctx context.Context, id int64, running bool, version string) (prevRunning bool, err error) {
 	if r == nil || r.db == nil {
-		return errors.New("traffic repository not initialized")
+		return false, errors.New("traffic repository not initialized")
 	}
 
 	if id <= 0 {
-		return errors.New("remote server id is required")
+		return false, errors.New("remote server id is required")
+	}
+
+	// 先读旧值用于判断状态翻转
+	var prev int
+	if scanErr := r.db.QueryRowContext(ctx, `SELECT COALESCE(xray_running, 0) FROM remote_servers WHERE id = ?`, id).Scan(&prev); scanErr != nil {
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			return false, ErrRemoteServerNotFound
+		}
+		return false, fmt.Errorf("read prev xray status: %w", scanErr)
 	}
 
 	runningVal := 0
@@ -7039,22 +8609,58 @@ func (r *TrafficRepository) UpdateRemoteServerXrayStatus(ctx context.Context, id
 
 	const stmt = `UPDATE remote_servers SET xray_running = ?, xray_version = ?, xray_scanned_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
 
-	result, err := r.db.ExecContext(ctx, stmt, runningVal, version, id)
-	if err != nil {
-		return fmt.Errorf("update remote server xray status: %w", err)
+	result, execErr := r.db.ExecContext(ctx, stmt, runningVal, version, id)
+	if execErr != nil {
+		return false, fmt.Errorf("update remote server xray status: %w", execErr)
 	}
 
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("get rows affected: %w", err)
+	affected, rErr := result.RowsAffected()
+	if rErr != nil {
+		return false, fmt.Errorf("get rows affected: %w", rErr)
 	}
 
 	if affected == 0 {
-		return ErrRemoteServerNotFound
+		return false, ErrRemoteServerNotFound
 	}
-
 	log.Printf("[Remote Server] Updated Xray status for server ID=%d: running=%v, version=%s", id, running, version)
+	return prev != 0, nil
+}
 
+// UpdateRemoteServerListenPort 仅更新 Agent 监听端口字段(编辑服务器场景)。0 表示沿用 agent 默认 23889。
+func (r *TrafficRepository) UpdateRemoteServerListenPort(ctx context.Context, id int64, port int) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if id <= 0 {
+		return errors.New("remote server id is required")
+	}
+	if port < 0 || port > 65535 {
+		return errors.New("listen_port out of range")
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE remote_servers SET listen_port = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, port, id)
+	if err != nil {
+		return fmt.Errorf("update remote server listen_port: %w", err)
+	}
+	return nil
+}
+
+// UpdateRemoteServerXrayMode 仅更新 xray_mode 字段(联邦同步用,不动 name/domain 等)。mode 非 embedded/external 视为空,跳过。
+func (r *TrafficRepository) UpdateRemoteServerXrayMode(ctx context.Context, id int64, mode string) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if id <= 0 {
+		return errors.New("remote server id is required")
+	}
+	if mode != "embedded" && mode != "external" {
+		return nil
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE remote_servers SET xray_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, mode, id)
+	if err != nil {
+		return fmt.Errorf("update remote server xray_mode: %w", err)
+	}
 	return nil
 }
 
@@ -7151,8 +8757,8 @@ func (r *TrafficRepository) ShouldUsePullMode(server RemoteServer) bool {
 	return false
 }
 
-// 更新远程服务器的基本信息（名称、域、流量设置、连接模式）。
-func (r *TrafficRepository) UpdateRemoteServer(ctx context.Context, id int64, name, domain string, trafficLimit int64, trafficResetDay int, connectionMode string) error {
+// 更新远程服务器的基本信息（名称、域、流量设置、连接模式、Xray模式）。
+func (r *TrafficRepository) UpdateRemoteServer(ctx context.Context, id int64, name, domain string, trafficLimit int64, trafficResetDay int, connectionMode, xrayMode, trafficStatsMode string) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
 	}
@@ -7161,17 +8767,26 @@ func (r *TrafficRepository) UpdateRemoteServer(ctx context.Context, id int64, na
 		return errors.New("remote server id is required")
 	}
 
-	// 根据是否提供connection_mode构建SQL
-	var stmt string
-	var args []any
+	// 动态构建 SET 子句
+	setClauses := []string{"name = ?", "domain = ?", "traffic_limit = ?", "traffic_reset_day = ?"}
+	args := []any{name, domain, trafficLimit, trafficResetDay}
 
 	if connectionMode != "" {
-		stmt = `UPDATE remote_servers SET name = ?, domain = ?, traffic_limit = ?, traffic_reset_day = ?, connection_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-		args = []any{name, domain, trafficLimit, trafficResetDay, connectionMode, id}
-	} else {
-		stmt = `UPDATE remote_servers SET name = ?, domain = ?, traffic_limit = ?, traffic_reset_day = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-		args = []any{name, domain, trafficLimit, trafficResetDay, id}
+		setClauses = append(setClauses, "connection_mode = ?")
+		args = append(args, connectionMode)
 	}
+	if xrayMode != "" {
+		setClauses = append(setClauses, "xray_mode = ?")
+		args = append(args, xrayMode)
+	}
+	if mode := strings.TrimSpace(trafficStatsMode); mode == "both" || mode == "upload" || mode == "download" {
+		setClauses = append(setClauses, "traffic_stats_mode = ?")
+		args = append(args, mode)
+	}
+	setClauses = append(setClauses, "updated_at = CURRENT_TIMESTAMP")
+	args = append(args, id)
+
+	stmt := `UPDATE remote_servers SET ` + strings.Join(setClauses, ", ") + ` WHERE id = ?`
 
 	result, err := r.db.ExecContext(ctx, stmt, args...)
 	if err != nil {
@@ -7187,6 +8802,29 @@ func (r *TrafficRepository) UpdateRemoteServer(ctx context.Context, id int64, na
 		return ErrRemoteServerNotFound
 	}
 
+	return nil
+}
+
+func (r *TrafficRepository) UpdateRemoteServerTrafficOffset(ctx context.Context, id int64, offset int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	_, err := r.db.ExecContext(ctx, `UPDATE remote_servers SET traffic_used_offset = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, offset, id)
+	if err != nil {
+		return fmt.Errorf("update traffic_used_offset: %w", err)
+	}
+	return nil
+}
+
+// UpdateRemoteServerTrafficMeta 仅更新流量限额与重置日(联邦轮询透传拥有方的限额信息用)。
+func (r *TrafficRepository) UpdateRemoteServerTrafficMeta(ctx context.Context, id int64, trafficLimit int64, trafficResetDay int) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	_, err := r.db.ExecContext(ctx, `UPDATE remote_servers SET traffic_limit = ?, traffic_reset_day = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, trafficLimit, trafficResetDay, id)
+	if err != nil {
+		return fmt.Errorf("update traffic meta: %w", err)
+	}
 	return nil
 }
 
@@ -7218,6 +8856,36 @@ func (r *TrafficRepository) DeleteNodesByOriginalServer(ctx context.Context, ser
 }
 
 // 通过 ID 删除远程服务器。
+// ReorderRemoteServers 按给定顺序写 sort_order(单调递增,从 10、20、30… 起步,留间隙便于以后单点插入)。
+// ids 里没有给到的服务器维持当前 sort_order,会自然排到列表后面。
+func (r *TrafficRepository) ReorderRemoteServers(ctx context.Context, ids []int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx, `UPDATE remote_servers SET sort_order = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+	if err != nil {
+		return fmt.Errorf("prepare reorder: %w", err)
+	}
+	defer stmt.Close()
+	for i, id := range ids {
+		if _, err := stmt.ExecContext(ctx, (i+1)*10, id); err != nil {
+			return fmt.Errorf("reorder id=%d: %w", id, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit reorder: %w", err)
+	}
+	return nil
+}
+
 func (r *TrafficRepository) DeleteRemoteServer(ctx context.Context, id int64) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
@@ -7233,6 +8901,9 @@ func (r *TrafficRepository) DeleteRemoteServer(ctx context.Context, id int64) er
 	if err != nil {
 		return fmt.Errorf("delete remote server: %w", err)
 	}
+
+	// 清理联邦(分享接入)标记,避免孤立记录
+	_ = r.DeleteFederatedServer(ctx, id)
 
 	affected, err := result.RowsAffected()
 	if err != nil {
@@ -7347,9 +9018,13 @@ func (r *TrafficRepository) UpsertNodeTraffic(ctx context.Context, serverID int6
 	}
 
 	if !exists {
-		// 插入新记录
-		const insertStmt = `INSERT INTO node_traffic (server_id, tag, type, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
-		_, err := r.db.ExecContext(ctx, insertStmt, serverID, tag, trafficType, uplink, downlink, uplink, downlink, uplink, downlink)
+		// 首次见到 (server, tag, type):把当前 raw 仅作为 baseline(写入 last_*),
+		// uplink/downlink/total_* 都从 0 起步。**不能**把 raw 写入累计字段 —— xray 已有的历史累计
+		// 会被当成"本次见到的新增 delta"一次性灌进当天的 traffic_records.total_used,
+		// 前端每日流量图就在那一天爆出来一条尖刺(用户报的"重启后某天数据错误")。
+		// 触发场景:新增远程服务器、新加 inbound tag、node_traffic 表被清/迁移后等。
+		const insertStmt = `INSERT INTO node_traffic (server_id, tag, type, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, updated_at) VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, CURRENT_TIMESTAMP)`
+		_, err := r.db.ExecContext(ctx, insertStmt, serverID, tag, trafficType, uplink, downlink)
 		if err != nil {
 			return fmt.Errorf("insert node traffic: %w", err)
 		}
@@ -7463,9 +9138,11 @@ func (r *TrafficRepository) UpsertUserTraffic(ctx context.Context, serverID int6
 	}
 
 	if !exists {
-		// 插入新记录
-		const insertStmt = `INSERT INTO user_traffic (server_id, username, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-		_, err := r.db.ExecContext(ctx, insertStmt, serverID, username, uplink, downlink, uplink, downlink, uplink, downlink)
+		// 首次见到 (server, username):见 UpsertNodeTraffic 同款注释 —
+		// 累计字段(uplink/downlink/total_*)从 0 起步,raw 仅作 last baseline,
+		// 否则套餐已用流量在首次见到一个用户时会被 xray 已有累计灌满。
+		const insertStmt = `INSERT INTO user_traffic (server_id, username, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at) VALUES (?, ?, 0, 0, 0, 0, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+		_, err := r.db.ExecContext(ctx, insertStmt, serverID, username, uplink, downlink)
 		if err != nil {
 			return fmt.Errorf("insert user traffic: %w", err)
 		}
@@ -7500,6 +9177,98 @@ func (r *TrafficRepository) UpsertUserTraffic(ctx context.Context, serverID int6
 	}
 
 	return nil
+}
+
+// UserEmailTraffic 跟 UserTraffic 字段对齐,只是 key 换 email。
+type UserEmailTraffic struct {
+	ID            int64
+	ServerID      int64
+	Email         string
+	Uplink        int64
+	Downlink      int64
+	TotalUplink   int64
+	TotalDownlink int64
+	LastUplink    int64
+	LastDownlink  int64
+	CycleStart    time.Time
+	UpdatedAt     time.Time
+}
+
+// UpsertUserEmailTraffic 跟 UpsertUserTraffic 完全一样的 delta/restart 检测逻辑,key 换成 email。
+// collector 同一次循环里跟 UpsertUserTraffic 并行调用,**双写两张表**:user_traffic 按 username
+// 聚合(老路径不变),user_email_traffic 保留 email 细分(新功能用)。
+func (r *TrafficRepository) UpsertUserEmailTraffic(ctx context.Context, serverID int64, email string, uplink, downlink int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if serverID <= 0 {
+		return errors.New("server id is required")
+	}
+	if email == "" {
+		return errors.New("email is required")
+	}
+
+	var existing UserEmailTraffic
+	var exists bool
+	row := r.db.QueryRowContext(ctx, `SELECT id, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink FROM user_email_traffic WHERE server_id = ? AND email = ?`, serverID, email)
+	err := row.Scan(&existing.ID, &existing.Uplink, &existing.Downlink, &existing.TotalUplink, &existing.TotalDownlink, &existing.LastUplink, &existing.LastDownlink)
+	if err == nil {
+		exists = true
+	} else if err != sql.ErrNoRows {
+		return fmt.Errorf("query existing user email traffic: %w", err)
+	}
+
+	if !exists {
+		// 首次见到 (server, email):见 UpsertNodeTraffic 同款注释 —— raw 仅作 baseline,
+		// 累计字段从 0 起步,避免历史累计灌入当期。
+		const insertStmt = `INSERT INTO user_email_traffic (server_id, email, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at) VALUES (?, ?, 0, 0, 0, 0, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+		if _, err := r.db.ExecContext(ctx, insertStmt, serverID, email, uplink, downlink); err != nil {
+			return fmt.Errorf("insert user email traffic: %w", err)
+		}
+		return nil
+	}
+
+	var deltaUplink, deltaDownlink int64
+	var newTotalUplink, newTotalDownlink int64
+	if uplink < existing.LastUplink || downlink < existing.LastDownlink {
+		// Xray 重启 — total 累计旧 last,delta 用新值起算
+		newTotalUplink = existing.TotalUplink + existing.LastUplink
+		newTotalDownlink = existing.TotalDownlink + existing.LastDownlink
+		deltaUplink = uplink
+		deltaDownlink = downlink
+	} else {
+		deltaUplink = uplink - existing.LastUplink
+		deltaDownlink = downlink - existing.LastDownlink
+		newTotalUplink = existing.TotalUplink
+		newTotalDownlink = existing.TotalDownlink
+	}
+
+	const updateStmt = `UPDATE user_email_traffic SET uplink = uplink + ?, downlink = downlink + ?, total_uplink = ?, total_downlink = ?, last_uplink = ?, last_downlink = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+	if _, err := r.db.ExecContext(ctx, updateStmt, deltaUplink, deltaDownlink, newTotalUplink, newTotalDownlink, uplink, downlink, existing.ID); err != nil {
+		return fmt.Errorf("update user email traffic: %w", err)
+	}
+	return nil
+}
+
+// ListUserEmailTraffic 返回所有 (server_id, email) 流量行 — 给 /api/admin/traffic/user-nodes 用。
+func (r *TrafficRepository) ListUserEmailTraffic(ctx context.Context) ([]UserEmailTraffic, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT id, server_id, email, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at FROM user_email_traffic`)
+	if err != nil {
+		return nil, fmt.Errorf("query user email traffic: %w", err)
+	}
+	defer rows.Close()
+	var out []UserEmailTraffic
+	for rows.Next() {
+		var t UserEmailTraffic
+		if err := rows.Scan(&t.ID, &t.ServerID, &t.Email, &t.Uplink, &t.Downlink, &t.TotalUplink, &t.TotalDownlink, &t.LastUplink, &t.LastDownlink, &t.CycleStart, &t.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan user email traffic: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
 
 // 返回服务器的所有用户流量记录。
@@ -8111,6 +9880,18 @@ func (r *TrafficRepository) UpdateCertificateStatus(ctx context.Context, id int6
 	return nil
 }
 
+func (r *TrafficRepository) AppendCertificateLog(ctx context.Context, id int64, line string) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	ts := time.Now().Format("15:04:05")
+	entry := "[" + ts + "] " + line + "\n"
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE certificates SET message = COALESCE(message, '') || ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+	`, entry, id)
+	return err
+}
+
 // 成功颁发后更新证书。
 func (r *TrafficRepository) UpdateCertificateIssued(ctx context.Context, id int64, certPath, keyPath, certPEM, keyPEM string, issueDate, expiryDate time.Time) error {
 	if r == nil || r.db == nil {
@@ -8507,5 +10288,71 @@ func (r *TrafficRepository) EnableUserTOTP(ctx context.Context, username, recove
 
 func (r *TrafficRepository) DisableUserTOTP(ctx context.Context, username string) error {
 	_, err := r.db.ExecContext(ctx, `UPDATE users SET totp_enabled = 0, totp_secret = '', recovery_codes = '[]', updated_at = CURRENT_TIMESTAMP WHERE username = ?`, username)
+	return err
+}
+
+// OverrideScript CRUD
+
+func (r *TrafficRepository) ListOverrideScripts(ctx context.Context, username string, hook string) ([]OverrideScript, error) {
+	query := `SELECT id, username, name, hook, content, enabled, sort_order, created_at, updated_at
+		FROM override_scripts WHERE username = ?`
+	args := []interface{}{username}
+
+	if hook != "" {
+		query += " AND hook = ?"
+		args = append(args, hook)
+	}
+	query += " ORDER BY sort_order ASC, id ASC"
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var scripts []OverrideScript
+	for rows.Next() {
+		var s OverrideScript
+		if err := rows.Scan(&s.ID, &s.Username, &s.Name, &s.Hook, &s.Content, &s.Enabled, &s.SortOrder, &s.CreatedAt, &s.UpdatedAt); err != nil {
+			return nil, err
+		}
+		scripts = append(scripts, s)
+	}
+	return scripts, rows.Err()
+}
+
+func (r *TrafficRepository) GetOverrideScript(ctx context.Context, id int64, username string) (*OverrideScript, error) {
+	var s OverrideScript
+	err := r.db.QueryRowContext(ctx,
+		`SELECT id, username, name, hook, content, enabled, sort_order, created_at, updated_at
+		FROM override_scripts WHERE id = ? AND username = ?`, id, username).Scan(
+		&s.ID, &s.Username, &s.Name, &s.Hook, &s.Content, &s.Enabled, &s.SortOrder, &s.CreatedAt, &s.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (r *TrafficRepository) CreateOverrideScript(ctx context.Context, s *OverrideScript) (int64, error) {
+	result, err := r.db.ExecContext(ctx,
+		`INSERT INTO override_scripts (username, name, hook, content, enabled, sort_order) VALUES (?, ?, ?, ?, ?, ?)`,
+		s.Username, s.Name, s.Hook, s.Content, s.Enabled, s.SortOrder)
+	if err != nil {
+		return 0, err
+	}
+	return result.LastInsertId()
+}
+
+func (r *TrafficRepository) UpdateOverrideScript(ctx context.Context, s *OverrideScript) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE override_scripts SET name = ?, hook = ?, content = ?, enabled = ?, sort_order = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ? AND username = ?`,
+		s.Name, s.Hook, s.Content, s.Enabled, s.SortOrder, s.ID, s.Username)
+	return err
+}
+
+func (r *TrafficRepository) DeleteOverrideScript(ctx context.Context, id int64, username string) error {
+	_, err := r.db.ExecContext(ctx,
+		`DELETE FROM override_scripts WHERE id = ? AND username = ?`, id, username)
 	return err
 }

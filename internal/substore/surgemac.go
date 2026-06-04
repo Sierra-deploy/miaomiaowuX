@@ -197,7 +197,7 @@ func (p *SurgeMacProducer) produceMihomo(proxy Proxy, _ string, opts *ProduceOpt
 	}
 	if len(nameserver) == 0 {
 		nameserver = []string{
-			"https://doh.pub/dns-query",
+			"https://120.53.53.53/dns-query",
 			"https://dns.alidns.com/dns-query",
 			"https://doh-pure.onedns.net/dns-query",
 		}

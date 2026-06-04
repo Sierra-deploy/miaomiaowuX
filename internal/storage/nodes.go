@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // scanNodeTags deserializes JSON tags and syncs Tag field.
@@ -91,7 +92,7 @@ func (r *TrafficRepository) ListNodes(ctx context.Context, username string) ([]N
 		return nil, errors.New("username is required")
 	}
 
-	rows, err := r.db.QueryContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(inbound_tag, ''), created_at, updated_at FROM nodes WHERE username = ? ORDER BY created_at DESC`, username)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), created_at, updated_at FROM nodes WHERE username = ? ORDER BY created_at DESC`, username)
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
 	}
@@ -101,7 +102,7 @@ func (r *TrafficRepository) ListNodes(ctx context.Context, username string) ([]N
 	for rows.Next() {
 		var node Node
 		var enabled int
-		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.InboundTag, &node.CreatedAt, &node.UpdatedAt); err != nil {
+		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.CreatedAt, &node.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		node.Enabled = enabled != 0
@@ -115,13 +116,90 @@ func (r *TrafficRepository) ListNodes(ctx context.Context, username string) ([]N
 	return nodes, nil
 }
 
+func (r *TrafficRepository) CountNodes(ctx context.Context) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	var count int64
+	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM nodes`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count nodes: %w", err)
+	}
+	return count, nil
+}
+
+// CountLicensedNodes 统计"占用 license 配额"的节点 — 任何指向 mmwx 已管理 server 的节点。
+//
+// 计入:
+//   - routed + routed_owner='shared'(admin 在出站管理里创建 + 同步入站自动识别)— 占用 server 上实际 xray 资源
+//   - physical + original_server != ''(节点已 claim 到某台已注册 server)— 用户手动导入或外部订阅
+//     指向 mmwx 管理的 server 时,handleCreate 会自动 claim 并把 original_server 填上,等于"伪装的 routed"
+//
+// 不计入:
+//   - physical + original_server = ''(指向真外部 vps,跟 mmwx 资源无关)
+//   - routed + routed_owner='user'(普通用户私有路由出站,有 user_permissions quota)
+//
+// 这套语义堵了"用户通过手动导入 vless:// 绕过 license"的口子 — 只要节点 server 指向已注册 server,
+// 创建时就被 claim,后续计数自动覆盖。
+func (r *TrafficRepository) CountLicensedNodes(ctx context.Context) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	var count int64
+	if err := r.db.QueryRowContext(ctx, `
+		SELECT COUNT(1) FROM nodes
+		WHERE (node_type = 'routed'   AND COALESCE(routed_owner, 'shared') = 'shared')
+		   OR (node_type = 'physical' AND COALESCE(original_server, '') != '')
+	`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count licensed nodes: %w", err)
+	}
+	return count, nil
+}
+
+// ListSharedRoutedByParentIDs 按父节点 ID 列举所有 routed_owner='shared' 的子节点。
+// 用于普通用户节点列表:套餐里只放父物理节点 ID,但 admin 派生的 shared routed 子节点
+// (落地+路由出站功能)也应该在套餐内自动可见。无父 ID → 返回空,无 panic。
+func (r *TrafficRepository) ListSharedRoutedByParentIDs(ctx context.Context, parentIDs []int64) ([]Node, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	if len(parentIDs) == 0 {
+		return nil, nil
+	}
+	placeholders := make([]string, len(parentIDs))
+	args := make([]interface{}, len(parentIDs))
+	for i, id := range parentIDs {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), created_at, updated_at FROM nodes WHERE node_type = 'routed' AND COALESCE(routed_owner, 'shared') = 'shared' AND parent_node_id IN (` + strings.Join(placeholders, ",") + `) ORDER BY created_at DESC`
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list shared routed by parents: %w", err)
+	}
+	defer rows.Close()
+	var nodes []Node
+	for rows.Next() {
+		var node Node
+		var enabled int
+		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.CreatedAt, &node.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan node: %w", err)
+		}
+		node.Enabled = enabled != 0
+		nodes = append(nodes, node)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate nodes: %w", err)
+	}
+	return nodes, nil
+}
+
 // 返回管理员用户的所有节点。
 func (r *TrafficRepository) ListAllNodes(ctx context.Context) ([]Node, error) {
 	if r == nil || r.db == nil {
 		return nil, errors.New("traffic repository not initialized")
 	}
 
-	rows, err := r.db.QueryContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(inbound_tag, ''), created_at, updated_at FROM nodes ORDER BY created_at DESC`)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), created_at, updated_at FROM nodes ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list all nodes: %w", err)
 	}
@@ -131,7 +209,7 @@ func (r *TrafficRepository) ListAllNodes(ctx context.Context) ([]Node, error) {
 	for rows.Next() {
 		var node Node
 		var enabled int
-		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.InboundTag, &node.CreatedAt, &node.UpdatedAt); err != nil {
+		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.CreatedAt, &node.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		node.Enabled = enabled != 0
@@ -162,8 +240,8 @@ func (r *TrafficRepository) GetNode(ctx context.Context, id int64, username stri
 	}
 
 	var enabled int
-	row := r.db.QueryRowContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(inbound_tag, ''), created_at, updated_at FROM nodes WHERE id = ? AND username = ? LIMIT 1`, id, username)
-	if err := row.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.InboundTag, &node.CreatedAt, &node.UpdatedAt); err != nil {
+	row := r.db.QueryRowContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), created_at, updated_at FROM nodes WHERE id = ? AND username = ? LIMIT 1`, id, username)
+	if err := row.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.CreatedAt, &node.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return node, ErrNodeNotFound
 		}
@@ -187,8 +265,8 @@ func (r *TrafficRepository) GetNodeByID(ctx context.Context, id int64) (Node, er
 	}
 
 	var enabled int
-	row := r.db.QueryRowContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(inbound_tag, ''), created_at, updated_at FROM nodes WHERE id = ? LIMIT 1`, id)
-	if err := row.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.InboundTag, &node.CreatedAt, &node.UpdatedAt); err != nil {
+	row := r.db.QueryRowContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), created_at, updated_at FROM nodes WHERE id = ? LIMIT 1`, id)
+	if err := row.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.CreatedAt, &node.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return node, ErrNodeNotFound
 		}
@@ -234,7 +312,7 @@ func (r *TrafficRepository) CreateNode(ctx context.Context, node Node) (Node, er
 		enabled = 1
 	}
 
-	res, err := r.db.ExecContext(ctx, `INSERT INTO nodes (username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, tag, original_server, inbound_tag) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, node.Username, node.RawURL, node.NodeName, node.Protocol, node.ParsedConfig, node.ClashConfig, enabled, node.Tag, node.OriginalServer, node.InboundTag)
+	res, err := r.db.ExecContext(ctx, `INSERT INTO nodes (username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, tag, original_server, original_domain, inbound_tag, chain_proxy_node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, node.Username, node.RawURL, node.NodeName, node.Protocol, node.ParsedConfig, node.ClashConfig, enabled, node.Tag, node.OriginalServer, node.OriginalDomain, node.InboundTag, node.ChainProxyNodeID)
 	if err != nil {
 		return Node{}, fmt.Errorf("create node: %w", err)
 	}
@@ -286,7 +364,7 @@ func (r *TrafficRepository) UpdateNode(ctx context.Context, node Node) (Node, er
 		enabled = 1
 	}
 
-	res, err := r.db.ExecContext(ctx, `UPDATE nodes SET raw_url = ?, node_name = ?, protocol = ?, parsed_config = ?, clash_config = ?, enabled = ?, tag = ?, original_server = ?, inbound_tag = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND username = ?`, node.RawURL, node.NodeName, node.Protocol, node.ParsedConfig, node.ClashConfig, enabled, node.Tag, node.OriginalServer, node.InboundTag, node.ID, node.Username)
+	res, err := r.db.ExecContext(ctx, `UPDATE nodes SET raw_url = ?, node_name = ?, protocol = ?, parsed_config = ?, clash_config = ?, enabled = ?, tag = ?, original_server = ?, original_domain = ?, inbound_tag = ?, chain_proxy_node_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND username = ?`, node.RawURL, node.NodeName, node.Protocol, node.ParsedConfig, node.ClashConfig, enabled, node.Tag, node.OriginalServer, node.OriginalDomain, node.InboundTag, node.ChainProxyNodeID, node.ID, node.Username)
 	if err != nil {
 		return Node{}, fmt.Errorf("update node: %w", err)
 	}
@@ -339,6 +417,9 @@ func (r *TrafficRepository) DeleteNode(ctx context.Context, id int64, username s
 	if affected == 0 {
 		return ErrNodeNotFound
 	}
+
+	// 清除引用了该节点作为中转节点的 chain_proxy_node_id
+	_, _ = r.db.ExecContext(ctx, `UPDATE nodes SET chain_proxy_node_id = NULL WHERE chain_proxy_node_id = ? AND username = ?`, id, username)
 
 	// 检查该 raw_url 是否还有其他节点使用
 	// 如果没有，则删除对应的外部订阅及其关联的代理集合配置
@@ -439,6 +520,9 @@ func (r *TrafficRepository) DeleteNodeByID(ctx context.Context, id int64) error 
 		return ErrNodeNotFound
 	}
 
+	// 清除引用了该节点作为中转节点的 chain_proxy_node_id
+	_, _ = r.db.ExecContext(ctx, `UPDATE nodes SET chain_proxy_node_id = NULL WHERE chain_proxy_node_id = ?`, id)
+
 	// 如果没有其他节点使用相同的 raw_url，则清除外部订阅
 	if rawURL != "" && username != "" {
 		var count int
@@ -472,7 +556,7 @@ func (r *TrafficRepository) BatchCreateNodes(ctx context.Context, nodes []Node) 
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.PrepareContext(ctx, `INSERT INTO nodes (username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, tag, original_server, inbound_tag) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO nodes (username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, tag, original_server, original_domain, inbound_tag, chain_proxy_node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return nil, fmt.Errorf("prepare insert node: %w", err)
 	}
@@ -509,7 +593,7 @@ func (r *TrafficRepository) BatchCreateNodes(ctx context.Context, nodes []Node) 
 			enabled = 1
 		}
 
-		res, err := stmt.ExecContext(ctx, node.Username, node.RawURL, node.NodeName, node.Protocol, node.ParsedConfig, node.ClashConfig, enabled, node.Tag, node.OriginalServer, node.InboundTag)
+		res, err := stmt.ExecContext(ctx, node.Username, node.RawURL, node.NodeName, node.Protocol, node.ParsedConfig, node.ClashConfig, enabled, node.Tag, node.OriginalServer, node.OriginalDomain, node.InboundTag, node.ChainProxyNodeID)
 		if err != nil {
 			return nil, fmt.Errorf("insert node %d: %w", idx+1, err)
 		}
@@ -584,6 +668,35 @@ func (r *TrafficRepository) DeleteNodesByInboundTag(ctx context.Context, serverN
 	return affected, nil
 }
 
+// RefreshNodesServerAddress 把指定服务器下所有节点的 clash_config.server 字段批量替换为 newAddr。
+// 场景:服务器 IP 漂移 / 新配置了域名,要把已存在的节点同步指向新地址。
+// 用 SQLite JSON1 的 json_set + json_extract,跳过 server 字段已经等于 newAddr 的行。
+// 返回实际改动的行数。
+func (r *TrafficRepository) RefreshNodesServerAddress(ctx context.Context, serverName, newAddr string) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	serverName = strings.TrimSpace(serverName)
+	newAddr = strings.TrimSpace(newAddr)
+	if serverName == "" || newAddr == "" {
+		return 0, nil
+	}
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE nodes
+		SET clash_config = json_set(clash_config, '$.server', ?),
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE original_server = ?
+		  AND clash_config IS NOT NULL
+		  AND json_valid(clash_config) = 1
+		  AND IFNULL(json_extract(clash_config, '$.server'), '') != ?
+	`, newAddr, serverName, newAddr)
+	if err != nil {
+		return 0, fmt.Errorf("refresh node server address: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	return affected, nil
+}
+
 // 当服务器名称更改时，UpdateNodesByServerName 会更新所有节点。
 // 这将更新该服务器中节点的original_server 字段和tag 字段。
 func (r *TrafficRepository) UpdateNodesByServerName(ctx context.Context, oldName, newName string) (int64, error) {
@@ -648,4 +761,336 @@ func (r *TrafficRepository) UpdateNodeByInboundTag(ctx context.Context, serverNa
 	}
 
 	return nil
+}
+
+// ===== 路由出站(routed node)专用 CRUD =====
+// routed 节点是一个虚拟节点:挂在某物理父节点下,代表"该 inbound 上一条 marktag-rule + 一个 outbound"。
+// 套餐绑用户时自动给用户开子账号(user_subaccounts)并加进 rule.user 数组。
+
+// 插入一条 routed 节点。基本字段(username/raw_url/node_name/protocol 等)由调用方传入,
+// 路由出站元数据(outbound/rule/admin)单独写入 routed_* 列。
+func (r *TrafficRepository) CreateRoutedNode(ctx context.Context, detail RoutedNodeDetail) (RoutedNodeDetail, error) {
+	if r == nil || r.db == nil {
+		return RoutedNodeDetail{}, errors.New("traffic repository not initialized")
+	}
+	n := detail.Node
+	n.NodeName = strings.TrimSpace(n.NodeName)
+	if n.NodeName == "" {
+		return RoutedNodeDetail{}, errors.New("node name is required")
+	}
+	if n.ParentNodeID == nil || *n.ParentNodeID <= 0 {
+		return RoutedNodeDetail{}, errors.New("parent_node_id is required for routed node")
+	}
+	if detail.RoutedOutboundTag == "" || detail.RoutedRuleMarktag == "" {
+		return RoutedNodeDetail{}, errors.New("routed_outbound_tag, routed_rule_marktag are required")
+	}
+	// 注:RoutedAdminEmail 允许为空 — 用户私有路由出站(routed_owner='user')无 admin 占位 client。
+	enabled := 0
+	if n.Enabled {
+		enabled = 1
+	}
+	if n.Tag == "" {
+		n.Tag = "路由出站"
+	}
+	if n.Protocol == "" {
+		n.Protocol = "routed"
+	}
+	owner := strings.TrimSpace(n.RoutedOwner)
+	if owner == "" {
+		owner = "shared"
+	}
+	res, err := r.db.ExecContext(ctx, `
+		INSERT INTO nodes (
+			username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, tag,
+			original_server, original_domain, inbound_tag, chain_proxy_node_id,
+			node_type, parent_node_id,
+			routed_outbound_tag, routed_outbound_json, routed_rule_marktag,
+			routed_admin_email, routed_admin_credential, routed_owner
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'routed', ?, ?, ?, ?, ?, ?, ?)`,
+		n.Username, n.RawURL, n.NodeName, n.Protocol, n.ParsedConfig, n.ClashConfig, enabled, n.Tag,
+		n.OriginalServer, n.OriginalDomain, n.InboundTag, n.ChainProxyNodeID,
+		*n.ParentNodeID,
+		detail.RoutedOutboundTag, detail.RoutedOutboundJSON, detail.RoutedRuleMarktag,
+		detail.RoutedAdminEmail, detail.RoutedAdminCredential, owner,
+	)
+	if err != nil {
+		return RoutedNodeDetail{}, fmt.Errorf("create routed node: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return RoutedNodeDetail{}, fmt.Errorf("fetch routed node id: %w", err)
+	}
+	return r.GetRoutedNodeDetail(ctx, id)
+}
+
+// 按 id 读取 routed 节点完整元数据(含 routed_* 字段)。
+func (r *TrafficRepository) GetRoutedNodeDetail(ctx context.Context, id int64) (RoutedNodeDetail, error) {
+	if r == nil || r.db == nil {
+		return RoutedNodeDetail{}, errors.New("traffic repository not initialized")
+	}
+	var d RoutedNodeDetail
+	var enabled int
+	err := r.db.QueryRowContext(ctx, `
+		SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled,
+		       COALESCE(tag, ''), COALESCE(original_server, ''), COALESCE(original_domain, ''),
+		       COALESCE(inbound_tag, ''), chain_proxy_node_id,
+		       COALESCE(node_type, 'physical'), parent_node_id,
+		       COALESCE(routed_outbound_tag, ''), COALESCE(routed_outbound_json, ''),
+		       COALESCE(routed_rule_marktag, ''),
+		       COALESCE(routed_admin_email, ''), COALESCE(routed_admin_credential, ''),
+		       COALESCE(routed_owner, 'shared'),
+		       created_at, updated_at
+		FROM nodes WHERE id = ? LIMIT 1`, id).Scan(
+		&d.ID, &d.Username, &d.RawURL, &d.NodeName, &d.Protocol, &d.ParsedConfig, &d.ClashConfig, &enabled,
+		&d.Tag, &d.OriginalServer, &d.OriginalDomain,
+		&d.InboundTag, &d.ChainProxyNodeID,
+		&d.NodeType, &d.ParentNodeID,
+		&d.RoutedOutboundTag, &d.RoutedOutboundJSON,
+		&d.RoutedRuleMarktag,
+		&d.RoutedAdminEmail, &d.RoutedAdminCredential,
+		&d.RoutedOwner,
+		&d.CreatedAt, &d.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return RoutedNodeDetail{}, ErrNodeNotFound
+		}
+		return RoutedNodeDetail{}, fmt.Errorf("get routed node detail: %w", err)
+	}
+	d.Enabled = enabled != 0
+	return d, nil
+}
+
+// 列出某物理父节点下所有 routed 子节点(管理员视角)。
+func (r *TrafficRepository) ListRoutedNodesByParent(ctx context.Context, parentNodeID int64) ([]RoutedNodeDetail, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled,
+		       COALESCE(tag, ''), COALESCE(original_server, ''), COALESCE(original_domain, ''),
+		       COALESCE(inbound_tag, ''), chain_proxy_node_id,
+		       COALESCE(node_type, 'physical'), parent_node_id,
+		       COALESCE(routed_outbound_tag, ''), COALESCE(routed_outbound_json, ''),
+		       COALESCE(routed_rule_marktag, ''),
+		       COALESCE(routed_admin_email, ''), COALESCE(routed_admin_credential, ''),
+		       COALESCE(routed_owner, 'shared'),
+		       created_at, updated_at
+		FROM nodes WHERE node_type = 'routed' AND parent_node_id = ? ORDER BY created_at DESC`, parentNodeID)
+	if err != nil {
+		return nil, fmt.Errorf("list routed nodes by parent: %w", err)
+	}
+	defer rows.Close()
+	var out []RoutedNodeDetail
+	for rows.Next() {
+		var d RoutedNodeDetail
+		var enabled int
+		if err := rows.Scan(
+			&d.ID, &d.Username, &d.RawURL, &d.NodeName, &d.Protocol, &d.ParsedConfig, &d.ClashConfig, &enabled,
+			&d.Tag, &d.OriginalServer, &d.OriginalDomain,
+			&d.InboundTag, &d.ChainProxyNodeID,
+			&d.NodeType, &d.ParentNodeID,
+			&d.RoutedOutboundTag, &d.RoutedOutboundJSON,
+			&d.RoutedRuleMarktag,
+			&d.RoutedAdminEmail, &d.RoutedAdminCredential,
+			&d.RoutedOwner,
+			&d.CreatedAt, &d.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan routed node: %w", err)
+		}
+		d.Enabled = enabled != 0
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// GetSystemNodeOwner 返回"系统节点"应该归属的 username。
+// 用途:NodeSyncListener 自动同步、remote_manage 批量同步等"系统侧"创建节点时,需要一个
+// username 字段来归属节点。不能硬编码 "admin" 字面字符串(系统里 admin 用户名可能是注册时
+// 任意输入的)。本函数按 created_at 升序取第一个 role='admin' 的用户名;若系统中无 admin
+// (极端情况),回退到字面字符串 "admin" 以保持与旧行为兼容。
+func (r *TrafficRepository) GetSystemNodeOwner(ctx context.Context) string {
+	if r == nil || r.db == nil {
+		return "admin"
+	}
+	var u string
+	err := r.db.QueryRowContext(ctx,
+		`SELECT username FROM users WHERE role = ? ORDER BY created_at ASC LIMIT 1`, RoleAdmin).Scan(&u)
+	if err != nil || strings.TrimSpace(u) == "" {
+		return "admin"
+	}
+	return u
+}
+
+// ListNonAdminUsernames 返回所有 role != 'admin' 的用户名集合(即"普通用户")。
+// 用途:admin 视角的节点过滤 — admin 看到所有非"普通用户私有"的节点。
+// 设计原因:NodeSyncListener 自动同步节点时硬编码 username="admin"(字面字符串,
+// 不一定对应真实 admin 账号),所以"反向过滤"比"白名单 admin"更安全。
+func (r *TrafficRepository) ListNonAdminUsernames(ctx context.Context) (map[string]bool, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT username FROM users WHERE role != ?`, RoleAdmin)
+	if err != nil {
+		return nil, fmt.Errorf("list non-admin usernames: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]bool)
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return nil, err
+		}
+		out[u] = true
+	}
+	return out, rows.Err()
+}
+
+// LogUserRoutedOutboundAction 记录一次用户路由出站操作(create/delete),用于"每日次数限制"。
+// 每次 routing 变更都会触发 agent 重启 xray,频次必须受控。
+func (r *TrafficRepository) LogUserRoutedOutboundAction(ctx context.Context, username, action string) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	_, err := r.db.ExecContext(ctx,
+		`INSERT INTO user_routed_outbound_actions(username, action) VALUES(?, ?)`,
+		username, action,
+	)
+	return err
+}
+
+// CountUserRoutedOutboundActionsToday 统计某用户当日(本地时间起始)以来的操作次数。
+func (r *TrafficRepository) CountUserRoutedOutboundActionsToday(ctx context.Context, username string) (int, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	now := time.Now()
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	var n int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM user_routed_outbound_actions WHERE username = ? AND created_at >= ?`,
+		username, dayStart.UTC().Format("2006-01-02 15:04:05"),
+	).Scan(&n)
+	return n, err
+}
+
+// MarkNodeAsRouted 将一个已存在的物理节点升级为路由出站节点。
+// 用途:同步 inbound 时发现节点的客户端 email 命中 xray routing.rules.user[] 且有具体 outboundTag,
+// 则把 node_type 标记为 routed,写入 routed_outbound_tag,并把 parent_node_id 指向同一 inbound 下的 master 节点。
+// 只对当前为 physical 的节点生效,避免覆盖手动配置或 routed_owner=user 的私有路由出站节点。
+// parentNodeID == 0 表示不知道 master,只更 type/tag,parent 留空(此时路由出站管理面板暂时查不到该节点,等下次同步时回填)。
+func (r *TrafficRepository) MarkNodeAsRouted(ctx context.Context, nodeID int64, outboundTag string, parentNodeID int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if parentNodeID > 0 {
+		_, err := r.db.ExecContext(ctx,
+			`UPDATE nodes SET node_type = 'routed', routed_outbound_tag = ?, parent_node_id = ?, updated_at = CURRENT_TIMESTAMP
+			 WHERE id = ? AND (node_type IS NULL OR node_type = '' OR node_type = 'physical' OR (node_type = 'routed' AND parent_node_id IS NULL))`,
+			outboundTag, parentNodeID, nodeID,
+		)
+		return err
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE nodes SET node_type = 'routed', routed_outbound_tag = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND (node_type IS NULL OR node_type = '' OR node_type = 'physical')`,
+		outboundTag, nodeID,
+	)
+	return err
+}
+
+// UpdateNodeInboundTag 把已绑定服务器节点的 inbound_tag 改为新值。
+// 用途:dedup 时通过 clash 配置指纹匹配到已存在节点,但 agent 这次扫到的 inbound_tag 与库里的不一致
+// (用户改了 tag,或老版本 agent tag 命名规则与新版不同),把库里 tag 校正过去,下次同步直接走 tag 匹配。
+func (r *TrafficRepository) UpdateNodeInboundTag(ctx context.Context, nodeID int64, inboundTag string) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE nodes SET inbound_tag = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+		inboundTag, nodeID,
+	)
+	return err
+}
+
+// ClaimExternalNode 把一个"外部节点"(original_server='' AND inbound_tag='')升级为受管节点:
+// 填上 original_server / inbound_tag / tag / clash_config(用 agent 转出来的新 config 覆盖)。
+// 用于迁移场景下,把 mmw 时代手工录入的节点跟 agent 扫描出来的同 server:port 入站绑定。
+func (r *TrafficRepository) ClaimExternalNode(ctx context.Context, nodeID int64, originalServer, inboundTag, tag, clashConfig string) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE nodes SET original_server = ?, inbound_tag = ?, tag = ?, clash_config = ?, parsed_config = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND (original_server IS NULL OR original_server = '')
+		   AND (inbound_tag IS NULL OR inbound_tag = '')`,
+		originalServer, inboundTag, tag, clashConfig, clashConfig, nodeID,
+	)
+	return err
+}
+
+// CountUserRoutedOutbounds 统计某用户创建的"用户私有路由出站"数量(routed_owner='user'),用于配额校验。
+func (r *TrafficRepository) CountUserRoutedOutbounds(ctx context.Context, username string) (int, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	var n int
+	err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM nodes WHERE node_type='routed' AND routed_owner='user' AND username = ?`,
+		username,
+	).Scan(&n)
+	return n, err
+}
+
+// ListUserRoutedOutbounds 列出某用户创建的私有路由出站(routed_owner='user'),按创建时间倒序。
+func (r *TrafficRepository) ListUserRoutedOutbounds(ctx context.Context, username string) ([]RoutedNodeDetail, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled,
+		       COALESCE(tag, ''), COALESCE(original_server, ''), COALESCE(original_domain, ''),
+		       COALESCE(inbound_tag, ''), chain_proxy_node_id,
+		       COALESCE(node_type, 'physical'), parent_node_id,
+		       COALESCE(routed_outbound_tag, ''), COALESCE(routed_outbound_json, ''),
+		       COALESCE(routed_rule_marktag, ''),
+		       COALESCE(routed_admin_email, ''), COALESCE(routed_admin_credential, ''),
+		       COALESCE(routed_owner, 'shared'),
+		       created_at, updated_at
+		FROM nodes WHERE node_type='routed' AND routed_owner='user' AND username = ? ORDER BY created_at DESC`, username)
+	if err != nil {
+		return nil, fmt.Errorf("list user routed outbounds: %w", err)
+	}
+	defer rows.Close()
+	var out []RoutedNodeDetail
+	for rows.Next() {
+		var d RoutedNodeDetail
+		var enabled int
+		if err := rows.Scan(
+			&d.ID, &d.Username, &d.RawURL, &d.NodeName, &d.Protocol, &d.ParsedConfig, &d.ClashConfig, &enabled,
+			&d.Tag, &d.OriginalServer, &d.OriginalDomain,
+			&d.InboundTag, &d.ChainProxyNodeID,
+			&d.NodeType, &d.ParentNodeID,
+			&d.RoutedOutboundTag, &d.RoutedOutboundJSON,
+			&d.RoutedRuleMarktag,
+			&d.RoutedAdminEmail, &d.RoutedAdminCredential,
+			&d.RoutedOwner,
+			&d.CreatedAt, &d.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan user routed outbound: %w", err)
+		}
+		d.Enabled = enabled != 0
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// 删除一个 routed 节点(级联会自动清 user_subaccounts via FK)。
+// agent 侧的 inbound client / outbound / rule 清理由调用方负责。
+func (r *TrafficRepository) DeleteRoutedNode(ctx context.Context, id int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	_, err := r.db.ExecContext(ctx, `DELETE FROM nodes WHERE id = ? AND node_type = 'routed'`, id)
+	return err
 }

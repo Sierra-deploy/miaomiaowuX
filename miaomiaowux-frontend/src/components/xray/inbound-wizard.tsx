@@ -11,8 +11,10 @@ import {
   XCircle,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { getXrayProtocolColor } from '@/lib/protocol-colors'
 import { api } from '@/lib/api'
 import { generateInboundConfig } from '@/lib/xray-config-generator'
+import { CertSelectField } from '@/components/xray/cert-select-field'
 import {
   getAllProtocols,
   getTransportOptions,
@@ -68,17 +70,6 @@ import { ArrayField } from './array-field'
 import { FormField } from './form-field'
 import { VlessDecryptionField } from './vless-decryption-field'
 
-// Protocol colors matching node management
-const PROTOCOL_COLORS: Record<string, string> = {
-  VLESS: 'text-purple-700 dark:text-purple-400',
-  VMess: 'text-blue-700 dark:text-blue-400',
-  Trojan: 'text-red-700 dark:text-red-400',
-  Shadowsocks2022: 'text-green-700 dark:text-green-400',
-  Socks5: 'text-yellow-700 dark:text-yellow-400',
-  Hysteria2: 'text-teal-700 dark:text-teal-400',
-  HTTP: 'text-cyan-700 dark:text-cyan-400',
-  Tunnel: 'text-orange-700 dark:text-orange-400',
-}
 
 // Security protocol display labels - needs t() at call site
 const getSecurityLabel = (security: string, t: (key: string) => string): string => {
@@ -121,8 +112,10 @@ const pickSimpleTransport = (
   return transportNames[0]
 }
 
-const pickSimpleSecurity = (securities: string[]): string => {
+const pickSimpleSecurity = (securities: string[], protocol?: string): string => {
   if (securities.length === 0) return ''
+  // AnyTLS 的 REALITY 在 mihomo/clash 都不被支持,简易模式始终默认 TLS,避免普通用户误选不可用组合。
+  if (protocol === 'Anytls' && securities.includes('TLS')) return 'TLS'
   if (securities.includes('XTLS-Vision-REALITY')) return 'XTLS-Vision-REALITY'
 
   const realitySecurity = securities.find((security) =>
@@ -144,6 +137,24 @@ const generateBase64Key = (byteLength: number): string => {
   return btoa(binary)
 }
 
+// 判定 serverDomain 是否匹配证书 certDomain(含单级泛域名),只允许精确匹配或 *.base 形式且不跨级。
+// 例:certDomainMatches('jpsk.2ha.me', '*.2ha.me') === true
+//    certDomainMatches('a.b.2ha.me', '*.2ha.me') === false
+const certDomainMatches = (serverDomain: string, certDomain: string): boolean => {
+  if (!serverDomain || !certDomain) return false
+  const a = serverDomain.toLowerCase().trim()
+  const b = certDomain.toLowerCase().trim()
+  if (b === a) return true
+  if (b.startsWith('*.')) {
+    const base = b.slice(2)
+    if (a.endsWith('.' + base)) {
+      const prefix = a.slice(0, -(base.length + 1))
+      return prefix.length > 0 && !prefix.includes('.')
+    }
+  }
+  return false
+}
+
 interface Server {
   id: number
   name: string
@@ -155,7 +166,7 @@ interface InboundWizardProps {
   servers: Server[]
   selectedServerIds: number[]
   onCancel: () => void
-  onSubmit: (serverIds: number[], inbound: any, tag: string, nodeName?: string) => Promise<void>
+  onSubmit: (serverIds: number[], inbound: any, tag: string, nodeName?: string, forwardNodeId?: number) => Promise<void>
   skipServerSelection?: boolean
   usedPorts?: number[]
 }
@@ -222,6 +233,36 @@ export function InboundWizard({
   const resolvedUsedPorts = usedPorts.length > 0 ? usedPorts : (inboundInfo?.ports || [])
   const tunnelInPort = inboundInfo?.tunnelInPort || 0
 
+  // 远程服务器列表(主要为了拿当前 server.domain 用于 AnyTLS+TLS 证书自动匹配)。
+  // 没有 single detail endpoint,只能 list 后客户端找。
+  const { data: allRemoteServers } = useQuery({
+    queryKey: ['remote-servers-wizard'],
+    queryFn: async () => {
+      const res = await api.get('/api/admin/remote-servers')
+      return (res.data?.servers ?? []) as Array<{ id: number; domain?: string; ip_address?: string }>
+    },
+    enabled: !!effectiveServerId,
+    staleTime: 60_000,
+  })
+  const currentServerDetail = effectiveServerId
+    ? allRemoteServers?.find((s) => s.id === effectiveServerId)
+    : null
+
+  // 已签发的有效证书列表,用于 AnyTLS+TLS 域名自动匹配(支持泛域名)。
+  const { data: validCertificates } = useQuery({
+    queryKey: ['certificates-valid-wizard'],
+    queryFn: async () => {
+      const res = await api.get('/api/admin/certificates/valid')
+      return (res.data?.certificates ?? []) as Array<{
+        id: number
+        domain: string
+        cert_path: string
+        key_path: string
+      }>
+    },
+    staleTime: 60_000,
+  })
+
   const [selectedProtocol, setSelectedProtocol] = useState<string>('VLESS')
   const [selectedTransport, setSelectedTransport] = useState<string>('TCP')
   const [selectedSecurity, setSelectedSecurity] = useState<string>(
@@ -256,13 +297,41 @@ export function InboundWizard({
   const [customDomainProbing, setCustomDomainProbing] = useState(false)
   const simpleRealityAutoLoaded = useRef(false)
 
+  // Tunnel「转发已有节点」:拉取节点表,解析 clash_config 得到 server:port,供 dokodemo 自动配置
+  const { data: forwardNodes = [] } = useQuery({
+    queryKey: ['forward-nodes'],
+    queryFn: async () => {
+      const res = await api.get('/api/admin/nodes')
+      const nodes = res.data.nodes || []
+      return nodes
+        .map((n: any) => {
+          let server = ''
+          let port = 0
+          try {
+            const c = JSON.parse(n.clash_config || '{}')
+            server = c.server || ''
+            port = Number(c.port) || 0
+          } catch {
+            /* 忽略解析失败的节点 */
+          }
+          return { id: n.id, name: n.node_name, server, port }
+        })
+        .filter((n: any) => n.server && n.port)
+    },
+    enabled: selectedProtocol === 'Tunnel',
+  })
+  const [forwardNodeId, setForwardNodeId] = useState<number | null>(null)
+
   // Node name + flag picker
   const [nodeName, setNodeName] = useState('')
   const [selectedFlag, setSelectedFlag] = useState('')
   const [showFlagPicker, setShowFlagPicker] = useState(false)
 
-  // Frequent users quick-add
-  const [frequentUsers, setFrequentUsers] = useState<any[]>([])
+  // Frequent users quick-add (锁死自身模式下不再使用,保留变量避免大改)
+  const [frequentUsers] = useState<any[]>([])
+  // 当前登录用户名 —— 添加节点时用户卡片锁死为"自己"
+  const [currentUsername, setCurrentUsername] = useState<string>('')
+  const selfFilledRef = useRef(false)
 
   useEffect(() => {
     if (tunnelInPort <= 0 || resolvedUsedPorts.includes(tunnelInPort)) return
@@ -322,7 +391,7 @@ export function InboundWizard({
       // Auto-select security
       if (securities.length > 0 && !securities.includes(selectedSecurity)) {
         setSelectedSecurity(
-          isSimpleMode ? pickSimpleSecurity(securities) : securities[0]
+          isSimpleMode ? pickSimpleSecurity(securities, selectedProtocol) : securities[0]
         )
       } else if (securities.length === 0) {
         setSelectedSecurity('')
@@ -426,6 +495,90 @@ export function InboundWizard({
     }))
   }, [isSimpleMode, selectedProtocol])
 
+  // 协议切换时把 protocolFields[selectedProtocol] 里声明的 defaultValue 注入 formData,
+  // 这样未交互的字段(如 AnyTLS 的 paddingScheme)在简易/专家模式都已预填默认值,提交时直接生效。
+  useEffect(() => {
+    const fields = protocolFields[selectedProtocol] || []
+    setFormData((prev: any) => {
+      let changed = false
+      const next = { ...prev }
+      for (const field of fields) {
+        if (field.defaultValue !== undefined && next[field.name] === undefined) {
+          next[field.name] = field.defaultValue
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [selectedProtocol])
+
+  // AnyTLS + TLS 简易模式:用服务器 domain 匹配现有证书(支持泛域名),命中则自动选中证书 +
+  // 把 serverName 预填成服务器域名;不命中则 toast 提示需切到专家模式手填证书路径。
+  useEffect(() => {
+    if (!isSimpleMode) return
+    if (selectedProtocol !== 'Anytls') return
+    if (selectedSecurity !== 'TLS') return
+    const serverDomain = (currentServerDetail?.domain || '').trim()
+    if (!serverDomain) {
+      toast.warning(t('wizard.anytlsServerHasNoDomain'), { id: 'anytls-no-domain' })
+      return
+    }
+    if (!validCertificates) return
+    if (validCertificates.length === 0) {
+      toast.warning(t('wizard.anytlsNoCertsExpert'), { id: 'anytls-no-certs' })
+      return
+    }
+    const matched = validCertificates.find((c) => certDomainMatches(serverDomain, c.domain))
+    if (matched) {
+      setFormData((prev: any) => {
+        if (prev.cert_id === matched.id && prev.serverName === serverDomain) return prev
+        return {
+          ...prev,
+          cert_id: matched.id,
+          certificateFile: matched.cert_path,
+          keyFile: matched.key_path,
+          serverName: prev.serverName || serverDomain,
+        }
+      })
+    } else {
+      toast.warning(
+        t('wizard.anytlsNoMatchingCert', { domain: serverDomain }),
+        { id: 'anytls-no-matching-cert', duration: 8000 }
+      )
+    }
+  }, [
+    isSimpleMode,
+    selectedProtocol,
+    selectedSecurity,
+    currentServerDetail?.domain,
+    validCertificates,
+    t,
+  ])
+
+  // AnyTLS + REALITY:toast 警告 Clash/Mihomo 不支持此组合,附文档链接(新标签打开)。
+  // id 防止反复触发,duration 留长一点,description 内嵌可点击的 a 标签。
+  useEffect(() => {
+    if (selectedProtocol !== 'Anytls') return
+    if (selectedSecurity !== 'REALITY') return
+    toast.warning(t('wizard.anytlsRealityTitle'), {
+      id: 'anytls-reality-warn',
+      duration: 12000,
+      description: (
+        <span>
+          {t('wizard.anytlsRealityDesc')}{' '}
+          <a
+            href='https://wiki.metacubex.one/config/proxies/anytls/'
+            target='_blank'
+            rel='noopener noreferrer'
+            className='underline text-primary'
+          >
+            {t('wizard.viewDocs')}
+          </a>
+        </span>
+      ),
+    })
+  }, [selectedProtocol, selectedSecurity, t])
+
   // GeoIP auto-detect flag
   useEffect(() => {
     if (!effectiveServerId) return
@@ -436,21 +589,12 @@ export function InboundWizard({
       .catch(() => {})
   }, [effectiveServerId, servers])
 
-  // Load frequent users
+  // 加载当前登录用户名(添加节点时用户卡片锁死成"自己")
   useEffect(() => {
-    const cached = localStorage.getItem('inbound-wizard-frequent-users')
-    if (cached) {
-      try { setFrequentUsers(JSON.parse(cached)) } catch {}
-    } else {
-      api.get('/api/admin/users').then((res) => {
-        const users = Array.isArray(res.data) ? res.data : (res.data?.users || [])
-        const admin = users.find((u: any) => u.role === 'admin')
-        const others = users.filter((u: any) => u.role !== 'admin').sort((a: any, b: any) => b.id - a.id).slice(0, 2)
-        const defaults = admin ? [admin, ...others] : others
-        setFrequentUsers(defaults)
-        localStorage.setItem('inbound-wizard-frequent-users', JSON.stringify(defaults))
-      }).catch(() => {})
-    }
+    api.get('/api/user/profile').then((res) => {
+      const uname = res.data?.username || ''
+      if (uname) setCurrentUsername(uname)
+    }).catch(() => {})
   }, [])
 
   // Auto-generate server/user passwords when entering SS2022 or switching method
@@ -500,6 +644,8 @@ export function InboundWizard({
   }
 
   useEffect(() => {
+    // tunnel 转发已有节点时 tag 用节点名生成,不让默认 tag 覆盖
+    if (selectedProtocol === 'Tunnel' && forwardNodeId) return
     const defaultTag = buildDefaultTag(formData.port)
 
     // Only update when user hasn't manually modified the tag
@@ -555,7 +701,8 @@ export function InboundWizard({
         userObj[field.name] = hasUserOrIdField
           ? (user.email || user.username)
           : user.username
-      } else if (field.name === 'password' || field.name === 'pass') {
+      } else if (field.name === 'password' || field.name === 'pass' || field.name === 'auth') {
+        // auth = Hysteria2 客户端密码,和 Trojan password 一样当场生成随机值。
         const isSS2022PskField = field.label?.includes('psk')
         if (isSS2022PskField) {
           const method = formData.method || '2022-blake3-aes-128-gcm'
@@ -580,13 +727,22 @@ export function InboundWizard({
     }
     const newClient = buildClientFromUser(user)
     handleFieldChange(fieldName, [...existing, newClient])
-    // Update frequent users cache
-    setFrequentUsers((prev) => {
-      const updated = [user, ...prev.filter((u: any) => u.id !== user.id)].slice(0, 5)
-      localStorage.setItem('inbound-wizard-frequent-users', JSON.stringify(updated))
-      return updated
-    })
   }
+
+  // 添加节点:用户卡片锁死为"当前登录账号自己"。
+  // currentUsername 拿到后(及切换协议时)把 clients/accounts 重置为唯一一条 = 自己,凭证当场生成。
+  useEffect(() => {
+    if (!currentUsername) return
+    const fieldName = (selectedProtocol === 'Socks5' || selectedProtocol === 'HTTP') ? 'accounts' : 'clients'
+    const selfClient = buildClientFromUser({ username: currentUsername })
+    setFormData((prev: any) => ({
+      ...prev,
+      clients: fieldName === 'clients' ? [selfClient] : [],
+      accounts: fieldName === 'accounts' ? [selfClient] : [],
+    }))
+    selfFilledRef.current = true
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentUsername, selectedProtocol])
 
   const handleFieldChange = (fieldName: string, value: any) => {
     setFormData((prev: any) => {
@@ -621,6 +777,70 @@ export function InboundWizard({
     } while (used.has(port))
     return port
   }
+
+  // tunnel tag 清洗:节点名可能含 emoji/空格/中文,转成 xray 安全的 tag(tunnel-<slug>-<port>)
+  const sanitizeTunnelTag = (name: string, port: number) => {
+    const slug = (name || 'node')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '')
+      .slice(0, 40)
+    return `tunnel-${slug || 'node'}-${port}`
+  }
+
+  // 选「转发已有节点」时自动配置 dokodemo:监听 0.0.0.0、监听端口=节点端口、转发到节点 server:port、tcp+udp、跟随重定向、嗅探
+  const applyForwardNode = (nodeIdStr: string) => {
+    const nid = Number(nodeIdStr)
+    setForwardNodeId(nid)
+    const node = forwardNodes.find((n: any) => n.id === nid)
+    if (!node) return
+    setFormData((prev: any) => ({
+      ...prev,
+      listen: '0.0.0.0',
+      port: node.port,
+      sniffing: true,
+      address: node.server,
+      forwardPort: node.port,
+      network: 'tcp,udp',
+      followRedirect: true,
+      tag: sanitizeTunnelTag(node.name, node.port),
+    }))
+    if (isSimpleMode) setNodeName(node.name)
+  }
+
+  // tunnel 转发节点时,监听端口 = 节点端口;若该端口已被本服务器其它入站占用则冲突
+  const forwardPortConflict =
+    selectedProtocol === 'Tunnel' &&
+    forwardNodeId != null &&
+    resolvedUsedPorts.includes(Number(formData.port))
+
+  const renderForwardNodeSelect = () => (
+    <div className='space-y-2'>
+      <Label>{t('wizard.forwardExistingNode')}</Label>
+      <Select
+        value={forwardNodeId ? String(forwardNodeId) : ''}
+        onValueChange={applyForwardNode}
+      >
+        <SelectTrigger>
+          <SelectValue placeholder={t('wizard.forwardNodePlaceholder')} />
+        </SelectTrigger>
+        <SelectContent>
+          {forwardNodes.map((n: any) => (
+            <SelectItem key={n.id} value={String(n.id)}>
+              {n.name} ({n.server}:{n.port})
+            </SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <p className='text-muted-foreground text-xs'>{t('wizard.forwardNodeDesc')}</p>
+      {forwardPortConflict && (
+        <p className='text-destructive text-xs'>
+          {t('wizard.forwardPortConflict', { port: formData.port })}
+        </p>
+      )}
+    </div>
+  )
 
   const isSelfDomain = (domain: string, serverMap?: Record<string, DomainServerInfo>) => {
     const servers = serverMap || domainServers
@@ -944,14 +1164,23 @@ export function InboundWizard({
       tag = buildDefaultTag(submitData.port)
     }
 
-    // Build custom node name in simple mode
+    // 节点名称:简易/专家模式都用同一个 nodeName state(共用),不再只在简易模式生效
     let customNodeName = ''
-    if (isSimpleMode && nodeName) {
+    if (nodeName) {
       const flag = selectedFlag ? countryCodeToFlag(selectedFlag) + ' ' : ''
       customNodeName = flag + nodeName
     }
 
-    await onSubmit(effectiveServerIds, inbound, tag, customNodeName)
+    // 选了主控托管证书时,把 cert_id 塞进 inbound(带外字段);后端会同步下发证书到 agent 并改写成真实路径,
+    // 避免证书缺失导致 xray 加载失败(502)。
+    if (formData.cert_id) {
+      inbound.cert_id = formData.cert_id
+    }
+
+    // tunnel「转发已有节点」时把源节点 ID 传给父级,用于创建配套节点
+    const fwdId =
+      selectedProtocol === 'Tunnel' && forwardNodeId ? forwardNodeId : undefined
+    await onSubmit(effectiveServerIds, inbound, tag, customNodeName, fwdId)
   }
 
   // Get current field sets based on selections
@@ -1023,7 +1252,7 @@ export function InboundWizard({
               className={
                 selectedProtocol === protocol
                   ? ''
-                  : PROTOCOL_COLORS[protocol] || ''
+                  : getXrayProtocolColor(protocol)
               }
               onClick={() => handleProtocolSelect(protocol)}
               type='button'
@@ -1122,7 +1351,8 @@ export function InboundWizard({
                     {/* Simple mode: left form, right JSON preview */}
                     <div className='flex gap-6'>
                       <div className='min-w-0 flex-1 space-y-6'>
-                        {/* Node Name */}
+                        {/* Node Name — tunnel 转发节点时隐藏(节点名自动取自所选节点) */}
+                        {selectedProtocol !== 'Tunnel' && (
                         <Card>
                           <CardHeader>
                             <CardTitle>{t('wizard.nodeName')}</CardTitle>
@@ -1165,6 +1395,20 @@ export function InboundWizard({
                             </div>
                           </CardContent>
                         </Card>
+                        )}
+
+                        {/* Tunnel 转发已有节点(简易模式)*/}
+                        {selectedProtocol === 'Tunnel' && (
+                          <Card>
+                            <CardHeader>
+                              <CardTitle>{t('wizard.forwardNodeTitle')}</CardTitle>
+                              <CardDescription>
+                                {t('wizard.forwardNodeCardDesc')}
+                              </CardDescription>
+                            </CardHeader>
+                            <CardContent>{renderForwardNodeSelect()}</CardContent>
+                          </Card>
+                        )}
 
                         {/* REALITY Domain Selection */}
                         {isRealitySecurity && (
@@ -1369,6 +1613,7 @@ export function InboundWizard({
                                   selectedProtocol === 'HTTP'
                                 }
                                 required
+                                locked
                                 ss2022Method={
                                   selectedProtocol === 'Shadowsocks2022'
                                     ? formData.method
@@ -1377,7 +1622,7 @@ export function InboundWizard({
                               />
                             </CardContent>
                           </Card>
-                        ) : (
+                        ) : selectedProtocol === 'Tunnel' ? null : (
                           <Card>
                             <CardHeader>
                               <CardTitle>{t('wizard.simpleModeTitle')}</CardTitle>
@@ -1481,6 +1726,45 @@ export function InboundWizard({
                           </CardDescription>
                         </CardHeader>
                         <CardContent className='space-y-4'>
+                          {/* 节点名称 — 跟简易模式共用 nodeName state,切换模式值保留;tunnel 转发已有节点时隐藏 */}
+                          {selectedProtocol !== 'Tunnel' && (
+                            <div className='space-y-1.5'>
+                              <Label className='text-sm font-medium'>{t('wizard.nodeName')}</Label>
+                              <div className='flex items-center gap-2 w-full'>
+                                <Popover open={showFlagPicker} onOpenChange={setShowFlagPicker}>
+                                  <PopoverTrigger asChild>
+                                    <Button variant='outline' size='sm' className='text-lg px-2 shrink-0' type='button'>
+                                      <Twemoji>{selectedFlag ? countryCodeToFlag(selectedFlag) : '\u{1F3F3}\u{FE0F}'}</Twemoji>
+                                    </Button>
+                                  </PopoverTrigger>
+                                  <PopoverContent className='w-72 p-2' align='start'>
+                                    <div className='grid grid-cols-7 gap-1'>
+                                      {FLAG_OPTIONS.map((opt) => (
+                                        <Button
+                                          key={opt.code}
+                                          variant='ghost'
+                                          size='sm'
+                                          className='text-lg px-1'
+                                          type='button'
+                                          onClick={() => { setSelectedFlag(opt.code); setShowFlagPicker(false) }}
+                                          title={opt.label}
+                                        >
+                                          <Twemoji>{countryCodeToFlag(opt.code)}</Twemoji>
+                                        </Button>
+                                      ))}
+                                    </div>
+                                  </PopoverContent>
+                                </Popover>
+                                <Input
+                                  placeholder={t('wizard.nodeNamePlaceholder')}
+                                  value={nodeName}
+                                  onChange={(e) => setNodeName(e.target.value)}
+                                  className='flex-1 min-w-0'
+                                />
+                              </div>
+                              <p className='text-xs text-muted-foreground'>{t('wizard.nodeNameDesc')}</p>
+                            </div>
+                          )}
                           {commonFields.map((field) => (
                             <FormField
                               key={field.name}
@@ -1545,6 +1829,7 @@ export function InboundWizard({
                                 selectedProtocol === 'HTTP'
                               }
                               required
+                              locked
                               ss2022Method={
                                 selectedProtocol === 'Shadowsocks2022'
                                   ? formData.method
@@ -1648,6 +1933,23 @@ export function InboundWizard({
                               </div>
                             )}
 
+                            {selectedSecurity.includes('TLS') &&
+                              !selectedSecurity.includes('REALITY') && (
+                                <CertSelectField
+                                  value={formData.cert_id ?? null}
+                                  remoteServerId={0}
+                                  onChange={(certId, certPath, keyPath) =>
+                                    setFormData((prev: any) => ({
+                                      ...prev,
+                                      cert_id: certId,
+                                      ...(certId
+                                        ? { certificateFile: certPath, keyFile: keyPath }
+                                        : {}),
+                                    }))
+                                  }
+                                />
+                              )}
+
                             {currentSecurityFields.map((field) => (
                               <FormField
                                 key={field.name}
@@ -1682,6 +1984,9 @@ export function InboundWizard({
                             </CardDescription>
                           </CardHeader>
                           <CardContent className='space-y-4'>
+                            {/* Tunnel 转发已有节点(专家模式):自动填充下面字段,仍可手动修改 */}
+                            {selectedProtocol === 'Tunnel' &&
+                              renderForwardNodeSelect()}
                             {selectedProtocol === 'VLESS' ? (
                               <>
                                 <VlessDecryptionField

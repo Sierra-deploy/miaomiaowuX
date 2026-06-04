@@ -1,11 +1,14 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -161,8 +164,17 @@ func (h *XrayServerHandler) RemoteHeartbeat(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// 从标头获取令牌
-	token := r.Header.Get("MM-Remote-Token")
+	// 加密中间件处理
+	crypto, cryptoErr := handleHTTPCrypto(r, w, h.crypto)
+	if crypto == nil {
+		return
+	}
+	_ = cryptoErr
+
+	token := crypto.Token
+	if token == "" {
+		token = r.Header.Get("MM-Remote-Token")
+	}
 	if token == "" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
@@ -176,10 +188,7 @@ func (h *XrayServerHandler) RemoteHeartbeat(w http.ResponseWriter, r *http.Reque
 
 	// 解析请求体
 	var req RemoteHeartbeatRequest
-	if r.Body != nil {
-		defer r.Body.Close()
-		json.NewDecoder(r.Body).Decode(&req) // 忽略错误，使用零值以实现向后兼容性
-	}
+	json.Unmarshal(crypto.Body, &req)
 
 	// 获取客户端IP
 	clientIP := r.RemoteAddr
@@ -255,6 +264,13 @@ func (h *XrayServerHandler) RemoteHeartbeat(w http.ResponseWriter, r *http.Reque
 		SendServerOnlineNotification(ctx, result.ServerName, clientIP)
 	}
 
+	// 首次连接或 Xray 重启时推送限速配置（非 WebSocket 模式的补偿）
+	if result.ServerID > 0 && h.limiterPusher != nil {
+		if result.PreviousStatus != "connected" || result.XrayRestarted {
+			go h.limiterPusher.PushToServer(context.Background(), result.ServerID)
+		}
+	}
+
 	// 重置成功心跳时的推送失败计数（连接正常）
 	if result.ServerID > 0 {
 		if err := h.repo.ResetRemoteServerPushFailCount(ctx, result.ServerID); err != nil {
@@ -275,8 +291,8 @@ func (h *XrayServerHandler) RemoteHeartbeat(w http.ResponseWriter, r *http.Reque
 		resp.TokenExpiresAt = result.TokenExpiresAt.Unix()
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	respData, _ := json.Marshal(resp)
+	writeHTTPCryptoResponse(w, crypto.Session, respData)
 }
 
 // RefreshRemoteTokenResponse 是令牌刷新端点的响应
@@ -361,6 +377,20 @@ func (h *XrayServerHandler) RefreshRemoteToken(w http.ResponseWriter, r *http.Re
 	})
 }
 
+func (h *XrayServerHandler) getMasterPort() string {
+	if port := os.Getenv("PORT"); port != "" {
+		return port
+	}
+	return "12889"
+}
+
+func (h *XrayServerHandler) masterPublicKeyBase64() string {
+	if h.crypto != nil && h.crypto.Identity != nil {
+		return h.crypto.Identity.PublicKeyBase64()
+	}
+	return ""
+}
+
 // 返回远程服务器的安装脚本
 func (h *XrayServerHandler) GetRemoteInstallScript(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
@@ -371,6 +401,15 @@ func (h *XrayServerHandler) GetRemoteInstallScript(w http.ResponseWriter, r *htt
 	// 从查询参数中获取令牌
 	token := r.URL.Query().Get("token")
 	stealSelf := r.URL.Query().Get("steal_self") == "1"
+	xrayMode := r.URL.Query().Get("xray_mode")
+	if xrayMode != "embedded" {
+		xrayMode = "external"
+	}
+	// 自定义 Agent 监听端口(由主控创建服务器时透传过来),非法/缺省值用 agent 内置默认 23889
+	listenPortParam := strings.TrimSpace(r.URL.Query().Get("listen_port"))
+	if p, perr := strconv.Atoi(listenPortParam); perr != nil || p < 1024 || p > 65535 {
+		listenPortParam = ""
+	}
 	frontService := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("front_service")))
 	if frontService != "xray" && frontService != "nginx" {
 		frontService = "xray"
@@ -378,6 +417,49 @@ func (h *XrayServerHandler) GetRemoteInstallScript(w http.ResponseWriter, r *htt
 	// nginx 前置暂未支持，先固定为 xray
 	if frontService == "nginx" {
 		frontService = "xray"
+	}
+
+	// 计算 install 脚本里写入的 SERVER:
+	// 优先用系统设置 master_url 里的 host(用户配置的对外可达域名),
+	// 这是 agent 真正访问主控的地址。仅在 master_url 未配置时回退到 r.Host(可能是 nginx upstream 名,如 miaomiaowu_web,不可对外访问)。
+	// 若 master_url 已显式配置,EXPLICIT_MASTER=1 在脚本里禁用"同机部署"自动覆盖
+	// (避免在主控本机上安装 agent 时把 master_url 改写成 127.0.0.1)。
+	scriptServer := strings.TrimSpace(r.Host)
+	// nginx 默认 `proxy_set_header Host $host` 不带端口,导致 cf:8443 → nginx → mmwx 时 r.Host 只有域名,
+	// agent 安装命令缺端口连不上主控。这里如果检测到 X-Forwarded-Host(带端口最优)或 X-Forwarded-Port
+	// 且端口不是 80/443,主动把 :port 拼回去,方便用户不需要必须先去配 master_url 就能拿到正确安装命令。
+	if !strings.Contains(scriptServer, ":") {
+		if xfh := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); xfh != "" && strings.Contains(xfh, ":") {
+			scriptServer = xfh
+		} else if xfp := strings.TrimSpace(r.Header.Get("X-Forwarded-Port")); xfp != "" && xfp != "80" && xfp != "443" {
+			scriptServer = scriptServer + ":" + xfp
+		}
+	}
+	scriptProtocol := ""
+	// nginx 反代下大概率有 X-Forwarded-Proto,带这个就别走脚本里 "host 有 : 就当 http" 的启发,直接显式 https
+	if xfproto := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")); xfproto == "https" || xfproto == "http" {
+		scriptProtocol = xfproto
+	}
+	explicitMaster := "0"
+	if mu, err := h.repo.GetSystemSetting(r.Context(), "master_url"); err == nil {
+		mu = strings.TrimSpace(mu)
+		if mu != "" {
+			explicitMaster = "1"
+			s := strings.TrimRight(mu, "/")
+			if strings.HasPrefix(s, "https://") {
+				scriptProtocol = "https"
+				s = strings.TrimPrefix(s, "https://")
+			} else if strings.HasPrefix(s, "http://") {
+				scriptProtocol = "http"
+				s = strings.TrimPrefix(s, "http://")
+			}
+			if i := strings.Index(s, "/"); i >= 0 {
+				s = s[:i]
+			}
+			if s != "" {
+				scriptServer = s
+			}
+		}
 	}
 
 	// 返回安装脚本内容
@@ -388,24 +470,39 @@ func (h *XrayServerHandler) GetRemoteInstallScript(w http.ResponseWriter, r *htt
 set -e
 
 TOKEN="` + token + `"
-SERVER="` + r.Host + `"
+SERVER="` + scriptServer + `"
+SCRIPT_PROTOCOL="` + scriptProtocol + `"
+EXPLICIT_MASTER="` + explicitMaster + `"
 AUTO_STEAL_SELF="` + map[bool]string{true: "1", false: "0"}[stealSelf] + `"
 FRONT_SERVICE="` + frontService + `"
+XRAY_MODE="` + xrayMode + `"
+MASTER_PUBLIC_KEY="` + h.masterPublicKeyBase64() + `"
+MASTER_PORT="` + h.getMasterPort() + `"
+LISTEN_PORT="` + listenPortParam + `"
 
-# Detect protocol (default to http if accessed locally)
-if [[ "$SERVER" == *":"* ]]; then
-    # Has port, likely development
+# 协议:优先用主控注入的 SCRIPT_PROTOCOL(来自系统设置 master_url 的 scheme),
+# 否则按 SERVER 是否带端口启发判断(开发场景常见 http)。
+if [ -n "$SCRIPT_PROTOCOL" ]; then
+    PROTOCOL="$SCRIPT_PROTOCOL"
+elif [[ "$SERVER" == *":"* ]]; then
     PROTOCOL="http"
 else
     PROTOCOL="https"
 fi
 
-# Allow override from environment
+# 允许通过环境变量强制覆盖协议
 if [ -n "$MMWX_PROTOCOL" ]; then
     PROTOCOL="$MMWX_PROTOCOL"
 fi
 
 MASTER_URL="${PROTOCOL}://${SERVER}"
+
+# 同机部署检测:只有在主控"没有显式配置 master_url"时才允许把 master_url 自动改成 127.0.0.1;
+# 用户配置了对外域名(EXPLICIT_MASTER=1)就必须用用户的域名,不让自动改写。
+if [ "$EXPLICIT_MASTER" != "1" ] && curl -sf "http://127.0.0.1:${MASTER_PORT}/api/setup/status" >/dev/null 2>&1; then
+    MASTER_URL="http://127.0.0.1:${MASTER_PORT}"
+    echo "Detected same-machine deployment, using ${MASTER_URL}"
+fi
 
 echo "=========================================="
 echo "  MMWX Remote Server Installation"
@@ -414,16 +511,78 @@ echo ""
 echo "Master Server: $MASTER_URL"
 echo ""
 
+# 检测 init 系统:OpenRC(Alpine 首选)/ systemd(主流)/ 兜底用 nohup + rc.local。
+# - Alpine 优先用 OpenRC:Alpine 主流就是 OpenRC,即便镜像里塞了 systemd 也不用它
+# - Alpine 极简镜像/LXC 可能没装 openrc 包 → 自动 apk add 装上,再走 OpenRC 路径
+# - 大部分 LXC 容器没有 systemd,老脚本直接 systemctl 失败"systemctl: command not found"
+HAS_SYSTEMD=0
+HAS_OPENRC=0
+IS_ALPINE=0
+if [ -f /etc/alpine-release ]; then
+    IS_ALPINE=1
+elif [ -f /etc/os-release ] && grep -qE '^ID=alpine' /etc/os-release 2>/dev/null; then
+    IS_ALPINE=1
+fi
+# Alpine 上 openrc 缺失就尝试自动装,失败不致命(下面还有 nohup 兜底)
+if [ "$IS_ALPINE" = "1" ] && ! command -v rc-service >/dev/null 2>&1; then
+    echo "[Init] Alpine detected without OpenRC, installing openrc..."
+    if command -v apk >/dev/null 2>&1; then
+        apk add --no-cache openrc 2>/dev/null || echo "[Init] apk add openrc failed, will fall back to nohup"
+    fi
+fi
+# Alpine 优先 OpenRC;非 Alpine 仍然先看 systemd(主流发行版默认)
+if [ "$IS_ALPINE" = "1" ]; then
+    if command -v rc-service >/dev/null 2>&1; then HAS_OPENRC=1; fi
+fi
+if [ "$HAS_OPENRC" = "0" ] && command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+    HAS_SYSTEMD=1
+fi
+if [ "$HAS_SYSTEMD" = "0" ] && [ "$HAS_OPENRC" = "0" ] && command -v rc-service >/dev/null 2>&1; then
+    HAS_OPENRC=1
+fi
+echo "Init system: $([ "$HAS_OPENRC" = 1 ] && echo openrc || ([ "$HAS_SYSTEMD" = 1 ] && echo systemd || echo none))$([ "$IS_ALPINE" = 1 ] && echo " (Alpine)")"
+
 # Step 1: Stop existing service if running
 echo "[1/6] Stopping existing service (if any)..."
-systemctl stop mmw-agent 2>/dev/null || true
-systemctl disable mmw-agent 2>/dev/null || true
+if [ "$HAS_SYSTEMD" = "1" ]; then
+    systemctl stop mmw-agent 2>/dev/null || true
+    systemctl disable mmw-agent 2>/dev/null || true
+elif [ "$HAS_OPENRC" = "1" ]; then
+    rc-service mmw-agent stop 2>/dev/null || true
+    rc-update del mmw-agent 2>/dev/null || true
+else
+    # nohup 兜底:杀掉现有 mmw-agent 进程
+    pkill -f /usr/local/bin/mmw-agent 2>/dev/null || true
+    sleep 1
+fi
 
 # Step 2: Create config directory first
 echo ""
 echo "[2/6] Creating configuration..."
 mkdir -p /etc/mmw-agent
 mkdir -p /var/lib/mmw-agent
+
+# 端口探测:从 LISTEN_PORT(或默认 23889)起,被占用就 +1,最多试 20 次。
+# 用 ss 看任意接口的 LISTEN socket,避免 agent 启动后 bind 失败造成"WS 活/HTTP 死"的死锁状态。
+REQUESTED_PORT="${LISTEN_PORT:-23889}"
+ACTUAL_PORT=""
+for i in $(seq 0 19); do
+    TRY_PORT=$((REQUESTED_PORT + i))
+    if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${TRY_PORT}\$"; then
+        echo "  端口 ${TRY_PORT} 已被占用,尝试下一个..."
+        continue
+    fi
+    ACTUAL_PORT="$TRY_PORT"
+    break
+done
+if [ -z "$ACTUAL_PORT" ]; then
+    echo "ERROR: 从 ${REQUESTED_PORT} 起的 20 个端口全部被占用,安装中止" >&2
+    exit 1
+fi
+if [ "$ACTUAL_PORT" != "$REQUESTED_PORT" ]; then
+    echo "⚠ 端口 ${REQUESTED_PORT} 被占用,自动改用 ${ACTUAL_PORT}"
+fi
+LISTEN_PORT="$ACTUAL_PORT"
 
 cat > /etc/mmw-agent/config.yaml << EOF
 # MMWX Remote Server Configuration
@@ -433,15 +592,20 @@ mode: remote
 master_url: ${MASTER_URL}
 token: ${TOKEN}
 connection_mode: websocket
+xray_mode: ${XRAY_MODE}
+steal_mode: $([ "$AUTO_STEAL_SELF" = "1" ] && echo "tunnel" || echo "")
+master_public_key: ${MASTER_PUBLIC_KEY}
+listen_port: "${LISTEN_PORT}"
 EOF
 
 echo "Configuration saved to /etc/mmw-agent/config.yaml"
 
-# Step 3: Create systemd service file (before install.sh runs)
+# Step 3: 创建 service 文件 — 按检测到的 init 系统选不同写法
 echo ""
-echo "[3/6] Creating systemd service..."
+echo "[3/6] Creating service..."
 
-cat > /etc/systemd/system/mmw-agent.service << EOF
+if [ "$HAS_SYSTEMD" = "1" ]; then
+    cat > /etc/systemd/system/mmw-agent.service << EOF
 [Unit]
 Description=MMW Agent Remote Server
 After=network.target
@@ -456,9 +620,43 @@ WorkingDirectory=/var/lib/mmw-agent
 [Install]
 WantedBy=multi-user.target
 EOF
+    systemctl daemon-reload
+elif [ "$HAS_OPENRC" = "1" ]; then
+    cat > /etc/init.d/mmw-agent << 'EOF'
+#!/sbin/openrc-run
+name="mmw-agent"
+description="MMW Agent Remote Server"
+command="/usr/local/bin/mmw-agent"
+command_args="-c /etc/mmw-agent/config.yaml"
+command_background="yes"
+pidfile="/run/mmw-agent.pid"
+output_log="/var/log/mmw-agent.log"
+error_log="/var/log/mmw-agent.log"
+depend() { need net; }
+EOF
+    chmod +x /etc/init.d/mmw-agent
+else
+    # 无 init 系统(典型 LXC 容器):写一个 supervisor 脚本,失败自动重启,放后台跑;同时塞进 rc.local 以便重启
+    cat > /usr/local/bin/mmw-agent-supervisor.sh << 'EOF'
+#!/bin/sh
+while true; do
+    /usr/local/bin/mmw-agent -c /etc/mmw-agent/config.yaml >> /var/log/mmw-agent.log 2>&1
+    echo "[supervisor] mmw-agent exited, restarting in 5s..." >> /var/log/mmw-agent.log
+    sleep 5
+done
+EOF
+    chmod +x /usr/local/bin/mmw-agent-supervisor.sh
 
-# Reload systemd to pick up new service file
-systemctl daemon-reload
+    # 写入 rc.local 实现重启自启动(若文件不存在就建一个)
+    if [ ! -f /etc/rc.local ]; then
+        echo "#!/bin/sh" > /etc/rc.local
+        echo "exit 0" >> /etc/rc.local
+        chmod +x /etc/rc.local
+    fi
+    if ! grep -q "mmw-agent-supervisor.sh" /etc/rc.local; then
+        sed -i '/^exit 0/i nohup /usr/local/bin/mmw-agent-supervisor.sh >/dev/null 2>&1 \&' /etc/rc.local
+    fi
+fi
 
 # Step 4: Download and install binary only (without starting)
 echo ""
@@ -482,9 +680,37 @@ esac
 # Get latest release URL
 RELEASE_URL="https://github.com/iluobei/mmw-agent/releases/latest/download/mmw-agent-linux-${ARCH_NAME}"
 
-# Download binary
+# Download binary — 优先用 curl(更普遍),没有就用 wget;两者都没就按发行版包管理器装一个,
+# 杜绝 "wget: command not found" 噪声 / "ERROR: 都没装" 卡死。
+ensure_downloader() {
+    if command -v curl >/dev/null 2>&1; then return 0; fi
+    if command -v wget >/dev/null 2>&1; then return 0; fi
+    echo "未检测到 curl/wget,尝试自动安装 curl..."
+    if command -v apt-get >/dev/null 2>&1; then
+        apt-get update -qq >/dev/null 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive apt-get install -y curl
+    elif command -v dnf >/dev/null 2>&1; then
+        dnf install -y curl
+    elif command -v yum >/dev/null 2>&1; then
+        yum install -y curl
+    elif command -v apk >/dev/null 2>&1; then
+        apk add --no-cache curl
+    elif command -v pacman >/dev/null 2>&1; then
+        pacman -Sy --noconfirm curl
+    elif command -v zypper >/dev/null 2>&1; then
+        zypper -n install curl
+    else
+        echo "ERROR: 无法识别系统包管理器,请手动安装 curl 或 wget 后重试" >&2
+        return 1
+    fi
+}
 echo "Downloading from $RELEASE_URL..."
-wget -q --show-progress -O /tmp/mmw-agent "$RELEASE_URL" || curl -fsSL -o /tmp/mmw-agent "$RELEASE_URL"
+ensure_downloader || exit 1
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL -o /tmp/mmw-agent "$RELEASE_URL"
+else
+    wget -q --show-progress -O /tmp/mmw-agent "$RELEASE_URL"
+fi
 
 # Install binary
 chmod +x /tmp/mmw-agent
@@ -492,11 +718,20 @@ mv /tmp/mmw-agent /usr/local/bin/mmw-agent
 
 echo "Binary installed to /usr/local/bin/mmw-agent"
 
-# Step 5: Enable and start service
+# Step 5: 启用并启动 service
 echo ""
 echo "[5/6] Starting service..."
-systemctl enable mmw-agent
-systemctl start mmw-agent
+if [ "$HAS_SYSTEMD" = "1" ]; then
+    systemctl enable mmw-agent
+    systemctl start mmw-agent
+elif [ "$HAS_OPENRC" = "1" ]; then
+    # rc-update 在 LXC 容器里没初始化 runlevel 时会报错,失败不致命(set -e 兜底)
+    rc-update add mmw-agent default 2>/dev/null || echo "  ⚠ rc-update add 失败(常见于 LXC 容器,不影响当前会话启动)"
+    rc-service mmw-agent start
+else
+    nohup /usr/local/bin/mmw-agent-supervisor.sh >/dev/null 2>&1 &
+    echo "Started via nohup (PID=$!); 安装重启后通过 /etc/rc.local 自启动"
+fi
 
 # Wait a moment for service to start
 sleep 3
@@ -511,45 +746,61 @@ echo "  Installation Complete!"
 echo "=========================================="
 echo ""
 echo "Service status:"
-systemctl status mmw-agent --no-pager -l 2>/dev/null | head -15 || echo "Service started"
+if [ "$HAS_SYSTEMD" = "1" ]; then
+    systemctl status mmw-agent --no-pager -l 2>/dev/null | head -15 || echo "Service started"
+elif [ "$HAS_OPENRC" = "1" ]; then
+    rc-service mmw-agent status 2>/dev/null || echo "Service started"
+else
+    pgrep -af /usr/local/bin/mmw-agent | head -5 || echo "Process not found in pgrep, check /var/log/mmw-agent.log"
+fi
 echo ""
 echo "To check status:"
-echo "  systemctl status mmw-agent"
+if [ "$HAS_SYSTEMD" = "1" ]; then
+    echo "  systemctl status mmw-agent"
+elif [ "$HAS_OPENRC" = "1" ]; then
+    echo "  rc-service mmw-agent status"
+else
+    echo "  tail -f /var/log/mmw-agent.log  # 或: pgrep -af mmw-agent"
+fi
 echo ""
 echo "To view logs:"
 echo "  journalctl -u mmw-agent -f"
 echo ""
 
-if [ "$AUTO_STEAL_SELF" = "1" ]; then
-    echo "=========================================="
-    echo "  Auto Install: Xray + Nginx"
-    echo "=========================================="
-    echo ""
+# Auto-install Xray (unless embedded mode)
+if [ "$XRAY_MODE" != "embedded" ]; then
     XRAY_INSTALLED=0
     if command -v xray >/dev/null 2>&1 || [ -x /usr/local/bin/xray ] || [ -x /usr/bin/xray ] || [ -x /opt/xray/xray ]; then
         XRAY_INSTALLED=1
     fi
+
+    if [ "$XRAY_INSTALLED" = "1" ]; then
+        echo "[Auto] Xray already installed, skip."
+    else
+        echo "[Auto] Installing Xray..."
+        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+    fi
+fi
+
+if [ "$AUTO_STEAL_SELF" = "1" ]; then
+    echo "=========================================="
+    echo "  Auto Install: Nginx"
+    echo "=========================================="
+    echo ""
 
     NGINX_INSTALLED=0
     if command -v nginx >/dev/null 2>&1 || [ -x /usr/local/nginx/sbin/nginx ]; then
         NGINX_INSTALLED=1
     fi
 
-    if [ "$XRAY_INSTALLED" = "1" ]; then
-        echo "[Auto] Xray already installed, skip."
-    else
-        echo "[Auto 1/2] Installing Xray..."
-        bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
-    fi
-
     if [ "$NGINX_INSTALLED" = "1" ]; then
         echo "[Auto] Nginx already installed, skip."
     else
-        echo "[Auto 2/2] Installing Nginx..."
+        echo "[Auto] Installing Nginx..."
         curl -fsSL https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/install-nginx.sh | bash
     fi
     echo ""
-    echo "Auto install complete (front service: ${FRONT_SERVICE})"
+    echo "Auto install complete (front service: ${FRONT_SERVICE}, xray mode: ${XRAY_MODE})"
 fi
 echo ""
 `

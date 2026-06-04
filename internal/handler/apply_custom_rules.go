@@ -76,7 +76,12 @@ func NewApplyCustomRulesHandler(repo *storage.TrafficRepository) http.Handler {
 		}
 
 		// 应用自定义规则
-		modifiedYaml, addedGroups, err := applyCustomRulesToYaml(r.Context(), repo, []byte(payload.YamlContent))
+		// 普通用户预览只应用自己的规则;管理员可应用全部(owner="")。
+		owner := username
+		if userIsAdmin(r.Context(), repo, username) {
+			owner = ""
+		}
+		modifiedYaml, addedGroups, err := applyCustomRulesToYaml(r.Context(), repo, []byte(payload.YamlContent), owner)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, fmt.Errorf("failed to apply custom rules: %w", err))
 			return
@@ -94,10 +99,21 @@ func NewApplyCustomRulesHandler(repo *storage.TrafficRepository) http.Handler {
 
 // applyCustomRulesToYaml 将启用的自定义规则应用于 YAML 数据
 // 返回修改后的 YAML 和添加的代理组列表
-func applyCustomRulesToYaml(ctx context.Context, repo *storage.TrafficRepository, yamlData []byte) ([]byte, []string, error) {
+func applyCustomRulesToYaml(ctx context.Context, repo *storage.TrafficRepository, yamlData []byte, owner string) ([]byte, []string, error) {
 	rules, err := repo.ListEnabledCustomRules(ctx, "")
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get custom rules: %w", err)
+	}
+
+	// 数据隔离:owner 非空时只应用该用户自己创建的规则(排除管理员/他人)。
+	if owner != "" {
+		filtered := rules[:0]
+		for _, ru := range rules {
+			if ru.CreatedBy == owner {
+				filtered = append(filtered, ru)
+			}
+		}
+		rules = filtered
 	}
 
 	if len(rules) == 0 {
@@ -204,6 +220,25 @@ func applyCustomRulesToYamlSmart(ctx context.Context, repo *storage.TrafficRepos
 	rules, err := repo.ListEnabledCustomRules(ctx, "")
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get custom rules: %w", err)
+	}
+
+	// 数据隔离 + 订阅级选择:
+	//   - 只应用该订阅"所有者"自己创建的覆写规则(排除管理员/他人的规则);
+	//   - 若该订阅指定了生效规则集(SelectedCustomRuleIDs),进一步只应用选中的。
+	// 兼容:历史/管理员订阅 CreatedBy 为空时不做所有者过滤(沿用旧的"全部启用生效")。
+	if sf, ferr := repo.GetSubscribeFileByID(ctx, subscribeFileID); ferr == nil {
+		selected := makeIDSet(sf.SelectedCustomRuleIDs)
+		filtered := rules[:0]
+		for _, ru := range rules {
+			if sf.CreatedBy != "" && ru.CreatedBy != sf.CreatedBy {
+				continue
+			}
+			if len(selected) > 0 && !selected[ru.ID] {
+				continue
+			}
+			filtered = append(filtered, ru)
+		}
+		rules = filtered
 	}
 
 	if len(rules) == 0 {

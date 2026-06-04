@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
 
 	"gopkg.in/yaml.v3"
@@ -113,10 +114,11 @@ type nodesHandler struct {
 	subscribeDir    string
 	yamlSyncManager *YAMLSyncManager
 	remoteManage    *RemoteManageHandler
+	licenseManager  *license.Manager
 }
 
 // 返回一个管理代理节点的仅管理处理程序。
-func NewNodesHandler(repo *storage.TrafficRepository, subscribeDir string, remoteManage *RemoteManageHandler) http.Handler {
+func NewNodesHandler(repo *storage.TrafficRepository, subscribeDir string, remoteManage *RemoteManageHandler, licenseMgr *license.Manager) http.Handler {
 	if repo == nil {
 		panic("nodes handler requires repository")
 	}
@@ -126,17 +128,49 @@ func NewNodesHandler(repo *storage.TrafficRepository, subscribeDir string, remot
 		subscribeDir:    subscribeDir,
 		yamlSyncManager: NewYAMLSyncManager(subscribeDir),
 		remoteManage:    remoteManage,
+		licenseManager:  licenseMgr,
 	}
+}
+
+// fetchNodeForAccess 按权限获取节点:管理员可取任意节点,普通用户只能取自己创建的(否则 NotFound)。
+func (h *nodesHandler) fetchNodeForAccess(ctx context.Context, id int64, username string, isAdmin bool) (storage.Node, error) {
+	if isAdmin {
+		return h.repo.GetNodeByID(ctx, id)
+	}
+	return h.repo.GetNode(ctx, id, username)
+}
+
+// deleteNodeForAccess 按权限删除节点:管理员可删任意,普通用户只能删自己的。
+func (h *nodesHandler) deleteNodeForAccess(ctx context.Context, id int64, username string, isAdmin bool) error {
+	if isAdmin {
+		return h.repo.DeleteNodeByID(ctx, id)
+	}
+	return h.repo.DeleteNode(ctx, id, username)
 }
 
 func (h *nodesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/admin/nodes")
 	path = strings.Trim(path, "/")
 
+	// 普通用户开放:列表 / 标签 / 解析订阅 / 批量导入(自己的外部节点) / 查看关联入站。
+	// 仅管理员:手动单个新增、改名/改标签/改服务器/改配置、删除/清空/批量删改
+	//（这些写操作会同步到共享 YAML 订阅文件,影响管理员)。
+	isAdmin := userIsAdmin(r.Context(), h.repo, auth.UsernameFromContext(r.Context()))
+	denyNonAdmin := func() bool {
+		if !isAdmin {
+			writeError(w, http.StatusForbidden, errors.New("该操作仅管理员可用"))
+			return true
+		}
+		return false
+	}
+
 	switch {
 	case path == "" && r.Method == http.MethodGet:
 		h.handleList(w, r)
 	case path == "" && r.Method == http.MethodPost:
+		if denyNonAdmin() {
+			return
+		}
 		h.handleCreate(w, r)
 	case path == "batch" && r.Method == http.MethodPost:
 		h.handleBatchCreate(w, r)
@@ -146,24 +180,50 @@ func (h *nodesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		idSegment := strings.TrimSuffix(path, "/related-inbounds")
 		h.handleGetRelatedInbounds(w, r, idSegment)
 	case strings.HasSuffix(path, "/server") && r.Method == http.MethodPut:
+		if denyNonAdmin() {
+			return
+		}
 		idSegment := strings.TrimSuffix(path, "/server")
 		h.handleUpdateServer(w, r, idSegment)
 	case strings.HasSuffix(path, "/restore-server") && r.Method == http.MethodPut:
+		if denyNonAdmin() {
+			return
+		}
 		idSegment := strings.TrimSuffix(path, "/restore-server")
 		h.handleRestoreServer(w, r, idSegment)
 	case strings.HasSuffix(path, "/config") && r.Method == http.MethodPut:
+		if denyNonAdmin() {
+			return
+		}
 		idSegment := strings.TrimSuffix(path, "/config")
 		h.handleUpdateConfig(w, r, idSegment)
 	case path != "" && path != "batch" && path != "fetch-subscription" && !strings.HasSuffix(path, "/server") && !strings.HasSuffix(path, "/restore-server") && !strings.HasSuffix(path, "/config") && !strings.HasSuffix(path, "/related-inbounds") && (r.Method == http.MethodPut || r.Method == http.MethodPatch):
+		if denyNonAdmin() {
+			return
+		}
 		h.handleUpdate(w, r, path)
 	case path != "" && path != "batch" && path != "fetch-subscription" && !strings.HasSuffix(path, "/related-inbounds") && r.Method == http.MethodDelete:
+		if denyNonAdmin() {
+			return
+		}
 		h.handleDelete(w, r, path)
 	case path == "clear" && r.Method == http.MethodPost:
+		if denyNonAdmin() {
+			return
+		}
 		h.handleClearAll(w, r)
 	case path == "batch-delete" && r.Method == http.MethodPost:
+		if denyNonAdmin() {
+			return
+		}
 		h.handleBatchDelete(w, r)
 	case path == "batch-rename" && r.Method == http.MethodPost:
+		if denyNonAdmin() {
+			return
+		}
 		h.handleBatchRename(w, r)
+	case path == "tags" && r.Method == http.MethodGet:
+		h.handleListTags(w, r)
 	default:
 		allowed := []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete}
 		methodNotAllowed(w, allowed...)
@@ -177,17 +237,206 @@ func (h *nodesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 由于此路由通过 RequireAdmin 中间件，所以用户一定是 admin
-	// admin 用户可以看到所有节点
-	nodes, err := h.repo.ListAllNodes(r.Context())
+	// 数据隔离:管理员看全部节点,但屏蔽"普通用户私有"节点。
+	// 反向过滤逻辑:只有当节点 username 属于现存普通用户时才屏蔽;
+	// admin 用户/legacy "admin" 字面字符串/已不存在的用户名 → 一律保留。
+	if userIsAdmin(r.Context(), h.repo, username) {
+		nodes, err := h.repo.ListAllNodes(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		nonAdmins, err := h.repo.ListNonAdminUsernames(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		filtered := make([]storage.Node, 0, len(nodes))
+		for _, n := range nodes {
+			if nonAdmins[n.Username] {
+				continue
+			}
+			filtered = append(filtered, n)
+		}
+		respondJSON(w, http.StatusOK, map[string]any{"nodes": convertNodes(filtered)})
+		return
+	}
+
+	// 普通用户:自己导入的节点 + 绑定套餐内的节点(只读)。
+	nodes, err := h.repo.ListNodes(r.Context(), username)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+	seen := make(map[int64]bool, len(nodes))
+	for _, n := range nodes {
+		seen[n.ID] = true
+	}
+	if user, uerr := h.repo.GetUser(r.Context(), username); uerr == nil && user.PackageID > 0 {
+		if pkg, perr := h.repo.GetPackage(r.Context(), user.PackageID); perr == nil && pkg != nil {
+			for _, nid := range pkg.Nodes {
+				if seen[nid] {
+					continue
+				}
+				if pn, nerr := h.repo.GetNodeByID(r.Context(), nid); nerr == nil {
+					nodes = append(nodes, pn)
+					seen[nid] = true
+				}
+			}
+			// 追加套餐内父节点派生出的 shared routed 子节点(admin 通过"添加路由出站"批量分配的)。
+			// 套餐字段 Nodes 只存父物理节点 ID,但 admin 在出站管理里给父节点派生的 routed_owner='shared'
+			// 子节点应当随套餐一起对用户可见;遗漏会导致用户看不到自己实际能用的路由出站节点。
+			if children, cerr := h.repo.ListSharedRoutedByParentIDs(r.Context(), pkg.Nodes); cerr == nil {
+				for _, cn := range children {
+					if seen[cn.ID] {
+						continue
+					}
+					nodes = append(nodes, cn)
+					seen[cn.ID] = true
+				}
+			}
+		}
+	}
 
+	// 安全:把每个节点的 clash_config 里 admin uuid/password 等凭据替换为本用户的凭据。
+	// 不替换 = 把 admin 凭据原样下发给所有能看到节点的普通用户(节点管理眼睛图标会显示)。
+	// routed 节点没有用户子账号的 → 完全过滤掉(用户无访问权,不该出现在列表)。
+	nodes = substituteNodesForUser(r.Context(), h.repo, username, nodes)
+
+	// 节点级倍率:根据用户绑定套餐查 multiplier(routed 子节点用 parent 回退),仅当 != 1 时写入响应
+	dto := convertNodes(nodes)
+	if user, uerr := h.repo.GetUser(r.Context(), username); uerr == nil && user.PackageID > 0 {
+		if pkg, perr := h.repo.GetPackage(r.Context(), user.PackageID); perr == nil && pkg != nil && len(pkg.NodeMultipliers) > 0 {
+			for i, n := range nodes {
+				m := pkg.MultiplierForNode(n.ID, n.ParentNodeID)
+				if m != 1.0 {
+					dto[i].Multiplier = m
+				}
+			}
+		}
+	}
 	respondJSON(w, http.StatusOK, map[string]any{
-		"nodes": convertNodes(nodes),
+		"nodes": dto,
 	})
+}
+
+// enforceLicenseIfNodeHostMatchesServer 防绕过 — 用户手动导入 / 批量导入节点时,
+// 如果节点的 server 字段命中已注册 remote_server 的 IP/Domain/PullAddress:
+//
+//	license 已满 → 返回拒绝消息,ok=false(调用方应返 403)
+//	license 未满 → 把 node.OriginalServer 直接填上(自动 claim),ok=true
+//	节点 server 跟任何 remote_server 都不匹配(真外部 vps)→ ok=true,不动 node
+//
+// 不命中 / 没有 RemoteManageHandler / 没有 LicenseManager 时一律放行。
+// 跟 routed_outbound.create 共用同一份 CountLicensedNodes 口径,语义闭环。
+func (h *nodesHandler) enforceLicenseIfNodeHostMatchesServer(ctx context.Context, node *storage.Node) (string, bool) {
+	if h.remoteManage == nil || node == nil {
+		return "", true
+	}
+	// 优先 ClashConfig(从 yaml 转过来的标准结构,server 字段稳定),fallback ParsedConfig。
+	configJSON := node.ClashConfig
+	if strings.TrimSpace(configJSON) == "" {
+		configJSON = node.ParsedConfig
+	}
+	srv, err := h.remoteManage.MatchRemoteServerByNodeHost(ctx, configJSON)
+	if err != nil || srv == nil {
+		return "", true
+	}
+
+	// 命中 → 检查 license 配额
+	if h.licenseManager != nil {
+		status := h.licenseManager.GetStatus()
+		maxNodes := 20
+		if status.Plan != nil {
+			maxNodes = status.Plan.MaxNodes
+		}
+		if count, cerr := h.repo.CountLicensedNodes(ctx); cerr == nil && count >= int64(maxNodes) {
+			return fmt.Sprintf("该节点指向已注册服务器 %q,需占用 license 配额,但已达上限 (%d/%d)，请升级许可证", srv.Name, count, maxNodes), false
+		}
+	}
+	// 配额内 → 自动 claim
+	node.OriginalServer = srv.Name
+	if strings.TrimSpace(node.Tag) == "" {
+		node.Tag = fmt.Sprintf("远程:%s", srv.Name)
+	}
+	return "", true
+}
+
+// buildUserCredMapForCreator 给某个用户构造 (server_name, inbound_tag) → credential_json 映射,
+// 给 applyUserCredentials 用。从 user_inbound_configs 表拉,跟 PackageSubscribeHandler.buildUserCredentialMap 同源。
+//
+// 复用点:nodes.go substituteNodesForUser + subscription.go generateFromTemplate(模板订阅) 都用这个。
+// 抽成包级函数避免重复 + 也避免漏改一处的安全隐患。
+func buildUserCredMapForCreator(ctx context.Context, repo *storage.TrafficRepository, username string) map[credKey]string {
+	if username == "" {
+		return nil
+	}
+	userConfigs, err := repo.GetUserInboundConfigs(ctx, username)
+	if err != nil || len(userConfigs) == 0 {
+		return nil
+	}
+	servers, err := repo.ListRemoteServers(ctx)
+	if err != nil {
+		return nil
+	}
+	idToName := make(map[int64]string, len(servers))
+	for _, s := range servers {
+		idToName[s.ID] = s.Name
+	}
+	m := make(map[credKey]string, len(userConfigs))
+	for _, cfg := range userConfigs {
+		if name, ok := idToName[cfg.ServerID]; ok {
+			m[credKey{name, cfg.InboundTag}] = cfg.CredentialJSON
+		}
+	}
+	return m
+}
+
+// substituteNodesForUser 把节点列表里的 clash_config 替换成该用户视角的版本。
+//   - 普通节点:applyUserCredentials 改 uuid / password 等
+//   - routed 节点:buildRoutedProxyForUser 用 user_subaccounts 凭据重建(没子账号即 drop)
+// 替换/重建失败的节点保留 admin 凭据 → 这种情况是数据异常(凭据没建好),为了不让用户彻底看不到节点,
+// 退而求其次返回原样;但更典型场景(用户从未绑过该节点)已经被 ListNodes 的 username 过滤掉了。
+func substituteNodesForUser(ctx context.Context, repo *storage.TrafficRepository, username string, nodes []storage.Node) []storage.Node {
+	if len(nodes) == 0 {
+		return nodes
+	}
+	credMap := buildUserCredMapForCreator(ctx, repo, username)
+	if credMap == nil {
+		credMap = map[credKey]string{}
+	}
+	out := make([]storage.Node, 0, len(nodes))
+	for _, n := range nodes {
+		if n.NodeType == "routed" {
+			// routed 节点必须有 active 子账号才能给用户;没的话整个节点过滤掉,
+			// 避免把 admin 的 routed 父凭据(uuid)泄露给无权用户。
+			proxy, ok := buildRoutedProxyForUser(ctx, repo, n, username)
+			if !ok {
+				continue
+			}
+			if raw, err := json.Marshal(proxy); err == nil {
+				n.ClashConfig = string(raw)
+			}
+			out = append(out, n)
+			continue
+		}
+		if n.ClashConfig == "" {
+			out = append(out, n)
+			continue
+		}
+		var proxy map[string]any
+		if err := json.Unmarshal([]byte(n.ClashConfig), &proxy); err != nil {
+			// 解析失败保持原样,避免凭空丢节点;但日志记一下方便排查
+			out = append(out, n)
+			continue
+		}
+		applyUserCredentials(proxy, n, credMap)
+		if raw, err := json.Marshal(proxy); err == nil {
+			n.ClashConfig = string(raw)
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 func (h *nodesHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -197,11 +446,19 @@ func (h *nodesHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 用户手动导入的节点 (node_type='physical') 默认不占 license 配额。
+	// 但若节点 server 字段命中已注册 remote_server 的 host —— 视为"伪装的 routed",
+	// 这一路径在 enrichNodeWithRemoteServerClaim() 里做:
+	//   1. license 配额满 → 拒绝
+	//   2. license 未满 → 放行 + 自动设置 OriginalServer,后续 CountLicensedNodes 会自动算上
+	// 详见 storage.CountLicensedNodes 注释。
+
 	var req nodeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeBadRequest(w, "请求格式不正确")
 		return
 	}
+	req.parseChainProxyNodeID()
 
 	// 校验节点名称不为空
 	if strings.TrimSpace(req.NodeName) == "" {
@@ -251,7 +508,14 @@ func (h *nodesHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		ClashConfig:  req.ClashConfig,
 		Enabled:      req.Enabled,
 		Tag:          req.Tag,
-		InboundTag:   req.InboundTag,
+		InboundTag:       req.InboundTag,
+		ChainProxyNodeID: req.ChainProxyNodeID,
+	}
+
+	// 防绕过:节点 server 指向已注册的 remote_server → 计入 license 配额
+	if rejectMsg, ok := h.enforceLicenseIfNodeHostMatchesServer(r.Context(), &node); !ok {
+		writeJSONError(w, http.StatusForbidden, rejectMsg)
+		return
 	}
 
 	created, err := h.repo.CreateNode(r.Context(), node)
@@ -289,6 +553,8 @@ func (h *nodesHandler) handleBatchCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// 同 handleCreate:批量导入也是用户手动添加 physical 节点,不占 license 配额。
+
 	nodes := make([]storage.Node, 0, len(req.Nodes))
 	for _, n := range req.Nodes {
 		// 允许 Clash 订阅节点没有 RawURL，但必须有 NodeName 和 ClashConfig
@@ -311,6 +577,14 @@ func (h *nodesHandler) handleBatchCreate(w http.ResponseWriter, r *http.Request)
 	if len(nodes) == 0 {
 		writeBadRequest(w, "没有有效的节点可以保存")
 		return
+	}
+
+	// 防绕过:批量里如果有 server 指向已注册 remote_server 的节点,每个都按 license 配额逐一检查。
+	for i := range nodes {
+		if rejectMsg, ok := h.enforceLicenseIfNodeHostMatchesServer(r.Context(), &nodes[i]); !ok {
+			writeJSONError(w, http.StatusForbidden, rejectMsg)
+			return
+		}
 	}
 
 	created, err := h.repo.BatchCreateNodes(r.Context(), nodes)
@@ -337,7 +611,7 @@ func (h *nodesHandler) handleUpdate(w http.ResponseWriter, r *http.Request, idSe
 		return
 	}
 
-	existing, err := h.repo.GetNode(r.Context(), id, username)
+	existing, err := h.fetchNodeForAccess(r.Context(), id, username, userIsAdmin(r.Context(), h.repo, username))
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, storage.ErrNodeNotFound) {
@@ -355,6 +629,7 @@ func (h *nodesHandler) handleUpdate(w http.ResponseWriter, r *http.Request, idSe
 		writeBadRequest(w, "请求格式不正确")
 		return
 	}
+	req.parseChainProxyNodeID()
 
 	// 如果节点名称被修改，需要校验新名称
 	if req.NodeName != "" && req.NodeName != oldNodeName {
@@ -365,8 +640,8 @@ func (h *nodesHandler) handleUpdate(w http.ResponseWriter, r *http.Request, idSe
 			return
 		}
 
-		// 校验节点名称是否重复（数据库层面）
-		exists, err := h.repo.CheckNodeNameExists(r.Context(), req.NodeName, username, id)
+		// 校验节点名称是否重复（在节点所有者的命名空间内）
+		exists, err := h.repo.CheckNodeNameExists(r.Context(), req.NodeName, existing.Username, id)
 		if err != nil {
 			logger.Info("[节点更新] 检查节点名称重复失败", "error", err)
 			writeError(w, http.StatusInternalServerError, errors.New("服务器错误"))
@@ -422,6 +697,9 @@ func (h *nodesHandler) handleUpdate(w http.ResponseWriter, r *http.Request, idSe
 		existing.Tag = req.Tag
 	}
 	existing.Enabled = req.Enabled
+	if req.hasChainProxyNodeID() {
+		existing.ChainProxyNodeID = req.ChainProxyNodeID
+	}
 
 	updated, err := h.repo.UpdateNode(r.Context(), existing)
 	if err != nil {
@@ -452,13 +730,19 @@ func (h *nodesHandler) handleUpdate(w http.ResponseWriter, r *http.Request, idSe
 }
 
 func (h *nodesHandler) handleUpdateServer(w http.ResponseWriter, r *http.Request, idSegment string) {
+	username := auth.UsernameFromContext(r.Context())
+	if username == "" {
+		writeError(w, http.StatusUnauthorized, errors.New("用户未认证"))
+		return
+	}
+
 	id, err := strconv.ParseInt(idSegment, 10, 64)
 	if err != nil || id <= 0 {
 		writeBadRequest(w, "无效的节点标识")
 		return
 	}
 
-	existing, err := h.repo.GetNodeByID(r.Context(), id)
+	existing, err := h.fetchNodeForAccess(r.Context(), id, username, userIsAdmin(r.Context(), h.repo, username))
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, storage.ErrNodeNotFound) {
@@ -482,11 +766,11 @@ func (h *nodesHandler) handleUpdateServer(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// 更新前保存原始域名（从 ClashConfig 的 server 字段获取）
+	// 更新前保存原始域名到 OriginalDomain（专用字段，不能用 OriginalServer——那是服务器名/路由键）
 	var currentClashConfig map[string]any
 	if err := json.Unmarshal([]byte(existing.ClashConfig), &currentClashConfig); err == nil {
 		if currentServer, ok := currentClashConfig["server"].(string); ok && currentServer != "" {
-			existing.OriginalServer = currentServer
+			existing.OriginalDomain = currentServer
 		}
 	}
 
@@ -532,13 +816,19 @@ func (h *nodesHandler) handleUpdateServer(w http.ResponseWriter, r *http.Request
 }
 
 func (h *nodesHandler) handleRestoreServer(w http.ResponseWriter, r *http.Request, idSegment string) {
+	username := auth.UsernameFromContext(r.Context())
+	if username == "" {
+		writeError(w, http.StatusUnauthorized, errors.New("用户未认证"))
+		return
+	}
+
 	id, err := strconv.ParseInt(idSegment, 10, 64)
 	if err != nil || id <= 0 {
 		writeBadRequest(w, "无效的节点标识")
 		return
 	}
 
-	existing, err := h.repo.GetNodeByID(r.Context(), id)
+	existing, err := h.fetchNodeForAccess(r.Context(), id, username, userIsAdmin(r.Context(), h.repo, username))
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, storage.ErrNodeNotFound) {
@@ -548,14 +838,14 @@ func (h *nodesHandler) handleRestoreServer(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// 检查原服务器是否存在
-	if existing.OriginalServer == "" {
+	// 检查原始域名是否存在
+	if existing.OriginalDomain == "" {
 		writeBadRequest(w, "节点没有保存原始域名")
 		return
 	}
 
-	// 从original_server恢复服务器地址
-	originalServer := existing.OriginalServer
+	// 从 original_domain 恢复服务器地址
+	originalServer := existing.OriginalDomain
 
 	// 更新 ParsedConfig 中的 server 字段
 	var parsedConfig map[string]any
@@ -575,8 +865,8 @@ func (h *nodesHandler) handleRestoreServer(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	// 恢复后清除original_server
-	existing.OriginalServer = ""
+	// 恢复后清除 original_domain（OriginalServer 路由键保持不变）
+	existing.OriginalDomain = ""
 
 	updated, err := h.repo.UpdateNode(r.Context(), existing)
 	if err != nil {
@@ -602,6 +892,12 @@ func (h *nodesHandler) handleRestoreServer(w http.ResponseWriter, r *http.Reques
 }
 
 func (h *nodesHandler) handleUpdateConfig(w http.ResponseWriter, r *http.Request, idSegment string) {
+	username := auth.UsernameFromContext(r.Context())
+	if username == "" {
+		writeError(w, http.StatusUnauthorized, errors.New("用户未认证"))
+		return
+	}
+
 	id, err := strconv.ParseInt(idSegment, 10, 64)
 	if err != nil || id <= 0 {
 		writeBadRequest(w, "无效的节点标识")
@@ -632,8 +928,8 @@ func (h *nodesHandler) handleUpdateConfig(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	// 获取现有节点
-	node, err := h.repo.GetNodeByID(r.Context(), id)
+	// 获取现有节点(按权限:管理员任意,普通用户仅自己的)
+	node, err := h.fetchNodeForAccess(r.Context(), id, username, userIsAdmin(r.Context(), h.repo, username))
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, storage.ErrNodeNotFound) {
@@ -693,9 +989,11 @@ func (h *nodesHandler) handleDelete(w http.ResponseWriter, r *http.Request, idSe
 	// 检查delete_inbound参数是否设置
 	deleteInbound := r.URL.Query().Get("delete_inbound") == "true"
 
-	// 在删除之前获取节点名称以进行 YAML 同步（使用 GetNodeByID 进行管理员访问）
+	isAdmin := userIsAdmin(r.Context(), h.repo, username)
+
+	// 在删除之前获取节点名称以进行 YAML 同步(按权限:管理员任意,普通用户仅自己的)
 	// 如果没有找到节点，我们仍然继续删除（可能已经在其他地方删除了）
-	node, err := h.repo.GetNodeByID(r.Context(), id)
+	node, err := h.fetchNodeForAccess(r.Context(), id, username, isAdmin)
 	nodeNotFound := errors.Is(err, storage.ErrNodeNotFound)
 	if err != nil && !nodeNotFound {
 		writeError(w, http.StatusInternalServerError, err)
@@ -715,13 +1013,18 @@ func (h *nodesHandler) handleDelete(w http.ResponseWriter, r *http.Request, idSe
 		}
 	}
 
-	// 如果节点链接到远程服务器，则从代理删除远程入站
-	if !nodeNotFound && node.OriginalServer != "" && node.InboundTag != "" {
-		h.deleteRemoteInbound(r.Context(), node.OriginalServer, node.InboundTag)
+	// 如果节点链接到远程服务器:routed 节点只需清掉它绑定的 outbound + rule(不能动 inbound,会误删其它节点);
+	// 普通物理节点保持原来"清掉整个 inbound"的行为。
+	if !nodeNotFound && node.OriginalServer != "" {
+		if node.NodeType == "routed" && node.RoutedOutboundTag != "" {
+			h.deleteRemoteRoutedOutbound(r.Context(), node.OriginalServer, node.RoutedOutboundTag)
+		} else if node.InboundTag != "" {
+			h.deleteRemoteInbound(r.Context(), node.OriginalServer, node.InboundTag)
+		}
 	}
 
-	// 尝试使用DeleteNodeByID删除节点（管理员可以删除任何节点）
-	if err := h.repo.DeleteNodeByID(r.Context(), id); err != nil {
+	// 删除节点(按权限:管理员任意,普通用户仅自己的)
+	if err := h.deleteNodeForAccess(r.Context(), id, username, isAdmin); err != nil {
 		if !errors.Is(err, storage.ErrNodeNotFound) {
 			writeError(w, http.StatusInternalServerError, err)
 			return
@@ -832,12 +1135,17 @@ func (h *nodesHandler) handleBatchDelete(w http.ResponseWriter, r *http.Request)
 		originalServer string
 		inboundTag     string
 	}
+	isAdmin := userIsAdmin(r.Context(), h.repo, username)
+
+	// 只处理调用者有权访问的节点(管理员任意,普通用户仅自己的)。
+	accessibleIDs := make([]int64, 0, len(req.NodeIDs))
 	nodes := make([]nodeInfo, 0, len(req.NodeIDs))
 	for _, id := range req.NodeIDs {
-		node, err := h.repo.GetNodeByID(r.Context(), id)
+		node, err := h.fetchNodeForAccess(r.Context(), id, username, isAdmin)
 		if err != nil {
 			continue
 		}
+		accessibleIDs = append(accessibleIDs, id)
 		nodes = append(nodes, nodeInfo{
 			name:           node.NodeName,
 			originalServer: node.OriginalServer,
@@ -852,10 +1160,10 @@ func (h *nodesHandler) handleBatchDelete(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	// 从数据库中删除节点（使用DeleteNodeByID进行管理员访问）
+	// 从数据库中删除节点(按权限)
 	deletedCount := 0
-	for _, id := range req.NodeIDs {
-		if err := h.repo.DeleteNodeByID(r.Context(), id); err != nil {
+	for _, id := range accessibleIDs {
+		if err := h.deleteNodeForAccess(r.Context(), id, username, isAdmin); err != nil {
 			continue
 		}
 		deletedCount++
@@ -882,6 +1190,46 @@ func (h *nodesHandler) handleBatchDelete(w http.ResponseWriter, r *http.Request)
 }
 
 // 通过 RemoteManageHandler 将删除入站请求转发给代理。
+// deleteRemoteRoutedOutbound:routed 节点删除时清掉服务器侧的 routing rule + outbound,但不动 inbound。
+// 同 outboundTag 的 rule 可能不止一条(理论上 sync 单一对一,防御性地全删);outbound 按 tag 删一次。
+// inbound 里的 client 留着 — 节点配置已经删了,client 留着也无害,后续如果重建可以复用同凭据。
+func (h *nodesHandler) deleteRemoteRoutedOutbound(ctx context.Context, serverName, outboundTag string) {
+	if h.remoteManage == nil {
+		return
+	}
+	server, err := h.repo.GetRemoteServerByName(ctx, serverName)
+	if err != nil {
+		log.Printf("[Nodes] routed delete: lookup server %q failed: %v", serverName, err)
+		return
+	}
+	// 1. routing rules by outboundTag(全删,从后往前避免 index 漂移)
+	if raw, err := h.remoteManage.forwardToRemoteServer(ctx, server.ID, "GET", "/api/child/routing", nil); err == nil {
+		var resp struct {
+			Success bool                   `json:"success"`
+			Routing map[string]interface{} `json:"routing"`
+		}
+		if json.Unmarshal(raw, &resp) == nil && resp.Routing != nil {
+			rules, _ := resp.Routing["rules"].([]interface{})
+			for i := len(rules) - 1; i >= 0; i-- {
+				rmap, _ := rules[i].(map[string]interface{})
+				if t, _ := rmap["outboundTag"].(string); t == outboundTag {
+					body, _ := json.Marshal(map[string]interface{}{"action": "remove_rule", "index": i})
+					if _, err := h.remoteManage.forwardToRemoteServer(ctx, server.ID, "POST", "/api/child/routing", body); err != nil {
+						log.Printf("[Nodes] routed delete: remove rule (server=%s tag=%s idx=%d) failed: %v", serverName, outboundTag, i, err)
+					}
+				}
+			}
+		}
+	}
+	// 2. outbound by tag
+	rmOut, _ := json.Marshal(map[string]string{"action": "remove", "tag": outboundTag})
+	if _, err := h.remoteManage.forwardToRemoteServer(ctx, server.ID, "POST", "/api/child/outbounds", rmOut); err != nil {
+		log.Printf("[Nodes] routed delete: remove outbound (server=%s tag=%s) failed: %v", serverName, outboundTag, err)
+	} else {
+		log.Printf("[Nodes] routed delete: cleared rule+outbound %s on %s", outboundTag, serverName)
+	}
+}
+
 func (h *nodesHandler) deleteRemoteInbound(ctx context.Context, serverName, inboundTag string) {
 	if h.remoteManage == nil {
 		return
@@ -929,6 +1277,8 @@ func (h *nodesHandler) handleBatchRename(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	isAdmin := userIsAdmin(r.Context(), h.repo, username)
+
 	successCount := 0
 	failCount := 0
 	var updatedNodes []nodeDTO
@@ -940,8 +1290,8 @@ func (h *nodesHandler) handleBatchRename(w http.ResponseWriter, r *http.Request)
 			continue
 		}
 
-		// 获取现有节点
-		node, err := h.repo.GetNode(r.Context(), update.NodeID, username)
+		// 获取现有节点(按权限:管理员任意,普通用户仅自己的)
+		node, err := h.fetchNodeForAccess(r.Context(), update.NodeID, username, isAdmin)
 		if err != nil {
 			failCount++
 			continue
@@ -1009,45 +1359,81 @@ func (h *nodesHandler) handleBatchRename(w http.ResponseWriter, r *http.Request)
 }
 
 type nodeRequest struct {
-	RawURL       string `json:"raw_url"`
-	NodeName     string `json:"node_name"`
-	Protocol     string `json:"protocol"`
-	ParsedConfig string `json:"parsed_config"`
-	ClashConfig  string `json:"clash_config"`
-	Enabled      bool   `json:"enabled"`
-	Tag          string `json:"tag"`
-	InboundTag   string `json:"inbound_tag"`
+	RawURL              string          `json:"raw_url"`
+	NodeName            string          `json:"node_name"`
+	Protocol            string          `json:"protocol"`
+	ParsedConfig        string          `json:"parsed_config"`
+	ClashConfig         string          `json:"clash_config"`
+	Enabled             bool            `json:"enabled"`
+	Tag                 string          `json:"tag"`
+	InboundTag          string          `json:"inbound_tag"`
+	ChainProxyNodeID    *int64          `json:"-"`
+	RawChainProxyNodeID json.RawMessage `json:"chain_proxy_node_id"`
+}
+
+func (r *nodeRequest) hasChainProxyNodeID() bool {
+	return r.RawChainProxyNodeID != nil
+}
+
+func (r *nodeRequest) parseChainProxyNodeID() {
+	if r.RawChainProxyNodeID == nil || string(r.RawChainProxyNodeID) == "null" {
+		r.ChainProxyNodeID = nil
+		return
+	}
+	var id int64
+	if json.Unmarshal(r.RawChainProxyNodeID, &id) == nil {
+		r.ChainProxyNodeID = &id
+	}
 }
 
 type nodeDTO struct {
-	ID             int64     `json:"id"`
-	RawURL         string    `json:"raw_url"`
-	NodeName       string    `json:"node_name"`
-	Protocol       string    `json:"protocol"`
-	ParsedConfig   string    `json:"parsed_config"`
-	ClashConfig    string    `json:"clash_config"`
-	Enabled        bool      `json:"enabled"`
-	Tag            string    `json:"tag"`
-	OriginalServer string    `json:"original_server"`
-	InboundTag     string    `json:"inbound_tag"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID               int64     `json:"id"`
+	RawURL           string    `json:"raw_url"`
+	NodeName         string    `json:"node_name"`
+	Protocol         string    `json:"protocol"`
+	ParsedConfig     string    `json:"parsed_config"`
+	ClashConfig      string    `json:"clash_config"`
+	Enabled          bool      `json:"enabled"`
+	// Tag 是用户自定义分类标签(VIP / Asia / 测试),前端节点页用它做过滤、分组显示、批量更新。
+	// 必须下发,否则前端改了 tag 拉回来缺字段,显示永远是原状态,等同"修改不起作用"。
+	Tag              string    `json:"tag"`
+	OriginalServer   string    `json:"original_server"`
+	OriginalDomain   string    `json:"original_domain"`
+	InboundTag       string    `json:"inbound_tag"`
+	ChainProxyNodeID *int64    `json:"chain_proxy_node_id"`
+	NodeType           string    `json:"node_type"`             // 'physical' | 'routed'
+	ParentNodeID       *int64    `json:"parent_node_id"`        // routed 节点指向其父物理节点
+	RoutedOutboundTag  string    `json:"routed_outbound_tag"`   // routed 节点专用:绑定的出站 tag(便于 UI 直接展示)
+	RoutedOwner        string    `json:"routed_owner,omitempty"` // routed 节点专用:'shared'(admin 套餐分配) | 'user'(用户私有)
+	CreatedBy          string    `json:"created_by,omitempty"`   // routed 节点专用:创建者用户名(user 视角下用于鉴别"是不是我创建的")
+	// Multiplier 仅在普通用户视角(其绑定套餐内有 NodeMultipliers 配置)下注入。admin 视角省略字段
+	// (一个节点可能在多个套餐里有不同倍率,无法单值显示);== 1 时也省略,前端按"未设置"对待。
+	Multiplier         float64   `json:"multiplier,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 func convertNode(node storage.Node) nodeDTO {
 	return nodeDTO{
-		ID:             node.ID,
-		RawURL:         node.RawURL,
-		NodeName:       node.NodeName,
-		Protocol:       node.Protocol,
-		ParsedConfig:   node.ParsedConfig,
-		ClashConfig:    node.ClashConfig,
-		Enabled:        node.Enabled,
-		Tag:            node.Tag,
-		OriginalServer: node.OriginalServer,
-		InboundTag:     node.InboundTag,
-		CreatedAt:      node.CreatedAt,
-		UpdatedAt:      node.UpdatedAt,
+		ID:                node.ID,
+		RawURL:            node.RawURL,
+		NodeName:          node.NodeName,
+		Protocol:          node.Protocol,
+		ParsedConfig:      node.ParsedConfig,
+		ClashConfig:       node.ClashConfig,
+		Enabled:           node.Enabled,
+		Tag:               node.Tag,
+		OriginalServer:    node.OriginalServer,
+		OriginalDomain:    node.OriginalDomain,
+		InboundTag:        node.InboundTag,
+		ChainProxyNodeID:  node.ChainProxyNodeID,
+		NodeType:          node.NodeType,
+		ParentNodeID:      node.ParentNodeID,
+		RoutedOutboundTag: node.RoutedOutboundTag,
+		RoutedOwner:       node.RoutedOwner,
+		CreatedBy:         node.Username, // nodes 表里 username = 创建/拥有者
+		CreatedAt:         node.CreatedAt,
+		UpdatedAt:         node.UpdatedAt,
 	}
 }
 
@@ -1196,4 +1582,41 @@ func (h *nodesHandler) handleFetchSubscription(w http.ResponseWriter, r *http.Re
 		"count":         len(clashConfig.Proxies),
 		"suggested_tag": suggestedTag,
 	})
+}
+
+func (h *nodesHandler) handleListTags(w http.ResponseWriter, r *http.Request) {
+	username := auth.UsernameFromContext(r.Context())
+	if username == "" {
+		writeError(w, http.StatusUnauthorized, errors.New("用户未认证"))
+		return
+	}
+
+	// 数据隔离:管理员看全部标签,普通用户只看自己节点的标签。
+	var allNodes []storage.Node
+	var err error
+	if userIsAdmin(r.Context(), h.repo, username) {
+		allNodes, err = h.repo.ListAllNodes(r.Context())
+	} else {
+		allNodes, err = h.repo.ListNodes(r.Context(), username)
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	seen := make(map[string]bool)
+	var tags []string
+	for _, node := range allNodes {
+		for _, t := range node.Tags {
+			if t != "" && !seen[t] {
+				seen[t] = true
+				tags = append(tags, t)
+			}
+		}
+	}
+	if tags == nil {
+		tags = []string{}
+	}
+
+	respondJSON(w, http.StatusOK, map[string]any{"tags": tags})
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -47,9 +48,326 @@ func (h *TrafficHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleNodeSnapshots(w, r)
 	case path == "user-snapshots":
 		h.handleUserSnapshots(w, r)
+	case path == "user-nodes":
+		h.handleUserNodes(w, r)
+	case path == "node-users":
+		h.handleNodeUsers(w, r)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+// handleUserNodes 返回某用户在每个节点上的流量(细分到 routed 子账号 / 普通 inbound),
+// 数据来源: user_email_traffic + user_subaccounts 反查 routed_node_id + user_inbound_configs 反查
+// 该用户在某 server 上的 inbound 节点。
+//
+// GET /api/admin/traffic/user-nodes?username=share
+//
+// 响应: { items: [ { node_id, node_name, server_name, uplink, downlink, last_uplink, last_downlink } ] }
+func (h *TrafficHandler) handleUserNodes(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	username := strings.TrimSpace(r.URL.Query().Get("username"))
+	if username == "" {
+		http.Error(w, "username is required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+
+	// 1. routed 子账号 email → routed_node_id(只算 is_active)
+	subaccounts, err := h.repo.ListUserSubaccounts(ctx, username)
+	if err != nil {
+		log.Printf("[Traffic API] user-nodes: list subaccounts failed: %v", err)
+		h.writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "list subaccounts failed"})
+		return
+	}
+	emailToRoutedNodeID := make(map[string]int64, len(subaccounts))
+	for _, sa := range subaccounts {
+		if sa.IsActive {
+			emailToRoutedNodeID[sa.Email] = sa.RoutedNodeID
+		}
+	}
+
+	// 2. 用户在每台 server 上的 inbound 配置(用于把"email=username"那行映射到对应 inbound 节点)
+	inbConfigs, err := h.repo.GetUserInboundConfigs(ctx, username)
+	if err != nil {
+		log.Printf("[Traffic API] user-nodes: list inbound configs failed: %v", err)
+		inbConfigs = nil
+	}
+	// (server_id) → []inbound_tag — 通常一 server 一 inbound,多 inbound 也存
+	serverToInboundTags := make(map[int64][]string)
+	for _, c := range inbConfigs {
+		serverToInboundTags[c.ServerID] = append(serverToInboundTags[c.ServerID], c.InboundTag)
+	}
+
+	// 3. 节点表反查:routed_node_id → Node;(server_name, inbound_tag) → Node
+	allNodes, err := h.repo.ListAllNodes(ctx)
+	if err != nil {
+		log.Printf("[Traffic API] user-nodes: list nodes failed: %v", err)
+		h.writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "list nodes failed"})
+		return
+	}
+	routedNodeByID := make(map[int64]storage.Node)
+	inboundNodeByKey := make(map[string]storage.Node) // "serverName::tag"
+	for _, n := range allNodes {
+		if n.NodeType == "routed" {
+			routedNodeByID[n.ID] = n
+		} else if n.InboundTag != "" {
+			inboundNodeByKey[n.OriginalServer+"::"+n.InboundTag] = n
+		}
+	}
+
+	// 4. server_id → server_name 映射(给 inbound 反查 + 输出标注)
+	servers, err := h.repo.ListRemoteServers(ctx)
+	if err != nil {
+		log.Printf("[Traffic API] user-nodes: list servers failed: %v", err)
+	}
+	serverNameByID := make(map[int64]string, len(servers))
+	for _, s := range servers {
+		serverNameByID[s.ID] = s.Name
+	}
+
+	// 5. 拉所有 user_email_traffic,过滤命中本 username 的行
+	allEmailTraffic, err := h.repo.ListUserEmailTraffic(ctx)
+	if err != nil {
+		log.Printf("[Traffic API] user-nodes: list user_email_traffic failed: %v", err)
+		h.writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "list email traffic failed"})
+		return
+	}
+
+	type item struct {
+		NodeID       int64  `json:"node_id"`
+		NodeName     string `json:"node_name"`
+		ServerName   string `json:"server_name"`
+		Uplink       int64  `json:"uplink"`
+		Downlink     int64  `json:"downlink"`
+		LastUplink   int64  `json:"last_uplink"`
+		LastDownlink int64  `json:"last_downlink"`
+	}
+	byNode := make(map[int64]*item)
+
+	addToNode := func(n storage.Node, srvName string, uet storage.UserEmailTraffic) {
+		if existing, ok := byNode[n.ID]; ok {
+			existing.Uplink += uet.Uplink
+			existing.Downlink += uet.Downlink
+			existing.LastUplink += uet.LastUplink
+			existing.LastDownlink += uet.LastDownlink
+			return
+		}
+		byNode[n.ID] = &item{
+			NodeID:       n.ID,
+			NodeName:     n.NodeName,
+			ServerName:   srvName,
+			Uplink:       uet.Uplink,
+			Downlink:     uet.Downlink,
+			LastUplink:   uet.LastUplink,
+			LastDownlink: uet.LastDownlink,
+		}
+	}
+
+	for _, uet := range allEmailTraffic {
+		// 优先 routed 路径:email 命中本 user 的子账号
+		if rid, ok := emailToRoutedNodeID[uet.Email]; ok {
+			if n, ok := routedNodeByID[rid]; ok {
+				srvName := serverNameByID[uet.ServerID]
+				if srvName == "" {
+					srvName = n.OriginalServer
+				}
+				addToNode(n, srvName, uet)
+			}
+			continue
+		}
+		// 普通 inbound 路径:email == username 且本 user 在该 server 有 inbound 配置
+		if uet.Email != username {
+			// 是别的 user 的 email,过滤掉
+			if h.repo.ResolveUsernameByEmail(ctx, uet.Email) != username {
+				continue
+			}
+		}
+		tags := serverToInboundTags[uet.ServerID]
+		if len(tags) == 0 {
+			continue
+		}
+		srvName := serverNameByID[uet.ServerID]
+		// 一般一 server 一个 inbound;若多 inbound,流量平均分(Xray stats 上 user 维度本身就是 across inbounds 的合计,没法精确拆)
+		share := uet
+		if len(tags) > 1 {
+			share.Uplink = uet.Uplink / int64(len(tags))
+			share.Downlink = uet.Downlink / int64(len(tags))
+			share.LastUplink = uet.LastUplink / int64(len(tags))
+			share.LastDownlink = uet.LastDownlink / int64(len(tags))
+		}
+		for _, tag := range tags {
+			if n, ok := inboundNodeByKey[srvName+"::"+tag]; ok {
+				addToNode(n, srvName, share)
+			}
+		}
+	}
+
+	out := make([]item, 0, len(byNode))
+	for _, it := range byNode {
+		out = append(out, *it)
+	}
+	// 按总流量降序
+	sort.Slice(out, func(i, j int) bool {
+		return (out[i].Uplink + out[i].Downlink) > (out[j].Uplink + out[j].Downlink)
+	})
+
+	h.writeJSON(w, http.StatusOK, map[string]any{"success": true, "items": out})
+}
+
+// handleNodeUsers 返回某节点上各用户的流量(节点视图 drilldown 反向用)。
+// 走 user_email_traffic + user_subaccounts/user_inbound_configs 反查,与 handleUserNodes 对称。
+//
+// GET /api/admin/traffic/node-users?node_id=42
+//
+// 响应: { items: [ { username, uplink, downlink, last_uplink, last_downlink } ] }
+func (h *TrafficHandler) handleNodeUsers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	nodeIDStr := strings.TrimSpace(r.URL.Query().Get("node_id"))
+	nodeID, err := strconv.ParseInt(nodeIDStr, 10, 64)
+	if err != nil || nodeID <= 0 {
+		http.Error(w, "node_id is required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+
+	node, err := h.repo.GetNodeByID(ctx, nodeID)
+	if err != nil {
+		h.writeJSON(w, http.StatusNotFound, map[string]any{"success": false, "error": "node not found"})
+		return
+	}
+	isRouted := node.NodeType == "routed"
+
+	// server_name → server_id 反查(普通 inbound 路径要的)
+	servers, err := h.repo.ListRemoteServers(ctx)
+	if err != nil {
+		log.Printf("[Traffic API] node-users: list servers failed: %v", err)
+	}
+	serverIDByName := make(map[string]int64, len(servers))
+	for _, s := range servers {
+		serverIDByName[s.Name] = s.ID
+	}
+	var nodeServerID int64
+	if !isRouted {
+		nodeServerID = serverIDByName[node.OriginalServer]
+	}
+
+	// routed 节点:本节点的所有 active 子账号 email → username
+	routedEmailToUsername := make(map[string]string)
+	if isRouted {
+		subs, err := h.repo.ListSubaccountsByRoutedNode(ctx, nodeID)
+		if err != nil {
+			log.Printf("[Traffic API] node-users: list subaccounts by routed node failed: %v", err)
+		}
+		for _, sa := range subs {
+			if sa.IsActive {
+				routedEmailToUsername[sa.Email] = sa.Username
+			}
+		}
+	}
+
+	// 普通 inbound 节点:本 (server_id, inbound_tag) 上有 user_inbound_configs 的所有 username,作为白名单。
+	// 同时拿本 server 的所有 active 子账号 email 作为排除集 — 子账号 email 走 routed 节点,
+	// 即使流量落在本 server 的统计里也不该归到本 inbound。
+	inboundUsernames := make(map[string]bool)
+	serverSubaccountEmails := make(map[string]bool)
+	if !isRouted && nodeServerID > 0 && node.InboundTag != "" {
+		cfgs, err := h.repo.ListAllUserInboundConfigs(ctx)
+		if err != nil {
+			log.Printf("[Traffic API] node-users: list user inbound configs failed: %v", err)
+		}
+		for _, c := range cfgs {
+			if c.ServerID == nodeServerID && c.InboundTag == node.InboundTag {
+				inboundUsernames[c.Username] = true
+			}
+		}
+		if node.OriginalServer != "" {
+			subs, err := h.repo.ListActiveSubaccountsByServerName(ctx, node.OriginalServer)
+			if err != nil {
+				log.Printf("[Traffic API] node-users: list server subaccounts failed: %v", err)
+			}
+			for _, sa := range subs {
+				serverSubaccountEmails[sa.Email] = true
+			}
+		}
+	}
+
+	allEmailTraffic, err := h.repo.ListUserEmailTraffic(ctx)
+	if err != nil {
+		log.Printf("[Traffic API] node-users: list user_email_traffic failed: %v", err)
+		h.writeJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "error": "list email traffic failed"})
+		return
+	}
+
+	type item struct {
+		Username     string `json:"username"`
+		Uplink       int64  `json:"uplink"`
+		Downlink     int64  `json:"downlink"`
+		LastUplink   int64  `json:"last_uplink"`
+		LastDownlink int64  `json:"last_downlink"`
+	}
+	byUser := make(map[string]*item)
+	addUser := func(username string, uet storage.UserEmailTraffic) {
+		if existing, ok := byUser[username]; ok {
+			existing.Uplink += uet.Uplink
+			existing.Downlink += uet.Downlink
+			existing.LastUplink += uet.LastUplink
+			existing.LastDownlink += uet.LastDownlink
+			return
+		}
+		byUser[username] = &item{
+			Username:     username,
+			Uplink:       uet.Uplink,
+			Downlink:     uet.Downlink,
+			LastUplink:   uet.LastUplink,
+			LastDownlink: uet.LastDownlink,
+		}
+	}
+
+	for _, uet := range allEmailTraffic {
+		if isRouted {
+			if username, ok := routedEmailToUsername[uet.Email]; ok {
+				addUser(username, uet)
+			}
+			continue
+		}
+		// 普通 inbound:必须是本 server
+		if uet.ServerID != nodeServerID {
+			continue
+		}
+		// 排除本 server 上的子账号 email(归 routed 节点)
+		if serverSubaccountEmails[uet.Email] {
+			continue
+		}
+		username := h.repo.ResolveUsernameByEmail(ctx, uet.Email)
+		if username == "" {
+			continue
+		}
+		// 必须确实在本 inbound 有配置才算 — 这同时滤掉了 ResolveUsernameByEmail
+		// fallback 把 outbound tag 当 username 返回的脏数据。
+		if !inboundUsernames[username] {
+			continue
+		}
+		addUser(username, uet)
+	}
+
+	out := make([]item, 0, len(byUser))
+	for _, it := range byUser {
+		out = append(out, *it)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return (out[i].Uplink + out[i].Downlink) > (out[j].Uplink + out[j].Downlink)
+	})
+
+	h.writeJSON(w, http.StatusOK, map[string]any{"success": true, "items": out})
 }
 
 // ServerTrafficResponse 表示服务器的流量数据
@@ -117,10 +435,16 @@ func (h *TrafficHandler) handleServers(w http.ResponseWriter, r *http.Request) {
 		userByServer[t.ServerID] = append(userByServer[t.ServerID], t)
 	}
 
-	// 建立服务器 ID → 名称映射
+	// 建立服务器 ID → 名称 / 流量统计规则映射
 	serverNameMap := make(map[int64]string)
+	serverStatsModeMap := make(map[int64]string)
 	for _, server := range servers {
 		serverNameMap[server.ID] = server.Name
+		mode := server.TrafficStatsMode
+		if mode != "upload" && mode != "download" {
+			mode = "both"
+		}
+		serverStatsModeMap[server.ID] = mode
 	}
 
 	// 收集所有出现过的 server_id
@@ -140,8 +464,25 @@ func (h *TrafficHandler) handleServers(w http.ResponseWriter, r *http.Request) {
 			name = fmt.Sprintf("未知服务器-%d", sid)
 		}
 		nodeTraffic := nodeByServer[sid]
+		mode := serverStatsModeMap[sid]
+		if mode == "" {
+			mode = "both"
+		}
 		var inbounds, outbounds []storage.NodeTraffic
 		for _, t := range nodeTraffic {
+			// 应用服务器层 traffic_stats_mode 到节点 inbound/outbound 流量:
+			// 仅上行/仅下行模式下把对侧字段置 0,前端 `(uplink+downlink)` 计算自动遵循规则。
+			// 用户流量(下方 userByServer)保持原样,按套餐 traffic_mode 走。
+			switch mode {
+			case "upload":
+				t.Downlink = 0
+				t.LastDownlink = 0
+				t.TotalDownlink = 0
+			case "download":
+				t.Uplink = 0
+				t.LastUplink = 0
+				t.TotalUplink = 0
+			}
 			if t.Type == "inbound" {
 				inbounds = append(inbounds, t)
 			} else {
@@ -417,13 +758,15 @@ func (h *TrafficHandler) writeJSON(w http.ResponseWriter, status int, data inter
 type RemoteTrafficHandler struct {
 	repo      *storage.TrafficRepository
 	collector *traffic.Collector
+	crypto    *CryptoConfig
 }
 
 // 创建一个新的远程流量处理程序
-func NewRemoteTrafficHandler(repo *storage.TrafficRepository, collector *traffic.Collector) *RemoteTrafficHandler {
+func NewRemoteTrafficHandler(repo *storage.TrafficRepository, collector *traffic.Collector, crypto *CryptoConfig) *RemoteTrafficHandler {
 	return &RemoteTrafficHandler{
 		repo:      repo,
 		collector: collector,
+		crypto:    crypto,
 	}
 }
 
@@ -449,16 +792,14 @@ func (h *RemoteTrafficHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 	ctx := r.Context()
 
-	// 从标头获取令牌
-	token := r.Header.Get("X-Remote-Token")
-	if token == "" {
-		// 尝试授权标头
-		auth := r.Header.Get("Authorization")
-		if strings.HasPrefix(auth, "Bearer ") {
-			token = strings.TrimPrefix(auth, "Bearer ")
-		}
+	// 加密中间件处理
+	crypto, err := handleHTTPCrypto(r, w, h.crypto)
+	if crypto == nil {
+		return
 	}
+	_ = err
 
+	token := crypto.Token
 	if token == "" {
 		h.writeJSON(w, http.StatusUnauthorized, map[string]interface{}{
 			"success": false,
@@ -479,7 +820,7 @@ func (h *RemoteTrafficHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 	// 解析请求体
 	var req RemoteTrafficRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.Unmarshal(crypto.Body, &req); err != nil {
 		h.writeJSON(w, http.StatusBadRequest, map[string]interface{}{
 			"success": false,
 			"error":   "Invalid request body",
@@ -500,9 +841,14 @@ func (h *RemoteTrafficHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	// 在实际实现中，您可能希望将远程服务器与 xray_servers 相关联
 	serverID := remoteServer.ID
 
-	// 更新流量报告上的last_heartbeat - 这取代了单独心跳的需要
-	if err := h.repo.UpdateRemoteServerLastActivity(ctx, serverID); err != nil {
-		log.Printf("[Remote Traffic] Failed to update last activity for %s: %v", remoteServer.Name, err)
+	// 更新流量报告上的 last_heartbeat — 这取代了单独心跳的需要;
+	// 同时检测离线→在线翻转,补发 TG 上线通知(WS 模式 auth 已经发过,
+	// HTTP push 模式以前只在这里悄悄翻状态,所以下线通知有、上线通知没有)。
+	prevStatus, serverName, serverIP, uErr := h.repo.UpdateRemoteServerLastActivity(ctx, serverID)
+	if uErr != nil {
+		log.Printf("[Remote Traffic] Failed to update last activity for %s: %v", remoteServer.Name, uErr)
+	} else if prevStatus == storage.RemoteServerStatusOffline {
+		SendServerOnlineNotification(ctx, serverName, serverIP)
 	}
 
 	// 处理指标
@@ -515,10 +861,18 @@ func (h *RemoteTrafficHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	h.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"message": "Traffic data received",
+	// 在 traffic 上报响应里捎带最新的 config 更新(HTTP-mode agent 没有持久连接,
+	// 走 traffic POST 的 response 把变化推回去,agent 收到后调 handleConfigUpdate 应用)。
+	configUpdates := map[string]string{}
+	if val, _ := h.repo.GetSystemSetting(ctx, "dashboard_refresh_interval_ms"); val != "" {
+		configUpdates["traffic_report_interval_ms"] = val
+	}
+	respData, _ := json.Marshal(map[string]interface{}{
+		"success":        true,
+		"message":        "Traffic data received",
+		"config_updates": configUpdates,
 	})
+	writeHTTPCryptoResponse(w, crypto.Session, respData)
 }
 
 func (h *RemoteTrafficHandler) writeJSON(w http.ResponseWriter, status int, data interface{}) {

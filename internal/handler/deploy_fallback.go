@@ -36,7 +36,11 @@ func (h *RemoteManageHandler) deployFallbackConfig(ctx context.Context, server *
 	domainConf := strings.ReplaceAll(string(domainTpl), "{domain}", domain)
 	domainConf = strings.ReplaceAll(domainConf, "{root_domain}", rootDomain)
 	domainConf = strings.ReplaceAll(domainConf, "{cert_name}", certName)
-	domainConf = strings.ReplaceAll(domainConf, "{static_root_path}", server.SiteValue)
+	staticRoot := server.SiteValue
+	if staticRoot == "" {
+		staticRoot = "/usr/local/nginx/html"
+	}
+	domainConf = strings.ReplaceAll(domainConf, "{static_root_path}", staticRoot)
 	domainConf = strings.ReplaceAll(domainConf, "{proxy_pass_server}", server.SiteValue)
 
 	sslPayload, _ := json.Marshal(map[string]any{
@@ -86,5 +90,11 @@ func (h *RemoteManageHandler) deployFallbackConfig(ctx context.Context, server *
 	}
 
 	log.Printf("[DeployFallback] Completed fallback config deployment for server %d (%s), domain=%s", server.ID, server.Name, domain)
+
+	// 通知 agent 更新本地 steal_mode
+	if h.wsHandler != nil {
+		_ = h.wsHandler.SendConfigUpdate(server.ID, map[string]string{"steal_mode": "fallback"})
+	}
+
 	return nil
 }

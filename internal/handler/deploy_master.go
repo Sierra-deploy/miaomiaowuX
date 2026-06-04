@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"miaomiaowux/internal/storage"
 	"miaomiaowux/templates"
@@ -119,6 +121,10 @@ func (h *CertificateHandler) DeployMasterCert(w http.ResponseWriter, r *http.Req
 	_ = h.repo.SetSystemSetting(ctx, "master_url", newMasterURL)
 	_ = h.repo.SetSystemSetting(ctx, "master_cert_pending", "")
 	log.Printf("[DeployMasterCert] 主控证书部署成功，master_url 已更新为 %s", newMasterURL)
+
+	if h.onMasterURLChanged != nil {
+		go h.onMasterURLChanged(context.Background(), newMasterURL)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
@@ -268,9 +274,21 @@ func (h *CertificateHandler) EnableHTTPS(w http.ResponseWriter, r *http.Request)
 	_ = h.repo.SetSystemSetting(ctx, "master_url", newMasterURL)
 	log.Printf("[EnableHTTPS] HTTPS 已启用，master_url=%s, port443_in_use=%v", newMasterURL, isPort443InUse())
 
+	if h.onMasterURLChanged != nil {
+		go h.onMasterURLChanged(context.Background(), newMasterURL)
+	}
+
 	respondJSON(w, http.StatusOK, map[string]any{
 		"success":        true,
 		"message":        fmt.Sprintf("已为 %s 开启 HTTPS 访问", domain),
 		"new_master_url": newMasterURL,
 	})
+
+	// 延迟重启服务，使其重新绑定到 127.0.0.1（响应已发送）
+	go func() {
+		time.Sleep(2 * time.Second)
+		log.Printf("[EnableHTTPS] Restarting service to bind 127.0.0.1 only")
+		p, _ := os.FindProcess(os.Getpid())
+		_ = p.Signal(syscall.SIGTERM)
+	}()
 }

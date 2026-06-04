@@ -1,12 +1,14 @@
 import { Link } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { Activity, Users, LayoutTemplate, Menu, Network, Package, Settings, PanelLeft, ChevronLeft, ChevronRight, MoreHorizontal, Shield, Server } from 'lucide-react'
+import { Activity, Users, LayoutTemplate, Menu, Network, Package, Settings, PanelLeft, ChevronLeft, ChevronRight, MoreHorizontal, Shield, Server, Link2, FileText, Scissors, LinkIcon } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { ThemeSwitch } from '@/components/theme-switch'
 import { UserMenu } from './user-menu'
 import { useAuthStore } from '@/stores/auth-store'
 import { useLayoutStore } from '@/stores/layout-store'
 import { profileQueryFn } from '@/lib/profile'
+import { userPermissionsQueryFn, type UserPageKey } from '@/lib/user-permissions'
+import { api } from '@/lib/api'
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -15,19 +17,37 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Button } from '@/components/ui/button'
 import { AnimatedX } from '@/components/animated-x'
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState, useRef, useLayoutEffect } from 'react'
 
 const baseNavLinks = [
   { titleKey: 'nav.trafficInfo' as const, to: '/', icon: Activity },
 ]
 
-const adminNavLinks = [
+const coreAdminNavLinks = [
   { titleKey: 'nav.nodeManagement' as const, to: '/nodes', icon: Network },
   { titleKey: 'nav.serviceManagement' as const, to: '/xray-servers', icon: Server },
   { titleKey: 'nav.userManagement' as const, to: '/users', icon: Users },
   { titleKey: 'nav.packageManagement' as const, to: '/packages', icon: Package },
   { titleKey: 'nav.certificateManagement' as const, to: '/certificates', icon: Shield },
-  { titleKey: 'nav.templateManagement' as const, to: '/templates', icon: LayoutTemplate },
+]
+
+const mmwTopNavLinks = [
+  { titleKey: 'nav.subscriptionLinks' as const, to: '/subscription', icon: LinkIcon, pageKey: 'subscription' as UserPageKey },
+  { titleKey: 'nav.subscriptionGenerator' as const, to: '/generator', icon: Link2, pageKey: 'generator' as UserPageKey },
+]
+
+const mmwBottomNavLinks = [
+  { titleKey: 'nav.templateManagement' as const, to: '/templates', icon: LayoutTemplate, pageKey: 'templates' as UserPageKey },
+  { titleKey: 'nav.subscriptionManagement' as const, to: '/subscribe-files', icon: FileText, pageKey: 'subscribe-files' as UserPageKey },
+  { titleKey: 'nav.customRulesManagement' as const, to: '/custom-rules', icon: Scissors, pageKey: 'custom-rules' as UserPageKey },
+]
+
+// 普通用户可被授权的核心页面(管理员始终可见,见 coreAdminNavLinks)
+const userGrantableNavLinks = [
+  { titleKey: 'nav.nodeManagement' as const, to: '/nodes', icon: Network, pageKey: 'nodes' as UserPageKey },
+]
+
+const tailAdminNavLinks = [
   { titleKey: 'nav.systemSettings' as const, to: '/system-settings', icon: Settings },
 ]
 
@@ -51,92 +71,135 @@ export function Topbar() {
 
   const isAdmin = Boolean(profile?.is_admin)
 
+  const { data: mmwFeaturesData } = useQuery({
+    queryKey: ['miaomiaowu-features-enabled'],
+    queryFn: async () => {
+      const response = await api.get('/api/admin/system-settings/miaomiaowu-features')
+      return response.data as { success: boolean; enable_miaomiaowu_features: boolean }
+    },
+    enabled: Boolean(auth.accessToken) && isAdmin,
+    staleTime: 5 * 60 * 1000,
+  })
+  const enableMmwFeatures = mmwFeaturesData?.enable_miaomiaowu_features ?? true
+
+  // 普通用户:按全局权限策略动态显示妙妙屋页面。
+  const { data: userPerms } = useQuery({
+    queryKey: ['user-permissions'],
+    queryFn: userPermissionsQueryFn,
+    enabled: Boolean(auth.accessToken) && !isAdmin,
+    staleTime: 5 * 60 * 1000,
+  })
+  const allowedPages = new Set(userPerms?.pages ?? [])
+  const permittedMmwLinks = [...mmwTopNavLinks, ...mmwBottomNavLinks, ...userGrantableNavLinks].filter((l) => allowedPages.has(l.pageKey))
+
   // 计算所有导航链接
-  const allNavLinks = isAdmin ? [...baseNavLinks, ...adminNavLinks] : baseNavLinks
+  const adminNavLinks = [...(enableMmwFeatures ? mmwTopNavLinks : []), ...coreAdminNavLinks, ...(enableMmwFeatures ? mmwBottomNavLinks : []), ...tailAdminNavLinks]
+  const allNavLinks = isAdmin ? [...baseNavLinks, ...adminNavLinks] : [...baseNavLinks, ...permittedMmwLinks]
+  // 移动端下拉菜单链接:管理员=管理菜单,普通用户=被授权的妙妙屋页面
+  const mobileMenuLinks = isAdmin ? adminNavLinks : permittedMmwLinks
   const totalLinks = allNavLinks.length
 
-  // 计算需要隐藏文字的按钮数量（从后往前）
-  const calculateIconOnlyCount = useCallback(() => {
-    if (!navRef.current) return
+  const buttonWidthsRef = useRef<number[]>([])
+  const logoTextWidthRef = useRef(0)
+  const hideLogoTextRef = useRef(false)
 
-    // 直接获取窗口宽度
-    const windowWidth = window.innerWidth
-    // 预留空间：logo图片约60px，右侧按钮区约200px，左右padding约48px，间距约24px
-    const logoTextWidth = 90 // "妙妙屋X" 文字宽度
-    const baseReservedSpace = 300
+  useLayoutEffect(() => {
+    const nav = navRef.current
+    if (!nav) return
 
-    // 每个带文字按钮约115px（4字+图标+padding），纯图标按钮约44px，gap约12px
-    const fullButtonWidth = 115
-    const iconButtonWidth = 44
-    const gap = 12
-    // 溢出菜单按钮宽度
-    const overflowButtonWidth = 44
+    const ICON_WIDTH = 36 // w-9 = 2.25rem
+    const OVERFLOW_BTN_WIDTH = 36
 
-    // 计算全部显示文字需要的宽度
-    const fullWidth = totalLinks * (fullButtonWidth + gap) - gap
-    const availableWithLogoText = windowWidth - baseReservedSpace - logoTextWidth
+    const doCalculate = () => {
+      if (!nav.isConnected) return
+      const availableWidth = nav.clientWidth
+      if (availableWidth <= 0) return
 
-    if (fullWidth <= availableWithLogoText) {
-      // 空间够，全部显示
-      setIconOnlyCount(0)
-      setHideLogoText(false)
-      setOverflowCount(0)
-      return
+      // 测量 logo 文字宽度（仅在文字可见时）
+      if (!hideLogoTextRef.current) {
+        const logoTextEl = nav.parentElement?.querySelector<HTMLElement>('[data-logo-text]')
+        if (logoTextEl) {
+          const parentGap = parseFloat(getComputedStyle(nav.parentElement!).gap) || 24
+          logoTextWidthRef.current = logoTextEl.offsetWidth + parentGap
+        }
+      }
+
+      // 测量按钮实际宽度（仅在全文字模式下）
+      const buttons = Array.from(nav.querySelectorAll<HTMLElement>('[data-nav-item]'))
+      if (buttons.length === totalLinks && buttons.every(b => b.dataset.iconOnly !== 'true')) {
+        buttonWidthsRef.current = buttons.map(b => b.offsetWidth)
+      }
+
+      const btnWidths = buttonWidthsRef.current.length === totalLinks
+        ? buttonWidthsRef.current
+        : Array(totalLinks).fill(115)
+
+      const gap = parseFloat(getComputedStyle(nav).gap) || 12
+
+      // 以"显示 logo 文字"为基准计算可用宽度
+      const logoTextW = logoTextWidthRef.current || 90
+      const baseAvailable = hideLogoTextRef.current
+        ? availableWidth - logoTextW
+        : availableWidth
+
+      // 所有按钮全文字的总宽度
+      const fullContentWidth = btnWidths.reduce((sum, w, i) => sum + w + (i > 0 ? gap : 0), 0)
+
+      // 阶段1：全部显示（含logo文字）
+      if (fullContentWidth <= baseAvailable) {
+        hideLogoTextRef.current = false
+        setHideLogoText(false)
+        setIconOnlyCount(0)
+        setOverflowCount(0)
+        return
+      }
+
+      // 阶段2：隐藏 logo 文字
+      const availableNoLogo = baseAvailable + logoTextW
+      if (fullContentWidth <= availableNoLogo) {
+        hideLogoTextRef.current = true
+        setHideLogoText(true)
+        setIconOnlyCount(0)
+        setOverflowCount(0)
+        return
+      }
+
+      // 阶段3：从右往左收起按钮文字
+      hideLogoTextRef.current = true
+      setHideLogoText(true)
+
+      let saved = 0
+      let collapseCount = 0
+      for (let i = btnWidths.length - 1; i >= 0; i--) {
+        saved += btnWidths[i] - ICON_WIDTH
+        collapseCount++
+        if (fullContentWidth - saved <= availableNoLogo) {
+          setIconOnlyCount(collapseCount)
+          setOverflowCount(0)
+          return
+        }
+      }
+
+      // 阶段4：全部图标仍不够，放入溢出菜单
+      setIconOnlyCount(totalLinks)
+      const allIconWidth = totalLinks * (ICON_WIDTH + gap) - gap + OVERFLOW_BTN_WIDTH + gap
+      if (allIconWidth > availableNoLogo) {
+        const excess = allIconWidth - availableNoLogo
+        const toHide = Math.ceil(excess / (ICON_WIDTH + gap))
+        setOverflowCount(Math.min(toHide, totalLinks - 1))
+      } else {
+        setOverflowCount(0)
+      }
     }
 
-    // 空间不够，先隐藏"妙妙屋X"文字
-    setHideLogoText(true)
-    const availableWithoutLogoText = windowWidth - baseReservedSpace
+    doCalculate()
 
-    if (fullWidth <= availableWithoutLogoText) {
-      // 隐藏logo文字后空间够了
-      setIconOnlyCount(0)
-      setOverflowCount(0)
-      return
-    }
+    const observer = new ResizeObserver(() => doCalculate())
+    observer.observe(nav)
+    if (nav.parentElement) observer.observe(nav.parentElement)
 
-    // 还不够，需要隐藏部分按钮文字
-    const savedPerButton = fullButtonWidth - iconButtonWidth
-    const overflowWidth = fullWidth - availableWithoutLogoText
-    const needed = Math.ceil(overflowWidth / savedPerButton)
-
-    if (needed <= totalLinks) {
-      // 隐藏部分按钮文字即可
-      setIconOnlyCount(Math.min(needed, totalLinks))
-      setOverflowCount(0)
-      return
-    }
-
-    // 所有按钮都只显示图标还不够，需要将部分按钮收到下拉菜单
-    setIconOnlyCount(totalLinks)
-    const allIconWidth = totalLinks * (iconButtonWidth + gap) - gap
-    const stillOverflow = allIconWidth - availableWithoutLogoText + overflowButtonWidth
-    if (stillOverflow > 0) {
-      const buttonsToHide = Math.ceil(stillOverflow / (iconButtonWidth + gap))
-      setOverflowCount(Math.min(buttonsToHide, totalLinks - 1)) // 至少保留1个按钮
-    } else {
-      setOverflowCount(0)
-    }
+    return () => observer.disconnect()
   }, [totalLinks])
-
-  useEffect(() => {
-    calculateIconOnlyCount()
-
-    const resizeObserver = new ResizeObserver(() => {
-      calculateIconOnlyCount()
-    })
-
-    if (navRef.current?.parentElement?.parentElement) {
-      resizeObserver.observe(navRef.current.parentElement.parentElement)
-    }
-
-    window.addEventListener('resize', calculateIconOnlyCount)
-
-    return () => {
-      resizeObserver.disconnect()
-      window.removeEventListener('resize', calculateIconOnlyCount)
-    }
-  }, [calculateIconOnlyCount])
 
   return (
     <header className='fixed top-0 left-0 right-0 z-50 border-b border-[color:rgba(241,140,110,0.22)] bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60'>
@@ -156,7 +219,7 @@ export function Topbar() {
               alt={`${t('brand')} Logo`}
               className='h-10 w-10 border-2 border-[color:rgba(241,140,110,0.4)] shadow-[4px_4px_0_rgba(0,0,0,0.2)] shrink-0 hidden dark:block'
             />
-            {!hideLogoText && <span className='hidden md:inline pixel-text text-primary text-base whitespace-nowrap'>{t('brand').replace('X', '')}<AnimatedX size="sm" /></span>}
+            {!hideLogoText && <span data-logo-text className='hidden md:inline pixel-text text-primary text-base whitespace-nowrap inline-flex items-baseline gap-0.5'>{t('brand').replace('X', '')}<AnimatedX size="sm" className='!text-3xl' /></span>}
           </Link>
 
           {/* Sidebar Toggle Button - Only show in sidebar mode */}
@@ -178,7 +241,7 @@ export function Topbar() {
 
           {/* Desktop Navigation - Base links + Admin links (only show in top mode) */}
           {layoutMode === 'top' && (
-            <nav ref={navRef} className='hidden md:flex items-center gap-2 md:gap-3 overflow-x-clip overflow-y-visible pr-[3px]'>
+            <nav ref={navRef} className='hidden md:flex flex-1 min-w-0 items-center gap-2 md:gap-3 overflow-x-clip overflow-y-visible pr-[3px]'>
             {allNavLinks.slice(0, totalLinks - overflowCount).map(({ titleKey, to, icon: Icon }, index) => {
               const label = t(titleKey)
               const showIconOnly = index >= totalLinks - overflowCount - iconOnlyCount
@@ -187,6 +250,8 @@ export function Topbar() {
                 <Link
                   key={to}
                   to={to}
+                  data-nav-item
+                  data-icon-only={showIconOnly ? 'true' : undefined}
                   aria-label={label}
                   title={label}
                   className={`pixel-button inline-flex items-center gap-2 py-2 h-9 text-sm font-semibold uppercase tracking-widest bg-background/75 text-foreground border-[color:rgba(137,110,96,0.45)] hover:bg-accent/35 hover:text-accent-foreground dark:bg-input/30 dark:border-[color:rgba(255,255,255,0.18)] dark:hover:bg-accent/45 dark:hover:text-accent-foreground transition-all whitespace-nowrap ${
@@ -250,8 +315,8 @@ export function Topbar() {
             ))}
           </nav>
 
-          {/* Mobile Navigation Dropdown - Only show on mobile for admin */}
-          {isAdmin && (
+          {/* Mobile Navigation Dropdown - 管理员显示管理菜单,普通用户显示被授权页面 */}
+          {mobileMenuLinks.length > 0 && (
             <DropdownMenu open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -264,7 +329,7 @@ export function Topbar() {
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align='start' className='w-48 pixel-border'>
-                {adminNavLinks.map(({ titleKey, to, icon: Icon }) => (
+                {mobileMenuLinks.map(({ titleKey, to, icon: Icon }) => (
                   <DropdownMenuItem key={to} asChild>
                     <Link
                       to={to}

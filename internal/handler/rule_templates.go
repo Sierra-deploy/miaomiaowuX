@@ -8,12 +8,51 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/storage"
 )
 
-type RuleTemplatesHandler struct{}
+type RuleTemplatesHandler struct {
+	repo *storage.TrafficRepository
+}
 
-func NewRuleTemplatesHandler() *RuleTemplatesHandler {
-	return &RuleTemplatesHandler{}
+func NewRuleTemplatesHandler(repo *storage.TrafficRepository) *RuleTemplatesHandler {
+	return &RuleTemplatesHandler{repo: repo}
+}
+
+// canModifyRuleTemplate 判断当前用户能否修改/删除指定模板:
+// 管理员任意;普通用户仅限自己上传的(归属为空的历史模板视为管理员所有,普通用户不可动)。
+func (h *RuleTemplatesHandler) canModifyRuleTemplate(r *http.Request, filename string) bool {
+	username := auth.UsernameFromContext(r.Context())
+	if h.repo == nil {
+		return true
+	}
+	if userIsAdmin(r.Context(), h.repo, username) {
+		return true
+	}
+	owner, _ := h.repo.GetRuleTemplateOwner(r.Context(), filename)
+	return owner != "" && owner == username
+}
+
+const (
+	ruleTemplateMaxCount    = 200     // rule_templates 目录最多文件数
+	ruleTemplateMaxFileSize = 2 << 20 // 单个模板文件最大 2MB
+)
+
+// countRuleTemplates 统计 rule_templates 目录下的模板文件数量。
+func countRuleTemplates(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() && (strings.HasSuffix(e.Name(), ".yaml") || strings.HasSuffix(e.Name(), ".yml")) {
+			n++
+		}
+	}
+	return n
 }
 
 func (h *RuleTemplatesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -48,13 +87,21 @@ func (h *RuleTemplatesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 		switch r.Method {
 		case http.MethodGet:
-			// 获取具体模板内容
+			// 获取具体模板内容(所有用户可读,用于使用模板)
 			h.handleGetTemplate(w, r, templateName)
 		case http.MethodPut:
-			// 更新模板内容
+			// 更新模板内容:仅管理员或模板所有者
+			if !h.canModifyRuleTemplate(r, templateName) {
+				http.Error(w, "无权修改该模板", http.StatusForbidden)
+				return
+			}
 			h.handleUpdateTemplate(w, r, templateName)
 		case http.MethodDelete:
-			// 删除模板
+			// 删除模板:仅管理员或模板所有者
+			if !h.canModifyRuleTemplate(r, templateName) {
+				http.Error(w, "无权删除该模板", http.StatusForbidden)
+				return
+			}
 			h.handleDeleteTemplate(w, r, templateName)
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -80,10 +127,44 @@ func (h *RuleTemplatesHandler) handleListTemplates(w http.ResponseWriter, r *htt
 		}
 	}
 
+	// 归属信息(供前端控制"删除/修改仅自己的"),并附带当前用户名与是否管理员。
+	allOwners, _ := h.repo.ListRuleTemplateOwners(r.Context())
+	username := auth.UsernameFromContext(r.Context())
+	isAdmin := userIsAdmin(r.Context(), h.repo, username)
+
+	// 数据隔离:
+	//   - admin → 全部归属信息原样返回(管理需要)
+	//   - 非 admin → templates 里隐藏"别人私有的模板文件",owners 只保留自己的归属信息
+	//     (防止普通用户从该接口枚举其它用户名)
+	visibleTemplates := templates
+	visibleOwners := allOwners
+	if !isAdmin {
+		visibleOwners = make(map[string]string, 1)
+		filtered := make([]string, 0, len(templates))
+		for _, fn := range templates {
+			owner, hasOwner := allOwners[fn]
+			if !hasOwner {
+				// 无归属记录 = 内置/公共模板,所有人可见
+				filtered = append(filtered, fn)
+				continue
+			}
+			if owner == username {
+				// 自己的私有模板:保留 + 暴露归属(给前端显示"可编辑/删除")
+				filtered = append(filtered, fn)
+				visibleOwners[fn] = owner
+			}
+			// 其它人的私有模板:对当前用户彻底隐藏
+		}
+		visibleTemplates = filtered
+	}
+
 	// 返回 JSON 响应
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"templates": templates,
+		"templates": visibleTemplates,
+		"owners":    visibleOwners,
+		"username":  username,
+		"is_admin":  isAdmin,
 	})
 }
 
@@ -146,6 +227,16 @@ func (h *RuleTemplatesHandler) handleUpdateTemplate(w http.ResponseWriter, r *ht
 		return
 	}
 
+	// 单文件大小上限
+	if len(payload.Content) > ruleTemplateMaxFileSize {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": fmt.Sprintf("模板内容过大,不能超过 %dMB", ruleTemplateMaxFileSize>>20),
+		})
+		return
+	}
+
 	// 将内容写入文件
 	if err := os.WriteFile(templatePath, []byte(payload.Content), 0644); err != nil {
 		http.Error(w, "Failed to save template", http.StatusInternalServerError)
@@ -184,6 +275,7 @@ func (h *RuleTemplatesHandler) handleDeleteTemplate(w http.ResponseWriter, r *ht
 		http.Error(w, "Failed to delete template", http.StatusInternalServerError)
 		return
 	}
+	_ = h.repo.DeleteRuleTemplateOwner(r.Context(), templateName)
 
 	// 返回成功响应
 	w.Header().Set("Content-Type", "application/json")
@@ -228,6 +320,12 @@ func (h *RuleTemplatesHandler) handleRenameTemplate(w http.ResponseWriter, r *ht
 		newName = newName + ".yaml"
 	}
 
+	// 归属校验:仅管理员或模板所有者可重命名
+	if !h.canModifyRuleTemplate(r, oldName) {
+		http.Error(w, "无权重命名该模板", http.StatusForbidden)
+		return
+	}
+
 	templatesDir := "rule_templates"
 	oldPath := filepath.Join(templatesDir, oldName)
 	newPath := filepath.Join(templatesDir, newName)
@@ -257,6 +355,7 @@ func (h *RuleTemplatesHandler) handleRenameTemplate(w http.ResponseWriter, r *ht
 		http.Error(w, "Failed to rename template", http.StatusInternalServerError)
 		return
 	}
+	_ = h.repo.RenameRuleTemplateOwner(r.Context(), oldName, newName)
 
 	// 返回成功响应
 	w.Header().Set("Content-Type", "application/json")
@@ -292,6 +391,16 @@ func (h *RuleTemplatesHandler) handleUploadTemplate(w http.ResponseWriter, r *ht
 		return
 	}
 
+	// 单文件大小上限
+	if header.Size > ruleTemplateMaxFileSize {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": fmt.Sprintf("模板文件过大,单文件不能超过 %dMB", ruleTemplateMaxFileSize>>20),
+		})
+		return
+	}
+
 	// 安全性：清理文件名
 	filename = filepath.Base(filename)
 	if strings.Contains(filename, "..") {
@@ -303,6 +412,16 @@ func (h *RuleTemplatesHandler) handleUploadTemplate(w http.ResponseWriter, r *ht
 	templatesDir := "rule_templates"
 	if err := os.MkdirAll(templatesDir, 0755); err != nil {
 		http.Error(w, "Failed to create templates directory", http.StatusInternalServerError)
+		return
+	}
+
+	// 数量上限
+	if countRuleTemplates(templatesDir) >= ruleTemplateMaxCount {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": fmt.Sprintf("模板数量已达上限 (%d)", ruleTemplateMaxCount),
+		})
 		return
 	}
 
@@ -326,13 +445,25 @@ func (h *RuleTemplatesHandler) handleUploadTemplate(w http.ResponseWriter, r *ht
 	}
 	defer dst.Close()
 
-	// 复制文件内容
-	if _, err := io.Copy(dst, file); err != nil {
-		// 清理错误
+	// 复制文件内容(限制大小,防止 multipart 头部声明不实)
+	written, err := io.Copy(dst, io.LimitReader(file, ruleTemplateMaxFileSize+1))
+	if err != nil {
 		os.Remove(templatePath)
 		http.Error(w, "Failed to save template file", http.StatusInternalServerError)
 		return
 	}
+	if written > ruleTemplateMaxFileSize {
+		os.Remove(templatePath)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": fmt.Sprintf("模板文件过大,单文件不能超过 %dMB", ruleTemplateMaxFileSize>>20),
+		})
+		return
+	}
+
+	// 记录归属(普通用户上传 → 该用户;管理员上传 → 管理员用户名)
+	_ = h.repo.SetRuleTemplateOwner(r.Context(), filename, auth.UsernameFromContext(r.Context()))
 
 	// 返回带有文件名的成功响应
 	w.Header().Set("Content-Type", "application/json")

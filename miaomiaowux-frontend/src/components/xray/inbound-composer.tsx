@@ -238,6 +238,10 @@ function useProtocolForms() {
         settingsLabel: 'Trojan ' + t('composer.protocolSettings'),
         hints: t('composer.trojanHints', { returnObjects: true }) as string[],
       }),
+      anytls: createProtocolForm({
+        settingsLabel: 'AnyTLS ' + t('composer.protocolSettings'),
+        hints: t('composer.anytlsHints', { returnObjects: true }) as string[],
+      }),
       shadowsocks: createProtocolForm({
         settingsLabel: 'Shadowsocks ' + t('composer.protocolSettings'),
         hints: t('composer.shadowsocksHints', { returnObjects: true }) as string[],

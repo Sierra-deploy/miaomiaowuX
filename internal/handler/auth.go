@@ -34,8 +34,15 @@ type credentialsRequest struct {
 	Password string `json:"password"`
 }
 
-// GetClientIP extracts the client IP address from the request
+// GetClientIP extracts the client IP address from the request.
+// 优先级:CF-Connecting-IP > X-Forwarded-For[0] > X-Real-IP > RemoteAddr。
+// Cloudflare 头单独优先 — 套 CF 的反代往往同时设置 XFF,但 CF 头是 Cloudflare 注入的、最可信。
 func GetClientIP(r *http.Request) string {
+	// Cloudflare 专属头
+	if cf := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); cf != "" {
+		return cf
+	}
+
 	// 首先检查 X-Forwarded-For 标头（对于代理请求）
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		ips := strings.Split(xff, ",")

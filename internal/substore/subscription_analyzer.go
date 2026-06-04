@@ -382,13 +382,23 @@ func GenerateV3TemplateFromAnalysis(analysis *SubscriptionAnalysisResult) string
 	lines = append(lines, "")
 
 	// DNS config
+	// 带 `#代理组名` 的 nameserver 必须 quote,否则被 YAML 当注释截掉。
 	lines = append(lines, "dns:")
 	lines = append(lines, "  enable: true")
-	lines = append(lines, "  enhanced-mode: fake-ip")
-	lines = append(lines, "  fake-ip-range: 198.18.0.1/16")
+	lines = append(lines, "  enhanced-mode: redir-host")
 	lines = append(lines, "  nameserver:")
-	lines = append(lines, "    - https://doh.pub/dns-query")
+	lines = append(lines, "    - 'https://8.8.8.8/dns-query/dns-query#🚀 节点选择'")
+	lines = append(lines, "  direct-nameserver:")
+	lines = append(lines, "    - https://120.53.53.53/dns-query")
+	lines = append(lines, "  nameserver-policy:")
+	lines = append(lines, "    geosite:cn,apple,private,steam,onedrive,category-games@cn:")
+	lines = append(lines, "      - https://120.53.53.53/dns-query")
+	lines = append(lines, "  proxy-server-nameserver:")
+	lines = append(lines, "    - https://120.53.53.53/dns-query")
 	lines = append(lines, "  ipv6: false")
+	lines = append(lines, "  listen: 0.0.0.0:7874")
+	lines = append(lines, "  default-nameserver:")
+	lines = append(lines, "    - 'https://1.1.1.1/dns-query/dns-query#🚀 节点选择'")
 	lines = append(lines, "")
 
 	lines = append(lines, "proxies:")

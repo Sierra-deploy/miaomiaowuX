@@ -17,6 +17,9 @@ interface ArrayFieldProps {
   required?: boolean
   showUserSelect?: boolean
   ss2022Method?: string // For Shadowsocks 2022 key generation
+  // locked: 锁死模式 —— 隐藏"选择用户/添加/删除"按钮,字段全部只读不可变。
+  // 用于"添加节点"场景:用户卡片只能是当前登录账号自己,凭证已自动生成,不允许手动改动。
+  locked?: boolean
 }
 
 const generateUUID = () => {
@@ -42,6 +45,7 @@ export function ArrayField({
   required = false,
   showUserSelect = false,
   ss2022Method,
+  locked = false,
 }: ArrayFieldProps) {
   const { t } = useTranslation('xray')
   const [showSelectDialog, setShowSelectDialog] = useState(false)
@@ -95,18 +99,20 @@ export function ArrayField({
           {label}
           {required && <span className="text-red-500 ml-1">*</span>}
         </h4>
-        <div className="flex gap-2">
-          {showUserSelect && (
-            <Button type="button" size="sm" onClick={() => setShowSelectDialog(true)} variant="outline">
-              <UserPlus className="h-4 w-4 mr-1" />
-              {t('arrayField.selectUser')}
+        {!locked && (
+          <div className="flex gap-2">
+            {showUserSelect && (
+              <Button type="button" size="sm" onClick={() => setShowSelectDialog(true)} variant="outline">
+                <UserPlus className="h-4 w-4 mr-1" />
+                {t('arrayField.selectUser')}
+              </Button>
+            )}
+            <Button type="button" size="sm" onClick={handleAdd} variant="outline">
+              <Plus className="h-4 w-4 mr-1" />
+              {addButtonText || t('arrayField.add')}
             </Button>
-          )}
-          <Button type="button" size="sm" onClick={handleAdd} variant="outline">
-            <Plus className="h-4 w-4 mr-1" />
-            {addButtonText || t('arrayField.add')}
-          </Button>
-        </div>
+          </div>
+        )}
       </div>
 
       <div className="space-y-3">
@@ -121,27 +127,34 @@ export function ArrayField({
                 <CardTitle className="text-sm">
                   {label} #{index + 1}
                 </CardTitle>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => handleRemove(index)}
-                  className="h-8 w-8 p-0"
-                >
-                  <Trash2 className="h-4 w-4 text-red-500" />
-                </Button>
+                {!locked && (
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => handleRemove(index)}
+                    className="h-8 w-8 p-0"
+                  >
+                    <Trash2 className="h-4 w-4 text-red-500" />
+                  </Button>
+                )}
               </div>
             </CardHeader>
             <CardContent className="space-y-3">
-              {fields.map((field) => (
-                <FormField
-                  key={field.name}
-                  field={field}
-                  value={item[field.name]}
-                  onChange={(value) => handleItemChange(index, field.name, value)}
-                  ss2022Method={ss2022Method}
-                />
-              ))}
+              {/* locked 时用 fieldset disabled 原生禁用所有输入,卡片只读不可变 */}
+              <fieldset disabled={locked} className={locked ? 'opacity-95' : ''}>
+                <div className="space-y-3">
+                  {fields.map((field) => (
+                    <FormField
+                      key={field.name}
+                      field={field}
+                      value={item[field.name]}
+                      onChange={(value) => handleItemChange(index, field.name, value)}
+                      ss2022Method={ss2022Method}
+                    />
+                  ))}
+                </div>
+              </fieldset>
             </CardContent>
           </Card>
         ))}

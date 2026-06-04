@@ -401,6 +401,13 @@ func syncSingleExternalSubscription(ctx context.Context, client *http.Client, re
 		}
 	}
 
+	// 节点名后缀:同步设置开启 append_sub_info 时,把"剩余流量 + 剩余天数"拼到节点名后
+	// (同步自 mmw v0.7.3 — user_settings.append_sub_info 字段以前在 mmwx 已存在但未接通)
+	subInfoSuffix := ""
+	if settings.AppendSubInfo && (sub.Total > 0 || sub.Expire != nil) {
+		subInfoSuffix = buildSubInfoSuffix(sub)
+	}
+
 	// 转换为storage.Node格式
 	nodesToUpdate := make([]storage.Node, 0, len(proxies))
 
@@ -413,6 +420,12 @@ func syncSingleExternalSubscription(ctx context.Context, client *http.Client, re
 		proxyName, ok := proxyMap["name"].(string)
 		if !ok || proxyName == "" {
 			continue
+		}
+
+		// 拼接订阅元信息到节点名
+		if subInfoSuffix != "" {
+			proxyName += subInfoSuffix
+			proxyMap["name"] = proxyName
 		}
 
 		// 将代理编组为 JSON 以进行存储
@@ -572,6 +585,17 @@ func syncSingleExternalSubscription(ctx context.Context, client *http.Client, re
 			// 更新现有节点
 			oldNodeName := existingNode.NodeName
 
+			// 如果节点做过 IP 解析（OriginalDomain 非空），保留解析后的 IP
+			var preservedIP string
+			if existingNode.OriginalDomain != "" {
+				var currentClash map[string]any
+				if err := json.Unmarshal([]byte(existingNode.ClashConfig), &currentClash); err == nil {
+					if s, ok := currentClash["server"].(string); ok {
+						preservedIP = s
+					}
+				}
+			}
+
 			// 从外部订阅更新节点字段
 			existingNode.RawURL = node.RawURL
 			existingNode.Protocol = node.Protocol
@@ -579,6 +603,31 @@ func syncSingleExternalSubscription(ctx context.Context, client *http.Client, re
 			existingNode.ClashConfig = node.ClashConfig
 			existingNode.Enabled = node.Enabled
 			existingNode.Tag = node.Tag
+
+			// 恢复 IP 解析：把解析后的 IP 写回新配置，更新 OriginalDomain 为新订阅的域名
+			if preservedIP != "" {
+				var newClash map[string]any
+				if err := json.Unmarshal([]byte(existingNode.ClashConfig), &newClash); err == nil {
+					if newDomain, ok := newClash["server"].(string); ok && newDomain != preservedIP {
+						existingNode.OriginalDomain = newDomain
+						newClash["server"] = preservedIP
+						if updated, err := json.Marshal(newClash); err == nil {
+							existingNode.ClashConfig = string(updated)
+						}
+					} else {
+						existingNode.OriginalDomain = ""
+					}
+				}
+				var newParsed map[string]any
+				if err := json.Unmarshal([]byte(existingNode.ParsedConfig), &newParsed); err == nil {
+					if _, ok := newParsed["server"]; ok && existingNode.OriginalDomain != "" {
+						newParsed["server"] = preservedIP
+						if updated, err := json.Marshal(newParsed); err == nil {
+							existingNode.ParsedConfig = string(updated)
+						}
+					}
+				}
+			}
 
 			// 根据 keepNodeName 设置处理节点名称
 			if !keepNodeName {
@@ -938,5 +987,44 @@ func (h *SyncExternalSubscriptionsHandler) ServeHTTP(w http.ResponseWriter, r *h
 	json.NewEncoder(w).Encode(map[string]string{
 		"message": "外部订阅同步成功",
 	})
+}
+
+// buildSubInfoSuffix 生成节点名后缀:剩余流量 + 剩余天数(同步自 mmw v0.7.3)。
+// 例:" 398.22GB📊 26Days⏳"。Total/Expire 都没有时返回空串。
+func buildSubInfoSuffix(sub storage.ExternalSubscription) string {
+	var parts []string
+
+	if sub.Total > 0 {
+		used := sub.Upload + sub.Download
+		remaining := sub.Total - used
+		if remaining < 0 {
+			remaining = 0
+		}
+		parts = append(parts, formatTrafficShort(remaining)+"📊")
+	}
+
+	if sub.Expire != nil {
+		days := int(time.Until(*sub.Expire).Hours() / 24)
+		if days < 0 {
+			days = 0
+		}
+		parts = append(parts, fmt.Sprintf("%dDays⏳", days))
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return " " + strings.Join(parts, " ")
+}
+
+func formatTrafficShort(bytes int64) string {
+	const (
+		gb = 1024 * 1024 * 1024
+		mb = 1024 * 1024
+	)
+	if bytes >= gb {
+		return fmt.Sprintf("%.2fGB", float64(bytes)/float64(gb))
+	}
+	return fmt.Sprintf("%.0fMB", float64(bytes)/float64(mb))
 }
 

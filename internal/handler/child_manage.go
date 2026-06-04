@@ -1757,6 +1757,25 @@ type ChildRoutingRequest struct {
 	Routing map[string]interface{} `json:"routing,omitempty"`
 	Rule    map[string]interface{} `json:"rule,omitempty"`
 	Index   int                    `json:"index,omitempty"`
+	// 负载均衡 leastPing/leastLoad 的 xray 顶层观测站(balancers 随 Routing 透传)。
+	// RawMessage 三态:缺失=不变;JSON null=清除;对象=写入。
+	Observatory      json.RawMessage `json:"observatory,omitempty"`
+	BurstObservatory json.RawMessage `json:"burstObservatory,omitempty"`
+}
+
+// applyObservatory 按 RawMessage 三态把顶层 observatory/burstObservatory 写入/删除/保持。
+func applyObservatory(config map[string]interface{}, key string, raw json.RawMessage) {
+	if len(raw) == 0 {
+		return
+	}
+	if string(raw) == "null" {
+		delete(config, key)
+		return
+	}
+	var obj map[string]interface{}
+	if err := json.Unmarshal(raw, &obj); err == nil {
+		config[key] = obj
+	}
 }
 
 // 处理子服务器的路由管理
@@ -1840,6 +1859,8 @@ func (h *ChildManageHandler) manageRouting(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		config["routing"] = req.Routing
+		applyObservatory(config, "observatory", req.Observatory)
+		applyObservatory(config, "burstObservatory", req.BurstObservatory)
 
 	case "add_rule":
 		if req.Rule == nil {

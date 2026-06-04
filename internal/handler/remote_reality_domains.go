@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"miaomiaowux/templates"
 )
@@ -322,7 +323,11 @@ func (h *RemoteManageHandler) HandleSetupSSL(w http.ResponseWriter, r *http.Requ
 	domainConf := strings.ReplaceAll(string(domainTpl), "{domain}", domain)
 	domainConf = strings.ReplaceAll(domainConf, "{root_domain}", rootDomain)
 	domainConf = strings.ReplaceAll(domainConf, "{cert_name}", certName)
-	domainConf = strings.ReplaceAll(domainConf, "{static_root_path}", server.SiteValue)
+	staticRoot := server.SiteValue
+	if staticRoot == "" {
+		staticRoot = "/usr/local/nginx/html"
+	}
+	domainConf = strings.ReplaceAll(domainConf, "{static_root_path}", staticRoot)
 	domainConf = strings.ReplaceAll(domainConf, "{proxy_pass_server}", server.SiteValue)
 
 	sslPayload, _ := json.Marshal(map[string]any{
@@ -383,7 +388,10 @@ func (h *RemoteManageHandler) HandleDeployStealSelfConfig(w http.ResponseWriter,
 		return
 	}
 
-	if err := h.DeployStealSelfConfig(r.Context(), id); err != nil {
+	// 使用独立 context：steal-self 部署会清理 nginx 443 端口，可能导致反代连接中断、请求 context 被取消
+	deployCtx, deployCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 60*time.Second)
+	defer deployCancel()
+	if err := h.DeployStealSelfConfig(deployCtx, id); err != nil {
 		remoteWriteError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -394,20 +402,52 @@ func (h *RemoteManageHandler) HandleDeployStealSelfConfig(w http.ResponseWriter,
 	})
 }
 
-// DeployStealSelfConfig 将配置部署到远程服务器，根据 steal_mode 选择 tunnel 或 fallback 模式。
+// DeployStealSelfConfig 将配置部署到远程服务器，根据 steal_mode 选择对应配置:
+//   - "fallback":需要 domain,下发 fallback 模板
+//   - "tunnel":需要 domain,下发 tunnel 模板
+//   - "default" / 空值:下发主控内嵌的 default/config.json 模板,无需 domain
+//
+// 历史 BUG:之前 if/else 只识别 fallback,其它(含 default、空)统统走 tunnel,
+// 用户选了"默认"部署模式但 deployStealSelf 实际下发的是 tunnel 配置。
 func (h *RemoteManageHandler) DeployStealSelfConfig(ctx context.Context, serverID int64) error {
 	server, err := h.repo.GetRemoteServer(ctx, serverID)
 	if err != nil {
 		return fmt.Errorf("获取服务器信息失败: %w", err)
 	}
-	if server.Domain == "" {
-		return fmt.Errorf("服务器未配置域名")
-	}
 
-	if server.StealMode == "fallback" {
+	switch server.StealMode {
+	case "fallback":
+		if server.Domain == "" {
+			return fmt.Errorf("fallback 模式需要先配置域名")
+		}
 		return h.deployFallbackConfig(ctx, server)
+	case "tunnel":
+		if server.Domain == "" {
+			return fmt.Errorf("tunnel 模式需要先配置域名")
+		}
+		return h.deployTunnelConfig(ctx, server)
+	default:
+		// default / 空值都走主控内嵌默认模板。用户主动触发不跳过 has-config 检查
+		// (跳过是为"全新装机自动下发"防覆盖业务,用户手动点这里说明就是要覆盖)。
+		return h.deployDefaultConfigManual(ctx, serverID)
 	}
-	return h.deployTunnelConfig(ctx, server)
+}
+
+// deployDefaultConfigManual 是 deployDefaultConfig 的"用户主动模式":不做 has-config 检查,
+// 直接覆盖 agent 当前 xray 配置为内嵌默认模板,然后重启 xray。
+func (h *RemoteManageHandler) deployDefaultConfigManual(ctx context.Context, serverID int64) error {
+	configTpl, err := templates.ReadFile("default/config.json")
+	if err != nil {
+		return fmt.Errorf("读取默认配置模板: %w", err)
+	}
+	configPayload, _ := json.Marshal(map[string]string{"config": string(configTpl)})
+	if _, err := h.forwardToRemoteServer(ctx, serverID, http.MethodPost, "/api/child/xray/config", configPayload); err != nil {
+		return fmt.Errorf("下发默认配置: %w", err)
+	}
+	if err := h.restartXrayWithRecovery(ctx, serverID, "ManualDeployDefault"); err != nil {
+		return fmt.Errorf("重启 xray: %w", err)
+	}
+	return nil
 }
 
 func extractDomainsFromInbound(inbound map[string]interface{}, seen map[string]struct{}, out *[]string) {

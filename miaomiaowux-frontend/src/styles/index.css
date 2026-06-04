@@ -138,6 +138,18 @@
 }
 
 @layer components {
+  /* 数字输入隐藏原生上下箭头(spin button),Firefox/Chromium/Edge 通用。
+     class="no-spin" 加到 <input type="number"> 上就生效。 */
+  .no-spin::-webkit-outer-spin-button,
+  .no-spin::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  .no-spin {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
   .pixel-border {
     position: relative;
     border-width: 2px;
@@ -392,6 +404,28 @@
   .dark .pixel-button:active {
     box-shadow: 1px 1px 0 rgba(0, 0, 0, 0.35);
   }
+}
+
+/* 无限流量场景:进度条始终 100% 填满,加彩虹渐变流动动画暗示"无尽"。
+   background-size: 200% 让色谱有冗余,background-position 横向位移 100% 即可无缝接回起点。 */
+@keyframes rainbow-flow {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}
+.rainbow-flow-bar {
+  background-image: linear-gradient(
+    90deg,
+    #ef4444 0%,
+    #f97316 14%,
+    #eab308 28%,
+    #22c55e 42%,
+    #06b6d4 56%,
+    #3b82f6 70%,
+    #a855f7 84%,
+    #ec4899 100%
+  );
+  background-size: 200% 100%;
+  animation: rainbow-flow 3s linear infinite;
 }
 
 /* Twemoji 样式 - 统一 emoji 显示 */

@@ -1069,6 +1069,8 @@ export default function singbox_Producer(): Producer {
       .produce(proxies as any, 'internal', { 'include-unsupported-proxy': true }) as any[])
       .map((proxy: any) => {
         try {
+          if (['xhttp'].includes(proxy.network))
+            throw new Error(`Platform sing-box does not support network: ${proxy.network}`)
           switch (proxy.type) {
             case 'ssh':
               list.push(sshParser(proxy))
@@ -1113,7 +1115,9 @@ export default function singbox_Producer(): Producer {
               }
               break
             case 'vless':
-              if (!proxy.flow || ['xtls-rprx-vision'].includes(proxy.flow)) {
+              if (proxy.encryption && proxy.encryption !== 'none') {
+                throw new Error(`VLESS encryption is not supported`)
+              } else if (!proxy.flow || ['xtls-rprx-vision'].includes(proxy.flow)) {
                 list.push(vlessParser(proxy))
               } else {
                 throw new Error(

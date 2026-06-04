@@ -432,25 +432,10 @@ function parseShadowsocks(url: string): ProxyNode | null {
       const matchedCipher = knownCiphers.find(cipher => authPart.startsWith(cipher + ':'))
 
       if (matchedCipher) {
-        // 格式3 或 格式4: 明文加密方式
+        // 格式3: method:password@server:port(明文加密方式),密码直接使用。
+        // 旧逻辑会尝试 base64 解码密码,把恰好是合法 base64 的明文密码错误解码,导致密码错误。
         method = matchedCipher
-        const passwordPart = authPart.substring(matchedCipher.length + 1)
-
-        // 尝试 base64 解码密码，如果解码后是有效字符串则使用解码结果（格式4）
-        // 否则直接使用原始密码（格式3）
-        try {
-          const decodedPassword = base64Decode(passwordPart)
-          // 检查解码结果是否看起来像有效密码（不含乱码）
-          // 如果原始密码本身就是 base64 格式的有效字符串，使用解码后的值
-          if (decodedPassword && /^[\x20-\x7E]+$/.test(decodedPassword)) {
-            password = decodedPassword
-          } else {
-            password = passwordPart
-          }
-        } catch {
-          // base64 解码失败，使用原始密码
-          password = passwordPart
-        }
+        password = authPart.substring(matchedCipher.length + 1)
       } else {
         // 格式1: base64(method:password)@server:port
         const encodedPart = authPart
@@ -645,65 +630,65 @@ function parseSocks(url: string): ProxyNode | null {
  * 解析 Snell 协议
  * 格式: snell://password@server:port?obfs=http&obfs-host=example.com&version=4#name
  */
-// function parseSnell(url: string): ProxyNode | null {
-//   try {
-//     const content = url.substring('snell://'.length)
-//     let name = 'Snell Node'
-//     let mainPart = content
+function parseSnell(url: string): ProxyNode | null {
+  try {
+    const content = url.substring('snell://'.length)
+    let name = 'Snell Node'
+    let mainPart = content
 
-//     // 提取节点名称
-//     if (content.includes('#')) {
-//       const hashIndex = content.lastIndexOf('#')
-//       mainPart = content.substring(0, hashIndex)
-//       name = decodeURIComponent(content.substring(hashIndex + 1))
-//     }
+    // 提取节点名称
+    if (content.includes('#')) {
+      const hashIndex = content.lastIndexOf('#')
+      mainPart = content.substring(0, hashIndex)
+      name = decodeURIComponent(content.substring(hashIndex + 1))
+    }
 
-//     // 提取查询参数
-//     let queryParams: Record<string, string> = {}
-//     let authAndServer = mainPart
-//     if (mainPart.includes('?')) {
-//       const [main, query] = mainPart.split('?')
-//       authAndServer = main
-//       queryParams = parseQueryString(query)
-//     }
+    // 提取查询参数
+    let queryParams: Record<string, string> = {}
+    let authAndServer = mainPart
+    if (mainPart.includes('?')) {
+      const [main, query] = mainPart.split('?')
+      authAndServer = main
+      queryParams = parseQueryString(query)
+    }
 
-//     // 解析 password@server:port
-//     const atIndex = authAndServer.lastIndexOf('@')
-//     if (atIndex === -1) return null
+    // 解析 password@server:port
+    const atIndex = authAndServer.lastIndexOf('@')
+    if (atIndex === -1) return null
 
-//     const password = authAndServer.substring(0, atIndex)
-//     const serverPart = authAndServer.substring(atIndex + 1)
+    const password = authAndServer.substring(0, atIndex)
+    const serverPart = authAndServer.substring(atIndex + 1)
 
-//     // 解析 server:port
-//     const colonIndex = serverPart.lastIndexOf(':')
-//     if (colonIndex === -1) return null
+    // 解析 server:port
+    const colonIndex = serverPart.lastIndexOf(':')
+    if (colonIndex === -1) return null
 
-//     const server = serverPart.substring(0, colonIndex)
-//     const port = parseInt(serverPart.substring(colonIndex + 1)) || 0
+    const server = serverPart.substring(0, colonIndex)
+    const port = parseInt(serverPart.substring(colonIndex + 1)) || 0
 
-//     const node: ProxyNode = {
-//       name,
-//       type: 'snell',
-//       server,
-//       port,
-//       psk: password,  // Snell 使用 psk (pre-shared key)
-//       version: parseInt(queryParams.version) || 4  // 默认版本 4
-//     }
+    const node: ProxyNode = {
+      name,
+      type: 'snell',
+      server,
+      port,
+      psk: password,  // Snell 使用 psk (pre-shared key)
+      version: parseInt(queryParams.version) || 4,  // 默认版本 4
+    }
 
-//     // 混淆设置
-//     if (queryParams.obfs && queryParams.obfs !== 'none') {
-//       node['obfs-opts'] = {
-//         mode: queryParams.obfs,  // http, tls
-//         host: queryParams['obfs-host'] || queryParams['obfs-hostname'] || ''
-//       }
-//     }
+    // 混淆设置
+    if (queryParams.obfs && queryParams.obfs !== 'none') {
+      node['obfs-opts'] = {
+        mode: queryParams.obfs,  // http, tls
+        host: queryParams['obfs-host'] || queryParams['obfs-hostname'] || '',
+      }
+    }
 
-//     return node
-//   } catch (e) {
-//     toast(`Parse Snell error: ${e instanceof Error ? e.message : String(e)}`)
-//     return null
-//   }
-// }
+    return node
+  } catch (e) {
+    toast(`Parse Snell error: ${e instanceof Error ? e.message : String(e)}`)
+    return null
+  }
+}
 
 /**
  * 解析通用协议 (trojan, vless, tuic, hysteria, hysteria2)
@@ -903,7 +888,9 @@ function parseGenericProtocol(url: string, protocol: string): ProxyNode | null {
       case 'hysteria2':
         node.password = password // Hysteria2 使用 password 字段
         node.auth = password // 内部临时字段，用于传递认证信息
-        // node.ports = queryParams.mport || port.toString()
+        if (queryParams.mport) {
+          node.ports = queryParams.mport
+        }
         node.obfs = queryParams.obfs
         node['obfs-password'] = queryParams['obfs-password'] || queryParams.obfsParam
         node.sni = safeDecodeURIComponent(queryParams.peer || queryParams.sni || (server.startsWith('[') ? '' : server))
@@ -1140,8 +1127,8 @@ export function parseProxyUrl(url: string): ProxyNode | null {
     return parseShadowsocks(url)
   } else if (url.startsWith('socks://') || url.startsWith('socks5://')) {
     return parseSocks(url)
-  // } else if (url.startsWith('snell://')) {
-  //   return parseSnell(url)
+  } else if (url.startsWith('snell://')) {
+    return parseSnell(url)
   } else if (url.startsWith('trojan://')) {
     return parseGenericProtocol(url, 'trojan')
   } else if (url.startsWith('vless://')) {
@@ -1202,8 +1189,8 @@ export function toClashProxy(node: ProxyNode): ClashProxy {
     'auth', // Hysteria2 内部使用的中间字段，已转换为 password
     'password', // 认证字段，已在第530-541行根据协议类型单独处理
     'uuid', // 认证字段，已在第526-528行单独处理
-    // 'psk', // Snell 认证字段，需单独处理
-    // 'version', // Snell 版本字段，需单独处理
+    'psk',
+    'version',
     // 已处理的参数
     'security', // 已转换为 tls 和 reality-opts
     'fingerprint', // 已转换为 client-fingerprint
@@ -1236,15 +1223,21 @@ export function toClashProxy(node: ProxyNode): ClashProxy {
     if (node.encryption) {
       clash.encryption = node.encryption
     }
-  // } else if (node.type === 'snell') {
-  //   // Snell 使用 psk (pre-shared key)
-  //   if (node.psk) {
-  //     clash.psk = node.psk
-  //   }
-  //   // Snell version
-  //   if (node.version) {
-  //     clash.version = node.version
-  //   }
+  } else if (node.type === 'snell') {
+    if (node.psk) {
+      clash.psk = node.psk
+    }
+    if (node.version) {
+      clash.version = node.version
+    }
+    // obfs-opts(Snell 2/3),Surge `obfs = http/tls` + `obfs-host = ...` 来源
+    if (node['obfs-opts']) {
+      clash['obfs-opts'] = node['obfs-opts']
+    }
+    // 通用开关:Surge `tfo = true` / `udp-relay = true` / `reuse = true`(Snell 4+)
+    if (node.tfo) clash.tfo = true
+    if (node.udp) clash.udp = true
+    if ((node as Record<string, unknown>)['reuse']) clash.reuse = true
   } else if (node.type === 'hysteria2' || node.type === 'hysteria' || node.type === 'anytls') {
     // Hysteria/Hysteria2/AnyTLS 使用 password
     if (node.password) {
@@ -1384,6 +1377,66 @@ export function toClashProxy(node: ProxyNode): ClashProxy {
 /**
  * 解析订阅内容（多个代理 URL，每行一个或 base64 编码）
  */
+/**
+ * 解析 Surge INI 行格式: `节点名 = type, server, port, key1 = value1, key2 = value2, ...`
+ * 支持类型:snell(主用)、ss/shadowsocks、vmess、trojan、socks5、http、https、hysteria2、tuic、wireguard 等
+ * 实现先聚焦 snell(用户反馈缺失),其它类型按 Surge 同款字段映射。
+ */
+export function parseSurgeLine(line: string): ProxyNode | null {
+  // 形态:`<name> = <type>, <server>, <port>, kv...`
+  const eqIdx = line.indexOf('=')
+  if (eqIdx === -1) return null
+  const name = line.substring(0, eqIdx).trim()
+  const rest = line.substring(eqIdx + 1).trim()
+  if (!name || !rest) return null
+
+  // 按逗号切;但 value 里如果含 = 也是普通 token(`psk = xxx` 整体一个 token,内部空格分隔)
+  const tokens = rest.split(',').map((s) => s.trim()).filter(Boolean)
+  if (tokens.length < 3) return null
+
+  const type = tokens[0].toLowerCase()
+  const server = tokens[1]
+  const port = parseInt(tokens[2], 10)
+  if (!server || !Number.isFinite(port) || port <= 0) return null
+
+  // kv 解析:`key = value` / `key=value`
+  const kv: Record<string, string> = {}
+  for (let i = 3; i < tokens.length; i++) {
+    const t = tokens[i]
+    const ei = t.indexOf('=')
+    if (ei === -1) continue
+    const k = t.substring(0, ei).trim().toLowerCase()
+    const v = t.substring(ei + 1).trim()
+    if (k) kv[k] = v
+  }
+  const truthy = (v: string | undefined) => v === 'true' || v === '1' || v === 'yes'
+
+  // 仅做 snell 这次;其它类型等用户提需求再加(避免一次性灌水)
+  if (type === 'snell') {
+    const node: ProxyNode = {
+      name,
+      type: 'snell',
+      server,
+      port,
+      psk: kv['psk'] || '',
+      version: parseInt(kv['version'] || '4', 10) || 4,
+    }
+    // obfs(Snell 2/3,Snell 4+ 移除)
+    if (kv['obfs'] && kv['obfs'] !== 'none') {
+      node['obfs-opts'] = {
+        mode: kv['obfs'],
+        host: kv['obfs-host'] || kv['obfs-hostname'] || '',
+      }
+    }
+    // 通用开关:tfo/udp-relay/reuse → 透传到 ProxyNode 由 Clash 输出
+    if (truthy(kv['tfo'])) node.tfo = true
+    if (truthy(kv['udp-relay']) || truthy(kv['udp'])) node.udp = true
+    if (truthy(kv['reuse'])) (node as Record<string, unknown>)['reuse'] = true
+    return node
+  }
+  return null
+}
+
 export function parseSubscription(content: string): ClashProxy[] {
   if (!content) return []
 
@@ -1405,11 +1458,22 @@ export function parseSubscription(content: string): ClashProxy[] {
 
   for (const line of lines) {
     const trimmed = line.trim()
-    if (!trimmed || !trimmed.includes('://')) continue
+    if (!trimmed) continue
 
-    const node = parseProxyUrl(trimmed)
-    if (node) {
-      proxies.push(toClashProxy(node))
+    // 1. URI 格式(snell:// / vmess:// / ss:// 等)
+    if (trimmed.includes('://')) {
+      const node = parseProxyUrl(trimmed)
+      if (node) {
+        proxies.push(toClashProxy(node))
+        continue
+      }
+    }
+    // 2. Surge INI 格式(`节点名 = type, server, port, ...`)
+    if (trimmed.includes('=') && !trimmed.startsWith('#') && !trimmed.startsWith(';') && !trimmed.startsWith('[')) {
+      const node = parseSurgeLine(trimmed)
+      if (node) {
+        proxies.push(toClashProxy(node))
+      }
     }
   }
 

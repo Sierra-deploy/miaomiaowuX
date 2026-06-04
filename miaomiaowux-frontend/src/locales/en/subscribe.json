@@ -20,7 +20,8 @@
     "typeLabels": {
       "create": "Create",
       "import": "Import",
-      "upload": "Upload"
+      "upload": "Upload",
+      "package": "Package"
     },
     "fileList": {
       "title": "Subscription List",

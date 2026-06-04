@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/storage"
 	"miaomiaowux/internal/util"
 
 	"gopkg.in/yaml.v3"
@@ -114,14 +116,39 @@ func (s *TempSubscriptionStore) cleanupLocked() {
 }
 
 // TempSubscriptionHandler 处理临时订阅请求
-type TempSubscriptionHandler struct{}
+type TempSubscriptionHandler struct {
+	repo *storage.TrafficRepository
+}
 
 // 为临时订阅创建新的处理程序
-func NewTempSubscriptionHandler() http.Handler {
-	return &TempSubscriptionHandler{}
+func NewTempSubscriptionHandler(repo *storage.TrafficRepository) http.Handler {
+	return &TempSubscriptionHandler{repo: repo}
 }
 
 func (h *TempSubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// 权限:admin 直接放行;普通用户必须节点管理(nodes 页面)对其开放,
+	// 跟节点页"生成临时订阅"按钮的可见性保持一致 — 后端是 source of truth。
+	ctx := r.Context()
+	username := auth.UsernameFromContext(ctx)
+	if username == "" {
+		writeError(w, http.StatusUnauthorized, errors.New("unauthorized"))
+		return
+	}
+	if !userIsAdmin(ctx, h.repo, username) {
+		cfg := loadUserPermConfig(ctx, h.repo)
+		allowed := false
+		for _, p := range cfg.Pages {
+			if p == "nodes" {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			writeError(w, http.StatusForbidden, errors.New("无权限:请联系管理员在妙妙屋功能中开启节点管理"))
+			return
+		}
+	}
+
 	switch r.Method {
 	case http.MethodPost:
 		h.handleCreate(w, r)

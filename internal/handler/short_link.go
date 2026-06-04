@@ -39,14 +39,43 @@ func (h *shortLinkHandler) TryServe(w http.ResponseWriter, r *http.Request) bool
 		return false
 	}
 
-	compositeCode := strings.Trim(r.URL.Path, "/")
-	compositeCode = strings.TrimPrefix(compositeCode, "x/")
-	if len(compositeCode) < 2 {
+	code := strings.Trim(r.URL.Path, "/")
+	code = strings.TrimPrefix(code, "x/")
+	if len(code) < 2 {
 		return false
 	}
 
 	ctx := r.Context()
 
+	// 新逻辑：直接用 code 查 subscribe_files 表（custom_short_code 或 file_short_code）
+	if sf, err := h.repo.GetSubscribeFileByShortCode(ctx, code); err == nil {
+		username := sf.CreatedBy
+		if username == "" {
+			return false
+		}
+
+		if sf.Type == "package" && h.packageHandler != nil {
+			newCtx := auth.ContextWithUsername(ctx, username)
+			h.packageHandler.ServeHTTP(w, r.Clone(newCtx))
+			return true
+		}
+
+		newURL := *r.URL
+		q := newURL.Query()
+		q.Set("filename", sf.Filename)
+		if clientType := r.URL.Query().Get("t"); clientType != "" {
+			q.Set("t", clientType)
+		}
+		newURL.RawQuery = q.Encode()
+
+		newCtx := auth.ContextWithUsername(ctx, username)
+		newRequest := r.Clone(newCtx)
+		newRequest.URL = &newURL
+		h.subscriptionHandler.ServeHTTP(w, newRequest)
+		return true
+	}
+
+	// Fallback: 旧复合码逻辑（FileShortCode + UserShortCode）
 	fileCodes, err := h.repo.GetAllFileShortCodes(ctx)
 	if err != nil {
 		fileCodes = nil
@@ -64,9 +93,9 @@ func (h *shortLinkHandler) TryServe(w http.ResponseWriter, r *http.Request) bool
 	var filename, username string
 	var isPackage bool
 	matched := false
-	for i := len(compositeCode) - 1; i >= 1; i-- {
-		leftCode := compositeCode[:i]
-		rightCode := compositeCode[i:]
+	for i := len(code) - 1; i >= 1; i-- {
+		leftCode := code[:i]
+		rightCode := code[i:]
 		un, uOk := userCodes[rightCode]
 		if !uOk {
 			continue
@@ -160,6 +189,13 @@ func NewUserCustomShortCodeSelfHandler(repo *storage.TrafficRepository) http.Han
 			return
 		}
 
+		// 不向普通用户开放:用户短码现为系统随机生成(3-10 位)不可自定义,
+		// 仅管理员保留设置入口,避免普通用户自定义引发的短码冲突可用性预言机。
+		if !userIsAdmin(r.Context(), repo, username) {
+			writeError(w, http.StatusForbidden, errors.New("该功能未开放"))
+			return
+		}
+
 		switch r.Method {
 		case http.MethodGet:
 			code, err := repo.GetUserCustomShortCode(r.Context(), username)
@@ -167,8 +203,13 @@ func NewUserCustomShortCodeSelfHandler(repo *storage.TrafficRepository) http.Han
 				writeError(w, http.StatusInternalServerError, err)
 				return
 			}
+			// effective = 自定义短码优先,否则系统自动短码(供前端预填当前短码)
+			effective, eerr := repo.GetEffectiveUserShortCode(r.Context(), username)
+			if eerr != nil {
+				effective = code
+			}
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"custom_short_code": code})
+			json.NewEncoder(w).Encode(map[string]string{"custom_short_code": code, "effective_short_code": effective})
 
 		case http.MethodPost:
 			var payload struct {
@@ -191,14 +232,15 @@ func NewUserCustomShortCodeSelfHandler(repo *storage.TrafficRepository) http.Han
 				userCodes, err := repo.GetAllUserShortCodes(r.Context())
 				if err == nil {
 					if un, exists := userCodes[code]; exists && un != username {
-						writeError(w, http.StatusConflict, errors.New("该自定义连接已被其他用户使用"))
+						// 不透露被谁占用,避免泄露其他用户的短码(可用性预言机)。
+						writeError(w, http.StatusConflict, errors.New("该短码已被占用，请更换一个"))
 						return
 					}
 				}
 			}
 
 			if err := repo.UpdateUserCustomShortCode(r.Context(), username, code); err != nil {
-				writeError(w, http.StatusConflict, errors.New(err.Error()))
+				writeError(w, http.StatusConflict, errors.New("该短码已被占用，请更换一个"))
 				return
 			}
 

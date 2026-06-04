@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { useState, useEffect } from 'react'
 import { useTranslation } from 'react-i18next'
+import { useQuery } from '@tanstack/react-query'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { FormField } from './form-field'
@@ -8,19 +9,9 @@ import { NodeSelectDialog } from './node-select-dialog'
 import { Import, Eye, X } from 'lucide-react'
 import { protocolFields } from '@/lib/xray-form-fields'
 import { generateOutboundConfig } from '@/lib/xray-config-generator'
-
-// Protocol colors matching node management
-const PROTOCOL_COLORS: Record<string, string> = {
-  VLESS: 'text-purple-700 dark:text-purple-400',
-  VMess: 'text-blue-700 dark:text-blue-400',
-  Trojan: 'text-red-700 dark:text-red-400',
-  Shadowsocks2022: 'text-green-700 dark:text-green-400',
-  Socks5: 'text-yellow-700 dark:text-yellow-400',
-  HTTP: 'text-cyan-700 dark:text-cyan-400',
-  Tunnel: 'text-orange-700 dark:text-orange-400',
-  Freedom: 'text-emerald-700 dark:text-emerald-400',
-  Blackhole: 'text-gray-700 dark:text-gray-400',
-}
+import { getXrayProtocolColor } from '@/lib/protocol-colors'
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
+import { api } from '@/lib/api'
 
 interface Server {
   id: number
@@ -34,9 +25,11 @@ interface OutboundWizardProps {
   selectedServerIds: number[]
   onCancel: () => void
   onSubmit: (serverIds: number[], outbound: any, tag: string) => Promise<void>
+  /** 多选导入回调:NodeSelectDialog 多选确认 → 调此回调一次性提交所有节点,wizard 表单不参与 */
+  onBulkImport?: (items: Array<{ node: any; clashConfig: any }>) => void
 }
 
-export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit }: OutboundWizardProps) {
+export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit, onBulkImport }: OutboundWizardProps) {
   const { t } = useTranslation('xray')
   const { t: tc } = useTranslation('common')
   const [selectedProtocol, setSelectedProtocol] = useState<string>('')
@@ -57,6 +50,27 @@ export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit 
   // Track if current config was imported from a node
   const [isNodeImported, setIsNodeImported] = useState(false)
   const [showMobileJsonPreview, setShowMobileJsonPreview] = useState(false)
+  // Tunnel 二次确认:选了带 tunnel 转发的节点时弹框,让用户决定走 tunnel 还是直连
+  const [tunnelChoice, setTunnelChoice] = useState<null | {
+    tunnelServerHost: string
+    tunnelServerName: string
+    tunnelListenPort: number
+    tunnelTag: string
+    directAddress: string
+    directPort: number
+  }>(null)
+
+  // 所有服务器 + tunnels(用于检测被导入节点的 server:port 是否被某个 tunnel 转发)
+  const { data: tunnelsResp } = useQuery({
+    queryKey: ['tunnels-for-wizard'],
+    queryFn: async () => (await api.get('/api/admin/tunnels')).data,
+    staleTime: 60_000,
+  })
+  const { data: serversResp } = useQuery({
+    queryKey: ['remote-servers-for-wizard'],
+    queryFn: async () => (await api.get('/api/admin/remote-servers')).data,
+    staleTime: 60_000,
+  })
 
   // Check if current protocol is a simple outbound (no transport/security/users)
   const isSimpleOutbound = selectedProtocol === 'Freedom' || selectedProtocol === 'Blackhole'
@@ -145,7 +159,8 @@ export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit 
     if (security === 'TLS') {
       newFormData.serverNames = clashConfig.sni || clashConfig.servername || clashConfig.server || ''
       newFormData.alpn = clashConfig.alpn?.join(',') || ''
-      if (clashConfig['skip-cert-verify']) newFormData.allowInsecure = true
+      // xray 已废弃 allowInsecure。skip-cert-verify=true 的节点保存时由后端 TLS dial 目标自动获取 sha256
+      newFormData.pinnedPeerCertSha256 = ''
       if (clashConfig.fingerprint) newFormData.fingerprint = clashConfig.fingerprint
     } else if (security === 'Reality') {
       const realityOpts = clashConfig['reality-opts'] || {}
@@ -157,6 +172,40 @@ export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit 
 
     setFormData(newFormData)
     setIsNodeImported(true)
+
+    // 节点的 server:port 是否对应到某条 tunnel 的 target?是的话给用户一个选择:走 tunnel 还是直连
+    const tunnels: any[] = tunnelsResp?.tunnels || []
+    const servers: any[] = serversResp?.servers || []
+    const matchedTunnel = tunnels.find((t) => t.target_address === newFormData.address && Number(t.target_port) === Number(newFormData.port))
+    if (matchedTunnel) {
+      const tunnelServer = servers.find((s) => s.id === matchedTunnel.server_id)
+      // 优先用 domain(更稳定),其次 ip
+      const tunnelHost = tunnelServer?.domain || tunnelServer?.ip_address || tunnelServer?.pull_address || ''
+      if (tunnelHost) {
+        setTunnelChoice({
+          tunnelServerHost: tunnelHost,
+          tunnelServerName: matchedTunnel.server_name || tunnelServer?.name || '',
+          tunnelListenPort: Number(matchedTunnel.listen_port),
+          tunnelTag: matchedTunnel.tag || '',
+          directAddress: newFormData.address,
+          directPort: Number(newFormData.port),
+        })
+      }
+    }
+  }
+
+  // 用户在确认框选择走 tunnel:把 address/port 换成 tunnel 服务器的对外地址 + tunnel 监听端口。
+  // TLS/Reality 的 serverNames 如果之前等于原地址,也跟着同步过去,避免握手 SNI 与连接目标不一致。
+  const applyTunnelChoice = () => {
+    if (!tunnelChoice) return
+    setFormData((prev: any) => {
+      const next = { ...prev, address: tunnelChoice.tunnelServerHost, port: tunnelChoice.tunnelListenPort }
+      if (prev.serverNames === tunnelChoice.directAddress) {
+        next.serverNames = tunnelChoice.tunnelServerHost
+      }
+      return next
+    })
+    setTunnelChoice(null)
   }
 
   const handleFieldChange = (fieldName: string, value: any) => {
@@ -239,7 +288,7 @@ export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit 
         <div className="flex flex-wrap gap-2 md:gap-3">
           <Button
             variant={selectedProtocol === 'Freedom' ? 'default' : 'secondary'}
-            className={selectedProtocol === 'Freedom' ? '' : PROTOCOL_COLORS['Freedom'] || ''}
+            className={selectedProtocol === 'Freedom' ? '' : getXrayProtocolColor('Freedom')}
             onClick={() => handleProtocolSelect('Freedom')}
             type="button"
           >
@@ -247,7 +296,7 @@ export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit 
           </Button>
           <Button
             variant={selectedProtocol === 'Blackhole' ? 'default' : 'secondary'}
-            className={selectedProtocol === 'Blackhole' ? '' : PROTOCOL_COLORS['Blackhole'] || ''}
+            className={selectedProtocol === 'Blackhole' ? '' : getXrayProtocolColor('Blackhole')}
             onClick={() => handleProtocolSelect('Blackhole')}
             type="button"
           >
@@ -315,7 +364,7 @@ export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit 
                   <CardHeader>
                     <CardTitle>{t('outbounds.importedNodeConfig')}</CardTitle>
                     <CardDescription>
-                      {t('inbounds.protocolLabel')}: <span className={PROTOCOL_COLORS[selectedProtocol] || ''}>{selectedProtocol}</span>
+                      {t('inbounds.protocolLabel')}: <span className={getXrayProtocolColor(selectedProtocol)}>{selectedProtocol}</span>
                       {selectedTransport !== 'TCP' && ` | ${t('composer.transportProtocol')}: ${selectedTransport}`}
                       {selectedSecurity !== 'None' && ` | ${t('composer.securityProtocol')}: ${selectedSecurity}`}
                     </CardDescription>
@@ -364,8 +413,38 @@ export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit 
         open={isNodeSelectOpen}
         onOpenChange={setIsNodeSelectOpen}
         onSelect={handleNodeImport}
-        protocolFilter={['vless', 'vmess', 'trojan', 'ss', 'socks5', 'http']}
+        multiple={!!onBulkImport}
+        onConfirm={(items) => {
+          if (items.length === 1 || !onBulkImport) {
+            // 单选 or 没传批量回调:沿用表单填充
+            handleNodeImport(items[0].node, items[0].clashConfig)
+          } else {
+            // 多选 + 有批量回调:跳过 wizard 表单,直接批量提交
+            onBulkImport(items)
+          }
+        }}
+        protocolFilter={['vless', 'vmess', 'trojan', 'ss', 'shadowsocks', 'socks5', 'http']}
       />
+
+      {/* Tunnel 二次确认:导入的节点 server:port 同时也是某 tunnel 的 target,问用户走哪条路径 */}
+      <AlertDialog open={!!tunnelChoice} onOpenChange={(o) => { if (!o) setTunnelChoice(null) }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>通过 Tunnel 连接?</AlertDialogTitle>
+            <AlertDialogDescription className="space-y-2">
+              <div>检测到该节点 <span className="font-mono">{tunnelChoice?.directAddress}:{tunnelChoice?.directPort}</span> 同时有一条 tunnel 转发指向它:</div>
+              <div className="rounded-md border bg-muted/40 p-2 text-xs font-mono">
+                {tunnelChoice?.tunnelServerName} : {tunnelChoice?.tunnelListenPort} (tag: {tunnelChoice?.tunnelTag}) → {tunnelChoice?.directAddress}:{tunnelChoice?.directPort}
+              </div>
+              <div>使用 tunnel 连接将把出站目标替换为 <span className="font-mono">{tunnelChoice?.tunnelServerHost}:{tunnelChoice?.tunnelListenPort}</span>;选择直连则保留节点原地址。</div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>直连节点</AlertDialogCancel>
+            <AlertDialogAction onClick={applyTunnelChoice}>通过 Tunnel</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }

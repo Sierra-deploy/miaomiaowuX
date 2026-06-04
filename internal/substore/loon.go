@@ -102,6 +102,14 @@ func (p *LoonProducer) ProduceOne(proxy Proxy, outputType string, opts *ProduceO
 		return p.wireguard(proxy)
 	case "hysteria2":
 		return p.hysteria2(proxy)
+	case "anytls":
+		if network := GetString(proxy, "network"); network != "" && network != "tcp" {
+			return "", fmt.Errorf("platform Loon does not support proxy type anytls with network %s", network)
+		}
+		if GetMap(proxy, "reality-opts") != nil {
+			return "", fmt.Errorf("platform Loon does not support proxy type anytls with REALITY")
+		}
+		return p.anytls(proxy)
 	default:
 		return "", fmt.Errorf("platform Loon does not support proxy type: %s", proxyType)
 	}
@@ -740,6 +748,50 @@ func (p *LoonProducer) hysteria2(proxy Proxy) (string, error) {
 	}
 
 	result.AppendIfPresent(",ecn=%v", "ecn")
+
+	// ip-version
+	p.appendIPVersion(result, proxy)
+
+	return result.String(), nil
+}
+
+// anytls 节点转 Loon 格式(同步自 mmw v0.7.2 #85)
+func (p *LoonProducer) anytls(proxy Proxy) (string, error) {
+	result := NewResult(proxy)
+	result.Append(fmt.Sprintf(`%s=anytls,%s,%d,"%s"`,
+		GetString(proxy, "name"),
+		GetString(proxy, "server"),
+		GetInt(proxy, "port"),
+		GetString(proxy, "password")))
+
+	for _, key := range []string{"idle-session-timeout", "max-stream-count"} {
+		if IsPresent(proxy, key) {
+			if v := GetInt(proxy, key); v > 0 {
+				result.Append(fmt.Sprintf(",%s=%d", key, v))
+			}
+		}
+	}
+
+	// tls verification
+	result.AppendIfPresent(",skip-cert-verify=%v", "skip-cert-verify")
+
+	// sni
+	if sni := GetSNI(proxy); sni != "" {
+		result.Append(fmt.Sprintf(",tls-name=%s", sni))
+	}
+	result.AppendIfPresent(",tls-cert-sha256=%s", "tls-fingerprint")
+	result.AppendIfPresent(",tls-pubkey-sha256=%s", "tls-pubkey-sha256")
+
+	// tfo
+	result.AppendIfPresent(",fast-open=%v", "tfo")
+
+	// block-quic
+	p.appendBlockQuic(result, proxy)
+
+	// udp
+	if GetBool(proxy, "udp") {
+		result.Append(",udp=true")
+	}
 
 	// ip-version
 	p.appendIPVersion(result, proxy)

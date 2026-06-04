@@ -1,0 +1,192 @@
+package handler
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"strings"
+
+	"miaomiaowux/internal/storage"
+)
+
+// collectInboundClientAddItem 从 master InboundCache 拿 protocol/settings,算好 cred,
+// 返回 batch item。**不调 agent / 不写 DB**。
+//
+// 返回 (nil, false, nil):缓存命中但用户在该 (server, inbound) 已有记录 → 跳过,续费场景
+// 返回 (nil, false, err):缓存 miss / 入站不存在等 → 调用方应 fallback 到逐个 addUserToInbound
+// 返回 (item, true, nil):成功,加入 batch 列表
+func collectInboundClientAddItem(ctx context.Context, cache *InboundCache, repo *storage.TrafficRepository, user storage.User, serverID int64, inboundTag string) (*InboundClientAddItem, bool, error) {
+	if cache == nil {
+		return nil, false, fmt.Errorf("inbound cache not available")
+	}
+	ib, ok := cache.GetInbound(serverID, inboundTag)
+	if !ok {
+		return nil, false, fmt.Errorf("inbound cache miss for server=%d tag=%s", serverID, inboundTag)
+	}
+
+	// 续费 / 重复绑定 → 跳过(用户已经在 user_inbound_configs 有记录,credential 复用)
+	existing, _ := repo.GetUserInboundConfig(ctx, user.Username, serverID, inboundTag)
+	if existing != nil && existing.Protocol == ib.Protocol {
+		return nil, false, nil
+	}
+
+	// shadowsocks 需要 method 决定 key 长度
+	var method string
+	if ib.Settings != nil {
+		method, _ = ib.Settings["method"].(string)
+	}
+	credential, credJSON, err := generateCredential(ib.Protocol, user, method, inboundTag)
+	if err != nil {
+		return nil, false, fmt.Errorf("generate credential: %w", err)
+	}
+
+	// VLESS Reality 必须有 flow=xtls-rprx-vision,否则客户端连不上。
+	// 跟 addUserToInbound line 1181-1195 同款继承逻辑 — batch 路径之前漏了这一段,
+	// 套餐加节点给已有用户分发时新生成的 client 全部丢 flow 字段(用户报的 bug)。
+	if strings.EqualFold(ib.Protocol, "vless") {
+		if _, hasFlow := credential["flow"]; !hasFlow && ib.Settings != nil {
+			if clients, ok := ib.Settings["clients"].([]interface{}); ok && len(clients) > 0 {
+				if first, ok := clients[0].(map[string]interface{}); ok {
+					if flow, ok := first["flow"].(string); ok && flow != "" {
+						credential["flow"] = flow
+						if b, err := json.Marshal(credential); err == nil {
+							credJSON = string(b)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return &InboundClientAddItem{
+		Username:       user.Username,
+		ServerID:       serverID,
+		InboundTag:     inboundTag,
+		Protocol:       ib.Protocol,
+		Credential:     credential,
+		CredentialJSON: credJSON,
+	}, true, nil
+}
+
+// applyInboundBatchOrFallback per-server 收集到的 inbound add-client items 一次 batch-apply 提交,
+// 失败时降级到逐项 addUserToInbound(老 agent 不支持 batch-apply 也走这条)。
+// 返回收集到的 warning(供前端 toast),空切片=全成功。
+func applyInboundBatchOrFallback(ctx context.Context, rm *RemoteManageHandler, repo *storage.TrafficRepository, serverID int64, items []InboundClientAddItem, label string) []string {
+	if len(items) == 0 {
+		return nil
+	}
+	err := applyInboundClientsBatchToAgent(ctx, rm, repo, serverID, items)
+	if err == nil {
+		return nil
+	}
+	if err != ErrAgentBatchNotSupported {
+		log.Printf("[%s] inbound batch-apply server=%d failed: %v — falling back to per-item", label, serverID, err)
+	} else {
+		log.Printf("[%s] agent server=%d 不支持 batch-apply,fallback per-item", label, serverID)
+	}
+
+	var warnings []string
+	for _, it := range items {
+		user := storage.User{Username: it.Username}
+		if ferr := addUserToInbound(ctx, rm, repo, user, it.ServerID, it.InboundTag); ferr != nil {
+			log.Printf("[%s] fallback addUserToInbound user=%s server=%d tag=%s: %v",
+				label, it.Username, it.ServerID, it.InboundTag, ferr)
+			warnings = append(warnings, fmt.Sprintf("节点 %s 添加用户 %s 失败", it.InboundTag, it.Username))
+		}
+	}
+	return warnings
+}
+
+// InboundClientAddItem 描述一次 per-server batch 中的单条"加 client"操作。
+// 调用方按 ServerID 聚合后一次性传给 applyInboundClientsBatchToAgent。
+//
+// 字段使用规则:
+//   - InboundTag / Credential 给 agent batch-apply 用,生成 add-client 操作
+//   - Username / ServerID / Protocol / CredentialJSON 给 master DB 写 user_inbound_configs 用
+//
+// 调用方必须保证 (Username, ServerID, InboundTag) 三元组在 master DB 中**不存在**
+// (即:已过滤 GetUserInboundConfig 返回非 nil 的情况),否则会写入重复行。
+type InboundClientAddItem struct {
+	Username       string
+	ServerID       int64
+	InboundTag     string
+	Protocol       string
+	Credential     map[string]interface{}
+	CredentialJSON string
+}
+
+// applyInboundClientsBatchToAgent 把同一 server 上多个用户加 client 的操作合并成 1 次
+// POST /api/child/batch-apply,显著减少跨海外往返耗时:
+//   - 现状:每个 (user, inbound) 一次 GET /api/child/inbounds + 一次 add-client → N 次 round-trip + agent inboundsMu 串行
+//   - 改造:0 次 GET(cred 用 master InboundCache 算)+ 1 次 batch-apply → 整 server 1 次 round-trip
+//
+// 老 agent(无 batch-apply 端点)→ 返回 ErrAgentBatchNotSupported,caller 应 fallback 逐个 addUserToInbound。
+// 全成功 → 批量 SaveUserInboundConfig 写 DB,返回 nil。
+// agent 个别 item 报 err(如 inbound 不存在)→ 跳过该 item 的 DB 写入,其它仍写入,函数仍返回 nil。
+func applyInboundClientsBatchToAgent(ctx context.Context, rm *RemoteManageHandler, repo *storage.TrafficRepository, serverID int64, items []InboundClientAddItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+
+	type batchInboundClient struct {
+		Tag    string                 `json:"tag"`
+		Client map[string]interface{} `json:"client"`
+	}
+	type batchReq struct {
+		InboundClients []batchInboundClient `json:"inbound_clients"`
+		// NoRestart=true:agent 端只 replaceRuntimeInbound 热更新,不重启 xray。
+		// 加 client 是 HandlerService 热生效的场景,完全不需要 restart。
+		NoRestart bool `json:"no_restart,omitempty"`
+	}
+
+	req := batchReq{NoRestart: true}
+	for _, it := range items {
+		req.InboundClients = append(req.InboundClients, batchInboundClient{
+			Tag:    it.InboundTag,
+			Client: it.Credential,
+		})
+	}
+	body, _ := json.Marshal(req)
+
+	raw, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/batch-apply", body)
+	if err != nil {
+		low := strings.ToLower(err.Error())
+		if strings.Contains(low, "404") || strings.Contains(low, "not found") || strings.Contains(low, "method not allowed") {
+			return ErrAgentBatchNotSupported
+		}
+		return fmt.Errorf("inbound batch-apply server=%d: %w", serverID, err)
+	}
+
+	var resp struct {
+		Success        bool     `json:"success"`
+		InboundResults []string `json:"inbound_results"`
+		Message        string   `json:"message"`
+	}
+	if jerr := json.Unmarshal(raw, &resp); jerr != nil {
+		return fmt.Errorf("parse batch-apply response: %w", jerr)
+	}
+	if !resp.Success {
+		return fmt.Errorf("batch-apply rejected: %s", resp.Message)
+	}
+
+	// 写 user_inbound_configs:跳过 agent 端返回 err: 的 item(常见:inbound tag 不存在)。
+	for i, it := range items {
+		if i < len(resp.InboundResults) && strings.HasPrefix(resp.InboundResults[i], "err:") {
+			log.Printf("[InboundBatch] add-client err server=%d item=%d tag=%s user=%s: %s",
+				serverID, i, it.InboundTag, it.Username, resp.InboundResults[i])
+			continue
+		}
+		if serr := repo.SaveUserInboundConfig(ctx, storage.UserInboundConfig{
+			Username:       it.Username,
+			ServerID:       it.ServerID,
+			InboundTag:     it.InboundTag,
+			Protocol:       it.Protocol,
+			CredentialJSON: it.CredentialJSON,
+		}); serr != nil {
+			log.Printf("[InboundBatch] DB save user_inbound_config failed user=%s server=%d tag=%s: %v",
+				it.Username, it.ServerID, it.InboundTag, serr)
+		}
+	}
+	return nil
+}

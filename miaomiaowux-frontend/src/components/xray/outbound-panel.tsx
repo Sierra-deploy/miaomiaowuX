@@ -15,9 +15,11 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import { Badge } from '@/components/ui/badge'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { api } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
 import type { XrayOutbound } from '@/lib/xray-presets'
+import { clashConfigToOutbound } from '@/lib/xray-config-generator'
 
 interface OutboundItem {
   server_id: number
@@ -39,7 +41,8 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
   const [freedomDomainStrategy, setFreedomDomainStrategy] = useState<string>('AsIs')
   const [viewingOutbound, setViewingOutbound] = useState<XrayOutbound | null>(null)
   const [isWizardDialogOpen, setIsWizardDialogOpen] = useState(false)
-  const [hideDefaultOutbounds, setHideDefaultOutbounds] = useState(true)
+  // 初始展示默认出站(direct/block 等),按钮文字提示"隐藏默认",点一下才隐藏
+  const [hideDefaultOutbounds, setHideDefaultOutbounds] = useState(false)
 
   const { data: outboundsData, isLoading } = useQuery({
     queryKey: ['remote-outbounds', serverId, serverName],
@@ -57,8 +60,36 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
     },
   })
 
+  // 共享 nodes query(routing-panel 也用同 key,react-query 自动 dedup)。
+  // 用于识别 outbound 是否被妙妙屋X路由出站功能引用 → 卡片打标 + 禁用删除。
+  const { data: nodesData } = useQuery({
+    queryKey: ['nodes'],
+    queryFn: async () => (await api.get('/api/admin/nodes')).data as { nodes: any[] },
+  })
+  const mmwxRoutedTags = useMemo(() => {
+    const set = new Set<string>()
+    for (const n of nodesData?.nodes || []) {
+      if (n.node_type === 'routed' && n.routed_outbound_tag) {
+        set.add(n.routed_outbound_tag)
+      }
+    }
+    return set
+  }, [nodesData])
+  const isMmwxManagedOutbound = (tag: string | undefined) => !!tag && mmwxRoutedTags.has(tag)
+
   const remoteUpdateOutboundMutation = useMutation({
     mutationFn: async ({ outbound }: { outbound: XrayOutbound }) => {
+      // 优先尝试 agent 新加的 `update` 动作:持久化时原位置替换,前端列表不被甩到末尾。
+      // 老版本 agent 不识别 update → 回落到 remove+add(顺序会变,但保证向后兼容,等用户升级 agent 后自动恢复保序)。
+      try {
+        const response = await api.post(`/api/admin/remote/outbounds?server_id=${serverId}`, {
+          action: 'update', tag: outbound.tag, outbound,
+        })
+        if (response.data?.success) return response.data
+        // 后端返回 success=false 也走回退路径
+      } catch {
+        // 老 agent: status 400,落到回退
+      }
       await api.post(`/api/admin/remote/outbounds?server_id=${serverId}`, {
         action: 'remove', tag: outbound.tag,
       })
@@ -137,6 +168,42 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
     } catch {}
   }
 
+  // 批量从节点导入:NodeSelectDialog 多选确认 → 跳过 wizard 表单,逐个生成 outbound + POST
+  // 失败不影响其他;统一 toast 汇总结果
+  const handleBulkOutboundImport = async (items: Array<{ node: any; clashConfig: any }>) => {
+    let ok = 0
+    const failed: string[] = []
+    for (const { node, clashConfig } of items) {
+      const tag = (clashConfig?.name || node.node_name || '').trim()
+      if (!tag) { failed.push(`${node.node_name}: ${t('outbounds.fillTag')}`); continue }
+      try {
+        const outbound = clashConfigToOutbound(clashConfig, tag)
+        const res = await api.post(`/api/admin/remote/outbounds?server_id=${serverId}`, {
+          action: 'add', outbound,
+        })
+        if (res.data?.success) ok++
+        else failed.push(`${node.node_name}: ${res.data?.message || '失败'}`)
+      } catch (e: any) {
+        failed.push(`${node.node_name}: ${e?.response?.data?.message || e?.message || '失败'}`)
+      }
+    }
+    queryClient.invalidateQueries({ queryKey: ['remote-outbounds', serverId] })
+    if (ok > 0 && failed.length === 0) {
+      toast.success(t('outbounds.bulkImportSuccess', { defaultValue: '批量导入成功 {{count}} 个出站', count: ok }))
+    } else if (ok > 0 && failed.length > 0) {
+      toast.error(
+        t('outbounds.bulkImportPartial', { defaultValue: '成功 {{ok}} 个 / 失败 {{fail}} 个', ok, fail: failed.length }) +
+        ': ' + failed.slice(0, 3).join('; ') + (failed.length > 3 ? ' …' : ''),
+      )
+    } else {
+      toast.error(
+        t('outbounds.bulkImportFailed', { defaultValue: '批量导入失败' }) +
+        ': ' + failed.slice(0, 3).join('; ') + (failed.length > 3 ? ' …' : ''),
+      )
+    }
+    setIsWizardDialogOpen(false)
+  }
+
   const outbounds = outboundsData?.outbounds || []
   const filteredOutbounds = useMemo(() => {
     if (!hideDefaultOutbounds) return outbounds
@@ -182,7 +249,7 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
             size="sm"
             onClick={() => setHideDefaultOutbounds(!hideDefaultOutbounds)}
           >
-            {hideDefaultOutbounds ? t('outbounds.hideDefault') : t('outbounds.showDefault')}
+            {hideDefaultOutbounds ? t('outbounds.showDefault') : t('outbounds.hideDefault')}
           </Button>
           <Button size="sm" onClick={() => setIsWizardDialogOpen(true)}>
             <Plus className="h-4 w-4 mr-1" />{t('outbounds.addOutbound')}
@@ -202,11 +269,22 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
           {filteredOutbounds.map((item: OutboundItem) => {
             const outbound = item.outbound
             const { address, port } = getOutboundAddress(outbound)
+            const mmwxManaged = isMmwxManagedOutbound(outbound.tag)
             return (
-              <Card key={`${item.server_id}-${outbound.tag}`}>
+              <Card key={`${item.server_id}-${outbound.tag}`} className={mmwxManaged ? 'border-l-4 border-l-primary/70' : ''}>
                 <CardHeader className="pb-2">
                   <div className="flex items-start justify-between gap-2">
-                    <CardTitle className="text-base truncate">{outbound.tag}</CardTitle>
+                    <CardTitle className="text-base truncate flex items-center gap-1.5">
+                      {outbound.tag}
+                      {mmwxManaged && (
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Badge variant='secondary' className='text-[10px] px-1 py-0 bg-primary/10 text-primary border-primary/30'>妙妙屋X</Badge>
+                          </TooltipTrigger>
+                          <TooltipContent><div className='text-xs max-w-xs'>此出站由妙妙屋X路由出站功能添加和管理,请勿手动删除 — 删除会让对应 routed 节点 + 用户子账号失效。要清理请去节点管理删除使用此 outbound 的 routed 节点。</div></TooltipContent>
+                        </Tooltip>
+                      )}
+                    </CardTitle>
                     <Badge variant="secondary" className="text-xs">{outbound.protocol}</Badge>
                   </div>
                 </CardHeader>
@@ -231,7 +309,7 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
                     <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => handleEditFreedom(item)}><Edit2 className="h-3 w-3 mr-1" />{tc('actions.edit')}</Button>
                   )}
                   <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setViewingOutbound(outbound)}><Eye className="h-3 w-3 mr-1" />{tc('actions.view')}</Button>
-                  {!isSimpleOutbound(outbound.protocol) && (
+                  {!isSimpleOutbound(outbound.protocol) && !mmwxManaged && (
                     <Button variant="outline" size="sm" className="h-7 text-xs text-red-600 hover:text-red-700" onClick={() => handleDelete(item)}><Trash2 className="h-3 w-3 mr-1" />{tc('actions.delete')}</Button>
                   )}
                 </CardFooter>
@@ -293,13 +371,13 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
 
       {/* Add Outbound Wizard Dialog */}
       <Dialog open={isWizardDialogOpen} onOpenChange={setIsWizardDialogOpen}>
-        <DialogContent className="w-[95vw] !max-w-none md:w-[90vw] lg:w-[80vw] max-h-[90vh] overflow-hidden sm:max-w-none flex flex-col">
+        <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
           <DialogHeader>
             <DialogTitle>{t('outbounds.addOutboundWizard')}</DialogTitle>
             <DialogDescription>{t('outbounds.addOutboundWizardDescShort')}</DialogDescription>
           </DialogHeader>
           <div className="flex-1 overflow-y-auto">
-            <OutboundWizard servers={[]} selectedServerIds={[]} onCancel={() => setIsWizardDialogOpen(false)} onSubmit={handleOutboundSubmit} />
+            <OutboundWizard servers={[]} selectedServerIds={[]} onCancel={() => setIsWizardDialogOpen(false)} onSubmit={handleOutboundSubmit} onBulkImport={handleBulkOutboundImport} />
           </div>
         </DialogContent>
       </Dialog>

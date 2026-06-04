@@ -106,12 +106,21 @@ jobs:
           npm run build
 
       - name: Build backend
+        # LICENSE_PUB_KEY: 通过 -ldflags -X 注入 internal/license.licenseSignPubKeyB64,
+        # 源码默认空字符串 → fork 后自编译的二进制验签全部失败 → PRO 不可用。
+        # Secret 在 仓库 Settings → Secrets and variables → Actions 配置。
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 0
+          LICENSE_PUB_KEY: ${{ secrets.LICENSE_PUB_KEY }}
         run: |
-          go build -trimpath -ldflags="-s -w" -o build/${{ matrix.output }} ./cmd/server
+          if [ -z "$LICENSE_PUB_KEY" ]; then
+            echo "::warning::LICENSE_PUB_KEY secret is empty — built binary will reject all license responses (PRO unusable)"
+          fi
+          go build -trimpath \
+            -ldflags="-s -w -X 'miaomiaowux/internal/license.licenseSignPubKeyB64=${LICENSE_PUB_KEY}'" \
+            -o build/${{ matrix.output }} ./cmd/server
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -163,6 +172,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            LICENSE_PUB_KEY=${{ secrets.LICENSE_PUB_KEY }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

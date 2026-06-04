@@ -42,6 +42,10 @@ export function generateInboundConfig(formData: any, protocol: string, transport
 
   // Generate streamSettings
   if (protocol === 'Hysteria2') {
+    // fork 的 xray-core HY2 schema(infra/conf/hysteria.go + transport_internet.go HysteriaConfig):
+    // protocol=hysteria + settings{version:2, clients:[{auth,email}]} +
+    // streamSettings{network:hysteria, security:tls, tlsSettings, hysteriaSettings:{version:2}}。
+    // 注意:该 fork 的 HysteriaConfig 不支持 obfs/salamander(无此字段),故不下发。
     config.streamSettings = {
       network: 'hysteria',
       security: 'tls',
@@ -52,11 +56,10 @@ export function generateInboundConfig(formData: any, protocol: string, transport
         }],
         alpn: ['h3'],
       },
+      hysteriaSettings: { version: 2 },
     }
-    if (formData.obfs === 'salamander' && formData.obfsPassword) {
-      config.streamSettings.hysteriaSettings = {
-        password: formData.obfsPassword,
-      }
+    if (formData.serverName) {
+      config.streamSettings.tlsSettings.serverName = formData.serverName
     }
   } else if (protocol !== 'HTTP' && protocol !== 'Dokodemo' && transport !== 'None') {
     config.streamSettings = generateStreamSettings(formData, transport, security)
@@ -153,6 +156,26 @@ function generateSettings(formData: any, protocol: string, security: string) {
       })
       break
 
+    case 'Anytls':
+      // AnyTLS schema:settings.users[](非 clients),字段 {password, level, email}。
+      settings.users = (formData.clients || []).map((client: any) => {
+        const c: any = { password: client.password }
+        if (client.email) c.email = client.email
+        if (client.level !== undefined) c.level = client.level
+        return c
+      })
+      // paddingScheme 为可选的 inbound 级流量整形规则数组,每行一条;留空则 server 用默认。
+      if (formData.paddingScheme && typeof formData.paddingScheme === 'string') {
+        const lines = formData.paddingScheme
+          .split('\n')
+          .map((l: string) => l.trim())
+          .filter(Boolean)
+        if (lines.length > 0) {
+          settings.paddingScheme = lines
+        }
+      }
+      break
+
     case 'HTTP':
       settings.auth = formData.auth || 'noauth'
       if (formData.auth === 'password' && formData.accounts && formData.accounts.length > 0) {
@@ -231,21 +254,36 @@ function generateStreamSettings(formData: any, transport: string, security: stri
     streamSettings.security = getSecurityType(security)
 
     if (security === 'TLS' || security.includes('XTLS-Vision') && !security.includes('REALITY')) {
-      streamSettings.tlsSettings = {
-        certificates: [
+      streamSettings.tlsSettings = {}
+
+      // certificates 仅在用户真填了 cert/key 时才包含。出站(client-side)绝大多数情况不需要本地证书,
+      // 留空数组只会让 xray 报 "both file and bytes are empty"。
+      if (formData.certificateFile || formData.keyFile) {
+        streamSettings.tlsSettings.certificates = [
           {
-            certificateFile: formData.certificateFile,
-            keyFile: formData.keyFile,
+            certificateFile: formData.certificateFile || '',
+            keyFile: formData.keyFile || '',
           },
-        ],
+        ]
       }
 
-      if (formData.serverName) {
-        streamSettings.tlsSettings.serverName = formData.serverName
+      // serverNames(复数,Reality 字段)与 serverName(单数,普通 TLS)在 clashConfigToOutbound 里都可能被填,
+      // 这里两者兼容,取到非空就当 SNI 用,不然 Trojan/VLESS-TLS 落地后 SNI 为空会直接握手失败
+      const sni = formData.serverName || formData.serverNames || ''
+      if (sni) {
+        streamSettings.tlsSettings.serverName = String(sni).split(',')[0].trim()
       }
 
       if (formData.alpn) {
         streamSettings.tlsSettings.alpn = formData.alpn.split(',').map((a: string) => a.trim())
+      }
+      // xray 已废弃 allowInsecure,改用 pinnedPeerCertSha256(hex,逗号分隔多值)精确锁证书
+      // 用户没填 → 留空字段,后端 hook 会在 POST 时 TLS dial 自动获取
+      if (formData.pinnedPeerCertSha256 && String(formData.pinnedPeerCertSha256).trim()) {
+        streamSettings.tlsSettings.pinnedPeerCertSha256 = String(formData.pinnedPeerCertSha256).trim()
+      }
+      if (formData.fingerprint) {
+        streamSettings.tlsSettings.fingerprint = formData.fingerprint
       }
 
       if (formData.minVersion) {
@@ -364,15 +402,14 @@ function generateOutboundSettings(formData: any, protocol: string, security: str
     return settings
   }
 
-  // Protocols that use vnext structure (VLESS, VMess, Trojan)
-  if (protocol === 'VLESS' || protocol === 'VMess' || protocol === 'Trojan') {
+  // VLESS/VMess 用 vnext.users[] 嵌套结构;Trojan 用扁平 servers[](xray 要求 servers 数组有且仅一个成员)
+  if (protocol === 'VLESS' || protocol === 'VMess') {
     const vnext: any = {
       address: formData.address,
       port: formData.port,
       users: []
     }
 
-    // Generate users array based on protocol
     if (protocol === 'VLESS') {
       vnext.users = (formData.users || []).map((user: any) => {
         const u: any = {
@@ -380,7 +417,6 @@ function generateOutboundSettings(formData: any, protocol: string, security: str
           encryption: user.encryption || 'none',
         }
         if (user.level !== undefined) u.level = user.level
-        // Add flow for XTLS/Vision
         if (security && (security.includes('XTLS') || security.includes('Vision'))) {
           u.flow = user.flow || 'xtls-rprx-vision'
         }
@@ -396,21 +432,23 @@ function generateOutboundSettings(formData: any, protocol: string, security: str
         if (user.security) u.security = user.security
         return u
       })
-    } else if (protocol === 'Trojan') {
-      vnext.users = (formData.users || []).map((user: any) => {
-        const u: any = {
-          password: user.password,
-        }
-        if (user.level !== undefined) u.level = user.level
-        // Add flow for XTLS
-        if (security && (security.includes('XTLS') || security.includes('Vision'))) {
-          u.flow = user.flow || 'xtls-rprx-vision'
-        }
-        return u
-      })
     }
 
     settings.vnext = [vnext]
+  } else if (protocol === 'Trojan') {
+    // xray Trojan outbound 协议结构与 VLESS/VMess 不同:settings.servers[{address, port, password, level, flow?}]
+    // 且 servers 必须有且仅有 1 个元素,以前误用 vnext 会导致 "Multiple endpoints" / 字段缺失等错误
+    const firstUser: any = (formData.users || [])[0] || {}
+    const server: any = {
+      address: formData.address,
+      port: formData.port,
+      password: firstUser.password || formData.password || '',
+    }
+    if (firstUser.level !== undefined) server.level = firstUser.level
+    if (security && (security.includes('XTLS') || security.includes('Vision'))) {
+      server.flow = firstUser.flow || 'xtls-rprx-vision'
+    }
+    settings.servers = [server]
   }
   // Protocols that use servers structure (Shadowsocks, Socks)
   else if (protocol === 'Shadowsocks2022') {
@@ -510,7 +548,8 @@ export function clashConfigToOutbound(clashConfig: any, tag: string): any {
   if (security === 'TLS') {
     formData.serverNames = clashConfig.sni || clashConfig.servername || clashConfig.server || ''
     formData.alpn = clashConfig.alpn?.join(',') || ''
-    if (clashConfig['skip-cert-verify']) formData.allowInsecure = true
+    // xray 已废弃 allowInsecure。skip-cert-verify=true 的 clash 节点不再写入"放弃验证"标记到 xray outbound;
+    // 后端 hook 会在保存时 TLS dial 目标节点拿 peer cert sha256 自动填入 pinnedPeerCertSha256
     if (clashConfig.fingerprint) formData.fingerprint = clashConfig.fingerprint
   } else if (security === 'Reality') {
     const realityOpts = clashConfig['reality-opts'] || {}
@@ -521,4 +560,37 @@ export function clashConfigToOutbound(clashConfig: any, tag: string): any {
   }
 
   return generateOutboundConfig(formData, protocol, transport, security)
+}
+
+/**
+ * 在 outbounds 列表里找一条"等价于这个节点"的出站(协议+server+port+凭据 全匹配),命中返回其 tag。
+ * 用于"选了节点做出站时,若服务器已有等价出站则复用,不重复创建"。
+ */
+export function matchNodeToExistingOutbound(clash: any, outbounds: any[]): string | null {
+  if (!clash || !Array.isArray(outbounds)) return null
+  const type = String(clash.type || '').toLowerCase()
+  const proto = type === 'ss' ? 'shadowsocks' : type === 'hy2' ? 'hysteria2' : type
+  const server = String(clash.server || '')
+  const port = Number(clash.port)
+
+  for (const ob of outbounds) {
+    if (!ob || ob.protocol !== proto) continue
+    const ep = (ob.settings?.vnext || ob.settings?.servers || [])[0]
+    if (!ep || String(ep.address || '') !== server || Number(ep.port) !== port) continue
+
+    if (type === 'vless' || type === 'vmess') {
+      const id = ep.users?.[0]?.id
+      if (id && clash.uuid && id === clash.uuid) return ob.tag
+    } else if (type === 'trojan') {
+      if (ep.password && clash.password && ep.password === clash.password) return ob.tag
+    } else if (type === 'ss' || type === 'shadowsocks') {
+      const cm = clash.cipher || clash.method
+      if (ep.method && cm && ep.method === cm && ep.password === clash.password) return ob.tag
+    } else if (type === 'hysteria2' || type === 'hy2') {
+      const pw = ep.password || ep.auth
+      const cpw = clash.password || clash.auth
+      if (pw && cpw && pw === cpw) return ob.tag
+    }
+  }
+  return null
 }

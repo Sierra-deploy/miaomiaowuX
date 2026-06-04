@@ -34,9 +34,10 @@ interface InboundItem {
 interface InboundPanelProps {
   serverId: number
   serverName: string
+  federationPrefix?: string
 }
 
-export function InboundPanel({ serverId, serverName }: InboundPanelProps) {
+export function InboundPanel({ serverId, serverName, federationPrefix }: InboundPanelProps) {
   const { t } = useTranslation('xray')
   const { t: tc } = useTranslation('common')
   const queryClient = useQueryClient()
@@ -141,8 +142,12 @@ export function InboundPanel({ serverId, serverName }: InboundPanelProps) {
   }
 
   const handleInboundSubmit = async (serverIds: number[], inbound: XrayInbound, tag: string) => {
-    const trimmedTag = tag?.trim() || inbound.tag || ''
+    let trimmedTag = tag?.trim() || inbound.tag || ''
     if (!trimmedTag) { toast.error(t('inbounds.fillTag')); return }
+    // 分享服务器:统一加前缀,避免与拥有方已有入站 tag 冲突
+    if (federationPrefix && !trimmedTag.startsWith(federationPrefix)) {
+      trimmedTag = federationPrefix + trimmedTag
+    }
     try {
       await remoteAddInboundMutation.mutateAsync({ inbound: { ...inbound, tag: trimmedTag } })
       toast.success(t('inbounds.inboundAddedToRemote'))
@@ -179,6 +184,10 @@ export function InboundPanel({ serverId, serverName }: InboundPanelProps) {
         </Button>
       </div>
 
+      <p className="text-xs text-muted-foreground rounded-md border border-dashed px-3 py-2">
+        提示：入站随节点联动管理。删除入站对应的节点后，入站会自动删除。
+      </p>
+
       {isLoading ? (
         <div className="text-center py-8">
           <RefreshCw className="h-6 w-6 animate-spin mx-auto mb-2" />
@@ -202,9 +211,7 @@ export function InboundPanel({ serverId, serverName }: InboundPanelProps) {
                 {item.inbound.listen && <div className="flex justify-between"><span className="text-muted-foreground">{t('inbounds.listenAddress')}</span><span>{item.inbound.listen}</span></div>}
               </CardContent>
               <CardFooter className="flex gap-1.5 pt-2">
-                <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => handleEdit(item)}><Edit2 className="h-3 w-3 mr-1" />{tc('actions.edit')}</Button>
                 <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setViewingInbound(item.inbound)}><Eye className="h-3 w-3 mr-1" />{tc('actions.view')}</Button>
-                <Button variant="outline" size="sm" className="h-7 text-xs text-red-600 hover:text-red-700" onClick={() => handleDelete(item)}><Trash2 className="h-3 w-3 mr-1" />{tc('actions.delete')}</Button>
               </CardFooter>
             </Card>
           ))}

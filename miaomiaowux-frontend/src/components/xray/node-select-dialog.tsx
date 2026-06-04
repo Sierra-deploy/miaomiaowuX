@@ -14,22 +14,12 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { Cable } from 'lucide-react'
 import { api } from '@/lib/api'
+import { getClashProtocolColor } from '@/lib/protocol-colors'
 import { toast } from 'sonner'
 
-// Protocol colors matching node management
-const PROTOCOL_COLORS: Record<string, string> = {
-  vmess: 'bg-blue-500/10 text-blue-700 dark:text-blue-400',
-  vless: 'bg-purple-500/10 text-purple-700 dark:text-purple-400',
-  trojan: 'bg-red-500/10 text-red-700 dark:text-red-400',
-  ss: 'bg-green-500/10 text-green-700 dark:text-green-400',
-  socks5: 'bg-yellow-500/10 text-yellow-700 dark:text-yellow-400',
-  hysteria: 'bg-pink-500/10 text-pink-700 dark:text-pink-400',
-  hysteria2: 'bg-indigo-500/10 text-indigo-700 dark:text-indigo-400',
-  tuic: 'bg-cyan-500/10 text-cyan-700 dark:text-cyan-400',
-  anytls: 'bg-teal-500/10 text-teal-700 dark:text-teal-400',
-  wireguard: 'bg-orange-500/10 text-orange-700 dark:text-orange-400',
-}
 
 interface ParsedNode {
   id: number
@@ -43,6 +33,7 @@ interface ParsedNode {
   original_server: string
   created_at: string
   updated_at: string
+  node_type?: string
 }
 
 interface NodeSelectDialogProps {
@@ -51,33 +42,44 @@ interface NodeSelectDialogProps {
   onSelect: (node: ParsedNode, clashConfig: any) => void
   /** Filter nodes by protocol, e.g., ['vless', 'vmess', 'trojan'] */
   protocolFilter?: string[]
+  /** 启用多选;调用方应提供 onConfirm 接收批量结果,onSelect 仅在退化时用 */
+  multiple?: boolean
+  /** 多选模式确认回调;传入则覆盖单选 onSelect 的"单条"语义,选 1/多 都走它 */
+  onConfirm?: (items: Array<{ node: ParsedNode; clashConfig: any }>) => void
 }
 
-export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter }: NodeSelectDialogProps) {
+export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter, multiple = false, onConfirm }: NodeSelectDialogProps) {
   const { t } = useTranslation('xray')
   const { t: tc } = useTranslation('common')
   const [nodes, setNodes] = useState<ParsedNode[]>([])
+  const [nodeOrder, setNodeOrder] = useState<number[]>([])
+  const [tunnels, setTunnels] = useState<any[]>([])
   const [loading, setLoading] = useState(false)
-  const [selectedNodeId, setSelectedNodeId] = useState<number | null>(null)
+  const [selectedNodeIds, setSelectedNodeIds] = useState<Set<number>>(new Set())
   const [searchTerm, setSearchTerm] = useState('')
   const [tagFilter, setTagFilter] = useState<string>('all')
 
-  // Load node list
+  // Load node list + user_config(取节点排序) + tunnels(标记被 tunnel 转发的节点)
   useEffect(() => {
     if (open) {
-      loadNodes()
-      setSelectedNodeId(null)
+      loadAll()
+      setSelectedNodeIds(new Set())
       setSearchTerm('')
       setTagFilter('all')
     }
   }, [open])
 
-  const loadNodes = async () => {
+  const loadAll = async () => {
     setLoading(true)
     try {
-      const response = await api.get('/api/admin/nodes')
-      const nodeData = response.data?.nodes || []
-      setNodes(nodeData)
+      const [nodesRes, ucRes, tnRes] = await Promise.all([
+        api.get('/api/admin/nodes'),
+        api.get('/api/user/config').catch(() => ({ data: {} })),
+        api.get('/api/admin/tunnels').catch(() => ({ data: { tunnels: [] } })),
+      ])
+      setNodes(nodesRes.data?.nodes || [])
+      setNodeOrder(ucRes.data?.node_order || [])
+      setTunnels(tnRes.data?.tunnels || [])
     } catch (error) {
       toast.error(t('nodeSelect.loadFailed'), {
         description: error.response?.data?.message || error.message,
@@ -88,8 +90,30 @@ export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter 
     }
   }
 
+  // server:port → tunnel[](和 nodes 主页的 renderForwardedBadge 同源,判断该节点是否被某 tunnel 转发)
+  const tunnelsByTarget = useMemo(() => {
+    const map = new Map<string, any[]>()
+    for (const tn of tunnels) {
+      const key = `${tn.target_address}:${tn.target_port}`
+      const arr = map.get(key) || []
+      arr.push(tn)
+      map.set(key, arr)
+    }
+    return map
+  }, [tunnels])
+
   const handleSelectNode = (nodeId: number) => {
-    setSelectedNodeId(nodeId === selectedNodeId ? null : nodeId)
+    setSelectedNodeIds((prev) => {
+      const next = new Set(prev)
+      if (multiple) {
+        next.has(nodeId) ? next.delete(nodeId) : next.add(nodeId)
+      } else {
+        // 单选:点已选 → 取消,点新的 → 替换
+        next.clear()
+        if (!prev.has(nodeId)) next.add(nodeId)
+      }
+      return next
+    })
   }
 
   // Get unique tags
@@ -103,12 +127,12 @@ export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter 
     return Array.from(tags).sort()
   }, [nodes])
 
-  // Filter nodes
+  // Filter nodes + 按 user_config.node_order 排序(节点列表里用户调过的顺序)
   const filteredNodes = useMemo(() => {
     let filtered = nodes
 
-    // Filter by enabled status
-    filtered = filtered.filter((node) => node.enabled)
+    // 隐藏路由出站节点 — 已经是某条 outbound 的"客户端视图",不应作为新出站的来源
+    filtered = filtered.filter((node) => node.node_type !== 'routed')
 
     // Filter by protocol if specified
     if (protocolFilter && protocolFilter.length > 0) {
@@ -132,22 +156,50 @@ export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter 
       )
     }
 
+    // 按 node_order 排序,不在 order 里的排到最后(保留稳定相对顺序)
+    if (nodeOrder.length > 0) {
+      const idx = new Map<number, number>()
+      nodeOrder.forEach((id, i) => idx.set(id, i))
+      filtered = [...filtered].sort((a, b) => {
+        const ai = idx.get(a.id) ?? Number.POSITIVE_INFINITY
+        const bi = idx.get(b.id) ?? Number.POSITIVE_INFINITY
+        return ai - bi
+      })
+    }
     return filtered
-  }, [nodes, protocolFilter, tagFilter, searchTerm])
+  }, [nodes, protocolFilter, tagFilter, searchTerm, nodeOrder])
 
   const handleConfirm = () => {
-    if (!selectedNodeId) return
-
-    const selectedNode = nodes.find((n) => n.id === selectedNodeId)
-    if (!selectedNode) return
-
-    try {
-      const clashConfig = JSON.parse(selectedNode.clash_config)
-      onSelect(selectedNode, clashConfig)
-      onOpenChange(false)
-    } catch (error) {
-      toast.error(t('nodeSelect.parseFailed'))
+    if (selectedNodeIds.size === 0) return
+    const items: Array<{ node: ParsedNode; clashConfig: any }> = []
+    for (const id of selectedNodeIds) {
+      const node = nodes.find((n) => n.id === id)
+      if (!node) continue
+      try {
+        items.push({ node, clashConfig: JSON.parse(node.clash_config) })
+      } catch {
+        toast.error(`${t('nodeSelect.parseFailed')}: ${node.node_name}`)
+      }
     }
+    if (items.length === 0) return
+    if (onConfirm) {
+      onConfirm(items)
+    } else {
+      // 旧 API 兼容:只回单条
+      onSelect(items[0].node, items[0].clashConfig)
+    }
+    onOpenChange(false)
+  }
+
+  // 当前过滤后的可选节点(在 filteredNodes useMemo 之后才能用,这里通过函数延迟绑定);
+  // 全选:勾上当前 filter 内所有节点;清空:清掉当前 filter 范围内的勾选
+  const toggleSelectAllFiltered = (filteredIds: number[], allFilteredChecked: boolean) => {
+    setSelectedNodeIds((prev) => {
+      const next = new Set(prev)
+      if (allFilteredChecked) filteredIds.forEach((id) => next.delete(id))
+      else filteredIds.forEach((id) => next.add(id))
+      return next
+    })
   }
 
   return (
@@ -192,6 +244,27 @@ export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter 
             </div>
           )}
 
+          {/* 多选工具栏:全选当前过滤范围 / 清空当前过滤范围 */}
+          {multiple && filteredNodes.length > 0 && (() => {
+            const filteredIds = filteredNodes.map((n) => n.id)
+            const allChecked = filteredIds.every((id) => selectedNodeIds.has(id))
+            return (
+              <div className="flex items-center justify-between text-xs">
+                <span className="text-muted-foreground">
+                  {t('nodeSelect.selectedCount', { defaultValue: '已选' })}: {selectedNodeIds.size} / {filteredNodes.length}
+                </span>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-6 text-xs"
+                  onClick={() => toggleSelectAllFiltered(filteredIds, allChecked)}
+                >
+                  {allChecked ? t('nodeSelect.clearSelection', { defaultValue: '清空选择' }) : t('nodeSelect.selectAll', { defaultValue: '全选当前列表' })}
+                </Button>
+              </div>
+            )
+          })()}
+
           {/* Node list */}
           <div className="flex-1 overflow-y-auto border rounded-lg p-4">
             {loading ? (
@@ -210,40 +283,60 @@ export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter 
                     // ignore
                   }
 
+                  const fwdTunnels = clashConfig?.server && clashConfig?.port
+                    ? (tunnelsByTarget.get(`${clashConfig.server}:${clashConfig.port}`) || [])
+                    : []
                   return (
                     <div
                       key={node.id}
-                      className={`flex items-center space-x-3 p-3 border rounded hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer transition-colors ${
-                        selectedNodeId === node.id ? 'bg-primary/10 border-primary' : ''
+                      className={`flex items-center gap-2 p-2 border rounded hover:bg-gray-50 dark:hover:bg-gray-800 cursor-pointer transition-colors ${
+                        selectedNodeIds.has(node.id) ? 'bg-primary/10 border-primary' : ''
                       }`}
                       onClick={() => handleSelectNode(node.id)}
                     >
                       <Checkbox
-                        checked={selectedNodeId === node.id}
+                        checked={selectedNodeIds.has(node.id)}
                         onCheckedChange={() => handleSelectNode(node.id)}
                       />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <Badge
-                            variant="outline"
-                            className={PROTOCOL_COLORS[node.protocol.toLowerCase()] || 'bg-gray-500/10'}
-                          >
-                            {node.protocol.toUpperCase()}
+                      {/* 节点信息单行显示:协议 + 节点名 + tunnel 标记 + 标签 + 地址 */}
+                      <div className="flex flex-1 min-w-0 items-center gap-2 text-sm">
+                        <Badge
+                          variant="outline"
+                          className={`shrink-0 ${getClashProtocolColor(node.protocol) || 'bg-gray-500/10'}`}
+                        >
+                          {node.protocol.toUpperCase()}
+                        </Badge>
+                        <span className="font-medium truncate min-w-0">{node.node_name}</span>
+                        {fwdTunnels.length > 0 && (
+                          <TooltipProvider>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Badge variant='outline' className='h-5 w-5 p-0 flex items-center justify-center shrink-0 border-orange-300 text-orange-600 dark:text-orange-400'>
+                                  <Cable className='h-3 w-3' />
+                                </Badge>
+                              </TooltipTrigger>
+                              <TooltipContent>
+                                <div className='space-y-0.5 text-xs'>
+                                  <div className='font-medium'>{t('nodeList.forwardedByTunnel', { defaultValue: '被 tunnel 转发' })}</div>
+                                  {fwdTunnels.map((tn: any) => (
+                                    <div key={`${tn.server_id}-${tn.tag}`} className='font-mono'>
+                                      {tn.server_name}:{tn.listen_port} · {tn.tag}
+                                    </div>
+                                  ))}
+                                </div>
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                        )}
+                        {node.tag && (
+                          <Badge variant="secondary" className="text-xs shrink-0">
+                            {node.tag}
                           </Badge>
-                          <span className="font-medium truncate">{node.node_name}</span>
-                          {node.tag && (
-                            <Badge variant="secondary" className="text-xs">
-                              {node.tag}
-                            </Badge>
-                          )}
-                        </div>
+                        )}
                         {clashConfig && (
-                          <div className="text-xs text-muted-foreground mt-1">
+                          <span className="text-xs text-muted-foreground truncate ml-auto font-mono shrink-0">
                             {clashConfig.server}:{clashConfig.port}
-                            {clashConfig.network && clashConfig.network !== 'tcp' && (
-                              <span className="ml-2">({clashConfig.network})</span>
-                            )}
-                          </div>
+                          </span>
                         )}
                       </div>
                     </div>
@@ -254,7 +347,11 @@ export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter 
           </div>
 
           <div className="text-sm text-muted-foreground">
-            {selectedNodeId ? t('nodeSelect.selected') : t('nodeSelect.selectNode')}
+            {multiple
+              ? (selectedNodeIds.size > 0
+                  ? `${t('nodeSelect.selectedCount', { defaultValue: '已选' })} ${selectedNodeIds.size} ${t('nodeSelect.itemUnit', { defaultValue: '个节点' })}`
+                  : t('nodeSelect.selectNode'))
+              : (selectedNodeIds.size > 0 ? t('nodeSelect.selected') : t('nodeSelect.selectNode'))}
           </div>
         </div>
 
@@ -262,8 +359,10 @@ export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter 
           <Button variant="outline" onClick={() => onOpenChange(false)}>
             {tc('actions.cancel')}
           </Button>
-          <Button onClick={handleConfirm} disabled={!selectedNodeId}>
-            {t('nodeSelect.confirmImport')}
+          <Button onClick={handleConfirm} disabled={selectedNodeIds.size === 0}>
+            {multiple && selectedNodeIds.size > 1
+              ? `${t('nodeSelect.confirmImport')} (${selectedNodeIds.size})`
+              : t('nodeSelect.confirmImport')}
           </Button>
         </DialogFooter>
       </DialogContent>

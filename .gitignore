@@ -43,3 +43,10 @@ docs/
 server
 CLAUDE.md
 e2e
+MERGE_PLAN.md
+*_test.go
+INTRODUCTION.md
+subscribes
+mmwx.db
+data
+deploy.sh

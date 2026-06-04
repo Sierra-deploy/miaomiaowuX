@@ -1,5 +1,7 @@
 # Build stage for frontend
-FROM node:20-slim AS frontend-builder
+# 用 BUILDPLATFORM(构建机原生架构,通常 amd64)构建,避免 arm64 在 QEMU 模拟下跑 npm ci 缓慢/网络超时。
+# 前端产物(internal/web/dist)是架构无关的静态文件,只需构建一次,供各架构后端 COPY。
+FROM --platform=$BUILDPLATFORM node:20-slim AS frontend-builder
 
 WORKDIR /app
 
@@ -8,7 +10,8 @@ COPY miaomiaowux-frontend/package*.json ./miaomiaowux-frontend/
 
 # Install dependencies
 WORKDIR /app/miaomiaowux-frontend
-RUN npm ci
+# 加长网络超时,容忍 CI 偶发的 registry 抖动
+RUN npm ci --fetch-timeout=600000
 
 # Copy frontend source
 COPY miaomiaowux-frontend/ ./
@@ -17,11 +20,16 @@ COPY miaomiaowux-frontend/ ./
 RUN npm run build
 
 # Build stage for backend
-FROM golang:1.25-bookworm AS backend-builder
+FROM golang:1.26-bookworm AS backend-builder
 
 # Declare build arguments for multi-platform support
 ARG TARGETOS
 ARG TARGETARCH
+
+# License signing public key — 编译时通过 -ldflags -X 注入 internal/license 包,源码默认空。
+# GitHub Actions workflow / docker buildx 命令传入 --build-arg LICENSE_PUB_KEY=...
+# 未传时 build 仍成功但镜像里的二进制 PRO 不可用(所有许可证响应验签 fail)。
+ARG LICENSE_PUB_KEY=""
 
 WORKDIR /app
 
@@ -48,7 +56,7 @@ COPY --from=frontend-builder /app/internal/web/dist ./internal/web/dist
 # Use TARGETOS and TARGETARCH for multi-platform builds
 RUN CGO_ENABLED=1 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build \
     -trimpath \
-    -ldflags="-s -w" \
+    -ldflags="-s -w -X 'miaomiaowux/internal/license.licenseSignPubKeyB64=${LICENSE_PUB_KEY}'" \
     -o /app/server \
     ./cmd/server
 
@@ -84,6 +92,13 @@ RUN chown -R appuser:appuser /app/server /app/rule_templates
 
 # Volume for persistent data
 VOLUME ["/app/data", "/app/subscribes"]
+
+# Bind 0.0.0.0 by default — Docker port mapping requires the server to listen on
+# all interfaces inside the container. The application-layer host enforcement
+# (internal/handler/host_enforcement.go) still blocks direct IP+port access when
+# HTTPS is configured, so security parity with the bare-metal "bind loopback" mode
+# is preserved.
+ENV BIND_HOST=0.0.0.0
 
 # Expose port
 EXPOSE 12889

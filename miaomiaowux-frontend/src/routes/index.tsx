@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
 import { createFileRoute, redirect } from '@tanstack/react-router'
@@ -18,7 +18,9 @@ import {
   ChevronRight,
   Copy,
   Download,
+  Gauge,
   HardDrive,
+  Info,
   Maximize2,
   PieChart,
   QrCode,
@@ -42,6 +44,7 @@ import uriIcon from '@/assets/icons/uri-color.svg'
 import v2rayIcon from '@/assets/icons/v2ray_color.png'
 import { Topbar } from '@/components/layout/topbar'
 import { api } from '@/lib/api'
+import { formatBytesShort as formatBytes, formatSpeedShort as formatSpeed } from '@/lib/format'
 import { useAuthStore } from '@/stores/auth-store'
 import { Button } from '@/components/ui/button'
 import {
@@ -96,6 +99,7 @@ interface UserProfile {
 }
 
 type NodeTrafficItem = {
+  node_id: number
   tag: string
   server_id: number
   server_name: string
@@ -200,14 +204,27 @@ function UserDashboard() {
     []
   )
 
+  // 普通用户 dashboard 轮询间隔(ms),含义同 admin 视图,详见 admin 部分注释。
+  const { data: refetchCfg } = useQuery({
+    queryKey: ['public-refetch-interval'],
+    queryFn: async () => {
+      const response = await api.get('/api/system-config/refetch-interval')
+      return response.data as { success: boolean; refetch_interval_ms: number }
+    },
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+    enabled: Boolean(auth.accessToken),
+  })
+  const refetchMs = Math.min(Math.max(refetchCfg?.refetch_interval_ms ?? 5000, 1000), 60_000)
+
   const { data, isLoading, isError } = useQuery({
     queryKey: ['traffic-summary'],
     queryFn: async () => {
       const response = await api.get('/api/traffic/summary')
       return response.data
     },
-    staleTime: 5 * 60 * 1000,
-    refetchInterval: 5 * 60 * 1000,
+    staleTime: refetchMs,
+    refetchInterval: refetchMs,
     enabled: Boolean(auth.accessToken),
   })
 
@@ -351,7 +368,7 @@ function UserDashboard() {
             const clashURL = `clash://install-config?url=${encodeURIComponent(subscribeURL)}`
             return (
               <Card key={file.id} className="sm:col-span-2 lg:col-span-4">
-                <CardContent className="flex flex-col gap-3 py-4 sm:flex-row sm:items-center">
+                <CardContent className="flex items-start gap-3 py-4">
                   <button
                     onClick={() => setQrValue(displayURL)}
                     className="bg-primary/10 text-primary hover:bg-primary/20 flex size-10 shrink-0 cursor-pointer items-center justify-center rounded-lg transition-all hover:scale-110 active:scale-95"
@@ -359,7 +376,7 @@ function UserDashboard() {
                   >
                     <QrCode className="size-5" />
                   </button>
-                  <div className="min-w-0 flex-1 space-y-1">
+                  <div className="min-w-0 flex-1 space-y-2">
                     <div className="flex items-center gap-2">
                       <span className="truncate text-sm font-semibold" title={file.name}>{file.name}</span>
                       {file.expire_at ? (
@@ -370,29 +387,31 @@ function UserDashboard() {
                         <span className="inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] text-muted-foreground">{t('user.subscribe.permanent')}</span>
                       )}
                     </div>
-                    <div className="bg-muted/40 rounded-md border px-2 py-1 font-mono text-xs break-all">{displayURL}</div>
-                  </div>
-                  <div className="flex shrink-0 gap-2">
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button size="sm" className="transition-transform hover:-translate-y-0.5 hover:shadow-md active:translate-y-0.5 active:scale-95">
-                          <Copy className="mr-1 size-3.5" />{t('user.subscribe.copy')}<ChevronDown className="ml-1 size-3.5" />
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
+                      <div className="bg-muted/40 flex min-w-0 flex-1 items-center rounded-md border px-3 font-mono text-xs break-all min-h-9">{displayURL}</div>
+                      <div className="flex shrink-0 gap-2">
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button size="sm" className="h-9 transition-transform hover:-translate-y-0.5 hover:shadow-md active:translate-y-0.5 active:scale-95">
+                              <Copy className="mr-1 size-3.5" />{t('user.subscribe.copy')}<ChevronDown className="ml-1 size-3.5" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end" className="w-56">
+                            {CLIENT_TYPES.map((client) => {
+                              const clientURL = buildSubscriptionURL(file.filename, file.file_short_code, client.type, file.type)
+                              return (
+                                <DropdownMenuItem key={client.type} onClick={() => handleCopy(file.id, clientURL, client.name)} className="cursor-pointer">
+                                  <img src={client.icon} alt={client.name} className="mr-2 size-4" />{client.name}
+                                </DropdownMenuItem>
+                              )
+                            })}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                        <Button size="sm" variant="secondary" className="h-9 transition-transform hover:-translate-y-0.5 hover:shadow-md active:translate-y-0.5 active:scale-95" asChild>
+                          <a href={clashURL}><Download className="mr-1 size-3.5" />{t('user.subscribe.import')}</a>
                         </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end" className="w-56">
-                        {CLIENT_TYPES.map((client) => {
-                          const clientURL = buildSubscriptionURL(file.filename, file.file_short_code, client.type, file.type)
-                          return (
-                            <DropdownMenuItem key={client.type} onClick={() => handleCopy(file.id, clientURL, client.name)} className="cursor-pointer">
-                              <img src={client.icon} alt={client.name} className="mr-2 size-4" />{client.name}
-                            </DropdownMenuItem>
-                          )
-                        })}
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                    <Button size="sm" variant="secondary" className="transition-transform hover:-translate-y-0.5 hover:shadow-md active:translate-y-0.5 active:scale-95" asChild>
-                      <a href={clashURL}><Download className="mr-1 size-3.5" />{t('user.subscribe.import')}</a>
-                    </Button>
+                      </div>
+                    </div>
                   </div>
                 </CardContent>
               </Card>
@@ -483,14 +502,30 @@ function AdminDashboard() {
     []
   )
 
+  // dashboard 轮询间隔(ms)。即「上报间隔」dashboard_refresh_interval_ms,
+  // admin 在"系统设置 > 定时配置 > 上报间隔"改后:同步给所有 agent + master 热重载自采 ticker(无需重启),
+  // 前端每 30s 拉一次 `/api/system-config/refetch-interval` 跟上。
+  // 默认 5000ms;clamp 到 [1000, 60000] 防极端配置浪费带宽。
+  const { data: refetchCfg } = useQuery({
+    queryKey: ['public-refetch-interval'],
+    queryFn: async () => {
+      const response = await api.get('/api/system-config/refetch-interval')
+      return response.data as { success: boolean; refetch_interval_ms: number }
+    },
+    staleTime: 30_000,
+    refetchInterval: 30_000,
+    enabled: Boolean(auth.accessToken),
+  })
+  const refetchMs = Math.min(Math.max(refetchCfg?.refetch_interval_ms ?? 5000, 1000), 60_000)
+
   const { data, isLoading, isError } = useQuery({
     queryKey: ['traffic-summary'],
     queryFn: async () => {
       const response = await api.get('/api/traffic/summary')
       return response.data
     },
-    staleTime: 5 * 60 * 1000,
-    refetchInterval: 5 * 60 * 1000,
+    staleTime: refetchMs,
+    refetchInterval: refetchMs,
     enabled: Boolean(auth.accessToken),
   })
 
@@ -498,10 +533,10 @@ function AdminDashboard() {
     queryKey: ['remote-servers-speed'],
     queryFn: async () => {
       const response = await api.get('/api/admin/remote-servers')
-      return response.data as { success: boolean; servers: Array<{ name: string; current_upload_speed?: number; current_download_speed?: number; traffic_limit: number; traffic_used: number }> }
+      return response.data as { success: boolean; servers: Array<{ name: string; current_upload_speed?: number; current_download_speed?: number; traffic_limit: number; traffic_used: number; traffic_used_offset?: number }> }
     },
-    staleTime: 3000,
-    refetchInterval: 3000,
+    staleTime: refetchMs,
+    refetchInterval: refetchMs,
     enabled: Boolean(auth.accessToken),
   })
 
@@ -514,8 +549,8 @@ function AdminDashboard() {
         servers: Array<{ server_id: number; server_name: string; inbounds: any[]; users: any[] }>
       }
     },
-    staleTime: 30_000,
-    refetchInterval: 60_000,
+    staleTime: refetchMs * 2,
+    refetchInterval: refetchMs,
     enabled: Boolean(auth.accessToken),
   })
 
@@ -533,7 +568,7 @@ function AdminDashboard() {
     queryKey: ['admin-users'],
     queryFn: async () => {
       const response = await api.get('/api/admin/users')
-      return response.data as { users: Array<{ username: string }> }
+      return response.data as { users: Array<{ username: string; traffic_multiplier?: number }> }
     },
     staleTime: 5 * 60 * 1000,
     enabled: Boolean(auth.accessToken),
@@ -541,6 +576,16 @@ function AdminDashboard() {
 
   const validUsernames = useMemo(() => {
     return new Set((usersData?.users ?? []).map(u => u.username))
+  }, [usersData])
+
+  // username -> 套餐流量倍率(oneway=1/twoway=2)。首页「按用户」流量列表显示计费流量=裸流量×倍率,
+  // 与用户自己看到的已用、与限额断流口径一致。速度仍用裸流量计算,不受倍率影响。
+  const multiplierByUser = useMemo(() => {
+    const m = new Map<string, number>()
+    for (const u of usersData?.users ?? []) {
+      if (u.traffic_multiplier && u.traffic_multiplier > 1) m.set(u.username, u.traffic_multiplier)
+    }
+    return m
   }, [usersData])
 
   const nodeNameMap = useMemo(() => {
@@ -614,7 +659,10 @@ function AdminDashboard() {
     }
     for (const s of remoteServersData?.servers ?? []) {
       const traffic = trafficByServerName.get(s.name)
-      let used = traffic?.used ?? s.traffic_used ?? 0
+      const offset = s.traffic_used_offset ?? 0
+      // 实时聚合(traffic.used) 不含 offset 校准,需手动加上;
+      // 回退到 s.traffic_used 时后端已经把 offset 算进去了,直接用即可
+      let used = traffic ? traffic.used + offset : (s.traffic_used ?? 0)
       if (timeRange !== 'month' && traffic) {
         const snap = snapshotByServerId.get(traffic.server_id) ?? 0
         used = Math.max(0, used - snap)
@@ -626,41 +674,62 @@ function AdminDashboard() {
 
   const nodeTrafficList = useMemo<NodeTrafficItem[]>(() => {
     if (!nodesData?.nodes) return []
-    const trafficByTag = new Map<string, { uplink: number; downlink: number; last_uplink: number; last_downlink: number; server_names: string[] }>()
+    // 物理节点按 inbound_tag 聚合,路由出站节点必须按 routed_outbound_tag 走 server.outbounds。
+    // KEY 必须是 `serverName::tag` 而不是裸 tag —— 不同服务器上同名 tag(例如多台 HK 服务器都叫
+    // shadowsocks-23889,或者多台机都有 yxl-att 出站)否则会被错误地串到一起,显示出一模一样的流量。
+    type Bucket = { uplink: number; downlink: number; last_uplink: number; last_downlink: number; server_names: string[] }
+    const inboundByKey = new Map<string, Bucket>()
+    const outboundByKey = new Map<string, Bucket>()
+    const collect = (map: Map<string, Bucket>, key: string, serverName: string, t: any) => {
+      const existing = map.get(key)
+      if (existing) {
+        existing.uplink += t.uplink ?? 0
+        existing.downlink += t.downlink ?? 0
+        existing.last_uplink += t.last_uplink ?? 0
+        existing.last_downlink += t.last_downlink ?? 0
+        if (!existing.server_names.includes(serverName)) existing.server_names.push(serverName)
+      } else {
+        map.set(key, { uplink: t.uplink ?? 0, downlink: t.downlink ?? 0, last_uplink: t.last_uplink ?? 0, last_downlink: t.last_downlink ?? 0, server_names: [serverName] })
+      }
+    }
     if (trafficData?.servers) {
       for (const server of trafficData.servers) {
-        for (const ib of server.inbounds ?? []) {
-          const existing = trafficByTag.get(ib.tag)
-          if (existing) {
-            existing.uplink += ib.uplink ?? 0
-            existing.downlink += ib.downlink ?? 0
-            existing.last_uplink += ib.last_uplink ?? 0
-            existing.last_downlink += ib.last_downlink ?? 0
-            if (!existing.server_names.includes(server.server_name)) existing.server_names.push(server.server_name)
-          } else {
-            trafficByTag.set(ib.tag, { uplink: ib.uplink ?? 0, downlink: ib.downlink ?? 0, last_uplink: ib.last_uplink ?? 0, last_downlink: ib.last_downlink ?? 0, server_names: [server.server_name] })
-          }
-        }
+        for (const ib of server.inbounds ?? []) collect(inboundByKey, `${server.server_name}::${ib.tag}`, server.server_name, ib)
+        for (const ob of (server as any).outbounds ?? []) collect(outboundByKey, `${server.server_name}::${ob.tag}`, server.server_name, ob)
       }
     }
-    const nodeSnapshotByTag = new Map<string, { uplink: number; downlink: number }>()
+    const inboundSnapByKey = new Map<string, { uplink: number; downlink: number }>()
+    const outboundSnapByKey = new Map<string, { uplink: number; downlink: number }>()
     if (timeRange !== 'month' && snapshotData?.nodeSnapshots) {
       for (const s of snapshotData.nodeSnapshots) {
-        const existing = nodeSnapshotByTag.get(s.tag)
+        // snapshot 数据如果带 server_name 就一起拼成 key,跟上面对齐
+        const srv = (s as any).server_name || ''
+        const map = ((s as any).type === 'outbound') ? outboundSnapByKey : inboundSnapByKey
+        const k = `${srv}::${s.tag}`
+        const existing = map.get(k)
         if (existing) { existing.uplink += s.uplink; existing.downlink += s.downlink }
-        else nodeSnapshotByTag.set(s.tag, { uplink: s.uplink, downlink: s.downlink })
+        else map.set(k, { uplink: s.uplink, downlink: s.downlink })
       }
     }
-    return nodesData.nodes.filter(n => n.inbound_tag).map(n => {
-      const t = trafficByTag.get(n.inbound_tag)
-      let uplink = t?.uplink ?? 0
-      let downlink = t?.downlink ?? 0
-      if (timeRange !== 'month') {
-        const snap = nodeSnapshotByTag.get(n.inbound_tag)
-        if (snap) { uplink = Math.max(0, uplink - snap.uplink); downlink = Math.max(0, downlink - snap.downlink) }
-      }
-      return { tag: n.inbound_tag, server_id: 0, server_name: '', server_names: t?.server_names ?? [], display_name: n.node_name, uplink, downlink, total_uplink: 0, total_downlink: 0, last_uplink: t?.last_uplink ?? 0, last_downlink: t?.last_downlink ?? 0, updated_at: '' }
-    }).sort((a, b) => (b.uplink + b.downlink) - (a.uplink + a.downlink))
+    return nodesData.nodes
+      .filter(n => n.inbound_tag || n.routed_outbound_tag) // 没绑入站也没绑出站的节点没法做流量归属
+      .map(n => {
+        const isRouted = (n as any).node_type === 'routed' && !!n.routed_outbound_tag
+        const lookupTag = isRouted ? (n.routed_outbound_tag as string) : n.inbound_tag
+        const srv = (n as any).original_server || ''
+        const key = `${srv}::${lookupTag}`
+        const t = (isRouted ? outboundByKey : inboundByKey).get(key)
+        let uplink = t?.uplink ?? 0
+        let downlink = t?.downlink ?? 0
+        if (timeRange !== 'month') {
+          const snap = (isRouted ? outboundSnapByKey : inboundSnapByKey).get(key)
+          if (snap) { uplink = Math.max(0, uplink - snap.uplink); downlink = Math.max(0, downlink - snap.downlink) }
+        }
+        return { node_id: n.id, tag: lookupTag, server_id: 0, server_name: '', server_names: t?.server_names ?? [srv].filter(Boolean), display_name: n.node_name, uplink, downlink, total_uplink: 0, total_downlink: 0, last_uplink: t?.last_uplink ?? 0, last_downlink: t?.last_downlink ?? 0, updated_at: '' }
+      })
+      // 上下行都为 0 的节点不展示(没流量的占位会把卡片刷满,信息密度低)
+      .filter(item => item.uplink > 0 || item.downlink > 0)
+      .sort((a, b) => (b.uplink + b.downlink) - (a.uplink + a.downlink))
   }, [nodesData, trafficData, timeRange, snapshotData])
 
   const userTrafficList = useMemo<UserTrafficItem[]>(() => {
@@ -693,42 +762,75 @@ function AdminDashboard() {
     return [...map.values()].sort((a, b) => (b.cycle_uplink + b.cycle_downlink) - (a.cycle_uplink + a.cycle_downlink))
   }, [trafficData, validUsernames, timeRange, snapshotData])
 
+  // 基于"两次轮询的真实差值/真实时间间隔"算速度。详见 useDeltaSpeeds。
+  // 注意:speed 用裸流量(userTrafficList)算,不受套餐倍率影响。
+  const userSpeedsMap = useDeltaSpeeds(
+    userTrafficList,
+    (u) => u.username,
+    (u) => u.cycle_uplink,
+    (u) => u.cycle_downlink,
+  )
+
+  // 显示用列表:计费流量 = 裸流量 × 套餐倍率(twoway×2)。与用户自己看到的已用、与限额断流口径一致。
+  // speed 仍来自上面基于裸流量的 userSpeedsMap(按 username 取,不受影响)。
+  const userTrafficListDisplay = useMemo(() =>
+    userTrafficList.map((u) => {
+      const mult = multiplierByUser.get(u.username) ?? 1
+      return mult === 1 ? u : { ...u, cycle_uplink: u.cycle_uplink * mult, cycle_downlink: u.cycle_downlink * mult }
+    }), [userTrafficList, multiplierByUser])
+
+  // type='user' 时拉新接口 /api/admin/traffic/user-nodes:精确的"用户每节点流量"。
+  // 走 user_email_traffic + user_subaccounts/user_inbound_configs 反查,数据准确不重复。
+  const { data: userNodesData } = useQuery({
+    queryKey: ['admin-traffic-user-nodes', drilldown?.type === 'user' ? drilldown.key : null],
+    queryFn: async () => {
+      const resp = await api.get(`/api/admin/traffic/user-nodes?username=${encodeURIComponent(drilldown!.key)}`)
+      return resp.data as { items?: Array<{ node_id: number; node_name: string; server_name: string; uplink: number; downlink: number; last_uplink: number; last_downlink: number }> }
+    },
+    enabled: drilldown?.type === 'user',
+    staleTime: 10 * 1000,
+  })
+
+  // type='node' 时拉对称接口 /api/admin/traffic/node-users:某节点上各用户的精确流量。
+  // 跟 user-nodes 同款 user_email_traffic + 子账号/inbound 配置反查,routed 节点也覆盖。
+  const { data: nodeUsersData } = useQuery({
+    queryKey: ['admin-traffic-node-users', drilldown?.type === 'node' ? drilldown.key : null],
+    queryFn: async () => {
+      const resp = await api.get(`/api/admin/traffic/node-users?node_id=${encodeURIComponent(drilldown!.key)}`)
+      return resp.data as { items?: Array<{ username: string; uplink: number; downlink: number; last_uplink: number; last_downlink: number }> }
+    },
+    enabled: drilldown?.type === 'node',
+    staleTime: 10 * 1000,
+  })
+
   const drilldownData = useMemo<DrilldownItem[]>(() => {
-    if (!drilldown || !trafficData?.servers) return []
+    if (!drilldown) return []
     if (drilldown.type === 'node') {
-      const userMap = new Map<string, DrilldownItem>()
-      for (const server of trafficData.servers) {
-        const hasTag = (server.inbounds ?? []).some((ib: any) => ib.tag === drilldown.key)
-        if (!hasTag) continue
-        for (const u of server.users ?? []) {
-          const existing = userMap.get(u.username)
-          if (existing) { existing.uplink += u.uplink ?? 0; existing.downlink += u.downlink ?? 0; existing.last_uplink += u.last_uplink ?? 0; existing.last_downlink += u.last_downlink ?? 0 }
-          else userMap.set(u.username, { label: u.username, uplink: u.uplink ?? 0, downlink: u.downlink ?? 0, last_uplink: u.last_uplink ?? 0, last_downlink: u.last_downlink ?? 0 })
-        }
-      }
-      return [...userMap.values()].sort((a, b) => (b.uplink + b.downlink) - (a.uplink + a.downlink))
-    } else {
-      const items: DrilldownItem[] = []
-      for (const server of trafficData.servers) {
-        const hasUser = (server.users ?? []).some((u: any) => u.username === drilldown.key)
-        if (hasUser) {
-          for (const ib of server.inbounds ?? []) {
-            if (!nodeNameMap.has(ib.tag)) continue
-            items.push({ label: nodeNameMap.get(ib.tag)!, uplink: ib.uplink ?? 0, downlink: ib.downlink ?? 0, last_uplink: ib.last_uplink ?? 0, last_downlink: ib.last_downlink ?? 0 })
-          }
-        }
-      }
-      return items.sort((a, b) => (b.uplink + b.downlink) - (a.uplink + a.downlink))
+      return (nodeUsersData?.items ?? []).map(it => ({
+        label: it.username,
+        uplink: it.uplink,
+        downlink: it.downlink,
+        last_uplink: it.last_uplink,
+        last_downlink: it.last_downlink,
+      }))
     }
-  }, [drilldown, trafficData, nodeNameMap])
+    // type === 'user' — 直接用接口返回(后端已按总流量降序)
+    return (userNodesData?.items ?? []).map(it => ({
+      label: it.node_name,
+      uplink: it.uplink,
+      downlink: it.downlink,
+      last_uplink: it.last_uplink,
+      last_downlink: it.last_downlink,
+    }))
+  }, [drilldown, nodeUsersData, userNodesData])
 
   const metrics = useMemo(() => data?.metrics ?? {}, [data?.metrics])
 
   const cards = useMemo(() => [
     { title: t('admin.stats.totalQuota'), description: t('admin.stats.totalQuotaDesc'), value: formatMetric(metrics.total_limit_gb, numberFormatter), icon: TrendingUp },
-    { title: t('admin.stats.usedTraffic'), description: t('admin.stats.usedTrafficDesc'), value: formatMetric(metrics.total_used_gb, numberFormatter), icon: Activity },
+    { title: t('admin.stats.usedTraffic'), description: t('admin.stats.usedTrafficDesc'), value: formatMetric(metrics.total_used_gb, numberFormatter), icon: Activity, info: (metrics.unlimited_used_gb ?? 0) > 0 ? t('admin.stats.unlimitedUsedHint', { value: formatMetric(metrics.unlimited_used_gb, numberFormatter) }) : undefined },
     { title: t('admin.stats.remainingTraffic'), description: t('admin.stats.remainingTrafficDesc'), value: formatMetric(metrics.total_remaining_gb, numberFormatter), icon: HardDrive },
-    { title: t('admin.stats.realtimeSpeed'), description: t('admin.stats.realtimeSpeedDesc'), value: '', speedData: { upload: aggregatedSpeed.upload, download: aggregatedSpeed.download }, icon: Activity },
+    { title: t('admin.stats.realtimeSpeed'), description: t('admin.stats.realtimeSpeedDesc'), value: '', speedData: { upload: aggregatedSpeed.upload, download: aggregatedSpeed.download }, icon: Gauge },
   ], [metrics, numberFormatter, aggregatedSpeed, t])
 
   const chartData = useMemo(() => {
@@ -752,10 +854,13 @@ function AdminDashboard() {
                   <CardContent><Skeleton className="h-9 w-28" /></CardContent>
                 </Card>
               ))
-            : cards.map(({ title, description, value, icon: Icon, speedData }) => (
+            : cards.map(({ title, description, value, icon: Icon, speedData, info }) => (
                 <Card key={title}>
                   <CardHeader className="space-y-2">
-                    <CardTitle className="flex flex-row items-center justify-between text-base">{title}<Icon className="size-8 text-primary" /></CardTitle>
+                    <CardTitle className="flex flex-row items-center justify-between text-base">
+                      <span className="flex items-center gap-1.5">{title}{info && <Info className="size-4 text-muted-foreground cursor-help" title={info} />}</span>
+                      <Icon className="size-8 text-primary" />
+                    </CardTitle>
                     <CardDescription>{description}</CardDescription>
                   </CardHeader>
                   <CardContent>
@@ -798,8 +903,8 @@ function AdminDashboard() {
               ) : (
                 <div className="space-y-1">
                   {nodeTrafficList.slice(0, PREVIEW_COUNT).map((node) => (
-                    <div key={node.tag} className="flex items-center justify-between rounded-md px-3 py-2 text-sm cursor-pointer transition hover:bg-muted"
-                      onClick={() => { setDrilldown({ type: 'node', key: node.tag, label: node.display_name }); setDrilldownPage(0) }}>
+                    <div key={`${node.node_id}::${node.tag}`} className="flex items-center justify-between rounded-md px-3 py-2 text-sm cursor-pointer transition hover:bg-muted"
+                      onClick={() => { setDrilldown({ type: 'node', key: String(node.node_id), label: node.display_name }); setDrilldownPage(0) }}>
                       <div className="truncate flex-1 min-w-0 mr-3 font-medium" title={`${node.display_name}\n${t('admin.nodeView.serverTooltip', { servers: node.server_names.join(', ') })}`}>{node.display_name}</div>
                       <div className="shrink-0 text-muted-foreground text-xs">↑{formatBytes(node.uplink)} ↓{formatBytes(node.downlink)}</div>
                     </div>
@@ -825,9 +930,10 @@ function AdminDashboard() {
                 <div className="text-sm text-muted-foreground text-center py-6">{t('admin.userView.noData')}</div>
               ) : (
                 <div className="space-y-1">
-                  {userTrafficList.slice(0, PREVIEW_COUNT).map((user) => {
-                    const upSpeed = estimateSpeed(user.cycle_uplink, user.last_uplink)
-                    const downSpeed = estimateSpeed(user.cycle_downlink, user.last_downlink)
+                  {userTrafficListDisplay.slice(0, PREVIEW_COUNT).map((user) => {
+                    const speed = userSpeedsMap.get(user.username)
+                    const upSpeed = speed?.up ?? 0
+                    const downSpeed = speed?.down ?? 0
                     return (
                       <div key={user.username} className="flex items-center justify-between rounded-md px-3 py-2 text-sm cursor-pointer transition hover:bg-muted"
                         onClick={() => { setDrilldown({ type: 'user', key: user.username }); setDrilldownPage(0) }}>
@@ -872,7 +978,10 @@ function AdminDashboard() {
                     return (
                       <TableRow key={s.name}>
                         <TableCell className="font-medium">{s.name}</TableCell>
-                        <TableCell className="text-xs text-muted-foreground whitespace-nowrap">↑{formatSpeed(s.upload)} ↓{formatSpeed(s.download)}</TableCell>
+                        <TableCell className="text-xs whitespace-nowrap">
+                          <span className="inline-block w-[72px] text-right tabular-nums text-green-600 dark:text-green-400">↑ {formatSpeed(s.upload)}</span>
+                          <span className="inline-block w-[72px] text-right tabular-nums text-blue-600 dark:text-blue-400 ml-2">↓ {formatSpeed(s.download)}</span>
+                        </TableCell>
                         <TableCell className="text-right">{formatBytes(s.used)}</TableCell>
                         <TableCell className="text-right">{s.limit > 0 ? formatBytes(s.limit) : t('admin.serverOverview.unlimited')}</TableCell>
                         <TableCell className="text-right">{remaining >= 0 ? formatBytes(remaining) : '--'}</TableCell>
@@ -897,7 +1006,7 @@ function AdminDashboard() {
               <FullscreenNodeList items={nodeTrafficList} page={fullscreenPage} onPageChange={setFullscreenPage}
                 onDrilldown={(key, label) => { setDrilldown({ type: 'node', key, label }); setDrilldownPage(0) }} />
             ) : fullscreenView === 'users' ? (
-              <FullscreenUserList items={userTrafficList} page={fullscreenPage} onPageChange={setFullscreenPage}
+              <FullscreenUserList items={userTrafficListDisplay} speeds={userSpeedsMap} page={fullscreenPage} onPageChange={setFullscreenPage}
                 onDrilldown={(key) => { setDrilldown({ type: 'user', key }); setDrilldownPage(0) }} />
             ) : null}
           </DialogContent>
@@ -930,17 +1039,16 @@ function PaginationControls({ page, totalPages, onPageChange }: { page: number; 
   )
 }
 
-function TrafficRow({ label, tooltip, uplink, downlink, lastUplink, lastDownlink, showSpeed = true, onClick }: {
-  label: string; tooltip?: string; uplink: number; downlink: number; lastUplink: number; lastDownlink: number; showSpeed?: boolean; onClick?: () => void
+function TrafficRow({ label, tooltip, uplink, downlink, upSpeed = 0, downSpeed = 0, showSpeed = true, onClick }: {
+  label: string; tooltip?: string; uplink: number; downlink: number; upSpeed?: number; downSpeed?: number; showSpeed?: boolean; onClick?: () => void
 }) {
-  const upSpeed = showSpeed ? estimateSpeed(uplink, lastUplink) : 0
-  const downSpeed = showSpeed ? estimateSpeed(downlink, lastDownlink) : 0
+  const showSpeedNow = showSpeed && (upSpeed > 0 || downSpeed > 0)
   return (
     <div className={`flex items-center justify-between rounded-md px-3 py-2 text-sm transition hover:bg-muted ${onClick ? 'cursor-pointer' : ''}`} onClick={onClick}>
       <div className="truncate flex-1 min-w-0 mr-3 font-medium" title={tooltip ?? label}>{label}</div>
       <div className="flex items-center gap-3 shrink-0 text-muted-foreground text-xs">
         <span>↑{formatBytes(uplink)} ↓{formatBytes(downlink)}</span>
-        {(upSpeed > 0 || downSpeed > 0) && <span className="text-primary">↑{formatSpeed(upSpeed)} ↓{formatSpeed(downSpeed)}</span>}
+        {showSpeedNow && <span className="text-primary">↑{formatSpeed(upSpeed)} ↓{formatSpeed(downSpeed)}</span>}
       </div>
     </div>
   )
@@ -957,9 +1065,9 @@ function FullscreenNodeList({ items, page, onPageChange, onDrilldown }: {
     <div>
       <div className="space-y-1">
         {paged.map((node) => (
-          <TrafficRow key={node.tag} label={node.display_name} tooltip={`${node.display_name}\n${t('admin.nodeView.serverTooltip', { servers: node.server_names.join(', ') })}`}
-            uplink={node.uplink} downlink={node.downlink} lastUplink={node.last_uplink} lastDownlink={node.last_downlink} showSpeed={false}
-            onClick={() => onDrilldown(node.tag, node.display_name)} />
+          <TrafficRow key={`${node.node_id}::${node.tag}`} label={node.display_name} tooltip={`${node.display_name}\n${t('admin.nodeView.serverTooltip', { servers: node.server_names.join(', ') })}`}
+            uplink={node.uplink} downlink={node.downlink} showSpeed={false}
+            onClick={() => onDrilldown(String(node.node_id), node.display_name)} />
         ))}
       </div>
       <PaginationControls page={page} totalPages={totalPages} onPageChange={onPageChange} />
@@ -967,8 +1075,8 @@ function FullscreenNodeList({ items, page, onPageChange, onDrilldown }: {
   )
 }
 
-function FullscreenUserList({ items, page, onPageChange, onDrilldown }: {
-  items: UserTrafficItem[]; page: number; onPageChange: (p: number) => void; onDrilldown: (key: string) => void
+function FullscreenUserList({ items, speeds, page, onPageChange, onDrilldown }: {
+  items: UserTrafficItem[]; speeds: Map<string, { up: number; down: number }>; page: number; onPageChange: (p: number) => void; onDrilldown: (key: string) => void
 }) {
   const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE))
   const paged = items.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
@@ -977,10 +1085,13 @@ function FullscreenUserList({ items, page, onPageChange, onDrilldown }: {
   return (
     <div>
       <div className="space-y-1">
-        {paged.map((user) => (
-          <TrafficRow key={user.username} label={user.username} uplink={user.cycle_uplink} downlink={user.cycle_downlink}
-            lastUplink={user.last_uplink} lastDownlink={user.last_downlink} onClick={() => onDrilldown(user.username)} />
-        ))}
+        {paged.map((user) => {
+          const sp = speeds.get(user.username)
+          return (
+            <TrafficRow key={user.username} label={user.username} uplink={user.cycle_uplink} downlink={user.cycle_downlink}
+              upSpeed={sp?.up ?? 0} downSpeed={sp?.down ?? 0} onClick={() => onDrilldown(user.username)} />
+          )
+        })}
       </div>
       <PaginationControls page={page} totalPages={totalPages} onPageChange={onPageChange} />
     </div>
@@ -996,7 +1107,7 @@ function DrilldownList({ items, page, onPageChange }: { items: DrilldownItem[]; 
     <div>
       <div className="space-y-1">
         {paged.map((item) => (
-          <TrafficRow key={item.label} label={item.label} uplink={item.uplink} downlink={item.downlink} lastUplink={item.last_uplink} lastDownlink={item.last_downlink} />
+          <TrafficRow key={item.label} label={item.label} uplink={item.uplink} downlink={item.downlink} showSpeed={false} />
         ))}
       </div>
       <PaginationControls page={page} totalPages={totalPages} onPageChange={onPageChange} />
@@ -1017,24 +1128,52 @@ function formatPercentage(value: number | undefined, formatter: Intl.NumberForma
   return `${formatter.format(value)} %`
 }
 
-function formatSpeed(bytesPerSec: number): string {
-  if (bytesPerSec === 0 || bytesPerSec === undefined) return '0 B/s'
-  if (bytesPerSec < 1024) return `${Math.round(bytesPerSec)} B/s`
-  if (bytesPerSec < 1024 * 1024) return `${Math.round(bytesPerSec / 1024)} K/s`
-  if (bytesPerSec < 1024 * 1024 * 1024) return `${Math.round(bytesPerSec / 1024 / 1024)} M/s`
-  return `${Math.round(bytesPerSec / 1024 / 1024 / 1024)} G/s`
-}
-
-function formatBytes(bytes: number): string {
-  if (!bytes) return '0 B'
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 / 1024).toFixed(2)} MB`
-  if (bytes < 1024 ** 4) return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
-  return `${(bytes / 1024 / 1024 / 1024 / 1024).toFixed(2)} TB`
-}
-
-function estimateSpeed(current: number, last: number): number {
-  const delta = current - last
-  return delta > 0 ? delta / 60 : 0
+// useDeltaSpeeds 在前端把"两次轮询之间 cycle 累计的真实差值 / 真实时间间隔"作为速度。
+//
+// 历史 bug：原 estimateSpeed(cycle_uplink, user.last_uplink) 把后端 user_traffic.last_uplink 当成"5 秒前的快照"使用，
+// 但 last_uplink 的语义其实是"agent 上次上报时的累计值"（xray 进程未重启时常接近 cycle 值；xray 刚重启会很小），
+// 完全不是 5 秒前的快照。结果 jimlee 累计 1.68GB 时算出 ~344 MB/s，超出网卡 1G 上限。
+//
+// 这里在前端用 useRef 持有上一轮的 cycle 快照 + 时间戳，下一轮 fetch 进来时差分得到真实速度。
+// 若 dt < 0.5s（如 React.StrictMode 开发期同步双调用）则保持上一次结果不更新缓存。
+function useDeltaSpeeds<T>(
+  items: T[],
+  keyFn: (x: T) => string,
+  upFn: (x: T) => number,
+  downFn: (x: T) => number,
+): Map<string, { up: number; down: number }> {
+  const prevRef = useRef<{ ts: number; map: Map<string, { up: number; down: number }> }>({
+    ts: 0,
+    map: new Map(),
+  })
+  return useMemo(() => {
+    const now = Date.now()
+    const speeds = new Map<string, { up: number; down: number }>()
+    const prev = prevRef.current
+    const dtSec = prev.ts > 0 ? (now - prev.ts) / 1000 : 0
+    if (dtSec >= 0.5) {
+      for (const it of items) {
+        const key = keyFn(it)
+        const p = prev.map.get(key)
+        if (p) {
+          const up = (upFn(it) - p.up) / dtSec
+          const down = (downFn(it) - p.down) / dtSec
+          speeds.set(key, {
+            up: up > 0 ? up : 0,
+            down: down > 0 ? down : 0,
+          })
+        }
+      }
+      const newMap = new Map<string, { up: number; down: number }>()
+      for (const it of items) newMap.set(keyFn(it), { up: upFn(it), down: downFn(it) })
+      prevRef.current = { ts: now, map: newMap }
+    } else if (prev.ts === 0) {
+      // 首次填充快照，本轮不显示速度
+      const newMap = new Map<string, { up: number; down: number }>()
+      for (const it of items) newMap.set(keyFn(it), { up: upFn(it), down: downFn(it) })
+      prevRef.current = { ts: now, map: newMap }
+    }
+    return speeds
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items])
 }

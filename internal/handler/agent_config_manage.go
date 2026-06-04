@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -11,7 +12,9 @@ import (
 	stdhttp "net/http"
 	"net/url"
 	"strings"
+	"time"
 
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
 	"miaomiaowux/internal/traffic"
 )
@@ -23,16 +26,39 @@ var randReader io.Reader = rand.Reader
 var base64URLEncoding = base64.URLEncoding
 
 type XrayServerHandler struct {
-	repo      *storage.TrafficRepository
-	collector *traffic.Collector
+	repo           *storage.TrafficRepository
+	collector      *traffic.Collector
+	limiterPusher  *LimiterConfigPusher
+	remoteManager  *RemoteManageHandler
+	wsHandler      *RemoteWSHandler
+	crypto         *CryptoConfig
+	licenseManager *license.Manager
 }
 
-func NewXrayServerHandler(repo *storage.TrafficRepository, collector *traffic.Collector) *XrayServerHandler {
+func (h *XrayServerHandler) SetWSHandler(ws *RemoteWSHandler) {
+	h.wsHandler = ws
+}
+
+func NewXrayServerHandler(repo *storage.TrafficRepository, collector *traffic.Collector, crypto *CryptoConfig) *XrayServerHandler {
 	return &XrayServerHandler{
 		repo:      repo,
 		collector: collector,
+		crypto:    crypto,
 	}
 }
+
+func (h *XrayServerHandler) SetLimiterPusher(p *LimiterConfigPusher) {
+	h.limiterPusher = p
+}
+
+func (h *XrayServerHandler) SetRemoteManager(rm *RemoteManageHandler) {
+	h.remoteManager = rm
+}
+
+func (h *XrayServerHandler) SetLicenseManager(mgr *license.Manager) {
+	h.licenseManager = mgr
+}
+
 
 // 远程服务器管理API
 
@@ -44,6 +70,7 @@ type RemoteServerCreateRequest struct {
 	TrafficResetDay   int    `json:"traffic_reset_day"`   // 要重置的月份日期 (1-31)
 	IPAddress         string `json:"ip_address"`          // 子服务器 IP 地址
 	ConnectionMode    string `json:"connection_mode"`     // push | pull | websocket
+	ListenPort        int    `json:"listen_port"`         // Agent HTTP 监听端口(0 = 用默认 23889);通过 install 脚本注入 MMWX_LISTEN_PORT
 	PullAddress       string `json:"pull_address"`        // 对于pull模式
 	PullPort          int    `json:"pull_port"`           // 对于pull模式
 	PullToken         string `json:"pull_token"`          // 对于pull模式
@@ -54,6 +81,8 @@ type RemoteServerCreateRequest struct {
 	StealMode         string `json:"steal_mode"`          // "tunnel" | "fallback"，默认 tunnel
 	SiteType          string `json:"site_type"`           // "static" | "proxy"
 	SiteValue         string `json:"site_value"`          // 静态路径或反向代理地址
+	XrayMode          string `json:"xray_mode"`           // "external" 或 "embedded"，默认 "external"
+	TrafficStatsMode  string `json:"traffic_stats_mode"`  // "both"(默认) | "upload" | "download" — 节点流量统计方向
 }
 
 // RemoteServerResponse 表示带有远程服务器数据的响应
@@ -77,8 +106,10 @@ type RemoteServerInboundInfo struct {
 // RemoteServerExtended 表示具有附加流量和入站信息的远程服务器
 type RemoteServerExtended struct {
 	storage.RemoteServer
-	TrafficUsed int64                     `json:"traffic_used"` // 当前使用的流量（以字节为单位）
-	Inbounds    []RemoteServerInboundInfo `json:"inbounds"`     // 入站信息（不包括 tag="api"）
+	TrafficUsed int64                     `json:"traffic_used"`
+	Inbounds    []RemoteServerInboundInfo `json:"inbounds"`
+	Encrypted   bool                      `json:"encrypted"`
+	WsConnected bool                      `json:"ws_connected"`
 }
 
 // RemoteServersListResponse 表示所有远程服务器的响应
@@ -97,13 +128,17 @@ type RemoteServerDeleteRequest struct {
 type RemoteServerUpdateRequest struct {
 	ID              int64  `json:"id"`
 	Name            string `json:"name"`
-	Domain          string `json:"domain"`            // 服务器域（可选）
-	TrafficLimit    int64  `json:"traffic_limit"`     // 流量限制（以字节为单位）
-	TrafficResetDay int    `json:"traffic_reset_day"` // 要重置的月份日期 (1-31)
-	ConnectionMode  string `json:"connection_mode"`   // “websocket”、“http”、“pull”、“auto”
-	PullAddress     string `json:"pull_address"`      // pull模式地址
-	PullPort        int    `json:"pull_port"`         // pull模式端口
-	PullToken       string `json:"pull_token"`        // pull模式令牌
+	Domain          string `json:"domain"`
+	TrafficLimit    int64  `json:"traffic_limit"`
+	TrafficResetDay int    `json:"traffic_reset_day"`
+	TrafficUsed     *int64 `json:"traffic_used"`
+	ConnectionMode  string `json:"connection_mode"`
+	ListenPort      int    `json:"listen_port"`     // Agent HTTP 监听端口;变更时主控会通知 agent 改配置+重启
+	PullAddress     string `json:"pull_address"`
+	PullPort        int    `json:"pull_port"`
+	PullToken       string `json:"pull_token"`
+	XrayMode         string `json:"xray_mode"`
+	TrafficStatsMode string `json:"traffic_stats_mode"` // both | upload | download
 }
 
 // 生成加密安全令牌
@@ -150,9 +185,13 @@ func (h *XrayServerHandler) ListRemoteServers(w stdhttp.ResponseWriter, r *stdht
 			RemoteServer: server,
 			Inbounds:     []RemoteServerInboundInfo{},
 		}
+		if h.wsHandler != nil {
+			extended.Encrypted = h.wsHandler.IsConnectionEncrypted(server.Token)
+			extended.WsConnected = h.wsHandler.IsConnected(server.Token)
+		}
 
 		trafficUsed, _ := h.repo.GetServerTrafficUsed(ctx, server.ID)
-		extended.TrafficUsed = trafficUsed
+		extended.TrafficUsed = trafficUsed + server.TrafficUsedOffset
 
 		nodeTraffic, err := h.repo.GetNodeTrafficByServer(ctx, server.ID)
 		if err == nil {
@@ -184,6 +223,24 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 	if r.Method != "POST" {
 		stdhttp.Error(w, "Method not allowed", stdhttp.StatusMethodNotAllowed)
 		return
+	}
+
+	if h.licenseManager != nil {
+		status := h.licenseManager.GetStatus()
+		maxServers := 5
+		if status.Plan != nil {
+			maxServers = status.Plan.MaxServers
+		}
+		count, err := h.repo.CountRemoteServers(r.Context())
+		if err == nil && count >= int64(maxServers) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(stdhttp.StatusForbidden)
+			json.NewEncoder(w).Encode(RemoteServerResponse{
+				Success: false,
+				Message: fmt.Sprintf("已达到服务器数量上限 (%d/%d)，请升级许可证", count, maxServers),
+			})
+			return
+		}
 	}
 
 	var req RemoteServerCreateRequest
@@ -272,25 +329,79 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		connectionMode = storage.ConnectionModePush
 	}
 
+	// steal_mode 三种值:tunnel / fallback / default。
+	// 历史 BUG:这里曾"非 fallback 就强制 tunnel",导致没勾偷自己的服务器实际也存 tunnel,
+	// 用户在编辑 dialog 看到默认选中 tunnel,语义混淆。
+	// 现在:
+	//   - 显式 fallback / tunnel / default → 原样保留
+	//   - 其它值(包括空)→ 偷自己时默认 tunnel,否则默认 default
 	stealMode := req.StealMode
-	if stealMode != "fallback" {
-		stealMode = "tunnel"
+	switch stealMode {
+	case "tunnel", "fallback", "default":
+		// ok
+	default:
+		if req.StealSelf {
+			stealMode = "tunnel"
+		} else {
+			stealMode = "default"
+		}
+	}
+
+	xrayMode := req.XrayMode
+	if xrayMode != "embedded" {
+		xrayMode = "external"
+	}
+	// embedded 是 PRO feature — 没有许可证拒收。等价于 "external" 不受限。
+	if xrayMode == "embedded" && h.licenseManager != nil && !h.licenseManager.HasFeature("embedded") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(stdhttp.StatusForbidden)
+		json.NewEncoder(w).Encode(RemoteServerResponse{Success: false, Message: "内嵌 Xray 是 PRO 功能,需要许可证"})
+		return
+	}
+
+	// Agent 监听端口:有效范围 1024-65535;0 表示用 agent 内置默认 23889
+	listenPort := req.ListenPort
+	if listenPort < 0 || listenPort > 65535 {
+		listenPort = 0
+	}
+
+	resetDay := req.TrafficResetDay
+	if resetDay < 0 || resetDay > 31 {
+		resetDay = 0
+	}
+	trafficUsedOffset := req.TrafficUsedOffset
+	if trafficUsedOffset < 0 {
+		trafficUsedOffset = 0
+	}
+	trafficLimit := req.TrafficLimit
+	if trafficLimit < 0 {
+		trafficLimit = 0
+	}
+	trafficStatsMode := strings.TrimSpace(req.TrafficStatsMode)
+	if trafficStatsMode != "upload" && trafficStatsMode != "download" {
+		trafficStatsMode = "both"
 	}
 
 	server := &storage.RemoteServer{
-		Name:           req.Name,
-		Token:          token,
-		Status:         storage.RemoteServerStatusPending,
-		IPAddress:      req.IPAddress,
-		ConnectionMode: connectionMode,
-		PullAddress:    req.PullAddress,
-		PullPort:       req.PullPort,
-		PullToken:      agentToken,
-		Domain:         strings.TrimSpace(req.Domain),
-		Use443:         req.Use443,
-		StealMode:      stealMode,
-		SiteType:       req.SiteType,
-		SiteValue:      req.SiteValue,
+		Name:              req.Name,
+		Token:             token,
+		Status:            storage.RemoteServerStatusPending,
+		IPAddress:         req.IPAddress,
+		ConnectionMode:    connectionMode,
+		ListenPort:        listenPort,
+		PullAddress:       req.PullAddress,
+		PullPort:          req.PullPort,
+		PullToken:         agentToken,
+		Domain:            strings.TrimSpace(req.Domain),
+		Use443:            req.Use443,
+		StealMode:         stealMode,
+		SiteType:          req.SiteType,
+		SiteValue:         req.SiteValue,
+		XrayMode:          xrayMode,
+		TrafficLimit:      trafficLimit,
+		TrafficUsedOffset: trafficUsedOffset,
+		TrafficResetDay:   resetDay,
+		TrafficStatsMode:  trafficStatsMode,
 	}
 
 	if err := h.repo.CreateRemoteServer(ctx, server); err != nil {
@@ -302,22 +413,26 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		return
 	}
 
-	// 构建安装命令 - 更喜欢系统设置中的 master_url
+	// 构建安装命令 — 优先用系统设置里的 master_url(用户配置的对外域名),
+	// 这是 agent 实际访问主控的地址,r.Host 可能是 nginx upstream 名(如 miaomiaowu_web),
+	// 不可对外访问。仅在 master_url 未配置时回退到请求 Host。
 	serverURL := ""
-	host := r.Host
-	scheme := "http"
-	if r.TLS != nil {
-		scheme = "https"
-	}
-	if forwardedProto := r.Header.Get("X-Forwarded-Proto"); forwardedProto != "" {
-		scheme = forwardedProto
-	}
-	if host != "" {
-		serverURL = fmt.Sprintf("%s://%s", scheme, host)
+	if masterURL, err := h.repo.GetSystemSetting(ctx, "master_url"); err == nil {
+		if mu := strings.TrimRight(strings.TrimSpace(masterURL), "/"); mu != "" {
+			serverURL = mu
+		}
 	}
 	if serverURL == "" {
-		if masterURL, err := h.repo.GetSystemSetting(ctx, "master_url"); err == nil && masterURL != "" {
-			serverURL = strings.TrimRight(masterURL, "/")
+		host := r.Host
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		if forwardedProto := r.Header.Get("X-Forwarded-Proto"); forwardedProto != "" {
+			scheme = forwardedProto
+		}
+		if host != "" {
+			serverURL = fmt.Sprintf("%s://%s", scheme, host)
 		}
 	}
 
@@ -336,6 +451,13 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 	if req.StealSelf {
 		installQuery.Set("steal_self", "1")
 		installQuery.Set("front_service", frontService)
+	}
+	if xrayMode == "embedded" {
+		installQuery.Set("xray_mode", "embedded")
+	}
+	// 自定义 Agent 端口透传到安装脚本(脚本会写进 /etc/mmw-agent/config.yaml 的 listen_port 字段)
+	if listenPort > 0 {
+		installQuery.Set("listen_port", fmt.Sprintf("%d", listenPort))
 	}
 	installScriptURL := fmt.Sprintf("%s/api/remote/install.sh?%s", serverURL, installQuery.Encode())
 
@@ -435,6 +557,32 @@ func (h *XrayServerHandler) DeleteRemoteServer(w stdhttp.ResponseWriter, r *stdh
 }
 
 // 更新远程服务器的基本信息
+// ReorderRemoteServers 接受按目标顺序排列的 server ID 数组,把数据库里 sort_order 字段按这个顺序写一遍。
+// 前端拖动结束就调一下,ListRemoteServers 已经按 sort_order ASC 排了,刷新自然看到新顺序。
+func (h *XrayServerHandler) ReorderRemoteServers(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+	if r.Method != stdhttp.MethodPost {
+		stdhttp.Error(w, "Method not allowed", stdhttp.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		IDs []int64 `json:"ids"`
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "无效的请求参数"})
+		return
+	}
+	if len(req.IDs) == 0 {
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "ids 不能为空"})
+		return
+	}
+	if err := h.repo.ReorderRemoteServers(r.Context(), req.IDs); err != nil {
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "message": err.Error()})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
+}
+
 func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 	if r.Method != "PUT" && r.Method != "POST" {
 		stdhttp.Error(w, "Method not allowed", stdhttp.StatusMethodNotAllowed)
@@ -486,7 +634,15 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		return
 	}
 
-	if err := h.repo.UpdateRemoteServer(ctx, req.ID, req.Name, req.Domain, req.TrafficLimit, req.TrafficResetDay, req.ConnectionMode); err != nil {
+	// embedded 是 PRO feature — update 路径也要拦,防止用户先 external 创建再 update 提权。
+	if req.XrayMode == "embedded" && oldServer.XrayMode != "embedded" && h.licenseManager != nil && !h.licenseManager.HasFeature("embedded") {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(stdhttp.StatusForbidden)
+		json.NewEncoder(w).Encode(RemoteServerResponse{Success: false, Message: "内嵌 Xray 是 PRO 功能,需要许可证"})
+		return
+	}
+
+	if err := h.repo.UpdateRemoteServer(ctx, req.ID, req.Name, req.Domain, req.TrafficLimit, req.TrafficResetDay, req.ConnectionMode, req.XrayMode, req.TrafficStatsMode); err != nil {
 		msg := "更新服务器失败"
 		if err == storage.ErrRemoteServerNotFound {
 			msg = "服务器不存在"
@@ -507,6 +663,14 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		}
 		if err := h.repo.UpdateRemoteServerConfig(ctx, req.ID, connMode, req.PullAddress, req.PullPort, req.PullToken); err != nil {
 			log.Printf("[Remote Server] Failed to update pull config for server %d: %v", req.ID, err)
+			// 之前这里只 log 不返 error,导致用户看到 success 但 pull_address 没真更新;
+			// 现在向前端透出错误,起码用户能感知失败并 retry。
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(RemoteServerResponse{
+				Success: false,
+				Message: fmt.Sprintf("更新拉取配置失败: %s", err.Error()),
+			})
+			return
 		}
 	}
 
@@ -519,11 +683,99 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		}
 	}
 
+	// 域名变更同步刷新该服务器下所有节点 clash_config.server。
+	// Domain 优先于 IP(动态 IP 场景下域名稳定),空 Domain 时回退到 IPAddress。
+	newDomain := strings.TrimSpace(req.Domain)
+	oldDomain := strings.TrimSpace(oldServer.Domain)
+	if newDomain != oldDomain {
+		addr := newDomain
+		if addr == "" {
+			addr = oldServer.IPAddress
+		}
+		if addr != "" {
+			finalName := req.Name
+			if finalName == "" {
+				finalName = oldServer.Name
+			}
+			if n, err := h.repo.RefreshNodesServerAddress(ctx, finalName, addr); err != nil {
+				log.Printf("[Remote Server] Refresh nodes server address failed for %s: %v", finalName, err)
+			} else if n > 0 {
+				log.Printf("[Remote Server] Refreshed %d node(s) server address → %s after domain change on %s", n, addr, finalName)
+			}
+		}
+	}
+
+	// 更新已用流量偏移量
+	if req.TrafficUsed != nil {
+		aggregated, _ := h.repo.GetServerTrafficUsed(ctx, req.ID)
+		offset := *req.TrafficUsed - aggregated
+		if err := h.repo.UpdateRemoteServerTrafficOffset(ctx, req.ID, offset); err != nil {
+			log.Printf("[Remote Server] Failed to update traffic offset for server %d: %v", req.ID, err)
+		}
+	}
+
+	// xray_mode 变更：异步通知 Agent 切换模式
+	newXrayMode := req.XrayMode
+	if newXrayMode == "" {
+		newXrayMode = oldServer.XrayMode
+	}
+	if newXrayMode != oldServer.XrayMode && h.remoteManager != nil {
+		go h.switchRemoteXrayMode(req.ID, newXrayMode)
+	}
+
+	// listen_port 变更:**必须先用旧端口通知 agent**(此刻 DB 仍是旧值,ForwardToServer 能连上 agent),
+	// 等 agent 收到并自重启后,**它会用新端口上报心跳给主控,主控收到心跳时会更新 listen_port**。
+	// 这里若立刻落库,会导致 ForwardToServer 读到新端口去连旧 agent 实例,connection refused。
+	// 同步调用是因为 agent 端会先 net.Listen 预检新端口能否 bind,
+	// 失败(被 xray 等占用)会立刻回 409,主控把错误透传给前端,避免重启后死锁。
+	respMsg := "服务器信息已更新"
+	newListenPort := req.ListenPort
+	if newListenPort < 0 || newListenPort > 65535 {
+		newListenPort = oldServer.ListenPort
+	}
+	if newListenPort != oldServer.ListenPort && h.remoteManager != nil {
+		if err := h.switchRemoteListenPort(req.ID, newListenPort); err != nil {
+			respMsg = fmt.Sprintf("服务器信息已更新,但端口切换失败: %v", err)
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(RemoteServerResponse{
 		Success: true,
-		Message: "服务器信息已更新",
+		Message: respMsg,
 	})
+}
+
+// switchRemoteXrayMode 通知远程 Agent 切换 xray_mode 并重启。
+func (h *XrayServerHandler) switchRemoteXrayMode(serverID int64, newMode string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	body, _ := json.Marshal(map[string]string{"xray_mode": newMode})
+	result, err := h.remoteManager.ForwardToServer(ctx, serverID, "POST", "/api/child/agent/switch-xray-mode", body)
+	if err != nil {
+		log.Printf("[Remote Server] Failed to switch xray_mode to %s for server %d: %v", newMode, serverID, err)
+		return
+	}
+	log.Printf("[Remote Server] Xray mode switch to %s for server %d: %s", newMode, serverID, string(result))
+}
+
+// switchRemoteListenPort 通知远程 Agent 改自身监听端口并重启。Agent 重启会短暂断连(~5–15s),
+// 重启后用新端口监听,主控下次重连读 server.ListenPort 自动用新端口。
+// agent 端会先 net.Listen 预检新端口能否 bind,失败立刻回 409 — 这里 error 不为 nil 即代表
+// 切换被 agent 拒绝(端口被占用),DB 不需要回滚因为 agent 也没改 config 也没重启。
+func (h *XrayServerHandler) switchRemoteListenPort(serverID int64, newPort int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	body, _ := json.Marshal(map[string]int{"listen_port": newPort})
+	result, err := h.remoteManager.ForwardToServer(ctx, serverID, "POST", "/api/child/agent/switch-listen-port", body)
+	if err != nil {
+		log.Printf("[Remote Server] Failed to switch listen_port to %d for server %d: %v", newPort, serverID, err)
+		return err
+	}
+	log.Printf("[Remote Server] Listen port switch to %d for server %d: %s", newPort, serverID, string(result))
+	return nil
 }
 
 func resolveIPs(address string) []string {

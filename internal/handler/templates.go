@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"miaomiaowux/internal/auth"
 	"miaomiaowux/internal/storage"
 	"miaomiaowux/internal/substore"
 )
@@ -30,6 +31,7 @@ type templateResponse struct {
 	RuleSource       string `json:"rule_source"`
 	UseProxy         bool   `json:"use_proxy"`
 	EnableIncludeAll bool   `json:"enable_include_all"`
+	CreatedBy        string `json:"created_by"`
 	CreatedAt        string `json:"created_at"`
 	UpdatedAt        string `json:"updated_at"`
 }
@@ -194,12 +196,14 @@ func NewTemplateConvertHandler() http.Handler {
 }
 
 func handleListTemplates(w http.ResponseWriter, r *http.Request, repo *storage.TrafficRepository) {
-	templates, err := repo.ListTemplates(r.Context())
+	ctx := r.Context()
+	templates, err := repo.ListTemplates(ctx)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
+	// 模板无敏感信息:所有用户可见并可使用全部模板(删除/修改仍仅限自己的,见对应 handler)。
 	response := make([]templateResponse, 0, len(templates))
 	for _, t := range templates {
 		response = append(response, templateToResponse(t))
@@ -220,6 +224,7 @@ func handleGetTemplate(w http.ResponseWriter, r *http.Request, repo *storage.Tra
 		return
 	}
 
+	// 模板可被所有用户使用,无需归属校验(删除/修改另行限制)。
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(templateToResponse(t))
 }
@@ -236,6 +241,13 @@ func handleCreateTemplate(w http.ResponseWriter, r *http.Request, repo *storage.
 		return
 	}
 
+	username := auth.UsernameFromContext(r.Context())
+	// 配额校验:普通用户创建模板受全局配额限制(admin 不限)。
+	if err := checkUserQuota(r.Context(), repo, username, "template"); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+
 	t := storage.Template{
 		Name:             req.Name,
 		Category:         req.Category,
@@ -243,6 +255,7 @@ func handleCreateTemplate(w http.ResponseWriter, r *http.Request, repo *storage.
 		RuleSource:       req.RuleSource,
 		UseProxy:         req.UseProxy,
 		EnableIncludeAll: req.EnableIncludeAll,
+		CreatedBy:        username,
 	}
 
 	id, err := repo.CreateTemplate(r.Context(), t)
@@ -274,6 +287,16 @@ func handleUpdateTemplate(w http.ResponseWriter, r *http.Request, repo *storage.
 		return
 	}
 
+	// 归属校验:普通用户不能改别人的模板。
+	username := auth.UsernameFromContext(r.Context())
+	if !userIsAdmin(r.Context(), repo, username) {
+		existing, gerr := repo.GetTemplateByID(r.Context(), id)
+		if gerr != nil || existing.CreatedBy != username {
+			writeError(w, http.StatusNotFound, storage.ErrTemplateNotFound)
+			return
+		}
+	}
+
 	t := storage.Template{
 		ID:               id,
 		Name:             req.Name,
@@ -282,6 +305,7 @@ func handleUpdateTemplate(w http.ResponseWriter, r *http.Request, repo *storage.
 		RuleSource:       req.RuleSource,
 		UseProxy:         req.UseProxy,
 		EnableIncludeAll: req.EnableIncludeAll,
+		CreatedBy:        username,
 	}
 
 	if err := repo.UpdateTemplate(r.Context(), t); err != nil {
@@ -304,6 +328,15 @@ func handleUpdateTemplate(w http.ResponseWriter, r *http.Request, repo *storage.
 }
 
 func handleDeleteTemplate(w http.ResponseWriter, r *http.Request, repo *storage.TrafficRepository, id int64) {
+	// 归属校验:普通用户不能删别人的模板。
+	username := auth.UsernameFromContext(r.Context())
+	if !userIsAdmin(r.Context(), repo, username) {
+		existing, gerr := repo.GetTemplateByID(r.Context(), id)
+		if gerr != nil || existing.CreatedBy != username {
+			writeError(w, http.StatusNotFound, storage.ErrTemplateNotFound)
+			return
+		}
+	}
 	if err := repo.DeleteTemplate(r.Context(), id); err != nil {
 		if errors.Is(err, storage.ErrTemplateNotFound) {
 			writeError(w, http.StatusNotFound, err)
@@ -326,6 +359,7 @@ func templateToResponse(t storage.Template) templateResponse {
 		RuleSource:       t.RuleSource,
 		UseProxy:         t.UseProxy,
 		EnableIncludeAll: t.EnableIncludeAll,
+		CreatedBy:        t.CreatedBy,
 		CreatedAt:        t.CreatedAt.Format("2006-01-02 15:04:05"),
 		UpdatedAt:        t.UpdatedAt.Format("2006-01-02 15:04:05"),
 	}

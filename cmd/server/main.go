@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -17,11 +18,15 @@ import (
 	"miaomiaowux/internal/agentlog"
 	"miaomiaowux/internal/auth"
 	"miaomiaowux/internal/notify"
+	"miaomiaowux/internal/patches"
 	"miaomiaowux/internal/child"
 	"miaomiaowux/internal/event"
 	"miaomiaowux/internal/handler"
+	mcpserver "miaomiaowux/internal/mcp"
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/logger"
 	"miaomiaowux/internal/proxygroups"
+	"miaomiaowux/internal/securechan"
 	"miaomiaowux/internal/storage"
 	"miaomiaowux/internal/traffic"
 	"miaomiaowux/internal/version"
@@ -78,14 +83,29 @@ func main() {
 		log.Printf("Loaded configuration from %s", *configPath)
 	}
 
-	addr := getAddr(config)
-
 	repo, err := storage.NewTrafficRepository(filepath.Join("data", "mmwx.db"))
 	if err != nil {
 		logger.Error("流量数据库初始化失败", "error", err)
 		os.Exit(1)
 	}
 	defer repo.Close()
+
+	addr := getAddr(config, repo)
+
+	masterIdentity, err := securechan.LoadOrGenerate(filepath.Join("data", "mmwx_master.key"))
+	if err != nil {
+		logger.Error("加密密钥初始化失败", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("主控加密公钥已加载", "public_key", masterIdentity.PublicKeyBase64())
+
+	cryptoConfig := handler.NewCryptoConfig(masterIdentity, securechan.NewSessionCache(1*time.Hour))
+
+	licenseManager := license.NewManager(repo, license.GetMachineID())
+	// 注入 usage 来源,让心跳把"本机当前 used_servers/nodes/users" 上报给 license 服务器。
+	licenseManager.SetUsageReporter(repo)
+	licenseManager.Start(context.Background())
+	defer licenseManager.Stop()
 
 	authManager, err := auth.NewManager(repo)
 	if err != nil {
@@ -128,6 +148,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// rule_templates 补丁:Ensure 不覆盖已存在文件(保护用户自定义),
+	// 但对历史已知错误的 dns 块(语义比对,顺序无关)做一次精准替换。详见 internal/patches 包注释。
+	if patched, err := patches.ApplyDNSPatches(ruleTemplatesDir); err != nil {
+		logger.Warn("DNS 模板补丁应用过程出错(不影响启动)", "error", err)
+	} else if patched > 0 {
+		logger.Info("DNS 模板补丁已应用", "count", patched)
+	}
+
 	// 初始化代理组配置 Store（纯内存存储）
 	// 优先从系统配置的远程地址拉取，失败时使用空配置
 	var proxyGroupsStore *proxygroups.Store
@@ -153,6 +181,10 @@ func main() {
 		DailyTrafficTime:        systemConfig.NotifyDailyTrafficTime,
 		TrafficThresholdPercent: systemConfig.NotifyTrafficThresholdPercent,
 	})
+
+	// TG bot 已拆为独立项目 ../mmwX-tgbot,通过 /api/admin/tgbot/* HTTP 调主控。
+	// 主控仅保留 admin REST handler + 邀请码 web UI + storage 字段 + notify 裸 HTTP 通知。
+	tgbotAPIHandler := handler.NewTGBotAPIHandler(repo)
 
 	// 从远程拉取配置
 	data, resolvedURL, fetchErr := proxygroups.FetchConfig(systemConfig.ProxyGroupsSourceURL)
@@ -186,7 +218,14 @@ func main() {
 	mux.Handle("/api/setup/init", handler.NewInitialSetupHandler(repo))
 	mux.Handle("/api/setup/verify-domain", handler.NewVerifyDomainHandler())
 	mux.Handle("/api/setup/restore-backup", handler.NewSetupRestoreBackupHandler(repo))
-	loginRateLimiter := handler.NewLoginRateLimiter()
+
+	// 从 system_settings 读 3 个安全限流器的自定义阈值(KV 缺失 → fallback hardcoded 默认值)。
+	// 同一份配置后面给 brute_force + subscription_rate 构造时复用。
+	secCfg := handler.LoadSecuritySettings(context.Background(), repo)
+	loginRateLimiter := handler.NewLoginRateLimiterWithConfig(
+		secCfg.LoginRateMaxAttempts, secCfg.LoginRateWindowMinutes, secCfg.LoginRateLockMinutes,
+	)
+	loginRateLimiter.SetSkipLocalIP(secCfg.SkipLocalIP)
 	twoFactorStore := auth.NewTwoFactorPendingStore(5 * time.Minute)
 	mux.Handle("/api/login", handler.NewLoginHandler(authManager, tokenStore, repo, loginRateLimiter, twoFactorStore))
 	mux.Handle("/api/login/2fa", handler.NewTwoFactorLoginHandler(tokenStore, repo, twoFactorStore))
@@ -194,32 +233,43 @@ func main() {
 
 	// 仅限管理端点
 	mux.Handle("/api/admin/credentials", auth.RequireAdmin(tokenStore, userRepo, handler.NewCredentialsHandler(authManager, tokenStore)))
+
+	// TG bot 相关 API(单前缀,handler 内部按 path 分发):
+	//   - invites CRUD(admin web UI 用)
+	//   - bind/unbind/user-by-tg/user-summary/user-subscriptions/user-nodes(独立 mmwX-tgbot 用)
+	mux.Handle("/api/admin/tgbot/", auth.RequireAdmin(tokenStore, userRepo, tgbotAPIHandler))
 	mux.Handle("/api/admin/users", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserListHandler(repo)))
-	mux.Handle("/api/admin/users/create", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserCreateHandler(repo)))
-	mux.Handle("/api/admin/users/delete", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserDeleteHandler(repo)))
-	mux.Handle("/api/admin/users/status", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserStatusHandler(repo)))
+	userCreateHandler := handler.NewUserCreateHandler(repo)
+	userCreateHandler.SetLicenseManager(licenseManager)
+	mux.Handle("/api/admin/users/create", auth.RequireAdmin(tokenStore, userRepo, userCreateHandler))
+	// /api/admin/users/delete 依赖 remoteManageHandler + limiterPusher 做 xray client 清理，注册下移到 ~line 348 之后
+	// /api/admin/users/status (启用/禁用) 同样依赖 remoteManageHandler + limiterPusher,见同区
 	mux.Handle("/api/admin/users/reset-password", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserResetPasswordHandler(repo)))
 	mux.Handle("/api/admin/users/remark", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserRemarkHandler(repo)))
+	mux.Handle("/api/admin/users/short-code", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserShortCodeHandler(repo)))
 	mux.Handle("/api/admin/users/update-email", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserUpdateEmailHandler(repo)))
+	mux.Handle("/api/admin/users/subaccounts", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserSubaccountsHandler(repo)))
 	mux.Handle("/api/admin/users/", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserSubscriptionsHandler(repo)))
 	mux.Handle("/api/admin/subscriptions", auth.RequireAdmin(tokenStore, userRepo, handler.NewSubscriptionAdminHandler(subscribeDir, repo)))
 	mux.Handle("/api/admin/subscriptions/", auth.RequireAdmin(tokenStore, userRepo, handler.NewSubscriptionAdminHandler(subscribeDir, repo)))
-	mux.Handle("/api/admin/subscribe-files", auth.RequireAdmin(tokenStore, userRepo, handler.NewSubscribeFilesHandler(repo)))
-	mux.Handle("/api/admin/subscribe-files/", auth.RequireAdmin(tokenStore, userRepo, handler.NewSubscribeFilesHandler(repo)))
+	mux.Handle("/api/admin/subscribe-files", auth.RequireToken(tokenStore, userRepo, handler.NewSubscribeFilesHandler(repo)))
+	mux.Handle("/api/admin/subscribe-files/", auth.RequireToken(tokenStore, userRepo, handler.NewSubscribeFilesHandler(repo)))
 	mux.Handle("/api/admin/rules/", auth.RequireAdmin(tokenStore, userRepo, http.StripPrefix("/api/admin/rules/", handler.NewRuleEditorHandler(subscribeDir, repo))))
-	mux.Handle("/api/admin/rule-templates", auth.RequireAdmin(tokenStore, userRepo, handler.NewRuleTemplatesHandler()))
-	mux.Handle("/api/admin/rule-templates/", auth.RequireAdmin(tokenStore, userRepo, handler.NewRuleTemplatesHandler()))
+	mux.Handle("/api/admin/rule-templates", auth.RequireToken(tokenStore, userRepo, handler.NewRuleTemplatesHandler(repo)))
+	mux.Handle("/api/admin/rule-templates/", auth.RequireToken(tokenStore, userRepo, handler.NewRuleTemplatesHandler(repo)))
 	// 在remoteManageHandler之后注册的节点处理程序（见下文）
 	mux.Handle("/api/admin/sync-external-subscriptions", auth.RequireAdmin(tokenStore, userRepo, handler.NewSyncExternalSubscriptionsHandler(repo, subscribeDir)))
 	mux.Handle("/api/admin/sync-external-subscription", auth.RequireAdmin(tokenStore, userRepo, handler.NewSyncSingleExternalSubscriptionHandler(repo, subscribeDir)))
 	mux.Handle("/api/admin/rules/latest", auth.RequireAdmin(tokenStore, userRepo, handler.NewRuleMetadataHandler(subscribeDir, repo)))
-	mux.Handle("/api/admin/custom-rules", auth.RequireAdmin(tokenStore, userRepo, handler.NewCustomRulesHandler(repo)))
-	mux.Handle("/api/admin/custom-rules/", auth.RequireAdmin(tokenStore, userRepo, handler.NewCustomRuleHandler(repo)))
-	mux.Handle("/api/admin/apply-custom-rules", auth.RequireAdmin(tokenStore, userRepo, handler.NewApplyCustomRulesHandler(repo)))
-	mux.Handle("/api/admin/templates", auth.RequireAdmin(tokenStore, userRepo, handler.NewTemplatesHandler(repo)))
-	mux.Handle("/api/admin/templates/", auth.RequireAdmin(tokenStore, userRepo, handler.NewTemplateHandler(repo)))
-	mux.Handle("/api/admin/templates/convert", auth.RequireAdmin(tokenStore, userRepo, handler.NewTemplateConvertHandler()))
-	mux.Handle("/api/admin/templates/fetch-source", auth.RequireAdmin(tokenStore, userRepo, handler.NewTemplateFetchSourceHandler()))
+	mux.Handle("/api/admin/custom-rules", auth.RequireToken(tokenStore, userRepo, handler.NewCustomRulesHandler(repo)))
+	mux.Handle("/api/admin/custom-rules/", auth.RequireToken(tokenStore, userRepo, handler.NewCustomRuleHandler(repo)))
+	mux.Handle("/api/admin/apply-custom-rules", auth.RequireToken(tokenStore, userRepo, handler.NewApplyCustomRulesHandler(repo)))
+	mux.Handle("/api/admin/override-scripts", auth.RequireToken(tokenStore, userRepo, handler.NewOverrideScriptsHandler(repo)))
+	mux.Handle("/api/admin/override-scripts/", auth.RequireToken(tokenStore, userRepo, handler.NewOverrideScriptsHandler(repo)))
+	mux.Handle("/api/admin/templates", auth.RequireToken(tokenStore, userRepo, handler.NewTemplatesHandler(repo)))
+	mux.Handle("/api/admin/templates/", auth.RequireToken(tokenStore, userRepo, handler.NewTemplateHandler(repo)))
+	mux.Handle("/api/admin/templates/convert", auth.RequireToken(tokenStore, userRepo, handler.NewTemplateConvertHandler()))
+	mux.Handle("/api/admin/templates/fetch-source", auth.RequireToken(tokenStore, userRepo, handler.NewTemplateFetchSourceHandler()))
 	mux.Handle("/api/admin/backup/download", auth.RequireAdmin(tokenStore, userRepo, handler.NewBackupDownloadHandler(repo)))
 	mux.Handle("/api/admin/backup/restore", auth.RequireAdmin(tokenStore, userRepo, handler.NewBackupRestoreHandler(repo)))
 	mux.Handle("/api/admin/update/check", auth.RequireAdmin(tokenStore, userRepo, handler.NewUpdateCheckHandler()))
@@ -229,14 +279,14 @@ func main() {
 
 	// Template V3 端点（仅限管理员）
 	templateV3Handler := handler.NewTemplateV3Handler(repo)
-	mux.Handle("/api/admin/template-v3", auth.RequireAdmin(tokenStore, userRepo, templateV3Handler))
-	mux.Handle("/api/admin/template-v3/", auth.RequireAdmin(tokenStore, userRepo, templateV3Handler))
+	mux.Handle("/api/admin/template-v3", auth.RequireToken(tokenStore, userRepo, templateV3Handler))
+	mux.Handle("/api/admin/template-v3/", auth.RequireToken(tokenStore, userRepo, templateV3Handler))
 
-	// 包管理端点（仅限管理员）
+	// 包管理端点（仅限管理员）— list/create 不依赖 limiterPusher;delete 需解绑用户,延后到 remoteManageHandler/limiterPusher 创建后注册
 	mux.Handle("/api/admin/packages", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageListHandler(repo)))
-	mux.Handle("/api/admin/packages/create", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageCreateHandler(repo)))
-	mux.Handle("/api/admin/packages/update", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageUpdateHandler(repo)))
-	mux.Handle("/api/admin/packages/", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageDeleteHandler(repo)))
+	packageCreateHandler := handler.NewPackageCreateHandler(repo)
+	packageCreateHandler.SetLicenseManager(licenseManager)
+	mux.Handle("/api/admin/packages/create", auth.RequireAdmin(tokenStore, userRepo, packageCreateHandler))
 
 	// 用户端点（所有经过身份验证的用户）
 	mux.Handle("/api/proxy-groups", auth.RequireToken(tokenStore, userRepo, handler.NewProxyGroupsHandler(proxyGroupsStore)))
@@ -249,6 +299,11 @@ func main() {
 	mux.Handle("/api/user/settings", auth.RequireToken(tokenStore, userRepo, handler.NewUserSettingsHandler(repo, tokenStore)))
 	mux.Handle("/api/user/config", auth.RequireToken(tokenStore, userRepo, handler.NewUserConfigHandler(repo)))
 	mux.Handle("/api/user/token", auth.RequireToken(tokenStore, userRepo, handler.NewUserTokenHandler(repo)))
+	// 代理集合(Clash proxy-provider)配置 — 用户自己 CRUD;handler 内做 username 隔离
+	mux.Handle("/api/user/proxy-provider-configs", auth.RequireToken(tokenStore, userRepo, handler.NewProxyProviderConfigsHandler(repo)))
+	// 每用户 API 令牌(供 MCP / 程序化访问);明文仅创建时返回一次
+	mux.Handle("/api/user/api-tokens", auth.RequireToken(tokenStore, userRepo, handler.NewUserAPITokensHandler(repo)))
+	mux.Handle("/api/user/api-tokens/", auth.RequireToken(tokenStore, userRepo, handler.NewUserAPITokensHandler(repo)))
 	mux.Handle("/api/user/external-subscriptions", auth.RequireToken(tokenStore, userRepo, handler.NewExternalSubscriptionsHandler(repo)))
 	mux.Handle("/api/user/external-subscriptions/nodes", auth.RequireToken(tokenStore, userRepo, handler.NewExternalSubscriptionNodesHandler(repo)))
 	mux.Handle("/api/user/external-subscriptions/check-filter", auth.RequireToken(tokenStore, userRepo, handler.NewExternalSubscriptionCheckFilterHandler(repo)))
@@ -273,20 +328,29 @@ func main() {
 
 	// 流量收集器（早期创建，以便可以与处理程序共享）
 	trafficCollector := traffic.NewCollector(repo)
-	if systemConfig.TrafficCollectInterval > 0 {
-		trafficCollector.SetInterval(time.Duration(systemConfig.TrafficCollectInterval) * time.Second)
+	// 主控本机自采间隔跟随「上报间隔」(dashboard_refresh_interval_ms,会同步给所有 agent),
+	// 与 agent 保持一致;未设置时用默认 5000ms。speed 仍用 speed_collect_interval。
+	reportMs := 5000
+	if val, _ := repo.GetSystemSetting(context.Background(), "dashboard_refresh_interval_ms"); val != "" {
+		if n, err := strconv.Atoi(val); err == nil && n >= 1000 && n <= 60000 {
+			reportMs = n
+		}
 	}
+	trafficCollector.SetInterval(time.Duration(reportMs) * time.Millisecond)
 	if systemConfig.SpeedCollectInterval > 0 {
 		trafficCollector.SetSpeedInterval(time.Duration(systemConfig.SpeedCollectInterval) * time.Second)
 	}
 
 	// Xray 服务器处理程序（远程服务器管理复用）
-	xrayServerHandler := handler.NewXrayServerHandler(repo, trafficCollector)
+	xrayServerHandler := handler.NewXrayServerHandler(repo, trafficCollector, cryptoConfig)
 
 	// 远程服务器管理端点（仅限管理员）
 	mux.Handle("/api/admin/remote-servers", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.ListRemoteServers)))
 	mux.Handle("/api/admin/remote-servers/create", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.CreateRemoteServer)))
+	// 接入分享服务器(消费方)
+	mux.Handle("/api/admin/remote-servers/add-shared", auth.RequireAdmin(tokenStore, userRepo, handler.NewAddSharedServerHandler(repo)))
 	mux.Handle("/api/admin/remote-servers/update", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.UpdateRemoteServer)))
+	mux.Handle("/api/admin/remote-servers/reorder", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.ReorderRemoteServers)))
 	mux.Handle("/api/admin/remote-servers/delete", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.DeleteRemoteServer)))
 	mux.Handle("/api/admin/check-same-ip", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.CheckSameIP)))
 
@@ -297,25 +361,83 @@ func main() {
 
 	// 流量采集与统计
 	trafficApiHandler := handler.NewTrafficHandler(repo, trafficCollector)
-	remoteTrafficHandler := handler.NewRemoteTrafficHandler(repo, trafficCollector)
+	remoteTrafficHandler := handler.NewRemoteTrafficHandler(repo, trafficCollector, cryptoConfig)
 	mux.Handle("/api/admin/traffic", auth.RequireAdmin(tokenStore, userRepo, trafficApiHandler))
 	mux.Handle("/api/admin/traffic/", auth.RequireAdmin(tokenStore, userRepo, trafficApiHandler))
 	mux.Handle("/api/remote/traffic", remoteTrafficHandler)
 
 	// 远程速度处理程序（来自子服务器的 HTTP 推送）
-	remoteSpeedHandler := handler.NewRemoteSpeedHandler(repo)
+	remoteSpeedHandler := handler.NewRemoteSpeedHandler(repo, cryptoConfig)
 	mux.Handle("/api/remote/speed", remoteSpeedHandler)
 
 	// 远程服务器的 WebSocket 处理程序
 	remoteWSHandler := handler.NewRemoteWSHandler(repo, trafficCollector)
+	remoteWSHandler.SetCrypto(cryptoConfig)
 	mux.Handle("/api/remote/ws", remoteWSHandler)
+
+	// 限速配置推送器
+	limiterPusher := handler.NewLimiterConfigPusher(repo, remoteWSHandler)
+	limiterPusher.SetLicenseManager(licenseManager)
+	remoteWSHandler.SetLimiterPusher(limiterPusher)
+	remoteWSHandler.SetLicenseManager(licenseManager)
+	xrayServerHandler.SetLimiterPusher(limiterPusher)
+	xrayServerHandler.SetLicenseManager(licenseManager)
 
 	// 远程服务器管理代理（将命令转发到子服务器）
 	remoteManageHandler := handler.NewRemoteManageHandler(repo, remoteWSHandler)
+	remoteManageHandler.SetCrypto(cryptoConfig)
+	remoteManageHandler.SetLicenseManager(licenseManager) // syncInboundsToNodes 路径里 license budget 检查需要
+	// inbound cache: 套餐绑/换绑时 in-memory 算 cred 用,从 xray config snapshot 派生。
+	inboundCache := handler.NewInboundCache()
+	remoteManageHandler.SetInboundCache(inboundCache)
+	// 启动时预热(异步,不阻塞 main):从 DB current snapshot 把每台 server 的 inbound 索引拉进 cache。
+	// 新 agent 第一次连上来前,套餐绑套餐如果选了这个 server 的 inbound,有 DB snapshot 就立即 cache hit。
+	go func() {
+		ctx := context.Background()
+		servers, err := repo.ListRemoteServers(ctx)
+		if err != nil {
+			log.Printf("[InboundCache] warmup list servers failed: %v", err)
+			return
+		}
+		for _, s := range servers {
+			inboundCache.WarmupFromDB(ctx, repo, s.ID)
+		}
+		log.Printf("[InboundCache] warmup done for %d servers", len(servers))
+	}()
+	// agent 重连后异步同步 xray config snapshot(双向兜底 — agent/master 跑路换机都能恢复)。
+	remoteWSHandler.SetXrayConfigSyncCallback(remoteManageHandler.SyncXrayConfigOnReconnect)
+	xrayServerHandler.SetRemoteManager(remoteManageHandler)
+	xrayServerHandler.SetWSHandler(remoteWSHandler)
 
-	// 套餐绑定/解绑（需要remoteManageHandler操作远程入站）
-	mux.Handle("/api/admin/packages/assign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageAssignHandler(repo, remoteManageHandler)))
-	mux.Handle("/api/admin/packages/unassign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageUnassignHandler(repo, remoteManageHandler)))
+	// 一次性老格式凭据 email 迁移(ae60947 漏回填存量)。
+	// 启动延迟 60s — 等 agent WS 重连。失败的行下次启动重试,全部成功才写 done 标记。
+	handler.NewCredentialEmailMigrator(repo, remoteManageHandler).Start(context.Background(), 60*time.Second)
+
+	// 依赖 limiterPusher 的端点
+	packageUpdateHandler := handler.NewPackageUpdateHandler(repo, remoteManageHandler, limiterPusher)
+	packageUpdateHandler.SetLicenseManager(licenseManager)
+	mux.Handle("/api/admin/packages/update", auth.RequireAdmin(tokenStore, userRepo, packageUpdateHandler))
+	mux.Handle("/api/admin/packages/assign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageAssignHandler(repo, remoteManageHandler, limiterPusher)))
+	mux.Handle("/api/admin/packages/unassign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageUnassignHandler(repo, remoteManageHandler, limiterPusher)))
+	// 删除套餐:解绑所有绑定用户(移除入站凭据/清 package_id/删套餐订阅)后再删,故依赖 remoteManageHandler/limiterPusher
+	mux.Handle("/api/admin/packages/", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageDeleteHandler(repo, remoteManageHandler, limiterPusher)))
+	// 服务器分享(PRO):拥有方生成/管理分享令牌
+	mux.Handle("/api/admin/server-share/", auth.RequireAdmin(tokenStore, userRepo, handler.NewServerShareHandler(repo, licenseManager)))
+	speedTesterWS := handler.NewSpeedTesterWSHandler(repo)
+	speedTesterWS.SetLicenseManager(licenseManager)
+	mux.Handle("/api/speedtest/tester/ws", speedTesterWS) // 家用测速端反向连入(token 认证,无 JWT)
+	speedTestHandler := handler.NewSpeedTestHandler(repo, licenseManager)
+	speedTestHandler.SetTesterWS(speedTesterWS)
+	mux.Handle("/api/admin/speedtest/", auth.RequireAdmin(tokenStore, userRepo, speedTestHandler))
+	// Tunnel(dokodemo 转发入站)聚合管理:跨所有远程/分享服务器列出 protocol==tunnel 入站,供节点管理「Tunnel 管理」弹窗使用
+	mux.Handle("/api/admin/tunnels", auth.RequireAdmin(tokenStore, userRepo, handler.NewTunnelsHandler(repo, remoteManageHandler)))
+	// 联邦入口(分享令牌鉴权,供其他主控间接管理被分享服务器)
+	federationHandler := handler.NewFederationHandler(repo, remoteManageHandler, licenseManager)
+	mux.Handle("/api/federation/manage", federationHandler)
+	mux.Handle("/api/federation/server-info", federationHandler)
+	mux.Handle("/api/admin/users/limits", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserLimitsHandler(repo, limiterPusher, licenseManager)))
+	mux.Handle("/api/admin/users/delete", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserDeleteHandler(repo, remoteManageHandler, limiterPusher)))
+	mux.Handle("/api/admin/users/status", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserStatusHandler(repo, remoteManageHandler, limiterPusher)))
 
 	// 用户节点管理（普通用户查看套餐节点、管理自己的出站）
 	userNodesHandler := handler.NewUserNodesHandler(repo, remoteManageHandler)
@@ -324,8 +446,24 @@ func main() {
 	mux.Handle("/api/user/nodes/outbounds", auth.RequireToken(tokenStore, userRepo, http.HandlerFunc(userNodesHandler.HandleListOutbounds)))
 
 	// 注册节点处理程序（需要remoteManageHandler进行远程入站清理）
-	mux.Handle("/api/admin/nodes", auth.RequireAdmin(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler)))
-	mux.Handle("/api/admin/nodes/", auth.RequireAdmin(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler)))
+	mux.Handle("/api/admin/nodes", auth.RequireToken(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler, licenseManager)))
+	mux.Handle("/api/admin/nodes/", auth.RequireToken(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler, licenseManager)))
+
+	// 路由出站(routed node)管理:给物理节点挂多个虚拟出站节点
+	routedOutboundHandler := handler.NewRoutedOutboundHandler(repo, remoteManageHandler)
+	routedOutboundHandler.SetLicenseManager(licenseManager) // 这里是 license max_nodes 唯一生效点
+	mux.Handle("/api/admin/routed-outbound", auth.RequireAdmin(tokenStore, userRepo, routedOutboundHandler))
+	// 用户私有路由出站(routed_owner='user'):普通用户为自己创建/删除/查询专属出站
+	mux.Handle("/api/user/routed-outbound", auth.RequireToken(tokenStore, userRepo, handler.NewUserRoutedOutboundHandler(repo, remoteManageHandler)))
+
+	// 从妙妙屋(mmw)迁移工具
+	migrateHandler := handler.NewMigrateHandler(repo, remoteManageHandler)
+	mux.Handle("/api/admin/migrate/fetch-mmw-backup", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(migrateHandler.FetchMmwBackup)))
+	mux.Handle("/api/admin/migrate/upload-mmw-backup", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(migrateHandler.UploadMmwBackup)))
+	mux.Handle("/api/admin/migrate/import-mmw", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(migrateHandler.ImportMmw)))
+	mux.Handle("/api/admin/migrate/distinct-node-servers", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(migrateHandler.DistinctNodeServers)))
+	mux.Handle("/api/admin/migrate/patch-client-emails", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(migrateHandler.PatchClientEmails)))
+	mux.Handle("/api/admin/migrate/takeover-external-xray", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(migrateHandler.TakeoverExternalXray)))
 
 	// 初始化事件系统以进行入站同步
 	eventBus := event.GetBus()
@@ -340,6 +478,7 @@ func main() {
 	mux.Handle("/api/admin/remote/xray/install", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleXrayInstall)))
 	mux.Handle("/api/admin/remote/xray/remove", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleXrayRemove)))
 	mux.Handle("/api/admin/remote/xray/config", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleXrayConfig)))
+	mux.Handle("/api/admin/remote/xray/test-config", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleXrayTestConfig)))
 	mux.Handle("/api/admin/remote/xray/config/files", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleXrayConfigFiles)))
 	mux.Handle("/api/admin/remote/nginx/install", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleNginxInstall)))
 	mux.Handle("/api/admin/remote/nginx/remove", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleNginxRemove)))
@@ -350,6 +489,7 @@ func main() {
 	mux.Handle("/api/admin/remote/nginx/remove-stream", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleNginxRemoveStream)))
 	mux.Handle("/api/admin/remote/agent/upgrade-stream", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleAgentUpgradeStream)))
 	mux.Handle("/api/admin/remote/agent/uninstall-stream", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleAgentUninstallStream)))
+	mux.Handle("/api/admin/remote/agent/version-info", auth.RequireAdmin(tokenStore, userRepo, handler.NewAgentVersionHandler(remoteManageHandler, repo)))
 	mux.Handle("/api/admin/remote/nginx/config", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleNginxConfig)))
 	mux.Handle("/api/admin/remote/nginx/config/files", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleNginxConfigFiles)))
 	mux.Handle("/api/admin/remote/system/info", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleSystemInfo)))
@@ -368,14 +508,20 @@ func main() {
 	mux.Handle("/api/admin/remote/switch-steal-mode", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleSwitchStealMode)))
 	mux.Handle("/api/admin/remote/website/add", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleAddWebsite)))
 	mux.Handle("/api/admin/remote/website/validate", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleValidateSite)))
+	mux.Handle("/api/admin/remote/user-speeds", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleUserSpeeds)))
 	// 令牌重置端点
+	// xray 配置 snapshot / 跑路恢复 / 历史回滚
+	xraySnapshotHandler := handler.NewXraySnapshotHandler(repo, remoteManageHandler)
+	mux.Handle("/api/admin/xray-snapshots/", auth.RequireAdmin(tokenStore, userRepo, xraySnapshotHandler))
+
 	mux.Handle("/api/admin/remote-servers/reset-server-token", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleResetServerToken)))
 	mux.Handle("/api/admin/remote-servers/reset-agent-token", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleResetAgentToken)))
 	mux.Handle("/api/admin/remote-servers/reset-all-tokens", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleResetAllTokens)))
 
 	// TCPing 端点
-	mux.Handle("/api/admin/tcping", auth.RequireAdmin(tokenStore, userRepo, handler.NewTCPingHandler()))
-	mux.Handle("/api/admin/tcping/batch", auth.RequireAdmin(tokenStore, userRepo, handler.NewTCPingBatchHandler()))
+	// tcping 连通性测试无数据修改，开放给普通用户（节点管理页的延迟测试按钮）
+	mux.Handle("/api/admin/tcping", auth.RequireToken(tokenStore, userRepo, handler.NewTCPingHandler()))
+	mux.Handle("/api/admin/tcping/batch", auth.RequireToken(tokenStore, userRepo, handler.NewTCPingBatchHandler()))
 
 	// 子服务器模式配置
 	// 确定我们是否处于儿童/远程模式：
@@ -496,7 +642,15 @@ func main() {
 	mux.Handle("/api/admin/xray/generate-x25519", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayKeyGenHandler.GenerateX25519)))
 
 	// 系统设置 API（仅限管理员）
-	systemSettingsHandler := handler.NewSystemSettingsHandler(repo)
+	systemSettingsHandler := handler.NewSystemSettingsHandler(repo, cryptoConfig)
+	systemSettingsHandler.SetCollector(trafficCollector)
+	systemSettingsHandler.SetWSHandler(remoteWSHandler)
+	// 启动时加载加密设置
+	if encVal, _ := repo.GetSystemSetting(context.Background(), "require_encryption"); encVal == "true" {
+		cryptoConfig.SetRequireEncryption(true)
+	}
+	// 自定义安全阈值(登录/暴力防护/订阅频率)— 写入后 handler 内部热更新 3 个 limiter 单例,无需重启
+	mux.Handle("/api/admin/security-settings", auth.RequireAdmin(tokenStore, userRepo, handler.NewSecuritySettingsHandler(repo)))
 	mux.Handle("/api/admin/system-settings/api-token", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(systemSettingsHandler.GetAPIToken)))
 	mux.Handle("/api/admin/system-settings/api-token/regenerate", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(systemSettingsHandler.RegenerateAPIToken)))
 	mux.Handle("/api/admin/system-settings/master-url", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -519,6 +673,17 @@ func main() {
 			http.Error(w, "��法不允许", http.StatusMethodNotAllowed)
 		}
 	})))
+	// 节点名称倍率前缀(开关 + 左右分隔符)
+	mux.Handle("/api/admin/system-settings/node-name-multiplier-prefix", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			systemSettingsHandler.GetNodeNameMultiplierPrefix(w, r)
+		case http.MethodPut:
+			systemSettingsHandler.SetNodeNameMultiplierPrefix(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
 	mux.Handle("/api/admin/system-settings/intervals", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -529,6 +694,25 @@ func main() {
 			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
 		}
 	})))
+	// 公开:所有登录用户可拿前端 dashboard 刷新间隔(默认 5000ms,admin 可在系统设置改)
+	mux.Handle("/api/system-config/refetch-interval", auth.RequireToken(tokenStore, userRepo, http.HandlerFunc(systemSettingsHandler.GetPublicIntervals)))
+	// admin:写前端 dashboard 刷新间隔,clamp [1000, 60000] ms
+	mux.Handle("/api/admin/system-settings/dashboard-refresh", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(systemSettingsHandler.SetDashboardRefresh)))
+
+	// 用户权限 / 配额(全局策略)
+	userPermsHandler := handler.NewUserPermissionsHandler(repo)
+	mux.Handle("/api/admin/system-settings/user-permissions", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			userPermsHandler.AdminGet(w, r)
+		case http.MethodPut, http.MethodPost:
+			userPermsHandler.AdminSet(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
+	// 普通用户拿自己适用的可见页面 + 配额 + 已用量
+	mux.Handle("/api/user/permissions", auth.RequireToken(tokenStore, userRepo, http.HandlerFunc(userPermsHandler.UserGet)))
 	mux.Handle("/api/admin/system-settings/agent-log", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -540,6 +724,84 @@ func main() {
 		}
 	})))
 
+	mux.Handle("/api/admin/system-settings/override-scripts", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			systemSettingsHandler.GetOverrideScriptsEnabled(w, r)
+		case http.MethodPut:
+			systemSettingsHandler.SetOverrideScriptsEnabled(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
+
+	mux.Handle("/api/admin/system-settings/silent-mode", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			systemSettingsHandler.GetSilentMode(w, r)
+		case http.MethodPut:
+			systemSettingsHandler.SetSilentMode(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/admin/system-settings/require-encryption", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			systemSettingsHandler.GetRequireEncryption(w, r)
+		case http.MethodPut:
+			systemSettingsHandler.SetRequireEncryption(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/admin/system-settings/miaomiaowu-features", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			systemSettingsHandler.GetMiaomiaowuFeaturesEnabled(w, r)
+		case http.MethodPut:
+			systemSettingsHandler.SetMiaomiaowuFeaturesEnabled(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/admin/system-settings/mmw-short-link-compat", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			systemSettingsHandler.GetMmwShortLinkCompat(w, r)
+		case http.MethodPut:
+			systemSettingsHandler.SetMmwShortLinkCompat(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/admin/system-settings/default-template", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			systemSettingsHandler.GetDefaultTemplate(w, r)
+		case http.MethodPut:
+			systemSettingsHandler.SetDefaultTemplate(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
+
+	// 许可证 API
+	licenseHandler := handler.NewLicenseHandler(repo, licenseManager)
+	mux.Handle("/api/admin/license/status", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(licenseHandler.GetStatus)))
+	mux.Handle("/api/admin/license/usage", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(licenseHandler.GetUsage)))
+	mux.Handle("/api/admin/license/settings", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			licenseHandler.GetSettings(w, r)
+		case http.MethodPut:
+			licenseHandler.UpdateSettings(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/user/license/status", auth.RequireToken(tokenStore, userRepo, http.HandlerFunc(licenseHandler.UserGetStatus)))
+
 	// 通知配置 API（仅限管理员）
 	notifyConfigHandler := handler.NewNotifyConfigHandler(repo)
 	mux.Handle("/api/admin/notify-config", auth.RequireAdmin(tokenStore, userRepo, notifyConfigHandler))
@@ -547,7 +809,9 @@ func main() {
 
 	// 证书管理 API（仅限管理员）
 	certHandler := handler.NewCertificateHandler(repo, remoteWSHandler)
+	certHandler.SetOnMasterURLChanged(remoteManageHandler.BroadcastMasterURLUpdate)
 	remoteManageHandler.SetCertificateHandler(certHandler)
+	remoteManageHandler.SetStealSelfDeployer(remoteManageHandler.DeployStealSelfConfig)
 	remoteWSHandler.SetScanResultHandler(remoteManageHandler.HandleScanResult)
 	remoteWSHandler.SetStealSelfDeployer(remoteManageHandler.DeployStealSelfConfig)
 	mux.Handle("/api/admin/certificates", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(certHandler.ListCertificates)))
@@ -586,7 +850,9 @@ func main() {
 	mux.Handle("/api/user/custom-short-code", auth.RequireToken(tokenStore, userRepo, handler.NewUserCustomShortCodeSelfHandler(repo)))
 
 	// 临时订阅端点
-	mux.Handle("/api/admin/temp-subscription", auth.RequireAdmin(tokenStore, userRepo, handler.NewTempSubscriptionHandler()))
+	// 中间件:RequireToken(非 admin 也能进 handler),handler 内按"妙妙屋功能 → 节点管理"开关决定是否放行。
+	// 路径保留 /api/admin/ 前缀以避免破坏既有前端调用;实际权限语义由 handler 控制。
+	mux.Handle("/api/admin/temp-subscription", auth.RequireToken(tokenStore, userRepo, handler.NewTempSubscriptionHandler(repo)))
 	tempSubAccessHandler := handler.NewTempSubscriptionAccessHandler()
 
 	// 短链接和 Web 应用程序的组合处理程序
@@ -594,18 +860,39 @@ func main() {
 	// /t/{id} 路径路由到临时订阅处理程序
 	// 所有其他路径都转到 Web 处理程序
 	shortLinkHandler := handler.NewShortLinkHandler(repo, subscriptionHandler, packageSubscribeHandler)
-	bruteForceProtector := handler.NewBruteForceProtector()
+	// 暴力防护 / 订阅频率限制 用前面 LoadSecuritySettings 拿到的同一份 secCfg 构造,
+	// system_settings 里有自定义阈值就用它们,没有就 fallback 到 hardcoded 默认值(24h/24h/30 次/2h)。
+	bruteForceProtector := handler.NewBruteForceProtectorWithConfig(
+		secCfg.BruteForceEnabled, secCfg.BruteForceMaxFailures,
+		secCfg.BruteForceWindowMinutes, secCfg.BruteForceBlockMinutes,
+	)
+	bruteForceProtector.SetSkipLocalIP(secCfg.SkipLocalIP)
+	subRateLimiter := handler.NewSubscriptionRateLimiterWithConfig(
+		secCfg.SubRateEnabled, secCfg.SubRateLimit, secCfg.SubRateWindowMinutes,
+	)
+	subRateLimiter.SetSkipLocalIP(secCfg.SkipLocalIP)
+	go subRateLimiter.StartCleanup(context.Background())
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.Trim(r.URL.Path, "/")
 		clientIP := handler.GetClientIP(r)
 
-		if bruteForceProtector.IsBlocked(clientIP, r.URL.Path) {
+		isTempSub := strings.HasPrefix(path, "t/") && len(path) == 10
+
+		// 暴力探测封禁检查（临时订阅排除，不受封禁拦截)
+		if !isTempSub && bruteForceProtector.IsBlocked(clientIP, r.URL.Path) {
 			http.NotFound(w, r)
 			return
 		}
 
+		isSubscriptionFetch := isTempSub ||
+			(strings.HasPrefix(path, "x/") && len(path) > 2 && isAlphanumeric(path[2:]))
+		if isSubscriptionFetch && !subRateLimiter.Allow(clientIP) {
+			http.Error(w, "请求过于频繁，请稍后再试", http.StatusTooManyRequests)
+			return
+		}
+
 		// 检查这是否是临时订阅访问（以"t/"开头，后跟 8 个十六进制字符）
-		if strings.HasPrefix(path, "t/") && len(path) == 10 {
+		if isTempSub {
 			rec := &handler.StatusRecorder{ResponseWriter: w, StatusCode: 200}
 			tempSubAccessHandler.ServeHTTP(rec, r)
 			if rec.StatusCode == http.StatusNotFound || rec.StatusCode == http.StatusForbidden {
@@ -625,16 +912,42 @@ func main() {
 				return
 			}
 		}
+
+		// 兼容妙妙屋短链接:旧版 mmw 直接 GET /<code>(无 /x/ 前缀)。
+		// 系统设置启用后,把单段 alphanumeric 路径(看起来像短码)按 /x/<code> 试一遍,
+		// 命中即返回订阅内容。不命中**必须 fall-through 到 SPA**,因为 /nodes / /users / /packages
+		// 这些前端路由也是单段 alphanumeric,如果直接 404 会把整个前端路由废掉。
+		if cfg, cfgErr := repo.GetSystemConfig(r.Context()); cfgErr == nil && cfg.EnableMmwShortLinkCompat &&
+			path != "" && !strings.Contains(path, "/") && !strings.Contains(path, ".") &&
+			len(path) >= 2 && isAlphanumeric(path) && subRateLimiter.Allow(clientIP) {
+			origURL := r.URL.Path
+			r.URL.Path = "/x/" + path
+			if shortLinkHandler.TryServe(w, r) {
+				return
+			}
+			r.URL.Path = origURL
+			// 没命中短链接 → 不计暴力枚举(SPA 路由也长这样,无法区分),fall-through 让 web.Handler 决定
+		}
+
 		// 否则，传递给 Web 处理程序
 		web.Handler().ServeHTTP(w, r)
 	})
 
+	// 嵌入式 MCP server(streamable-HTTP):供 OpenClaw 等 agent 运维。鉴权在工具调用时按 API 令牌经 mux 复用现有链。
+	mux.Handle("/mcp", mcpserver.NewHandler(mux))
+
+	silentModeManager := handler.NewSilentModeManager(repo, tokenStore)
+	handlerWithSilentMode := silentModeManager.Middleware(mux)
+
 	allowedOrigins := getAllowedOrigins()
-	handlerWithCORS := withCORS(mux, allowedOrigins)
+	handlerWithCORS := withCORS(handlerWithSilentMode, allowedOrigins)
+	// HTTPS 启用后,应用层拦截非合法 Host 的请求(IP+端口直连等)→ 308 重定向到正确域名。
+	// 跟 bind host 解耦,Docker / 跨机反代 / 裸机都能正确工作。详见 host_enforcement.go。
+	handlerWithHostEnforce := handler.EnforceHTTPSHost(handlerWithCORS, repo)
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           handlerWithCORS,
+		Handler:           handlerWithHostEnforce,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -648,12 +961,15 @@ func main() {
 	// 启动每日快照和清理任务
 	go startDailySnapshotTask(collectorCtx, trafficHandler)
 	// 启动流量超限检查（每 2 分钟）
-	trafficEnforcer := handler.NewTrafficLimitEnforcer(repo, remoteManageHandler)
+	trafficEnforcer := handler.NewTrafficLimitEnforcer(repo, remoteManageHandler, limiterPusher)
 	go trafficEnforcer.Start(collectorCtx, time.Duration(systemConfig.TrafficCheckInterval)*time.Second)
 	// 启动 WebSocket 陈旧连接清理
 	remoteWSHandler.StartCleanupLoop(collectorCtx, 1*time.Minute)
 	// 启动通知调度器
 	go handler.StartNotifyScheduler(collectorCtx, repo)
+	// 启动分享服务器(联邦)状态/流量轮询（每 30 秒从拥有方拉取）
+	handler.SetFederationLicense(licenseManager)
+	go handler.StartFederationPoller(collectorCtx, repo)
 	// 启动证书自动续订检查程序（每 24 小时检查一次是否有 30 天内过期的证书）
 	certHandler.StartRenewalChecker(collectorCtx)
 	// TODO: 启动远程服务器离线检测任务（功能尚未实现）
@@ -687,16 +1003,26 @@ func main() {
 	waitForShutdown(srv, stopCollector)
 }
 
-func getAddr(config *ServerConfig) string {
-	// 优先级：配置文件 > 环境变量 > 默认值
+func getAddr(config *ServerConfig, repo *storage.TrafficRepository) string {
+	port := "12889"
 	if config != nil && config.Port != "" {
-		return "0.0.0.0:" + config.Port
+		port = config.Port
+	} else if envPort := os.Getenv("PORT"); envPort != "" {
+		port = envPort
 	}
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "12889"
+
+	// 默认绑 0.0.0.0,通用所有部署形态(裸机 / Docker / 跨机反代)。
+	// 以前在 https 启用时强绑 127.0.0.1 是为了"禁止 IP+端口直连",但这套物理层拦截
+	// 在 Docker 容器内会让 -p 端口映射失效(容器内 lo 跟 host 端口隔绝)。
+	// 改用应用层 host 中间件(internal/handler/host_enforcement.go)做"直连拦截",
+	// 跟 bind host 解耦。BIND_HOST env 留给高级场景显式覆盖。
+	host := "0.0.0.0"
+	if v := strings.TrimSpace(os.Getenv("BIND_HOST")); v != "" {
+		host = v
 	}
-	return "0.0.0.0:" + port
+	log.Printf("[Main] HTTP server binding to %s:%s", host, port)
+	_ = repo // 保留参数:其它 host enforcement 在 main.go 主流程里包裹
+	return host + ":" + port
 }
 
 // 检查字符串是否仅包含字母数字字符
@@ -773,12 +1099,25 @@ func startDailySnapshotTask(ctx context.Context, trafficHandler *handler.Traffic
 		logger.Error("[流量收集器] 达到最大重试次数后仍失败", "max_retries", maxRetries)
 	}
 
-	runWithRetry()
+	// 启动后不立即跑,改为等到下一个 00:00:00 触发第一次,之后每 24h 一次。
+	// 用户需求:每日流量记录在 0 点产生,而不是服务器启动时刻。
+	now := time.Now()
+	nextMidnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).Add(24 * time.Hour)
+	firstDelay := time.Until(nextMidnight)
+	logger.Info("[流量收集器] 定时调度器已启动", "first_run_at", nextMidnight.Format("2006-01-02 15:04:05"), "interval", "24小时")
+
+	firstTimer := time.NewTimer(firstDelay)
+	select {
+	case <-ctx.Done():
+		firstTimer.Stop()
+		logger.Info("[流量收集器] 定时调度器已停止")
+		return
+	case <-firstTimer.C:
+		runWithRetry()
+	}
 
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
-
-	logger.Info("[流量收集器] 定时调度器已启动", "interval", "24小时")
 
 	for {
 		select {

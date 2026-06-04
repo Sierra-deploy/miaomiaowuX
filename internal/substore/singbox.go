@@ -66,6 +66,11 @@ func (p *SingboxProducer) Produce(proxies []Proxy, outputType string, opts *Prod
 		var parsed map[string]interface{}
 		var err error
 
+		// sing-box 不支持 xhttp 传输,跳过
+		if GetString(proxy, "network") == "xhttp" {
+			continue
+		}
+
 		switch proxyType {
 		case "ssh":
 			parsed, err = p.sshParser(proxy)
@@ -81,6 +86,8 @@ func (p *SingboxProducer) Produce(proxies []Proxy, outputType string, opts *Prod
 			if GetString(proxy, "plugin") == "shadow-tls" {
 				ssPart, stPart, err2 := p.shadowTLSParser(proxy)
 				if err2 == nil {
+					p.passthroughExtraFields(proxy, ssPart)
+					p.passthroughExtraFields(proxy, stPart)
 					list = append(list, ssPart)
 					list = append(list, stPart)
 				}
@@ -102,11 +109,16 @@ func (p *SingboxProducer) Produce(proxies []Proxy, outputType string, opts *Prod
 				err = fmt.Errorf("platform sing-box does not support proxy type: %s with network %s", proxyType, network)
 			}
 		case "vless":
-			flow := GetString(proxy, "flow")
-			if flow == "" || flow == "xtls-rprx-vision" {
-				parsed, err = p.vlessParser(proxy)
+			encryption := GetString(proxy, "encryption")
+			if encryption != "" && encryption != "none" {
+				err = fmt.Errorf("VLESS encryption is not supported")
 			} else {
-				err = fmt.Errorf("platform sing-box does not support proxy type: %s with flow %s", proxyType, flow)
+				flow := GetString(proxy, "flow")
+				if flow == "" || flow == "xtls-rprx-vision" {
+					parsed, err = p.vlessParser(proxy)
+				} else {
+					err = fmt.Errorf("platform sing-box does not support proxy type: %s with flow %s", proxyType, flow)
+				}
 			}
 		case "trojan":
 			if GetString(proxy, "flow") == "" {
@@ -138,6 +150,7 @@ func (p *SingboxProducer) Produce(proxies []Proxy, outputType string, opts *Prod
 		}
 
 		if parsed != nil {
+			p.passthroughExtraFields(proxy, parsed)
 			list = append(list, parsed)
 		}
 	}
@@ -188,6 +201,62 @@ func (p *SingboxProducer) networkParser(proxy Proxy, parsed map[string]interface
 	network := GetString(proxy, "_network")
 	if network == "tcp" || network == "udp" {
 		parsed["network"] = network
+	}
+}
+
+var singboxConsumedKeys = map[string]bool{
+	"name": true, "type": true, "server": true, "port": true,
+	"password": true, "uuid": true, "cipher": true, "alterId": true,
+	"network": true, "tls": true, "skip-cert-verify": true,
+	"servername": true, "sni": true, "alpn": true,
+	"ws-opts": true, "grpc-opts": true, "h2-opts": true, "http-opts": true,
+	"reality-opts": true, "client-fingerprint": true, "fingerprint": true,
+	"flow": true, "udp": true, "xudp": true,
+	"fast-open": true, "tfo": true, "tcp-fast-open": true, "tcp_fast_open": true,
+	"smux": true, "ip-version": true,
+	"dialer-proxy": true, "detour": true,
+	"_dns_server": true, "_network": true,
+	"plugin": true, "plugin-opts": true,
+	"obfs": true, "obfs-param": true, "protocol": true, "protocol-param": true,
+	"up": true, "down": true,
+	"auth": true, "auth-str": true, "auth_str": true,
+	"ca": true, "ca-str": true, "ca_str": true,
+	"recv-window-conn": true, "recv-window": true, "recv_window_conn": true, "recv_window": true,
+	"disable-mtu-discovery": true,
+	"obfs-password": true, "ports": true, "hop-interval": true,
+	"congestion-controller": true, "udp-relay-mode": true,
+	"reduce-rtt": true, "heartbeat-interval": true,
+	"ip": true, "ipv6": true, "public-key": true, "private-key": true,
+	"pre-shared-key": true, "reserved": true, "mtu": true,
+	"allowed-ips": true, "peers": true, "remote-dns-resolve": true, "dns": true,
+	"username": true, "host-key": true, "host-key-algorithms": true,
+	"private-key-passphrase": true, "private-key-path": true,
+	"headers": true, "path": true,
+	"version": true, "token": true,
+	"idle-timeout": true, "padding": true,
+	"encryption": true,
+	"udp-over-tcp": true, "udp-over-tcp-version": true,
+	"insecure": true, "peer": true, "disable-sni": true,
+	"ech-opts": true, "server-fingerprint": true,
+	"udp-over-stream": true, "udp-timeout": true,
+	"insecure-concurrency": true, "extra-headers": true,
+	"idle-session-check-interval": true, "idle-session-timeout": true, "min-idle-session": true,
+	"system": true, "workers": true,
+	"ws-headers": true, "ws-path": true, "ws-host": true,
+	"http-host": true, "http-path": true, "h2-host": true, "h2-path": true,
+	"obfs-host": true,
+}
+
+func (p *SingboxProducer) passthroughExtraFields(proxy Proxy, parsed map[string]interface{}) {
+	for key, value := range proxy {
+		if singboxConsumedKeys[key] {
+			continue
+		}
+		sbKey := strings.ReplaceAll(key, "-", "_")
+		if _, exists := parsed[sbKey]; exists {
+			continue
+		}
+		parsed[sbKey] = value
 	}
 }
 

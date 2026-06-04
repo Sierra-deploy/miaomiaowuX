@@ -126,6 +126,7 @@ type TemplateV3Processor struct {
 	regionGroupsAdded bool                // Whether region proxy groups have been added
 	regionGroupNames  []string            // Names of region proxy groups
 	variables         map[string]string   // 模板自定义变量（非标准顶级键）
+	usedVariables     map[string]bool     // 被实际引用的变量
 }
 
 // Clash/mihomo 标准顶级键（不视为自定义变量）
@@ -152,6 +153,7 @@ func NewTemplateV3Processor(proxies []ProxyNode, providers map[string][]string) 
 		regionGroupsAdded: false,
 		regionGroupNames:  GetRegionProxyGroupNames(),
 		variables:         make(map[string]string),
+		usedVariables:     make(map[string]bool),
 	}
 }
 
@@ -264,8 +266,8 @@ func (p *TemplateV3Processor) ProcessTemplate(templateContent string, proxies []
 			// Remove add-region-proxy-groups from output
 			p.removeGlobalConfig(rootMap, "add-region-proxy-groups")
 
-			// 移除自定义变量键（不输出到最终 YAML）
-			for name := range p.variables {
+			// 只移除被实际引用的变量键（未引用的保留为全局配置）
+			for name := range p.usedVariables {
 				p.removeGlobalConfig(rootMap, name)
 			}
 		}
@@ -560,6 +562,7 @@ func (p *TemplateV3Processor) parseProxyGroup(groupNode *yaml.Node) ProxyGroupV3
 			// 解析变量引用：filter 值如果是自定义变量名，替换为变量值
 			if resolved, ok := p.variables[group.Filter]; ok {
 				logger.Info("[模板变量] 代理组 filter 引用变量已解析", "group", group.Name, "variable", group.Filter, "resolved", resolved)
+				p.usedVariables[group.Filter] = true
 				group.Filter = resolved
 			}
 		case "exclude-filter":
@@ -567,6 +570,7 @@ func (p *TemplateV3Processor) parseProxyGroup(groupNode *yaml.Node) ProxyGroupV3
 			// 解析变量引用
 			if resolved, ok := p.variables[group.ExcludeFilter]; ok {
 				logger.Info("[模板变量] 代理组 exclude-filter 引用变量已解析", "group", group.Name, "variable", group.ExcludeFilter, "resolved", resolved)
+				p.usedVariables[group.ExcludeFilter] = true
 				group.ExcludeFilter = resolved
 			}
 		case "exclude-type":
@@ -1000,6 +1004,58 @@ func parseHexString(s string) (int64, bool) {
 		}
 	}
 	return result, true
+}
+
+// CollectUsedProxyNamesFromGroups 扫顶层 proxy-groups 收集真正被引用的"叶子节点名"(非组名、非内置词)。
+// 跟 (*TemplateV3Processor).collectUsedProxyNames 算法等价,但不依赖 processor 实例:
+//   - 第一遍把所有 group.name 收集到 groupNames(用于区分"组名引用"和"节点名引用")
+//   - 第二遍扫每个 group.proxies 数组,排除组名 + DIRECT/REJECT/PASS,剩下的就是叶子节点
+//
+// 给订阅生成的后处理裁剪用(去掉顶层 proxies 里不被任何 group 引用的孤儿节点)。
+func CollectUsedProxyNamesFromGroups(groupsNode *yaml.Node) map[string]bool {
+	used := make(map[string]bool)
+	if groupsNode == nil || groupsNode.Kind != yaml.SequenceNode {
+		return used
+	}
+
+	// 第一遍:收集组名
+	groupNames := make(map[string]bool)
+	for _, g := range groupsNode.Content {
+		if g.Kind != yaml.MappingNode {
+			continue
+		}
+		for i := 0; i < len(g.Content)-1; i += 2 {
+			if g.Content[i].Value == "name" {
+				groupNames[g.Content[i+1].Value] = true
+				break
+			}
+		}
+	}
+
+	// 第二遍:扫 proxies 引用,过滤组名/内置词
+	for _, g := range groupsNode.Content {
+		if g.Kind != yaml.MappingNode {
+			continue
+		}
+		for i := 0; i < len(g.Content)-1; i += 2 {
+			if g.Content[i].Value != "proxies" {
+				continue
+			}
+			pn := g.Content[i+1]
+			if pn.Kind != yaml.SequenceNode {
+				continue
+			}
+			for _, item := range pn.Content {
+				name := item.Value
+				if name == "" || groupNames[name] || name == "DIRECT" || name == "REJECT" || name == "PASS" {
+					continue
+				}
+				used[name] = true
+			}
+			break
+		}
+	}
+	return used
 }
 
 // collectUsedProxyNames collects all proxy names used in processed proxy-groups

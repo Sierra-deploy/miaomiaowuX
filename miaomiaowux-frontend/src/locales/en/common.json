@@ -1,12 +1,23 @@
 {
+  "time": {
+    "justNow": "just now",
+    "minutesAgo": "{{n}}m ago",
+    "hoursAgo": "{{n}}h ago",
+    "daysAgo": "{{n}}d ago"
+  },
   "nav": {
     "trafficInfo": "Traffic",
     "nodeManagement": "Nodes",
+    "routedOutbounds": "Routed Outbounds",
     "serviceManagement": "Services",
     "userManagement": "Users",
     "packageManagement": "Packages",
     "certificateManagement": "Certificates",
     "templateManagement": "Templates",
+    "subscriptionGenerator": "Subscriptions",
+    "subscriptionManagement": "Sub Files",
+    "subscriptionLinks": "Sub Links",
+    "customRulesManagement": "Custom Rules",
     "systemSettings": "System Settings"
   },
   "actions": {
@@ -125,7 +136,9 @@
     "settings": "Settings",
     "debugLog": "Debug Log",
     "help": "Help",
+    "tgBotApp": "TG Bot & APP",
     "backup": "Backup Data",
+    "migrateFromMmw": "Migrate from MMW",
     "checkUpdate": "Check Update",
     "version": "Version",
     "signOut": "Sign Out",
@@ -141,7 +154,18 @@
     "debugEnableFailed": "Failed to enable debug log",
     "debugDisableFailed": "Failed to disable debug log",
     "logDownloaded": "Log file downloaded",
-    "logDownloadFailed": "Failed to download log file"
+    "logDownloadFailed": "Failed to download log file",
+    "about": "About",
+    "licenseStatus": "License Status",
+    "licenseValid": "Valid",
+    "licenseInvalid": "Invalid",
+    "licensePlan": "Plan",
+    "licensePlanDesc": "Description",
+    "maxServers": "Max Servers",
+    "maxNodes": "Max Nodes",
+    "maxUsers": "Max Users",
+    "expiresAt": "Expires",
+    "trialHint": "You are on a trial license. PRO features are not available. Register for a license at:"
   },
   "noData": "No data",
   "cardView": "Card View",
@@ -161,5 +185,12 @@
   },
   "flagPicker": {
     "autoDetect": "Auto Detect Region"
+  },
+  "license": {
+    "proFeatureTooltip": "This feature requires a Pro license. Please upgrade in license settings.",
+    "proFeatureActive": "Pro feature active",
+    "serverLimitReached": "Server limit reached ({{current}}/{{max}})",
+    "nodeLimitReached": "Node limit reached ({{current}}/{{max}})",
+    "userLimitReached": "User limit reached ({{current}}/{{max}})"
   }
 }

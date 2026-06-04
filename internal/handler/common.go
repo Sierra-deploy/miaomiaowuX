@@ -22,6 +22,13 @@ func writeJSONError(w http.ResponseWriter, status int, message string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
 
+// writeJSON 写一份成功响应(任意结构)。
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
 func sortNodesByNodeOrder(nodes []storage.Node, nodeOrder []int64) {
 	if len(nodeOrder) == 0 || len(nodes) == 0 {
 		return

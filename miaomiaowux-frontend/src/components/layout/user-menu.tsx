@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Link } from '@tanstack/react-router'
-import { LogOut, Settings2, ExternalLink, BookOpen, HardDrive, RefreshCw, Bug, Palette, Languages } from 'lucide-react'
+import { LogOut, Settings2, ExternalLink, BookOpen, HardDrive, RefreshCw, Bug, Palette, Languages, Info, ArrowRightLeft, Bot } from 'lucide-react'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
 import useDialogState from '@/hooks/use-dialog-state'
@@ -15,6 +15,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Switch } from '@/components/ui/switch'
@@ -31,6 +37,7 @@ export function UserMenu() {
   const [backupDialogOpen, setBackupDialogOpen] = useState(false)
   const [updateDialogOpen, setUpdateDialogOpen] = useState(false)
   const [isDownloading, setIsDownloading] = useState(false)
+  const [aboutOpen, setAboutOpen] = useState(false)
   const { auth } = useAuthStore()
   const { currentVersion, hasUpdate, releaseUrl } = useVersionCheck()
   const queryClient = useQueryClient()
@@ -38,6 +45,29 @@ export function UserMenu() {
   const { data: profile } = useQuery({
     queryKey: ['profile'],
     queryFn: profileQueryFn,
+    enabled: Boolean(auth.accessToken),
+    staleTime: 5 * 60 * 1000,
+  })
+
+  const { data: licenseData } = useQuery({
+    queryKey: ['user-license-status'],
+    queryFn: async () => {
+      const response = await api.get('/api/user/license/status')
+      return response.data as {
+        success: boolean
+        valid: boolean
+        expires_at?: string
+        plan?: {
+          name: string
+          display_name: string
+          description: string
+          max_servers: number
+          max_nodes: number
+          max_users: number
+          features: string[]
+        }
+      }
+    },
     enabled: Boolean(auth.accessToken),
     staleTime: 5 * 60 * 1000,
   })
@@ -275,13 +305,25 @@ export function UserMenu() {
           </DropdownMenuItem>
 
           <DropdownMenuItem asChild className='cursor-pointer justify-center'>
-            <a href='https://docs.miaomiaowu.net' target='_blank' rel='noopener noreferrer' className='flex items-center gap-2'>
+            <a href='https://miaomiaowu.net/x' target='_blank' rel='noopener noreferrer' className='flex items-center gap-2'>
               <BookOpen className='size-4' /> {t('userMenu.help')}
+            </a>
+          </DropdownMenuItem>
+          <DropdownMenuItem asChild className='cursor-pointer justify-center'>
+            <a href='https://miaomiaowu.net/x/docs/tool-mmwx-tgbot' target='_blank' rel='noopener noreferrer' className='flex items-center gap-2'>
+              <Bot className='size-4' /> {t('userMenu.tgBotApp')}
             </a>
           </DropdownMenuItem>
           {profile?.is_admin && (
             <DropdownMenuItem onClick={() => setBackupDialogOpen(true)} className='cursor-pointer justify-center'>
               <HardDrive className='size-4' /> {t('userMenu.backup')}
+            </DropdownMenuItem>
+          )}
+          {profile?.is_admin && (
+            <DropdownMenuItem asChild className='cursor-pointer justify-center'>
+              <Link to='/migrate-from-mmw' className='flex items-center gap-2'>
+                <ArrowRightLeft className='size-4' /> {t('userMenu.migrateFromMmw')}
+              </Link>
             </DropdownMenuItem>
           )}
           {profile?.is_admin && (
@@ -298,6 +340,9 @@ export function UserMenu() {
               </span>
             </DropdownMenuItem>
           )}
+          <DropdownMenuItem onClick={() => setAboutOpen(true)} className='cursor-pointer justify-center'>
+            <Info className='size-4' /> {t('userMenu.about')}
+          </DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem asChild className='cursor-pointer justify-center'>
             <a
@@ -320,6 +365,87 @@ export function UserMenu() {
       <SignOutDialog open={Boolean(open)} onOpenChange={(value) => setOpen(value)} />
       <BackupDialog open={backupDialogOpen} onOpenChange={setBackupDialogOpen} />
       <UpdateDialog open={updateDialogOpen} onOpenChange={setUpdateDialogOpen} />
+
+      <Dialog open={aboutOpen} onOpenChange={setAboutOpen}>
+        <DialogContent className='sm:max-w-md'>
+          <DialogHeader>
+            <DialogTitle>{t('userMenu.about')}</DialogTitle>
+          </DialogHeader>
+          <div className='space-y-3'>
+            <div className='flex items-center justify-between'>
+              <span className='text-sm text-muted-foreground'>{t('userMenu.version')}</span>
+              <span className='text-sm font-medium'>v{currentVersion}</span>
+            </div>
+            {licenseData && (
+              <>
+                <div className='flex items-center justify-between'>
+                  <span className='text-sm text-muted-foreground'>{t('userMenu.licenseStatus')}</span>
+                  <span className={`text-sm font-medium ${licenseData.valid ? 'text-green-600' : 'text-red-500'}`}>
+                    {licenseData.valid ? t('userMenu.licenseValid') : t('userMenu.licenseInvalid')}
+                  </span>
+                </div>
+                {licenseData.plan && (
+                  <>
+                    <div className='flex items-center justify-between'>
+                      <span className='text-sm text-muted-foreground'>{t('userMenu.licensePlan')}</span>
+                      <span className='text-sm font-medium flex items-center gap-1.5'>
+                        {licenseData.plan.display_name}
+                        {licenseData.valid && licenseData.plan.name !== 'TRIAL' && (
+                          <span className='inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-gradient-to-r from-amber-400 to-yellow-300 text-amber-900 border border-amber-300/60 shadow-sm shadow-amber-200/50'>
+                            <svg className='h-2.5 w-2.5' viewBox='0 0 24 24' fill='currentColor'>
+                              <path d='M12 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z' />
+                            </svg>
+                            Pro
+                          </span>
+                        )}
+                      </span>
+                    </div>
+                    {licenseData.plan.description && (
+                      <div className='flex items-center justify-between'>
+                        <span className='text-sm text-muted-foreground'>{t('userMenu.licensePlanDesc')}</span>
+                        <span className='text-sm'>{licenseData.plan.description}</span>
+                      </div>
+                    )}
+                    <div className='flex items-center justify-between'>
+                      <span className='text-sm text-muted-foreground'>{t('userMenu.maxServers')}</span>
+                      <span className='text-sm'>{licenseData.plan.max_servers}</span>
+                    </div>
+                    <div className='flex items-center justify-between'>
+                      <span className='text-sm text-muted-foreground'>{t('userMenu.maxNodes')}</span>
+                      <span className='text-sm'>{licenseData.plan.max_nodes}</span>
+                    </div>
+                    <div className='flex items-center justify-between'>
+                      <span className='text-sm text-muted-foreground'>{t('userMenu.maxUsers')}</span>
+                      <span className='text-sm'>{licenseData.plan.max_users}</span>
+                    </div>
+                  </>
+                )}
+                {licenseData.expires_at && (
+                  <div className='flex items-center justify-between'>
+                    <span className='text-sm text-muted-foreground'>{t('userMenu.expiresAt')}</span>
+                    <span className='text-sm'>{licenseData.expires_at}</span>
+                  </div>
+                )}
+                {licenseData.plan?.name === 'TRIAL' && (
+                  <div className='rounded-lg border border-blue-200 bg-blue-50 p-3 dark:border-blue-900 dark:bg-blue-950'>
+                    <p className='text-xs text-blue-800 dark:text-blue-200'>
+                      {t('userMenu.trialHint')}{' '}
+                      <a
+                        href='https://license.miaomiaowu.net/'
+                        target='_blank'
+                        rel='noopener noreferrer'
+                        className='font-medium underline'
+                      >
+                        license.miaomiaowu.net
+                      </a>
+                    </p>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </>
   )
 }

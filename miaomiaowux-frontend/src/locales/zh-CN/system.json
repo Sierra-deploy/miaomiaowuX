@@ -9,12 +9,12 @@
   },
   "intervals": {
     "title": "定时配置",
-    "description": "配置各项定时任务的执行间隔，修改后需重启服务生效",
+    "description": "配置各项定时任务的执行间隔；网速/上报间隔即时生效，其余修改后需重启服务",
     "speedCollect": "网速采集间隔（秒）",
-    "trafficCollect": "流量采集间隔（秒）",
+    "reportInterval": "上报间隔（秒）",
     "trafficCheck": "流量限额检查间隔（秒）",
     "heartbeat": "心跳间隔（秒）",
-    "updated": "定时配置已更新，重启服务后生效"
+    "updated": "定时配置已更新；上报间隔已同步至所有 agent 并即时生效"
   },
   "masterUrl": {
     "title": "主服务器地址",
@@ -57,6 +57,34 @@
     "usageHint": "使用此 Token 在请求头 MM-Authorization 中访问 API",
     "warning": "• 携带此 Token 可以不需要登录直接访问所有后台 API\n• 请妥善保管此 Token，泄露可能导致数据安全问题\n• 服务启动时会在日志中打印此 Token\n• 点击刷新按钮可重新生成 Token，旧 Token 立即失效"
   },
+  "overrideScripts": {
+    "title": "覆写脚本",
+    "description": "开启后，覆写管理页面的脚本功能将在订阅生成时执行",
+    "enableLabel": "启用覆写脚本",
+    "updated": "覆写脚本设置已更新"
+  },
+  "miaomiaowuFeatures": {
+    "title": "妙妙屋功能",
+    "description": "开启后显示模板管理、订阅管理、生成订阅、订阅链接、覆写管理菜单",
+    "enableLabel": "启用妙妙屋功能",
+    "updated": "妙妙屋功能设置已更新"
+  },
+  "silentMode": {
+    "title": "静默模式",
+    "description": "开启后，所有请求返回 404，仅订阅相关接口可用。用户获取一次订阅后临时恢复访问。",
+    "enableLabel": "启用静默模式",
+    "timeout": "恢复时长",
+    "minutes": "分钟",
+    "hint": "获取订阅后恢复访问 {{timeout}} 分钟，之后再次进入静默状态",
+    "updated": "静默模式设置已更新"
+  },
+  "encryption": {
+    "title": "强制加密通信",
+    "description": "开启后，所有 Agent 必须使用加密通信连接主控，未加密连接将被拒绝",
+    "enableLabel": "强制加密",
+    "warning": "请确保所有 Agent 已更新并配置了公钥，否则旧 Agent 将无法连接",
+    "updated": "加密设置已更新"
+  },
   "sync": {
     "title": "外部订阅同步设置",
     "description": "配置外部订阅的同步行为",
@@ -79,6 +107,24 @@
     "cacheExpireMinutes": "缓存过期时间（分钟）",
     "cacheExpireMinutesHint": "设置为0表示每次获取订阅时都重新拉取。大于0时，只有超过设置的分钟数才会重新拉取",
     "cacheExpireWarning": "注意：每次都更新订阅会影响获取订阅接口的响应速度"
+  },
+  "license": {
+    "title": "许可证",
+    "description": "管理许可证状态",
+    "licenseKey": "许可证密钥",
+    "licenseKeyPlaceholder": "输入许可证密钥",
+    "status": "当前状态",
+    "valid": "有效",
+    "invalid": "无效",
+    "plan": "套餐",
+    "expiresAt": "到期时间",
+    "maxServers": "最大服务器数",
+    "maxNodes": "最大节点数",
+    "maxUsers": "最大用户数",
+    "permanent": "永久",
+    "trial": "试用版",
+    "updated": "许可证设置已更新",
+    "trialHint": "当前为试用许可证，PRO 功能（限速器、节点测速等）不可用。访问以下地址注册并免费获取许可证（包含 PRO 功能，还会持续新增功能...）："
   },
   "configUpdated": "设置已更新",
   "configUpdateFailed": "更新设置失败"

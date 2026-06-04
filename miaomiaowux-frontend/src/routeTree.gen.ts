@@ -13,13 +13,17 @@ import { Route as XrayServersRouteImport } from './routes/xray-servers'
 import { Route as XrayOutboundsRouteImport } from './routes/xray-outbounds'
 import { Route as XrayInboundsRouteImport } from './routes/xray-inbounds'
 import { Route as UsersRouteImport } from './routes/users'
+import { Route as TgBotInvitesRouteImport } from './routes/tg-bot-invites'
 import { Route as TemplatesRouteImport } from './routes/templates'
 import { Route as SystemSettingsRouteImport } from './routes/system-settings'
+import { Route as SubscriptionRouteImport } from './routes/subscription'
 import { Route as SubscribeFilesRouteImport } from './routes/subscribe-files'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as RulesRouteImport } from './routes/rules'
+import { Route as RoutedOutboundsRouteImport } from './routes/routed-outbounds'
 import { Route as PackagesRouteImport } from './routes/packages'
 import { Route as NodesRouteImport } from './routes/nodes'
+import { Route as MigrateFromMmwRouteImport } from './routes/migrate-from-mmw'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as GeneratorRouteImport } from './routes/generator'
 import { Route as CustomRulesRouteImport } from './routes/custom-rules'
@@ -30,9 +34,12 @@ import { Route as XrayServersIndexRouteImport } from './routes/xray-servers.inde
 import { Route as XrayOutboundsIndexRouteImport } from './routes/xray-outbounds.index'
 import { Route as XrayInboundsIndexRouteImport } from './routes/xray-inbounds.index'
 import { Route as TemplatesIndexRouteImport } from './routes/templates.index'
+import { Route as SubscriptionIndexRouteImport } from './routes/subscription.index'
 import { Route as SubscribeFilesIndexRouteImport } from './routes/subscribe-files.index'
+import { Route as RoutedOutboundsIndexRouteImport } from './routes/routed-outbounds.index'
 import { Route as PackagesIndexRouteImport } from './routes/packages.index'
 import { Route as NodesIndexRouteImport } from './routes/nodes.index'
+import { Route as MigrateFromMmwIndexRouteImport } from './routes/migrate-from-mmw.index'
 import { Route as CustomRulesIndexRouteImport } from './routes/custom-rules.index'
 import { Route as CertificatesIndexRouteImport } from './routes/certificates.index'
 import { Route as SubscribeFilesCustomRouteImport } from './routes/subscribe-files.custom'
@@ -57,6 +64,11 @@ const UsersRoute = UsersRouteImport.update({
   path: '/users',
   getParentRoute: () => rootRouteImport,
 } as any)
+const TgBotInvitesRoute = TgBotInvitesRouteImport.update({
+  id: '/tg-bot-invites',
+  path: '/tg-bot-invites',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const TemplatesRoute = TemplatesRouteImport.update({
   id: '/templates',
   path: '/templates',
@@ -65,6 +77,11 @@ const TemplatesRoute = TemplatesRouteImport.update({
 const SystemSettingsRoute = SystemSettingsRouteImport.update({
   id: '/system-settings',
   path: '/system-settings',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const SubscriptionRoute = SubscriptionRouteImport.update({
+  id: '/subscription',
+  path: '/subscription',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SubscribeFilesRoute = SubscribeFilesRouteImport.update({
@@ -82,6 +99,11 @@ const RulesRoute = RulesRouteImport.update({
   path: '/rules',
   getParentRoute: () => rootRouteImport,
 } as any)
+const RoutedOutboundsRoute = RoutedOutboundsRouteImport.update({
+  id: '/routed-outbounds',
+  path: '/routed-outbounds',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const PackagesRoute = PackagesRouteImport.update({
   id: '/packages',
   path: '/packages',
@@ -90,6 +112,11 @@ const PackagesRoute = PackagesRouteImport.update({
 const NodesRoute = NodesRouteImport.update({
   id: '/nodes',
   path: '/nodes',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const MigrateFromMmwRoute = MigrateFromMmwRouteImport.update({
+  id: '/migrate-from-mmw',
+  path: '/migrate-from-mmw',
   getParentRoute: () => rootRouteImport,
 } as any)
 const LoginRoute = LoginRouteImport.update({
@@ -142,10 +169,20 @@ const TemplatesIndexRoute = TemplatesIndexRouteImport.update({
   path: '/',
   getParentRoute: () => TemplatesRoute,
 } as any)
+const SubscriptionIndexRoute = SubscriptionIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => SubscriptionRoute,
+} as any)
 const SubscribeFilesIndexRoute = SubscribeFilesIndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => SubscribeFilesRoute,
+} as any)
+const RoutedOutboundsIndexRoute = RoutedOutboundsIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => RoutedOutboundsRoute,
 } as any)
 const PackagesIndexRoute = PackagesIndexRouteImport.update({
   id: '/',
@@ -156,6 +193,11 @@ const NodesIndexRoute = NodesIndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => NodesRoute,
+} as any)
+const MigrateFromMmwIndexRoute = MigrateFromMmwIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => MigrateFromMmwRoute,
 } as any)
 const CustomRulesIndexRoute = CustomRulesIndexRouteImport.update({
   id: '/',
@@ -180,13 +222,17 @@ export interface FileRoutesByFullPath {
   '/custom-rules': typeof CustomRulesRouteWithChildren
   '/generator': typeof GeneratorRoute
   '/login': typeof LoginRoute
+  '/migrate-from-mmw': typeof MigrateFromMmwRouteWithChildren
   '/nodes': typeof NodesRouteWithChildren
   '/packages': typeof PackagesRouteWithChildren
+  '/routed-outbounds': typeof RoutedOutboundsRouteWithChildren
   '/rules': typeof RulesRoute
   '/settings': typeof SettingsRoute
   '/subscribe-files': typeof SubscribeFilesRouteWithChildren
+  '/subscription': typeof SubscriptionRouteWithChildren
   '/system-settings': typeof SystemSettingsRoute
   '/templates': typeof TemplatesRouteWithChildren
+  '/tg-bot-invites': typeof TgBotInvitesRoute
   '/users': typeof UsersRoute
   '/xray-inbounds': typeof XrayInboundsRouteWithChildren
   '/xray-outbounds': typeof XrayOutboundsRouteWithChildren
@@ -194,9 +240,12 @@ export interface FileRoutesByFullPath {
   '/subscribe-files/custom': typeof SubscribeFilesCustomRoute
   '/certificates/': typeof CertificatesIndexRoute
   '/custom-rules/': typeof CustomRulesIndexRoute
+  '/migrate-from-mmw/': typeof MigrateFromMmwIndexRoute
   '/nodes/': typeof NodesIndexRoute
   '/packages/': typeof PackagesIndexRoute
+  '/routed-outbounds/': typeof RoutedOutboundsIndexRoute
   '/subscribe-files/': typeof SubscribeFilesIndexRoute
+  '/subscription/': typeof SubscriptionIndexRoute
   '/templates/': typeof TemplatesIndexRoute
   '/xray-inbounds/': typeof XrayInboundsIndexRoute
   '/xray-outbounds/': typeof XrayOutboundsIndexRoute
@@ -210,13 +259,17 @@ export interface FileRoutesByTo {
   '/rules': typeof RulesRoute
   '/settings': typeof SettingsRoute
   '/system-settings': typeof SystemSettingsRoute
+  '/tg-bot-invites': typeof TgBotInvitesRoute
   '/users': typeof UsersRoute
   '/subscribe-files/custom': typeof SubscribeFilesCustomRoute
   '/certificates': typeof CertificatesIndexRoute
   '/custom-rules': typeof CustomRulesIndexRoute
+  '/migrate-from-mmw': typeof MigrateFromMmwIndexRoute
   '/nodes': typeof NodesIndexRoute
   '/packages': typeof PackagesIndexRoute
+  '/routed-outbounds': typeof RoutedOutboundsIndexRoute
   '/subscribe-files': typeof SubscribeFilesIndexRoute
+  '/subscription': typeof SubscriptionIndexRoute
   '/templates': typeof TemplatesIndexRoute
   '/xray-inbounds': typeof XrayInboundsIndexRoute
   '/xray-outbounds': typeof XrayOutboundsIndexRoute
@@ -230,13 +283,17 @@ export interface FileRoutesById {
   '/custom-rules': typeof CustomRulesRouteWithChildren
   '/generator': typeof GeneratorRoute
   '/login': typeof LoginRoute
+  '/migrate-from-mmw': typeof MigrateFromMmwRouteWithChildren
   '/nodes': typeof NodesRouteWithChildren
   '/packages': typeof PackagesRouteWithChildren
+  '/routed-outbounds': typeof RoutedOutboundsRouteWithChildren
   '/rules': typeof RulesRoute
   '/settings': typeof SettingsRoute
   '/subscribe-files': typeof SubscribeFilesRouteWithChildren
+  '/subscription': typeof SubscriptionRouteWithChildren
   '/system-settings': typeof SystemSettingsRoute
   '/templates': typeof TemplatesRouteWithChildren
+  '/tg-bot-invites': typeof TgBotInvitesRoute
   '/users': typeof UsersRoute
   '/xray-inbounds': typeof XrayInboundsRouteWithChildren
   '/xray-outbounds': typeof XrayOutboundsRouteWithChildren
@@ -244,9 +301,12 @@ export interface FileRoutesById {
   '/subscribe-files/custom': typeof SubscribeFilesCustomRoute
   '/certificates/': typeof CertificatesIndexRoute
   '/custom-rules/': typeof CustomRulesIndexRoute
+  '/migrate-from-mmw/': typeof MigrateFromMmwIndexRoute
   '/nodes/': typeof NodesIndexRoute
   '/packages/': typeof PackagesIndexRoute
+  '/routed-outbounds/': typeof RoutedOutboundsIndexRoute
   '/subscribe-files/': typeof SubscribeFilesIndexRoute
+  '/subscription/': typeof SubscriptionIndexRoute
   '/templates/': typeof TemplatesIndexRoute
   '/xray-inbounds/': typeof XrayInboundsIndexRoute
   '/xray-outbounds/': typeof XrayOutboundsIndexRoute
@@ -261,13 +321,17 @@ export interface FileRouteTypes {
     | '/custom-rules'
     | '/generator'
     | '/login'
+    | '/migrate-from-mmw'
     | '/nodes'
     | '/packages'
+    | '/routed-outbounds'
     | '/rules'
     | '/settings'
     | '/subscribe-files'
+    | '/subscription'
     | '/system-settings'
     | '/templates'
+    | '/tg-bot-invites'
     | '/users'
     | '/xray-inbounds'
     | '/xray-outbounds'
@@ -275,9 +339,12 @@ export interface FileRouteTypes {
     | '/subscribe-files/custom'
     | '/certificates/'
     | '/custom-rules/'
+    | '/migrate-from-mmw/'
     | '/nodes/'
     | '/packages/'
+    | '/routed-outbounds/'
     | '/subscribe-files/'
+    | '/subscription/'
     | '/templates/'
     | '/xray-inbounds/'
     | '/xray-outbounds/'
@@ -291,13 +358,17 @@ export interface FileRouteTypes {
     | '/rules'
     | '/settings'
     | '/system-settings'
+    | '/tg-bot-invites'
     | '/users'
     | '/subscribe-files/custom'
     | '/certificates'
     | '/custom-rules'
+    | '/migrate-from-mmw'
     | '/nodes'
     | '/packages'
+    | '/routed-outbounds'
     | '/subscribe-files'
+    | '/subscription'
     | '/templates'
     | '/xray-inbounds'
     | '/xray-outbounds'
@@ -310,13 +381,17 @@ export interface FileRouteTypes {
     | '/custom-rules'
     | '/generator'
     | '/login'
+    | '/migrate-from-mmw'
     | '/nodes'
     | '/packages'
+    | '/routed-outbounds'
     | '/rules'
     | '/settings'
     | '/subscribe-files'
+    | '/subscription'
     | '/system-settings'
     | '/templates'
+    | '/tg-bot-invites'
     | '/users'
     | '/xray-inbounds'
     | '/xray-outbounds'
@@ -324,9 +399,12 @@ export interface FileRouteTypes {
     | '/subscribe-files/custom'
     | '/certificates/'
     | '/custom-rules/'
+    | '/migrate-from-mmw/'
     | '/nodes/'
     | '/packages/'
+    | '/routed-outbounds/'
     | '/subscribe-files/'
+    | '/subscription/'
     | '/templates/'
     | '/xray-inbounds/'
     | '/xray-outbounds/'
@@ -340,13 +418,17 @@ export interface RootRouteChildren {
   CustomRulesRoute: typeof CustomRulesRouteWithChildren
   GeneratorRoute: typeof GeneratorRoute
   LoginRoute: typeof LoginRoute
+  MigrateFromMmwRoute: typeof MigrateFromMmwRouteWithChildren
   NodesRoute: typeof NodesRouteWithChildren
   PackagesRoute: typeof PackagesRouteWithChildren
+  RoutedOutboundsRoute: typeof RoutedOutboundsRouteWithChildren
   RulesRoute: typeof RulesRoute
   SettingsRoute: typeof SettingsRoute
   SubscribeFilesRoute: typeof SubscribeFilesRouteWithChildren
+  SubscriptionRoute: typeof SubscriptionRouteWithChildren
   SystemSettingsRoute: typeof SystemSettingsRoute
   TemplatesRoute: typeof TemplatesRouteWithChildren
+  TgBotInvitesRoute: typeof TgBotInvitesRoute
   UsersRoute: typeof UsersRoute
   XrayInboundsRoute: typeof XrayInboundsRouteWithChildren
   XrayOutboundsRoute: typeof XrayOutboundsRouteWithChildren
@@ -383,6 +465,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof UsersRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/tg-bot-invites': {
+      id: '/tg-bot-invites'
+      path: '/tg-bot-invites'
+      fullPath: '/tg-bot-invites'
+      preLoaderRoute: typeof TgBotInvitesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/templates': {
       id: '/templates'
       path: '/templates'
@@ -395,6 +484,13 @@ declare module '@tanstack/react-router' {
       path: '/system-settings'
       fullPath: '/system-settings'
       preLoaderRoute: typeof SystemSettingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/subscription': {
+      id: '/subscription'
+      path: '/subscription'
+      fullPath: '/subscription'
+      preLoaderRoute: typeof SubscriptionRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/subscribe-files': {
@@ -418,6 +514,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof RulesRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/routed-outbounds': {
+      id: '/routed-outbounds'
+      path: '/routed-outbounds'
+      fullPath: '/routed-outbounds'
+      preLoaderRoute: typeof RoutedOutboundsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/packages': {
       id: '/packages'
       path: '/packages'
@@ -430,6 +533,13 @@ declare module '@tanstack/react-router' {
       path: '/nodes'
       fullPath: '/nodes'
       preLoaderRoute: typeof NodesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/migrate-from-mmw': {
+      id: '/migrate-from-mmw'
+      path: '/migrate-from-mmw'
+      fullPath: '/migrate-from-mmw'
+      preLoaderRoute: typeof MigrateFromMmwRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/login': {
@@ -502,12 +612,26 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof TemplatesIndexRouteImport
       parentRoute: typeof TemplatesRoute
     }
+    '/subscription/': {
+      id: '/subscription/'
+      path: '/'
+      fullPath: '/subscription/'
+      preLoaderRoute: typeof SubscriptionIndexRouteImport
+      parentRoute: typeof SubscriptionRoute
+    }
     '/subscribe-files/': {
       id: '/subscribe-files/'
       path: '/'
       fullPath: '/subscribe-files/'
       preLoaderRoute: typeof SubscribeFilesIndexRouteImport
       parentRoute: typeof SubscribeFilesRoute
+    }
+    '/routed-outbounds/': {
+      id: '/routed-outbounds/'
+      path: '/'
+      fullPath: '/routed-outbounds/'
+      preLoaderRoute: typeof RoutedOutboundsIndexRouteImport
+      parentRoute: typeof RoutedOutboundsRoute
     }
     '/packages/': {
       id: '/packages/'
@@ -522,6 +646,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/nodes/'
       preLoaderRoute: typeof NodesIndexRouteImport
       parentRoute: typeof NodesRoute
+    }
+    '/migrate-from-mmw/': {
+      id: '/migrate-from-mmw/'
+      path: '/'
+      fullPath: '/migrate-from-mmw/'
+      preLoaderRoute: typeof MigrateFromMmwIndexRouteImport
+      parentRoute: typeof MigrateFromMmwRoute
     }
     '/custom-rules/': {
       id: '/custom-rules/'
@@ -571,6 +702,18 @@ const CustomRulesRouteWithChildren = CustomRulesRoute._addFileChildren(
   CustomRulesRouteChildren,
 )
 
+interface MigrateFromMmwRouteChildren {
+  MigrateFromMmwIndexRoute: typeof MigrateFromMmwIndexRoute
+}
+
+const MigrateFromMmwRouteChildren: MigrateFromMmwRouteChildren = {
+  MigrateFromMmwIndexRoute: MigrateFromMmwIndexRoute,
+}
+
+const MigrateFromMmwRouteWithChildren = MigrateFromMmwRoute._addFileChildren(
+  MigrateFromMmwRouteChildren,
+)
+
 interface NodesRouteChildren {
   NodesIndexRoute: typeof NodesIndexRoute
 }
@@ -593,6 +736,18 @@ const PackagesRouteWithChildren = PackagesRoute._addFileChildren(
   PackagesRouteChildren,
 )
 
+interface RoutedOutboundsRouteChildren {
+  RoutedOutboundsIndexRoute: typeof RoutedOutboundsIndexRoute
+}
+
+const RoutedOutboundsRouteChildren: RoutedOutboundsRouteChildren = {
+  RoutedOutboundsIndexRoute: RoutedOutboundsIndexRoute,
+}
+
+const RoutedOutboundsRouteWithChildren = RoutedOutboundsRoute._addFileChildren(
+  RoutedOutboundsRouteChildren,
+)
+
 interface SubscribeFilesRouteChildren {
   SubscribeFilesCustomRoute: typeof SubscribeFilesCustomRoute
   SubscribeFilesIndexRoute: typeof SubscribeFilesIndexRoute
@@ -605,6 +760,18 @@ const SubscribeFilesRouteChildren: SubscribeFilesRouteChildren = {
 
 const SubscribeFilesRouteWithChildren = SubscribeFilesRoute._addFileChildren(
   SubscribeFilesRouteChildren,
+)
+
+interface SubscriptionRouteChildren {
+  SubscriptionIndexRoute: typeof SubscriptionIndexRoute
+}
+
+const SubscriptionRouteChildren: SubscriptionRouteChildren = {
+  SubscriptionIndexRoute: SubscriptionIndexRoute,
+}
+
+const SubscriptionRouteWithChildren = SubscriptionRoute._addFileChildren(
+  SubscriptionRouteChildren,
 )
 
 interface TemplatesRouteChildren {
@@ -662,13 +829,17 @@ const rootRouteChildren: RootRouteChildren = {
   CustomRulesRoute: CustomRulesRouteWithChildren,
   GeneratorRoute: GeneratorRoute,
   LoginRoute: LoginRoute,
+  MigrateFromMmwRoute: MigrateFromMmwRouteWithChildren,
   NodesRoute: NodesRouteWithChildren,
   PackagesRoute: PackagesRouteWithChildren,
+  RoutedOutboundsRoute: RoutedOutboundsRouteWithChildren,
   RulesRoute: RulesRoute,
   SettingsRoute: SettingsRoute,
   SubscribeFilesRoute: SubscribeFilesRouteWithChildren,
+  SubscriptionRoute: SubscriptionRouteWithChildren,
   SystemSettingsRoute: SystemSettingsRoute,
   TemplatesRoute: TemplatesRouteWithChildren,
+  TgBotInvitesRoute: TgBotInvitesRoute,
   UsersRoute: UsersRoute,
   XrayInboundsRoute: XrayInboundsRouteWithChildren,
   XrayOutboundsRoute: XrayOutboundsRouteWithChildren,

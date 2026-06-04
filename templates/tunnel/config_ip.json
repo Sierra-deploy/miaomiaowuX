@@ -121,9 +121,14 @@
             "protocol": "freedom",
             "settings": {
                 "redirect": "127.0.0.1:8001",
-                "domainStrategy": "UseIP"
+                "domainStrategy": "UseIP",
+                "proxyProtocol": 1
             },
             "tag": "nginx"
         }
-    ]
+    ],
+    "metrics": {
+        "tag": "Metrics",
+        "listen": "127.0.0.1:38889"
+    }
 } 

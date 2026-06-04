@@ -1,12 +1,23 @@
 {
+  "time": {
+    "justNow": "刚刚",
+    "minutesAgo": "{{n}}分钟前",
+    "hoursAgo": "{{n}}小时前",
+    "daysAgo": "{{n}}天前"
+  },
   "nav": {
     "trafficInfo": "流量信息",
     "nodeManagement": "节点管理",
+    "routedOutbounds": "路由出站",
     "serviceManagement": "服务管理",
     "userManagement": "用户管理",
     "packageManagement": "套餐管理",
     "certificateManagement": "证书管理",
     "templateManagement": "模板管理",
+    "subscriptionGenerator": "生成订阅",
+    "subscriptionManagement": "订阅管理",
+    "subscriptionLinks": "订阅链接",
+    "customRulesManagement": "覆写管理",
     "systemSettings": "系统设置"
   },
   "actions": {
@@ -125,7 +136,9 @@
     "settings": "个人设置",
     "debugLog": "Debug 日志",
     "help": "使用帮助",
+    "tgBotApp": "TG Bot & APP",
     "backup": "备份数据",
+    "migrateFromMmw": "从妙妙屋迁移",
     "checkUpdate": "检查更新",
     "version": "版本",
     "signOut": "退出登录",
@@ -141,7 +154,18 @@
     "debugEnableFailed": "开启Debug日志失败",
     "debugDisableFailed": "关闭Debug日志失败",
     "logDownloaded": "日志文件已下载",
-    "logDownloadFailed": "下载日志文件失败"
+    "logDownloadFailed": "下载日志文件失败",
+    "about": "关于",
+    "licenseStatus": "许可证状态",
+    "licenseValid": "有效",
+    "licenseInvalid": "无效",
+    "licensePlan": "套餐",
+    "licensePlanDesc": "简介",
+    "maxServers": "最大服务器数",
+    "maxNodes": "最大节点数",
+    "maxUsers": "最大用户数",
+    "expiresAt": "到期时间",
+    "trialHint": "当前为试用许可证，PRO 功能不可用。注册获取许可证："
   },
   "noData": "暂无数据",
   "cardView": "卡片视图",
@@ -161,5 +185,12 @@
   },
   "flagPicker": {
     "autoDetect": "自动检测地区"
+  },
+  "license": {
+    "proFeatureTooltip": "此功能需要 Pro 许可证，请前往许可证设置升级",
+    "proFeatureActive": "Pro 功能已激活",
+    "serverLimitReached": "服务器已达上限 ({{current}}/{{max}})",
+    "nodeLimitReached": "节点已达上限 ({{current}}/{{max}})",
+    "userLimitReached": "用户已达上限 ({{current}}/{{max}})"
   }
 }

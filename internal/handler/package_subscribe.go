@@ -1,12 +1,14 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"miaomiaowux/internal/auth"
@@ -61,18 +63,65 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Build user credential lookup for per-user proxy configs
+	credMap := h.buildUserCredentialMap(r, username)
+
+	// 节点名称倍率前缀:开关开启时,套餐内倍率 != 1 的节点 name 加上 "{Left}{mult}{Right}" 前缀
+	// renameMap 收集所有重命名,后面要同步 proxy-groups 里"按全名引用"的列表,避免组找不到节点
+	sysCfg, _ := h.repo.GetSystemConfig(r.Context())
+	renameMap := make(map[string]string)
+	recordRename := func(oldName, newName string, did bool) {
+		if did && oldName != "" && newName != "" && oldName != newName {
+			renameMap[oldName] = newName
+		}
+	}
+
+	// 按用户 node_order 重排 pkg.Nodes。
+	// 用户拖过节点顺序 → settings.NodeOrder 非空 → 按其位置排;
+	// 没拖过 → fallback 用 admin 的顺序(过滤掉用户没绑的节点) — 跟 /api/user/config GET 一致。
+	// nodeOrder 中没有的节点(套餐里新加的)排到最末,保持 pkg.Nodes 原顺序。
+	orderedNodeIDs := orderPackageNodes(r.Context(), h.repo, username, pkg.Nodes)
+
 	// Load nodes from package
 	var proxies []map[string]any
-	for _, nodeID := range pkg.Nodes {
+	for _, nodeID := range orderedNodeIDs {
 		node, err := h.repo.GetNodeByID(r.Context(), nodeID)
-		if err != nil || !node.Enabled || node.ClashConfig == "" {
+		if err != nil || !node.Enabled {
+			continue
+		}
+		// routed 节点:克隆父 inbound 的 clash 模板,替换 uuid 为该用户子账号 uuid + 节点名
+		if node.NodeType == "routed" {
+			if proxyConfig, ok := buildRoutedProxyForUser(r.Context(), h.repo, node, username); ok {
+				recordRename(applyMultiplierPrefix(proxyConfig, node, pkg, &sysCfg))
+				proxies = append(proxies, proxyConfig)
+			}
+			continue
+		}
+		if node.ClashConfig == "" {
 			continue
 		}
 		var proxyConfig map[string]any
 		if err := json.Unmarshal([]byte(node.ClashConfig), &proxyConfig); err != nil {
 			continue
 		}
+		applyUserCredentials(proxyConfig, node, credMap)
+		recordRename(applyMultiplierPrefix(proxyConfig, node, pkg, &sysCfg))
 		proxies = append(proxies, proxyConfig)
+	}
+
+	// 追加用户私有路由出站(routed_owner='user' && username=<creator>):不依赖套餐分配,
+	// 创建者一人独享。其 routed 子账号 email 已通过 user_subaccounts 维护,buildRoutedProxyForUser
+	// 复用同一套替换 uuid 逻辑。
+	if userRouted, err := h.repo.ListUserRoutedOutbounds(r.Context(), username); err == nil {
+		for _, n := range userRouted {
+			if !n.Enabled {
+				continue
+			}
+			if proxyConfig, ok := buildRoutedProxyForUser(r.Context(), h.repo, n.Node, username); ok {
+				recordRename(applyMultiplierPrefix(proxyConfig, n.Node, pkg, &sysCfg))
+				proxies = append(proxies, proxyConfig)
+			}
+		}
 	}
 
 	if len(proxies) == 0 {
@@ -80,8 +129,8 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	// Load template: default.yaml > redirhost__v3.yaml
-	templateContent, err := h.loadTemplate()
+	// Load template: 套餐模板 > 系统默认 > 目录第一个
+	templateContent, err := h.loadTemplate(r, pkg)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -101,12 +150,22 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// 节点名重命名了 → 同步 proxy-groups 里手写的全名引用(模板若用 filter 自动会用新名,这里兜底全名引用场景)
+	if len(renameMap) > 0 {
+		if rewritten, rerr := rewriteProxyGroupRefs([]byte(result), renameMap); rerr == nil {
+			result = string(rewritten)
+		}
+	}
+
 	// Format conversion
 	clientType := strings.TrimSpace(r.URL.Query().Get("t"))
 	if clientType == "" || clientType == "clash" || clientType == "clashmeta" {
 		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
-		w.Header().Set("Content-Disposition", "attachment; filename=\""+pkg.Name+".yaml\"")
-		h.writeTrafficHeader(w, user, pkg)
+		// 显式带 t=clash/clashmeta 通常是浏览器/调试预览,不想被强制下载;只有完全不带 t(典型 Clash 客户端拉取)才下发 attachment
+		if clientType == "" {
+			w.Header().Set("Content-Disposition", "attachment; filename=\""+pkg.Name+".yaml\"")
+		}
+		h.writeTrafficHeader(r.Context(), w, user, pkg)
 		w.Write([]byte(result))
 		return
 	}
@@ -118,17 +177,87 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	h.writeTrafficHeader(w, user, pkg)
+	h.writeTrafficHeader(r.Context(), w, user, pkg)
 	w.Write(converted)
 }
 
-func (h *PackageSubscribeHandler) loadTemplate() (string, error) {
+// orderPackageNodes 按用户 node_order 重排套餐节点 ID 列表。
+//   - settings.NodeOrder 非空 → 按其位置排;不在 NodeOrder 里的(新加节点)排到末尾
+//   - settings.NodeOrder 空 → fallback admin 顺序(跟 /api/user/config GET 一致)
+//   - 仍空 → 直接返回 pkg.Nodes 原顺序
+//
+// 套餐里有但 NodeOrder 里没有的节点(管理员后加的)按 pkg.Nodes 原顺序追加在末尾。
+func orderPackageNodes(ctx context.Context, repo *storage.TrafficRepository, username string, pkgNodes []int64) []int64 {
+	if len(pkgNodes) == 0 {
+		return pkgNodes
+	}
+	var nodeOrder []int64
+	if settings, err := repo.GetUserSettings(ctx, username); err == nil {
+		nodeOrder = settings.NodeOrder
+	}
+	if len(nodeOrder) == 0 {
+		nodeOrder = computeFallbackNodeOrder(ctx, repo, username)
+	}
+	if len(nodeOrder) == 0 {
+		return pkgNodes
+	}
+
+	pkgSet := make(map[int64]bool, len(pkgNodes))
+	for _, id := range pkgNodes {
+		pkgSet[id] = true
+	}
+	orderPos := make(map[int64]int, len(nodeOrder))
+	for i, id := range nodeOrder {
+		orderPos[id] = i
+	}
+
+	ordered := make([]int64, 0, len(pkgNodes))
+	var trailing []int64
+	for _, id := range pkgNodes {
+		if _, ok := orderPos[id]; !ok {
+			trailing = append(trailing, id)
+		}
+	}
+	// 在 nodeOrder 里的节点按位置排
+	for _, id := range nodeOrder {
+		if pkgSet[id] {
+			ordered = append(ordered, id)
+		}
+	}
+	// 不在 nodeOrder 里的(套餐新加,用户还没拖过)按 pkg.Nodes 原顺序追加
+	ordered = append(ordered, trailing...)
+	return ordered
+}
+
+// loadTemplate 优先级:套餐绑的模板 → 系统默认模板 → rule_templates 目录第一个 yaml。
+// pkg 为 nil 时跳过套餐模板这一级(serveAllNodes 等无套餐上下文场景)。
+func (h *PackageSubscribeHandler) loadTemplate(r *http.Request, pkg *storage.Package) (string, error) {
 	templatesDir := "rule_templates"
-	candidates := []string{"default.yaml", "redirhost__v3.yaml"}
+
+	var candidates []string
+	if pkg != nil && strings.TrimSpace(pkg.TemplateFilename) != "" {
+		candidates = append(candidates, pkg.TemplateFilename)
+	}
+	if cfg, err := h.repo.GetSystemConfig(r.Context()); err == nil && cfg.DefaultTemplateFilename != "" {
+		candidates = append(candidates, cfg.DefaultTemplateFilename)
+	}
 	for _, name := range candidates {
 		content, err := os.ReadFile(filepath.Join(templatesDir, name))
 		if err == nil {
 			return string(content), nil
+		}
+	}
+
+	entries, err := os.ReadDir(templatesDir)
+	if err == nil {
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+				continue
+			}
+			content, err := os.ReadFile(filepath.Join(templatesDir, e.Name()))
+			if err == nil {
+				return string(content), nil
+			}
 		}
 	}
 	return "", errors.New("未找到可用模板，请管理员配置模板")
@@ -155,7 +284,8 @@ func (h *PackageSubscribeHandler) serveAllNodes(w http.ResponseWriter, r *http.R
 		writeError(w, http.StatusNotFound, errors.New("无可用节点"))
 		return
 	}
-	templateContent, err := h.loadTemplate()
+	// serveAllNodes 是"无套餐上下文,导出全部节点"的旁路调试入口 — 传 nil 走系统默认模板。
+	templateContent, err := h.loadTemplate(r, nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -174,7 +304,9 @@ func (h *PackageSubscribeHandler) serveAllNodes(w http.ResponseWriter, r *http.R
 	clientType := strings.TrimSpace(r.URL.Query().Get("t"))
 	if clientType == "" || clientType == "clash" || clientType == "clashmeta" {
 		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
-		w.Header().Set("Content-Disposition", `attachment; filename="all-nodes.yaml"`)
+		if clientType == "" {
+			w.Header().Set("Content-Disposition", `attachment; filename="all-nodes.yaml"`)
+		}
 		w.Write([]byte(result))
 		return
 	}
@@ -187,10 +319,21 @@ func (h *PackageSubscribeHandler) serveAllNodes(w http.ResponseWriter, r *http.R
 	w.Write(converted)
 }
 
-func (h *PackageSubscribeHandler) writeTrafficHeader(w http.ResponseWriter, user storage.User, pkg *storage.Package) {
-	if pkg.TrafficLimitBytes > 0 {
-		w.Header().Set("subscription-userinfo", fmt.Sprintf("upload=0; download=0; total=%d", pkg.TrafficLimitBytes))
+func (h *PackageSubscribeHandler) writeTrafficHeader(ctx context.Context, w http.ResponseWriter, user storage.User, pkg *storage.Package) {
+	if pkg.TrafficLimitBytes <= 0 {
+		return
 	}
+	// 已用流量 = 裸流量(SUM(uplink+downlink)) × 套餐倍率(oneway×1 / twoway×2),
+	// 与限额判定口径一致(traffic_limit_enforcer.go:已用×TrafficMultiplier 比限额),
+	// 这样客户端显示的已用/剩余与实际被断流的时机吻合。
+	// 之前这里硬编码 download=0,导致客户端永远显示已用 0。
+	raw, _ := h.repo.GetUserTotalTraffic(ctx, user.Username)
+	used := raw * pkg.TrafficMultiplier()
+	info := fmt.Sprintf("upload=0; download=%d; total=%d", used, pkg.TrafficLimitBytes)
+	if user.PackageEndDate != nil {
+		info += fmt.Sprintf("; expire=%d", user.PackageEndDate.Unix())
+	}
+	w.Header().Set("subscription-userinfo", info)
 }
 
 func (h *PackageSubscribeHandler) convertFormat(r *http.Request, yamlData []byte, clientType string) ([]byte, error) {
@@ -253,4 +396,218 @@ func (h *PackageSubscribeHandler) convertFormat(r *http.Request, yamlData []byte
 	default:
 		return nil, fmt.Errorf("unexpected produce result type: %T", result)
 	}
+}
+
+type credKey struct {
+	serverName string
+	inboundTag string
+}
+
+func (h *PackageSubscribeHandler) buildUserCredentialMap(r *http.Request, username string) map[credKey]string {
+	ctx := r.Context()
+	userConfigs, err := h.repo.GetUserInboundConfigs(ctx, username)
+	if err != nil || len(userConfigs) == 0 {
+		return nil
+	}
+	servers, err := h.repo.ListRemoteServers(ctx)
+	if err != nil {
+		return nil
+	}
+	idToName := make(map[int64]string, len(servers))
+	for _, s := range servers {
+		idToName[s.ID] = s.Name
+	}
+	m := make(map[credKey]string, len(userConfigs))
+	for _, cfg := range userConfigs {
+		if name, ok := idToName[cfg.ServerID]; ok {
+			m[credKey{name, cfg.InboundTag}] = cfg.CredentialJSON
+		}
+	}
+	return m
+}
+
+// rewriteProxyGroupRefs 给定 YAML 文档 + 节点名映射,把每个 proxy-group 的 proxies 数组里
+// 命中的旧名替换为新名。模板若用 filter/regex 选节点会自动用 proxies 数组里的新名,
+// 这里专门兜底"模板里手写全名引用"的场景,避免代理组指向不存在的节点。
+// 解析失败 / proxy-groups 缺失 → 原样返回。
+func rewriteProxyGroupRefs(data []byte, rename map[string]string) ([]byte, error) {
+	if len(rename) == 0 || len(data) == 0 {
+		return data, nil
+	}
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return data, err
+	}
+	if len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
+		return data, nil
+	}
+	doc := root.Content[0]
+	modified := false
+	for i := 0; i < len(doc.Content)-1; i += 2 {
+		if doc.Content[i].Value != "proxy-groups" {
+			continue
+		}
+		groups := doc.Content[i+1]
+		if groups.Kind != yaml.SequenceNode {
+			break
+		}
+		for _, g := range groups.Content {
+			if g.Kind != yaml.MappingNode {
+				continue
+			}
+			for j := 0; j < len(g.Content)-1; j += 2 {
+				if g.Content[j].Value != "proxies" {
+					continue
+				}
+				pxs := g.Content[j+1]
+				if pxs.Kind != yaml.SequenceNode {
+					continue
+				}
+				for _, pn := range pxs.Content {
+					if pn.Kind != yaml.ScalarNode {
+						continue
+					}
+					if newName, ok := rename[pn.Value]; ok {
+						pn.Value = newName
+						modified = true
+					}
+				}
+			}
+		}
+		break
+	}
+	if !modified {
+		return data, nil
+	}
+	out, err := MarshalYAMLWithIndent(&root)
+	if err != nil {
+		return data, err
+	}
+	return []byte(RemoveUnicodeEscapeQuotes(string(out))), nil
+}
+
+// applyMultiplierPrefix 按系统开关给节点名加倍率前缀,效果 "「2」原节点名"。
+//   - 开关关 / 套餐空 / 节点倍率 == 1 → 不动 name,返回 ("","",false)
+//   - routed 子节点通过 ParentNodeID 自动回退到父物理节点的套餐倍率
+//   - 前缀左右分隔符由 SystemConfig.NodeNameMultiplierLeft / Right 决定,默认 「」
+//   - 返回 (oldName, newName, true) 给调用方收集 renameMap,后续要同步 proxy-groups 引用
+func applyMultiplierPrefix(proxy map[string]any, node storage.Node, pkg *storage.Package, cfg *storage.SystemConfig) (string, string, bool) {
+	if proxy == nil || cfg == nil || pkg == nil || !cfg.NodeNameMultiplierPrefixEnabled {
+		return "", "", false
+	}
+	mult := pkg.MultiplierForNode(node.ID, node.ParentNodeID)
+	if mult == 1.0 {
+		return "", "", false
+	}
+	name, _ := proxy["name"].(string)
+	if name == "" {
+		name = node.NodeName
+	}
+	left := cfg.NodeNameMultiplierLeft
+	if left == "" {
+		left = "「"
+	}
+	right := cfg.NodeNameMultiplierRight
+	if right == "" {
+		right = "」"
+	}
+	// 整数倍率不带小数(2 → "2" 而非 "2.0")
+	var multStr string
+	if mult == float64(int64(mult)) {
+		multStr = strconv.FormatInt(int64(mult), 10)
+	} else {
+		multStr = strconv.FormatFloat(mult, 'f', -1, 64)
+	}
+	newName := left + multStr + right + name
+	proxy["name"] = newName
+	return name, newName, true
+}
+
+func applyUserCredentials(proxy map[string]any, node storage.Node, credMap map[credKey]string) {
+	if credMap == nil || node.OriginalServer == "" || node.InboundTag == "" {
+		return
+	}
+	credJSON, ok := credMap[credKey{node.OriginalServer, node.InboundTag}]
+	if !ok {
+		return
+	}
+	var cred map[string]any
+	if err := json.Unmarshal([]byte(credJSON), &cred); err != nil {
+		return
+	}
+	switch node.Protocol {
+	case "vless", "vmess":
+		if id, ok := cred["id"].(string); ok && id != "" {
+			proxy["uuid"] = id
+		}
+	case "ss", "shadowsocks":
+		if userPass, ok := cred["password"].(string); ok && userPass != "" {
+			if nodePass, ok := proxy["password"].(string); ok && nodePass != "" {
+				// 仅 SS2022 需要 "master:userPass" 双段拼接(老 SS 单段密码不该改)。
+				cipher, _ := proxy["cipher"].(string)
+				if strings.HasPrefix(cipher, "2022-") {
+					// 兜底:存量 node.ClashConfig 可能还是老格式 "master:firstClient" — 剥掉冒号后段,
+					// 只保留 master,再拼当前用户密码,得到正确的两段。新节点直接 nodePass 就是 master 一段。
+					if idx := strings.Index(nodePass, ":"); idx >= 0 {
+						nodePass = nodePass[:idx]
+					}
+					proxy["password"] = nodePass + ":" + userPass
+				}
+			}
+		}
+	case "trojan", "anytls":
+		if password, ok := cred["password"].(string); ok && password != "" {
+			proxy["password"] = password
+		}
+	case "hysteria2", "hysteria", "hy2":
+		// HY2 客户端凭据 auth → clash hysteria2 节点的 password 字段。
+		if auth, ok := cred["auth"].(string); ok && auth != "" {
+			proxy["password"] = auth
+		}
+	}
+}
+
+// buildRoutedProxyForUser 为某用户 + 某 routed 节点生成订阅条目:
+//   - 取父物理节点的 ClashConfig 作为协议/streamSettings 模板
+//   - 用 user_subaccounts.credential_json 里的 uuid 覆盖
+//   - 节点名换成 routed 节点的 NodeName
+//
+// 返回 (proxy_map, true) 或 (nil, false)(用户未绑定子账号 / 未 active / 父节点不可用 → 跳过)。
+func buildRoutedProxyForUser(ctx context.Context, repo *storage.TrafficRepository, routedNode storage.Node, username string) (map[string]any, bool) {
+	// 子账号必须 is_active=1,否则该用户当前没有访问权(下线 / 未绑套餐 / 暂停)
+	sa, err := repo.GetUserSubaccount(ctx, routedNode.ID, username)
+	if err != nil || sa == nil || !sa.IsActive {
+		return nil, false
+	}
+
+	// clash_config 来源优先级:
+	//   1. 父节点的 clash_config(绑定到普通 inbound 物理节点的标准 routed)
+	//   2. routed 节点自身的 clash_config(纯出站 server 场景:server 上没默认 inbound,
+	//      同步入站时识别不出 parent,但 routed 节点入库时已克隆了完整可连配置)
+	var clashJSON string
+	if routedNode.ParentNodeID != nil && *routedNode.ParentNodeID > 0 {
+		if parent, perr := repo.GetNodeByID(ctx, *routedNode.ParentNodeID); perr == nil && parent.Enabled && parent.ClashConfig != "" {
+			clashJSON = parent.ClashConfig
+		}
+	}
+	if clashJSON == "" && strings.TrimSpace(routedNode.ClashConfig) != "" {
+		clashJSON = routedNode.ClashConfig
+	}
+	if clashJSON == "" {
+		return nil, false
+	}
+
+	var proxy map[string]any
+	if err := json.Unmarshal([]byte(clashJSON), &proxy); err != nil {
+		return nil, false
+	}
+	// 覆盖 uuid(VLESS/VMess 主键)、节点名
+	var cred map[string]any
+	if err := json.Unmarshal([]byte(sa.CredentialJSON), &cred); err == nil {
+		if id, ok := cred["id"].(string); ok && id != "" {
+			proxy["uuid"] = id
+		}
+	}
+	proxy["name"] = routedNode.NodeName
+	return proxy, true
 }

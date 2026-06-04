@@ -366,9 +366,78 @@ func parseProxyURI(uri string) (map[string]interface{}, error) {
 		return parseAnytlsURI(uri)
 	case strings.HasPrefix(uri, "socks://"), strings.HasPrefix(uri, "socks5://"):
 		return parseSocksURI(uri)
+	case strings.HasPrefix(uri, "snell://"):
+		return parseSnellURI(uri)
 	default:
 		return nil, fmt.Errorf("unsupported protocol")
 	}
+}
+
+// parseSnellURI 解析 snell:// 协议
+// 格式: snell://psk@server:port?obfs=...&obfs-host=...&version=4#name
+// 移植自 miaomiaowu commit b453faa(支持 snell 协议与 egern reality)
+func parseSnellURI(uri string) (map[string]interface{}, error) {
+	content := strings.TrimPrefix(uri, "snell://")
+
+	name := "Snell Node"
+	if idx := strings.LastIndex(content, "#"); idx != -1 {
+		name = urlDecode(content[idx+1:])
+		content = content[:idx]
+	}
+
+	params := make(map[string]string)
+	if idx := strings.Index(content, "?"); idx != -1 {
+		paramStr := content[idx+1:]
+		content = content[:idx]
+		for _, kv := range strings.Split(paramStr, "&") {
+			if parts := strings.SplitN(kv, "=", 2); len(parts) == 2 {
+				params[parts[0]] = urlDecode(parts[1])
+			}
+		}
+	}
+
+	content = strings.TrimSuffix(content, "/")
+
+	atIdx := strings.LastIndex(content, "@")
+	if atIdx == -1 {
+		return nil, fmt.Errorf("invalid snell uri: missing @")
+	}
+
+	psk := content[:atIdx]
+	serverPort := content[atIdx+1:]
+
+	server, port := parseServerPort(serverPort)
+	if server == "" {
+		return nil, fmt.Errorf("invalid snell uri: invalid server")
+	}
+
+	proxy := map[string]interface{}{
+		"type":   "snell",
+		"name":   name,
+		"server": server,
+		"port":   port,
+		"psk":    psk,
+	}
+
+	if v := params["version"]; v != "" {
+		if ver, err := strconv.Atoi(v); err == nil {
+			proxy["version"] = ver
+		}
+	} else {
+		proxy["version"] = 4
+	}
+
+	if obfs := params["obfs"]; obfs != "" && obfs != "none" {
+		obfsOpts := map[string]interface{}{"mode": obfs}
+		if host := params["obfs-host"]; host != "" {
+			obfsOpts["host"] = host
+		} else if host := params["obfs-hostname"]; host != "" {
+			obfsOpts["host"] = host
+		}
+		proxy["obfs-opts"] = obfsOpts
+	}
+
+	return proxy, nil
 }
 
 // 解析 vmess:// URI
@@ -601,6 +670,9 @@ func parseShadowsocksURI(uri string) (map[string]interface{}, error) {
 		// 格式: base64(method:password)@server:port 或 method:password@server:port
 		atIdx := strings.LastIndex(content, "@")
 		authPart := content[:atIdx]
+		if decoded, err := url.QueryUnescape(authPart); err == nil {
+			authPart = decoded
+		}
 		serverPart := content[atIdx+1:]
 
 		server, port = parseServerPort(serverPart)
@@ -673,6 +745,8 @@ func parseShadowsocksURI(uri string) (map[string]interface{}, error) {
 	if server == "" || port == 0 {
 		return nil, fmt.Errorf("invalid ss uri: invalid server:port")
 	}
+
+	password = urlDecode(password)
 
 	proxy := map[string]interface{}{
 		"type":     "ss",
@@ -1015,6 +1089,11 @@ func parseHysteriaURI(uri string, proxyType string) (map[string]interface{}, err
 	// 客户指纹
 	if fp := params["fp"]; fp != "" {
 		proxy["client-fingerprint"] = fp
+	}
+
+	// 端口跳跃(hy2 mport)
+	if mport := params["mport"]; mport != "" {
+		proxy["ports"] = mport
 	}
 
 	return proxy, nil
