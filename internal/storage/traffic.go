@@ -9018,9 +9018,13 @@ func (r *TrafficRepository) UpsertNodeTraffic(ctx context.Context, serverID int6
 	}
 
 	if !exists {
-		// 插入新记录
-		const insertStmt = `INSERT INTO node_traffic (server_id, tag, type, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
-		_, err := r.db.ExecContext(ctx, insertStmt, serverID, tag, trafficType, uplink, downlink, uplink, downlink, uplink, downlink)
+		// 首次见到 (server, tag, type):把当前 raw 仅作为 baseline(写入 last_*),
+		// uplink/downlink/total_* 都从 0 起步。**不能**把 raw 写入累计字段 —— xray 已有的历史累计
+		// 会被当成"本次见到的新增 delta"一次性灌进当天的 traffic_records.total_used,
+		// 前端每日流量图就在那一天爆出来一条尖刺(用户报的"重启后某天数据错误")。
+		// 触发场景:新增远程服务器、新加 inbound tag、node_traffic 表被清/迁移后等。
+		const insertStmt = `INSERT INTO node_traffic (server_id, tag, type, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, updated_at) VALUES (?, ?, ?, 0, 0, 0, 0, ?, ?, CURRENT_TIMESTAMP)`
+		_, err := r.db.ExecContext(ctx, insertStmt, serverID, tag, trafficType, uplink, downlink)
 		if err != nil {
 			return fmt.Errorf("insert node traffic: %w", err)
 		}
@@ -9134,9 +9138,11 @@ func (r *TrafficRepository) UpsertUserTraffic(ctx context.Context, serverID int6
 	}
 
 	if !exists {
-		// 插入新记录
-		const insertStmt = `INSERT INTO user_traffic (server_id, username, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-		_, err := r.db.ExecContext(ctx, insertStmt, serverID, username, uplink, downlink, uplink, downlink, uplink, downlink)
+		// 首次见到 (server, username):见 UpsertNodeTraffic 同款注释 —
+		// 累计字段(uplink/downlink/total_*)从 0 起步,raw 仅作 last baseline,
+		// 否则套餐已用流量在首次见到一个用户时会被 xray 已有累计灌满。
+		const insertStmt = `INSERT INTO user_traffic (server_id, username, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at) VALUES (?, ?, 0, 0, 0, 0, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+		_, err := r.db.ExecContext(ctx, insertStmt, serverID, username, uplink, downlink)
 		if err != nil {
 			return fmt.Errorf("insert user traffic: %w", err)
 		}
@@ -9213,8 +9219,10 @@ func (r *TrafficRepository) UpsertUserEmailTraffic(ctx context.Context, serverID
 	}
 
 	if !exists {
-		const insertStmt = `INSERT INTO user_email_traffic (server_id, email, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-		if _, err := r.db.ExecContext(ctx, insertStmt, serverID, email, uplink, downlink, uplink, downlink, uplink, downlink); err != nil {
+		// 首次见到 (server, email):见 UpsertNodeTraffic 同款注释 —— raw 仅作 baseline,
+		// 累计字段从 0 起步,避免历史累计灌入当期。
+		const insertStmt = `INSERT INTO user_email_traffic (server_id, email, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at) VALUES (?, ?, 0, 0, 0, 0, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+		if _, err := r.db.ExecContext(ctx, insertStmt, serverID, email, uplink, downlink); err != nil {
 			return fmt.Errorf("insert user email traffic: %w", err)
 		}
 		return nil
