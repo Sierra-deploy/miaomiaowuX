@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"miaomiaowux/internal/version"
 	"net/http"
 	"sync"
 	"time"
@@ -237,9 +238,10 @@ func (m *Manager) persistStatus(ctx context.Context) {
 func (m *Manager) activate(ctx context.Context) {
 	nonce := genNonce()
 	body, _ := json.Marshal(map[string]string{
-		"key":        m.key,
-		"machine_id": m.machineID,
-		"nonce":      nonce,
+		"key":         m.key,
+		"machine_id":  m.machineID,
+		"nonce":       nonce,
+		"app_version": version.Version,
 	})
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.serverURL+"/api/v1/activate", bytes.NewReader(body))
@@ -267,12 +269,11 @@ func (m *Manager) heartbeat(ctx context.Context) {
 	// 采集失败(repo 错)不影响心跳本身,只是这次不传 used_* 字段。
 	nonce := genNonce()
 	payload := map[string]any{
-		"key":        m.key,
-		"machine_id": m.machineID,
-		"nonce":      nonce,
-		// client_fp 给 license server 做"同 license 多 fp"的破解版传播识别。
-		// fp 本身没强 enforcement(fork 主控能伪造),只做运营层指纹收集。
-		"client_fp": collectFingerprint(),
+		"key":         m.key,
+		"machine_id":  m.machineID,
+		"nonce":       nonce,
+		"app_version": version.Version,
+		"client_fp":   collectFingerprint(),
 	}
 	m.mu.RLock()
 	usage := m.usage
