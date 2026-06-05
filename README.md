@@ -158,6 +158,10 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.2.1 (2026-06-05)
+- 🌈支持cloudflare turnstile 验证码
+- 🛠️ fix: tgbot用户注册后无法访问节点
+- 🛠️ fix: 检查版本号逻辑
 ### v0.2.0 (2026-06-04)
 - 🌈MCP功能补全
 - 🌈TG BOT开发测试
