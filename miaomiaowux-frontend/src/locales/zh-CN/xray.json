@@ -307,6 +307,9 @@
     "anytlsServerHasNoDomain": "AnyTLS+TLS 需要服务器域名;当前服务器未配置域名，请先在服务管理设置域名",
     "anytlsNoCertsExpert": "暂无可用证书。请在证书管理签发，或切到专家模式手填证书路径",
     "anytlsNoMatchingCert": "未找到与 {{domain}} 匹配的证书。请切到专家模式手填证书路径，或在证书管理签发匹配证书",
+    "tlsServerHasNoDomain": "{{protocol}}+TLS 需要服务器域名；当前服务器未配置域名，请先在服务管理设置域名",
+    "tlsNoCertsExpert": "暂无可用证书。请在证书管理签发，或切到专家模式手填证书路径",
+    "tlsNoMatchingCert": "未找到与 {{domain}} 匹配的证书。请切到专家模式手填证书路径，或在证书管理签发匹配证书",
     "anytlsRealityTitle": "AnyTLS + REALITY 客户端兼容性提示",
     "anytlsRealityDesc": "Clash 不支持 AnyTLS-REALITY，Mihomo 文档已明确不会支持。",
     "viewDocs": "查看文档"

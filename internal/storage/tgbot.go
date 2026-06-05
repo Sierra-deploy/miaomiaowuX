@@ -340,6 +340,22 @@ func (r *TrafficRepository) RevokeInviteCode(ctx context.Context, code string) e
 	return nil
 }
 
+// DeleteInviteCode 硬删除邀请码(连同使用记录)。从列表彻底移除。
+func (r *TrafficRepository) DeleteInviteCode(ctx context.Context, code string) error {
+	if code == "" {
+		return errors.New("code required")
+	}
+	res, err := r.db.ExecContext(ctx, `DELETE FROM invite_codes WHERE code = ?`, code)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("邀请码不存在")
+	}
+	_, _ = r.db.ExecContext(ctx, `DELETE FROM invite_code_uses WHERE code = ?`, code)
+	return nil
+}
+
 // ListInviteCodes 列出邀请码;createdBy 非空时按创建者过滤。按 created_at DESC 排。
 func (r *TrafficRepository) ListInviteCodes(ctx context.Context, createdBy string, limit int) ([]InviteCode, error) {
 	if limit <= 0 {

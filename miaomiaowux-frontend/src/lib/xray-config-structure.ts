@@ -23,7 +23,7 @@ export const XRAY_CONFIG = {
         { Websocket: ['None', 'TLS'] },
       ],
     },
-    { Hysteria2: ['TLS'] },
+    { Hysteria2: [{ hysteria: ['TLS'] }] },
     {
       Anytls: [
         { TCP: ['TLS', 'REALITY'] },

@@ -513,37 +513,63 @@ export function InboundWizard({
   }, [selectedProtocol])
 
   // AnyTLS + TLS 简易模式:用服务器 domain 匹配现有证书(支持泛域名),命中则自动选中证书 +
-  // 把 serverName 预填成服务器域名;不命中则 toast 提示需切到专家模式手填证书路径。
+  // 简易模式 + 必 TLS 的协议(AnyTLS / Hysteria2 / VLESS / VMess):自动按服务器域名匹配已有证书并塞
+  // cert_id + serverName + cert/key 路径。命中省 3 步,不命中 toast 提示用户去签发或切专家模式。
+  // security 判定与 submit 时 hasCert(L1062-1071)一致:TLS-含变体(TLS / TLS-WS / XTLS-Vision)放行,
+  // REALITY / XTLS-Vision-REALITY 走自己的域名+key 路径,不需证书。
   useEffect(() => {
-    if (!isSimpleMode) return
-    if (selectedProtocol !== 'Anytls') return
-    if (selectedSecurity !== 'TLS') return
-    const serverDomain = (currentServerDetail?.domain || '').trim()
-    if (!serverDomain) {
-      toast.warning(t('wizard.anytlsServerHasNoDomain'), { id: 'anytls-no-domain' })
+    if (!isSimpleMode) {
+      console.debug('[auto-cert] skip: not simple mode')
       return
     }
-    if (!validCertificates) return
+    const tlsAutoCertProtocols = ['Anytls', 'Hysteria2', 'VLESS', 'VMess', 'Trojan']
+    if (!tlsAutoCertProtocols.includes(selectedProtocol)) {
+      console.debug('[auto-cert] skip: protocol not in whitelist', selectedProtocol)
+      return
+    }
+    if (!selectedSecurity.includes('TLS') || selectedSecurity.includes('REALITY')) {
+      console.debug('[auto-cert] skip: security not TLS or contains REALITY', selectedSecurity)
+      return
+    }
+    const serverDomain = (currentServerDetail?.domain || '').trim()
+    console.debug('[auto-cert] running:', { selectedProtocol, selectedSecurity, serverDomain, validCertCount: validCertificates?.length })
+    if (!serverDomain) {
+      toast.warning(t('wizard.tlsServerHasNoDomain', { protocol: selectedProtocol }), {
+        id: `tls-no-domain-${selectedProtocol}`,
+      })
+      return
+    }
+    if (!validCertificates) {
+      console.debug('[auto-cert] skip: certificates query not ready yet')
+      return
+    }
     if (validCertificates.length === 0) {
-      toast.warning(t('wizard.anytlsNoCertsExpert'), { id: 'anytls-no-certs' })
+      toast.warning(t('wizard.tlsNoCertsExpert'), { id: `tls-no-certs-${selectedProtocol}` })
       return
     }
     const matched = validCertificates.find((c) => certDomainMatches(serverDomain, c.domain))
     if (matched) {
+      console.debug('[auto-cert] matched:', matched.domain, 'id=', matched.id)
       setFormData((prev: any) => {
-        if (prev.cert_id === matched.id && prev.serverName === serverDomain) return prev
-        return {
+        if (prev.cert_id === matched.id && prev.serverName === serverDomain) {
+          console.debug('[auto-cert] formData already up-to-date, skip setState')
+          return prev
+        }
+        const next = {
           ...prev,
           cert_id: matched.id,
           certificateFile: matched.cert_path,
           keyFile: matched.key_path,
           serverName: prev.serverName || serverDomain,
         }
+        console.debug('[auto-cert] setFormData →', { cert_id: next.cert_id, certificateFile: next.certificateFile, serverName: next.serverName })
+        return next
       })
     } else {
+      console.debug('[auto-cert] no matching cert for', serverDomain, 'available:', validCertificates.map((c) => c.domain))
       toast.warning(
-        t('wizard.anytlsNoMatchingCert', { domain: serverDomain }),
-        { id: 'anytls-no-matching-cert', duration: 8000 }
+        t('wizard.tlsNoMatchingCert', { domain: serverDomain }),
+        { id: `tls-no-matching-cert-${selectedProtocol}`, duration: 8000 }
       )
     }
   }, [
@@ -1054,9 +1080,17 @@ export function InboundWizard({
     }
 
     if (isSimpleMode) {
+      // TLS 协议简易模式必须已有证书才放行。AnyTLS / Hysteria2 走自动匹配证书路径会预填 cert_id +
+      // certificateFile,这里看到已填就不拦;其他 TLS 协议(VLESS+TLS / VMess+TLS)目前没自动填路径,
+      // 走老的"切专家模式"提示。判定:formData.cert_id 非空(托管证书)或 certificateFile+keyFile 都填了。
+      const hasCert =
+        !!formData.cert_id ||
+        (!!(formData.certificateFile && String(formData.certificateFile).trim()) &&
+          !!(formData.keyFile && String(formData.keyFile).trim()))
       const requiresCertFiles =
         selectedSecurity.includes('TLS') &&
-        !selectedSecurity.includes('REALITY')
+        !selectedSecurity.includes('REALITY') &&
+        !hasCert
       if (requiresCertFiles) {
         toast.error(t('wizard.needsCertSwitch'))
         return

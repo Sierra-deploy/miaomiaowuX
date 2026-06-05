@@ -76,6 +76,8 @@ func (h *TGBotAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.createInvite(w, r)
 	case path == "invites/revoke" && r.Method == http.MethodPost:
 		h.revokeInvite(w, r)
+	case path == "invites/delete" && r.Method == http.MethodPost:
+		h.deleteInvite(w, r)
 	// 独立 bot 用
 	case path == "bind" && r.Method == http.MethodPost:
 		h.bind(w, r)
@@ -220,6 +222,31 @@ func (h *TGBotAPIHandler) revokeInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.repo.RevokeInviteCode(r.Context(), body.Code); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+// deleteInvite POST /invites/delete {code}:硬删除邀请码(仅限已不可用的:已撤销/已用尽/已过期)。
+func (h *TGBotAPIHandler) deleteInvite(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid body")
+		return
+	}
+	code := strings.TrimSpace(body.Code)
+	if code == "" {
+		writeJSONError(w, http.StatusBadRequest, "code 必填")
+		return
+	}
+	if ic, ok := h.repo.GetInviteCode(r.Context(), code); ok && ic.IsUsable() {
+		writeJSONError(w, http.StatusBadRequest, "邀请码仍可用,请先撤销再删除")
+		return
+	}
+	if err := h.repo.DeleteInviteCode(r.Context(), code); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}

@@ -1629,6 +1629,50 @@ func validateInboundClientsSelfOnly(ctx context.Context, inboundReq map[string]i
 	return ""
 }
 
+// validateInboundTLS 兜底校验入站 TLS 证书完整性。Hysteria2 / VLESS+TLS / Trojan+TLS 等
+// 协议必 TLS,前端漏填证书时 xray-core 报 "both file and bytes are empty" 对用户不友好,
+// 还容易让人误以为是后端 bug。这里在 forward 前明确拒绝并给出用户能看懂的提示。
+//
+// 调用时机:在 resolveInboundCert 之后,inboundReq 已经反映了"托管证书路径已注入"的最新形态。
+// 兼容 action: "add" / "" 两种入站添加场景;remove/update 不校验。
+func validateInboundTLS(inboundReq map[string]interface{}) string {
+	inbound, _ := inboundReq["inbound"].(map[string]interface{})
+	if inbound == nil {
+		return ""
+	}
+	ss, _ := inbound["streamSettings"].(map[string]interface{})
+	if ss == nil {
+		return ""
+	}
+	sec, _ := ss["security"].(string)
+	if sec != "tls" {
+		return ""
+	}
+	protocol, _ := inbound["protocol"].(string)
+	tls, _ := ss["tlsSettings"].(map[string]interface{})
+	certs, _ := tls["certificates"].([]interface{})
+	if len(certs) == 0 {
+		return fmt.Sprintf("入站 %s 启用了 TLS,但未配置证书。请在「证书来源」选择主控托管证书,或手动填写 certificateFile + keyFile 路径", strings.ToLower(protocol))
+	}
+	for i, c := range certs {
+		cm, ok := c.(map[string]interface{})
+		if !ok {
+			return fmt.Sprintf("入站 %s 的 tlsSettings.certificates[%d] 不是对象", strings.ToLower(protocol), i)
+		}
+		certFile, _ := cm["certificateFile"].(string)
+		keyFile, _ := cm["keyFile"].(string)
+		certBytes, _ := cm["certificate"].([]interface{})
+		keyBytes, _ := cm["key"].([]interface{})
+		if strings.TrimSpace(certFile) == "" && len(certBytes) == 0 {
+			return fmt.Sprintf("入站 %s 的证书 #%d 没填证书文件路径(certificateFile),也没填证书内联内容(certificate)。请补全后重试", strings.ToLower(protocol), i)
+		}
+		if strings.TrimSpace(keyFile) == "" && len(keyBytes) == 0 {
+			return fmt.Sprintf("入站 %s 的证书 #%d 没填私钥文件路径(keyFile),也没填私钥内联内容(key)。请补全后重试", strings.ToLower(protocol), i)
+		}
+	}
+	return ""
+}
+
 // resolveInboundCert 处理「添加 tls 入站时选了主控托管证书」(前端通过带外字段 cert_id 指定):
 // 同步把证书下发到该 agent 的 xray 证书目录,再把 tlsSettings.certificates 改写成 agent 上的真实路径,
 // 并在 serverName 为空时补成证书域名。返回改写后的 body(未触发则返回 nil);失败返回错误,由调用方透传给前端。
@@ -1745,6 +1789,20 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 				return
 			} else if newBody != nil {
 				body = newBody
+				// 重新 unmarshal 一下,后续 TLS 兜底校验要看到最新的 certificates 值
+				_ = json.Unmarshal(body, &inboundReq)
+			}
+		}
+	}
+
+	// TLS 入站兜底校验:hysteria2 / vless+tls / trojan 等必须 TLS 的协议,前端漏填证书时
+	// xray-core 的错是 "both file and bytes are empty",对用户不友好且让人怀疑后端 bug。
+	// 这里在 forward 前明确拒绝并给出用户能看懂的提示。
+	if r.Method == http.MethodPost && inboundReq != nil {
+		if action, _ := inboundReq["action"].(string); action == "" || strings.ToLower(action) == "add" {
+			if msg := validateInboundTLS(inboundReq); msg != "" {
+				remoteWriteError(w, http.StatusBadRequest, msg)
+				return
 			}
 		}
 	}

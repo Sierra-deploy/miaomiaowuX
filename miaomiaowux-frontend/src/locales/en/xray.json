@@ -307,6 +307,9 @@
     "anytlsServerHasNoDomain": "AnyTLS+TLS requires a server domain; current server has no domain configured. Set one in Server Management first.",
     "anytlsNoCertsExpert": "No valid certificates available. Issue one in Certificate Management, or switch to Expert mode to fill cert paths manually.",
     "anytlsNoMatchingCert": "No certificate found matching {{domain}}. Switch to Expert mode to fill paths manually, or issue a matching certificate.",
+    "tlsServerHasNoDomain": "{{protocol}}+TLS requires a server domain; current server has no domain configured. Set one in Server Management first.",
+    "tlsNoCertsExpert": "No valid certificates available. Issue one in Certificate Management, or switch to Expert mode to fill cert paths manually.",
+    "tlsNoMatchingCert": "No certificate found matching {{domain}}. Switch to Expert mode to fill paths manually, or issue a matching certificate.",
     "anytlsRealityTitle": "AnyTLS + REALITY client compatibility notice",
     "anytlsRealityDesc": "Clash does not support AnyTLS-REALITY; Mihomo docs explicitly state it will not be supported.",
     "viewDocs": "View Docs"
