@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"miaomiaowux/internal/storage"
 )
@@ -35,6 +36,11 @@ type securitySettingsResponse struct {
 	// SkipLocalIP 命中本地/私有/loopback IP 时,跳过封禁与频率限制,
 	// 防反代/docker 未传 XFF 时一次封禁打死所有真实用户。
 	SkipLocalIP bool `json:"skip_local_ip"`
+
+	// Cloudflare Turnstile 人机验证(登录页)。两 key 都填才启用,任一空 → 自动降级跳过。
+	// GET 时 secret_key 走 maskSecret() 输出 `xxxx****yyyy`,前端 PUT 把 mask 占位回传时 writeSecurityKVs 跳过该字段。
+	TurnstileSiteKey   string `json:"turnstile_site_key"`
+	TurnstileSecretKey string `json:"turnstile_secret_key"`
 }
 
 // 默认值 — 跟 NewXxxProtector hardcoded 默认值一致,KV 缺失时返回这套。
@@ -50,6 +56,8 @@ var securityDefaults = securitySettingsResponse{
 	SubRateLimit:            60,
 	SubRateWindowMinutes:    1,
 	SkipLocalIP:             true,
+	TurnstileSiteKey:        "",
+	TurnstileSecretKey:      "",
 }
 
 type SecuritySettingsHandler struct {
@@ -160,7 +168,34 @@ func LoadSecuritySettings(ctx context.Context, repo *storage.TrafficRepository) 
 	resp.SubRateLimit = readIntSetting(ctx, repo, "sub_rate_limit", resp.SubRateLimit)
 	resp.SubRateWindowMinutes = readIntSetting(ctx, repo, "sub_rate_window_minutes", resp.SubRateWindowMinutes)
 	resp.SkipLocalIP = readBoolSetting(ctx, repo, "skip_local_ip", resp.SkipLocalIP)
+	resp.TurnstileSiteKey = readStringSetting(ctx, repo, "turnstile_site_key", "")
+	// secret_key 输出 mask,不直接吐明文给前端(虽然是 admin auth,但避免 devtools/日志泄露)
+	resp.TurnstileSecretKey = maskSecret(readStringSetting(ctx, repo, "turnstile_secret_key", ""))
 	return resp
+}
+
+func readStringSetting(ctx context.Context, repo *storage.TrafficRepository, key, fallback string) string {
+	v, err := repo.GetSystemSetting(ctx, key)
+	if err != nil {
+		return fallback
+	}
+	return v
+}
+
+// maskSecret 输出 `xxxx****yyyy` — 前 4 + 后 4 字符,中间 ****。短 secret(<12)返回 `****`,
+// 空字符串原样返回 `""`,前端据此判断"未配置"。PUT 时 isMaskedSecret 识别这个占位避免误写。
+func maskSecret(s string) string {
+	if s == "" {
+		return ""
+	}
+	if len(s) < 12 {
+		return "****"
+	}
+	return s[:4] + "****" + s[len(s)-4:]
+}
+
+func isMaskedSecret(s string) bool {
+	return strings.Contains(s, "****")
 }
 
 func writeSecurityKVs(ctx context.Context, repo *storage.TrafficRepository, p *securitySettingsResponse) error {
@@ -176,10 +211,24 @@ func writeSecurityKVs(ctx context.Context, repo *storage.TrafficRepository, p *s
 		"sub_rate_limit":             strconv.Itoa(p.SubRateLimit),
 		"sub_rate_window_minutes":    strconv.Itoa(p.SubRateWindowMinutes),
 		"skip_local_ip":              strconv.FormatBool(p.SkipLocalIP),
+		"turnstile_site_key":         strings.TrimSpace(p.TurnstileSiteKey),
 	}
 	for k, v := range pairs {
 		if err := repo.SetSystemSetting(ctx, k, v); err != nil {
 			return fmt.Errorf("set %s: %w", k, err)
+		}
+	}
+	// secret_key 特殊处理:收到 mask 占位(`xxxx****yyyy`)表示前端没改,保留原值不动。
+	// 真要清空 secret → 把 site_key 留空即可触发 Turnstile.Enabled()=false 整体降级。
+	secret := strings.TrimSpace(p.TurnstileSecretKey)
+	if secret != "" && !isMaskedSecret(secret) {
+		if err := repo.SetSystemSetting(ctx, "turnstile_secret_key", secret); err != nil {
+			return fmt.Errorf("set turnstile_secret_key: %w", err)
+		}
+	} else if secret == "" {
+		// 主动清空(纯空串,跟 mask 占位区分):清掉 secret_key
+		if err := repo.SetSystemSetting(ctx, "turnstile_secret_key", ""); err != nil {
+			return fmt.Errorf("clear turnstile_secret_key: %w", err)
 		}
 	}
 	return nil

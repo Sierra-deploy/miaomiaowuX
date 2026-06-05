@@ -8,14 +8,16 @@ import (
 	"time"
 
 	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/captcha"
 	"miaomiaowux/internal/logger"
 	"miaomiaowux/internal/storage"
 )
 
 type loginRequest struct {
-	Username   string `json:"username"`
-	Password   string `json:"password"`
-	RememberMe bool   `json:"remember_me"`
+	Username       string `json:"username"`
+	Password       string `json:"password"`
+	RememberMe     bool   `json:"remember_me"`
+	TurnstileToken string `json:"turnstile_token"`
 }
 
 type loginResponse struct {
@@ -64,7 +66,7 @@ func GetClientIP(r *http.Request) string {
 	return ip
 }
 
-func NewLoginHandler(manager *auth.Manager, tokens *auth.TokenStore, repo *storage.TrafficRepository, rateLimiter *LoginRateLimiter, twoFactorStore *auth.TwoFactorPendingStore) http.Handler {
+func NewLoginHandler(manager *auth.Manager, tokens *auth.TokenStore, repo *storage.TrafficRepository, rateLimiter *LoginRateLimiter, twoFactorStore *auth.TwoFactorPendingStore, turnstile *captcha.Turnstile) http.Handler {
 	if manager == nil || tokens == nil {
 		panic("login handler requires manager and token store")
 	}
@@ -94,6 +96,13 @@ func NewLoginHandler(manager *auth.Manager, tokens *auth.TokenStore, repo *stora
 				writeError(w, http.StatusTooManyRequests, errors.New("too many login attempts, please try again later"))
 				return
 			}
+		}
+
+		// Turnstile 人机验证:Enabled 内部已查 DB 看两 key 是否都填,未填则放行。
+		// 失败按 plan 用 400 — 跟 mmwx-license 一致(不混淆 401 invalid credentials 的语义)。
+		if turnstile != nil && !turnstile.Verify(r.Context(), payload.TurnstileToken, clientIP) {
+			writeError(w, http.StatusBadRequest, errors.New("captcha verification failed"))
+			return
 		}
 
 		ok, err := manager.Authenticate(r.Context(), username, payload.Password)

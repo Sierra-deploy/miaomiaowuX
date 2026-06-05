@@ -12,11 +12,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"encoding/json"
 	"syscall"
 	"time"
 
 	"miaomiaowux/internal/agentlog"
 	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/captcha"
 	"miaomiaowux/internal/notify"
 	"miaomiaowux/internal/patches"
 	"miaomiaowux/internal/child"
@@ -227,7 +229,23 @@ func main() {
 	)
 	loginRateLimiter.SetSkipLocalIP(secCfg.SkipLocalIP)
 	twoFactorStore := auth.NewTwoFactorPendingStore(5 * time.Minute)
-	mux.Handle("/api/login", handler.NewLoginHandler(authManager, tokenStore, repo, loginRateLimiter, twoFactorStore))
+	turnstileVerifier := captcha.New(repo)
+
+	// 公开端点:登录页前端拉这个拿 site_key 决定是否渲染 widget(在 auth 之前必须可访问)。
+	// 两 key 都空时 enabled=false → 前端不渲染、后端 Verify 直接放行,无侵入降级。
+	mux.HandleFunc("/api/captcha/config", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"enabled":  turnstileVerifier.Enabled(r.Context()),
+			"site_key": turnstileVerifier.SiteKey(r.Context()),
+		})
+	})
+
+	mux.Handle("/api/login", handler.NewLoginHandler(authManager, tokenStore, repo, loginRateLimiter, twoFactorStore, turnstileVerifier))
 	mux.Handle("/api/login/2fa", handler.NewTwoFactorLoginHandler(tokenStore, repo, twoFactorStore))
 	mux.Handle("/api/login/recovery", handler.NewRecoveryLoginHandler(tokenStore, repo, twoFactorStore))
 

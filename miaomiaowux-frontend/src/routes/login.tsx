@@ -25,6 +25,7 @@ import {
   InputOTPSlot,
 } from '@/components/ui/input-otp'
 import { handleServerError } from '@/lib/handle-server-error'
+import { useTurnstile } from '@/hooks/useTurnstile'
 
 export const Route = createFileRoute('/login')({
   beforeLoad: () => {
@@ -126,8 +127,20 @@ function LoginView() {
     },
   })
 
+  // Turnstile captcha config — 公开端点,login 前必须可访问,降级时 site_key 为空字符串。
+  const { data: captchaConfig } = useQuery({
+    queryKey: ['captcha-config'],
+    queryFn: async () => {
+      const response = await api.get('/api/captcha/config')
+      return response.data as { enabled: boolean; site_key: string }
+    },
+    staleTime: Infinity,
+  })
+  const siteKey = captchaConfig?.site_key || ''
+  const { containerRef: turnstileRef, token: turnstileToken, reset: resetTurnstile } = useTurnstile(siteKey)
+
   const login = useMutation({
-    mutationFn: async (values: LoginFormValues) => {
+    mutationFn: async (values: LoginFormValues & { turnstile_token: string }) => {
       const response = await api.post('/api/login', values)
       return response.data as LoginResponse & { requires_2fa?: boolean; two_factor_token?: string }
     },
@@ -142,11 +155,17 @@ function LoginView() {
     onError: (error) => {
       handleServerError(error)
       toast.error(t('login.failed'))
+      // Turnstile token 一次性,登录失败必须 reset 才能再用 — 否则下一次提交仍带旧失效 token
+      resetTurnstile()
     },
   })
 
   const onSubmit = form.handleSubmit((values) => {
-    login.mutate(values)
+    if (siteKey && !turnstileToken) {
+      toast.error(t('login.captchaRequired'))
+      return
+    }
+    login.mutate({ ...values, turnstile_token: turnstileToken })
   })
 
   if (twoFactorToken) {
@@ -202,6 +221,7 @@ function LoginView() {
                 {t('login.rememberMe')}
               </Label>
             </div>
+            {siteKey && <div ref={turnstileRef} className='flex justify-center' />}
             <Button type='submit' className='w-full' disabled={login.isPending}>
               {login.isPending ? t('login.loggingIn') : t('login.loginButton')}
             </Button>

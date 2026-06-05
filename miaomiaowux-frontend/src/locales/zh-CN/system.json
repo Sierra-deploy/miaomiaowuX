@@ -7,6 +7,16 @@
     "enableLabel": "启用短链接",
     "updated": "短链接设置已更新"
   },
+  "turnstile": {
+    "title": "Cloudflare 人机验证",
+    "description": "登录页接入 Cloudflare Turnstile,防爆破登录。两 key 都填才启用,任一空自动降级跳过验证。",
+    "siteKey": "Site Key",
+    "siteKeyPlaceholder": "0x4AAAAAAA... (公开,前端 widget 用)",
+    "secretKey": "Secret Key",
+    "secretKeyPlaceholder": "0x4AAAAAAA... (保密,后端 siteverify 用)",
+    "secretKeyConfigured": "已配置(填入新值替换)",
+    "hint": "前往 Cloudflare Dashboard → Turnstile 申请 Site Key 与 Secret Key,详见文档「Cloudflare Turnstile」教程页。"
+  },
   "intervals": {
     "title": "定时配置",
     "description": "配置各项定时任务的执行间隔；网速/上报间隔即时生效，其余修改后需重启服务",

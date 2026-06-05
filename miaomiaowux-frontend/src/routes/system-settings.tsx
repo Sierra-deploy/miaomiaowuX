@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute, Link, redirect } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { BookOpen, CircleHelp, Copy, Eye, EyeOff, KeyRound, Lock, RefreshCw, Settings, Timer } from 'lucide-react'
+import { BookOpen, CircleHelp, Copy, Eye, EyeOff, KeyRound, Lock, RefreshCw, Settings, ShieldCheck, Timer } from 'lucide-react'
 import { Topbar } from '@/components/layout/topbar'
 import {
   Card,
@@ -493,6 +493,10 @@ function SystemSettingsPage() {
     sub_rate_limit: number
     sub_rate_window_minutes: number
     skip_local_ip: boolean
+    turnstile_site_key: string
+    // secret_key:GET 拿到 masked(xxxx****yyyy),PUT 时 mask 占位会被后端识别并跳过写入 —
+    // 因此当前 state 里它要么是 mask,要么是用户实际输入的新值。
+    turnstile_secret_key: string
   }
   const [securityConfig, setSecurityConfig] = useState<SecurityConfig>({
     login_rate_max_attempts: 5,
@@ -506,6 +510,8 @@ function SystemSettingsPage() {
     sub_rate_limit: 60,
     sub_rate_window_minutes: 1,
     skip_local_ip: true,
+    turnstile_site_key: '',
+    turnstile_secret_key: '',
   })
   const { data: securityData } = useQuery({
     queryKey: ['security-settings'],
@@ -1519,6 +1525,44 @@ function SystemSettingsPage() {
                   </div>
                 )}
               </div>
+            </CardContent>
+          </Card>
+
+          {/* Cloudflare Turnstile 人机验证 — 两 key 都填才启用,任一空自动降级跳过验证。
+              secret_key 由后端走 mask 输出,前端显示 placeholder 提示"已配置"或"未配置"。
+              保存时 input.value 等于 mask 占位 → 后端 isMaskedSecret 检测跳过不写。 */}
+          <Card>
+            <CardHeader className='pb-4'>
+              <CardTitle className='flex items-center gap-2'>
+                <ShieldCheck className='h-5 w-5' />
+                {t('turnstile.title')}
+              </CardTitle>
+              <CardDescription>{t('turnstile.description')}</CardDescription>
+            </CardHeader>
+            <CardContent className='space-y-4'>
+              <div className='space-y-1'>
+                <Label htmlFor='turnstile-site-key' className='text-sm'>{t('turnstile.siteKey')}</Label>
+                <Input
+                  id='turnstile-site-key'
+                  type='text'
+                  placeholder={t('turnstile.siteKeyPlaceholder')}
+                  value={securityConfig.turnstile_site_key}
+                  onChange={(e) => setSecurityConfig({ ...securityConfig, turnstile_site_key: e.target.value })}
+                  onBlur={() => saveSecurityConfig({ turnstile_site_key: securityConfig.turnstile_site_key })}
+                />
+              </div>
+              <div className='space-y-1'>
+                <Label htmlFor='turnstile-secret-key' className='text-sm'>{t('turnstile.secretKey')}</Label>
+                <Input
+                  id='turnstile-secret-key'
+                  type='password'
+                  placeholder={securityConfig.turnstile_secret_key ? t('turnstile.secretKeyConfigured') : t('turnstile.secretKeyPlaceholder')}
+                  value={securityConfig.turnstile_secret_key}
+                  onChange={(e) => setSecurityConfig({ ...securityConfig, turnstile_secret_key: e.target.value })}
+                  onBlur={() => saveSecurityConfig({ turnstile_secret_key: securityConfig.turnstile_secret_key })}
+                />
+              </div>
+              <p className='text-xs text-muted-foreground'>{t('turnstile.hint')}</p>
             </CardContent>
           </Card>
 

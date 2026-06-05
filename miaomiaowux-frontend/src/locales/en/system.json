@@ -7,6 +7,16 @@
     "enableLabel": "Enable Short Links",
     "updated": "Short link settings updated"
   },
+  "turnstile": {
+    "title": "Cloudflare Turnstile",
+    "description": "Captcha protection for the login page. Both keys must be set to enable; either empty falls back to no verification.",
+    "siteKey": "Site Key",
+    "siteKeyPlaceholder": "0x4AAAAAAA... (public, used by the frontend widget)",
+    "secretKey": "Secret Key",
+    "secretKeyPlaceholder": "0x4AAAAAAA... (private, used by backend siteverify)",
+    "secretKeyConfigured": "Configured (type a new value to replace)",
+    "hint": "Apply for Site Key & Secret Key at Cloudflare Dashboard → Turnstile. See the 'Cloudflare Turnstile' tutorial in the docs for step-by-step setup."
+  },
   "intervals": {
     "title": "Scheduled Tasks",
     "description": "Configure task intervals. Speed/report intervals apply instantly; others need a restart.",
