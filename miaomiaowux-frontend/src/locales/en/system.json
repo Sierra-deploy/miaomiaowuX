@@ -15,7 +15,8 @@
     "secretKey": "Secret Key",
     "secretKeyPlaceholder": "0x4AAAAAAA... (private, used by backend siteverify)",
     "secretKeyConfigured": "Configured (type a new value to replace)",
-    "hint": "Apply for Site Key & Secret Key at Cloudflare Dashboard → Turnstile. See the 'Cloudflare Turnstile' tutorial in the docs for step-by-step setup."
+    "hint": "Apply for Site Key & Secret Key at Cloudflare Dashboard → Turnstile.",
+    "docLinkLabel": "Read the full setup guide →"
   },
   "intervals": {
     "title": "Scheduled Tasks",

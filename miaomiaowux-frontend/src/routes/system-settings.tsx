@@ -1562,7 +1562,17 @@ function SystemSettingsPage() {
                   onBlur={() => saveSecurityConfig({ turnstile_secret_key: securityConfig.turnstile_secret_key })}
                 />
               </div>
-              <p className='text-xs text-muted-foreground'>{t('turnstile.hint')}</p>
+              <p className='text-xs text-muted-foreground'>
+                {t('turnstile.hint')}{' '}
+                <a
+                  href='https://miaomiaowu.net/x/docs/tool-cloudflare-turnstile'
+                  target='_blank'
+                  rel='noopener noreferrer'
+                  className='text-primary hover:underline'
+                >
+                  {t('turnstile.docLinkLabel')}
+                </a>
+              </p>
             </CardContent>
           </Card>
 

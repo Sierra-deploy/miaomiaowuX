@@ -15,7 +15,8 @@
     "secretKey": "Secret Key",
     "secretKeyPlaceholder": "0x4AAAAAAA... (保密,后端 siteverify 用)",
     "secretKeyConfigured": "已配置(填入新值替换)",
-    "hint": "前往 Cloudflare Dashboard → Turnstile 申请 Site Key 与 Secret Key,详见文档「Cloudflare Turnstile」教程页。"
+    "hint": "前往 Cloudflare Dashboard → Turnstile 申请 Site Key 与 Secret Key。",
+    "docLinkLabel": "查看完整配置教程 →"
   },
   "intervals": {
     "title": "定时配置",
