@@ -518,55 +518,35 @@ export function InboundWizard({
   // security 判定与 submit 时 hasCert(L1062-1071)一致:TLS-含变体(TLS / TLS-WS / XTLS-Vision)放行,
   // REALITY / XTLS-Vision-REALITY 走自己的域名+key 路径,不需证书。
   useEffect(() => {
-    if (!isSimpleMode) {
-      console.debug('[auto-cert] skip: not simple mode')
-      return
-    }
+    if (!isSimpleMode) return
     const tlsAutoCertProtocols = ['Anytls', 'Hysteria2', 'VLESS', 'VMess', 'Trojan']
-    if (!tlsAutoCertProtocols.includes(selectedProtocol)) {
-      console.debug('[auto-cert] skip: protocol not in whitelist', selectedProtocol)
-      return
-    }
-    if (!selectedSecurity.includes('TLS') || selectedSecurity.includes('REALITY')) {
-      console.debug('[auto-cert] skip: security not TLS or contains REALITY', selectedSecurity)
-      return
-    }
+    if (!tlsAutoCertProtocols.includes(selectedProtocol)) return
+    if (!selectedSecurity.includes('TLS') || selectedSecurity.includes('REALITY')) return
     const serverDomain = (currentServerDetail?.domain || '').trim()
-    console.debug('[auto-cert] running:', { selectedProtocol, selectedSecurity, serverDomain, validCertCount: validCertificates?.length })
     if (!serverDomain) {
       toast.warning(t('wizard.tlsServerHasNoDomain', { protocol: selectedProtocol }), {
         id: `tls-no-domain-${selectedProtocol}`,
       })
       return
     }
-    if (!validCertificates) {
-      console.debug('[auto-cert] skip: certificates query not ready yet')
-      return
-    }
+    if (!validCertificates) return
     if (validCertificates.length === 0) {
       toast.warning(t('wizard.tlsNoCertsExpert'), { id: `tls-no-certs-${selectedProtocol}` })
       return
     }
     const matched = validCertificates.find((c) => certDomainMatches(serverDomain, c.domain))
     if (matched) {
-      console.debug('[auto-cert] matched:', matched.domain, 'id=', matched.id)
       setFormData((prev: any) => {
-        if (prev.cert_id === matched.id && prev.serverName === serverDomain) {
-          console.debug('[auto-cert] formData already up-to-date, skip setState')
-          return prev
-        }
-        const next = {
+        if (prev.cert_id === matched.id && prev.serverName === serverDomain) return prev
+        return {
           ...prev,
           cert_id: matched.id,
           certificateFile: matched.cert_path,
           keyFile: matched.key_path,
           serverName: prev.serverName || serverDomain,
         }
-        console.debug('[auto-cert] setFormData →', { cert_id: next.cert_id, certificateFile: next.certificateFile, serverName: next.serverName })
-        return next
       })
     } else {
-      console.debug('[auto-cert] no matching cert for', serverDomain, 'available:', validCertificates.map((c) => c.domain))
       toast.warning(
         t('wizard.tlsNoMatchingCert', { domain: serverDomain }),
         { id: `tls-no-matching-cert-${selectedProtocol}`, duration: 8000 }
