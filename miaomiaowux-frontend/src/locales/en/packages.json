@@ -16,7 +16,21 @@
     "cycleDaysValue": "{{days}} days",
     "speedLimit": "Speed Limit",
     "deviceLimit": "Devices",
-    "twoway": "Two-way"
+    "twoway": "Two-way",
+    "trafficMode": "Counting",
+    "twowayLabel": "Two-way ×2",
+    "onewayLabel": "One-way",
+    "template": "Subscription template",
+    "templateDefault": "System default",
+    "limits": "Rate limits",
+    "unlimited": "unlimited",
+    "deviceN_one": "{{n}} device",
+    "deviceN_other": "{{n}} devices",
+    "deviceUnlimited": "no device cap",
+    "perNodeOverride_one": "{{count}} per-node override",
+    "perNodeOverride_other": "{{count}} per-node overrides",
+    "nodeCount": "Bound nodes",
+    "allNodes": "all nodes"
   },
   "dialog": {
     "createTitle": "Create Package Template",
@@ -65,5 +79,16 @@
     "trafficPositive": "Traffic quota must be greater than 0",
     "cyclePositive": "Billing cycle must be greater than 0",
     "externalNodeWarning": "Note: External node traffic is not counted in package traffic!"
+  },
+  "list": {
+    "name": "Package",
+    "traffic": "Traffic",
+    "cycle": "Cycle",
+    "mode": "Mode",
+    "template": "Template",
+    "limits": "Limits",
+    "nodes": "Nodes",
+    "actions": "Actions",
+    "daysUnit": "d"
   }
 }

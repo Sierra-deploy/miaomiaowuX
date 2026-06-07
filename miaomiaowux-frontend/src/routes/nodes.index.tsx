@@ -5806,7 +5806,7 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
         onOpenChange={setTunnelDialogOpen}
       />
       <Dialog open={routedOutboundsDialogOpen} onOpenChange={setRoutedOutboundsDialogOpen}>
-        <DialogContent className='sm:max-w-5xl max-h-[85vh] overflow-y-auto'>
+        <DialogContent className='sm:max-w-5xl lg:max-w-6xl xl:max-w-[1320px] max-h-[85vh] overflow-y-auto'>
           <DialogHeader>
             <DialogTitle>路由出站管理</DialogTitle>
           </DialogHeader>

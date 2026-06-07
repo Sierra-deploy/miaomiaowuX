@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { Edit2, RefreshCw, Trash2, Plus, Package } from 'lucide-react'
+import { Edit2, RefreshCw, Trash2, Plus, Package, Network, Gauge, FileText, ArrowLeftRight, ArrowRight, Info as InfoIcon } from 'lucide-react'
 
 import { ProFeatureGate } from '@/components/pro-feature-gate'
 import { Button } from '@/components/ui/button'
@@ -17,6 +17,10 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { EmptyStateCard } from '@/components/ui/empty-state'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { ViewToggle, type ViewMode } from '@/components/ui/view-toggle'
+import { useIsMobile } from '@/hooks/use-mobile'
 import {
   Dialog,
   DialogContent,
@@ -157,6 +161,20 @@ function PackagesPage() {
       return ai - bi
     })
   }, [nodesData, userConfigData])
+
+  // node_id → node info(用于卡片 hover tooltip 反查节点名)
+  const nodeMap = useMemo(() => {
+    const m = new Map<number, any>()
+    for (const n of nodes) {
+      m.set(n.id, n)
+    }
+    return m
+  }, [nodes])
+
+  // 卡片 / 列表 视图切换;手机端强制 card
+  const isMobile = useIsMobile()
+  const [viewModeRaw, setViewMode] = useState<ViewMode>(() => (localStorage.getItem('packages-view-mode') as ViewMode) || 'card')
+  const viewMode: ViewMode = isMobile ? 'card' : viewModeRaw
 
   const createMutation = useMutation({
     mutationFn: async (data: PackageFormData) => {
@@ -301,6 +319,70 @@ function PackagesPage() {
 
   const packages = packagesData?.packages || []
 
+  // 套餐模板 filename → 显示名;不在列表里时退回 filename
+  const templateLabel = (filename: string | undefined): string => {
+    if (!filename) return t('card.templateDefault', { defaultValue: '系统默认' })
+    const found = ruleTemplates.find((rt) => rt.filename === filename)
+    return found?.name || filename
+  }
+
+  // 节点 id → 套餐对该节点的实际限速值(显示用):pkg.node_speed_limits[id] ?? pkg.speed_limit_mbps
+  const nodeSpeedFor = (pkg: PackageTemplate, nodeId: number): number => {
+    const map = pkg.node_speed_limits || {}
+    const k = String(nodeId)
+    if (k in map) return Number(map[k])
+    return pkg.speed_limit_mbps || 0
+  }
+  const nodeDeviceFor = (pkg: PackageTemplate, nodeId: number): number => {
+    const map = pkg.node_device_limits || {}
+    const k = String(nodeId)
+    if (k in map) return Number(map[k])
+    return pkg.device_limit || 0
+  }
+  // 该套餐有多少个节点单独设置了 per-node 限速 / 客户端数
+  const perNodeCount = (pkg: PackageTemplate): number => {
+    const a = Object.keys(pkg.node_speed_limits || {}).length
+    const b = Object.keys(pkg.node_device_limits || {}).length
+    return Math.max(a, b)
+  }
+  const fmtSpeed = (v: number): string => (v > 0 ? `${v} Mbps` : t('card.unlimited', { defaultValue: '不限速' }))
+  const fmtDevice = (v: number): string => (v > 0 ? String(v) : t('card.unlimited', { defaultValue: '不限' }))
+
+  // 节点列表 tooltip 内容(节点名 + per-node 限速/客户端数;若该节点有套餐覆盖则高亮显示)
+  const renderNodeTooltip = (pkg: PackageTemplate) => {
+    const nodeIds = pkg.nodes || []
+    if (nodeIds.length === 0) {
+      return <div className="text-xs">{t('card.allNodes', { defaultValue: '不选 = 套餐可使用所有节点' })}</div>
+    }
+    return (
+      <div className="space-y-1 max-h-[60vh] overflow-y-auto">
+        {nodeIds.map((id) => {
+          const n = nodeMap.get(id)
+          const name = n?.node_name || `node-${id}`
+          const speed = nodeSpeedFor(pkg, id)
+          const device = nodeDeviceFor(pkg, id)
+          const speedKey = String(id)
+          const hasSpeedOverride = pkg.node_speed_limits && speedKey in pkg.node_speed_limits
+          const hasDeviceOverride = pkg.node_device_limits && speedKey in pkg.node_device_limits
+          return (
+            <div key={id} className="flex items-center justify-between gap-3 text-[11px] py-0.5">
+              <span className="truncate max-w-[200px]">{name}</span>
+              <span className="flex items-center gap-1.5 shrink-0 tabular-nums">
+                <span className={hasSpeedOverride ? 'text-primary font-medium' : 'text-muted-foreground'}>
+                  ↓ {fmtSpeed(speed)}
+                </span>
+                <span className="text-muted-foreground">|</span>
+                <span className={hasDeviceOverride ? 'text-primary font-medium' : 'text-muted-foreground'}>
+                  {fmtDevice(device)}
+                </span>
+              </span>
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
   return (
     <div className="container mx-auto py-8 px-4 pt-24">
       <div className="mb-8 flex items-center justify-between">
@@ -310,10 +392,15 @@ function PackagesPage() {
             {t('page.description')}
           </p>
         </div>
-        <Button onClick={handleCreate}>
-          <Plus className="h-4 w-4 mr-2" />
-          {t('buttons.createTemplate')}
-        </Button>
+        <div className="flex items-center gap-2">
+          {!isMobile && (
+            <ViewToggle view={viewMode} onViewChange={(v) => { setViewMode(v); localStorage.setItem('packages-view-mode', v) }} />
+          )}
+          <Button onClick={handleCreate}>
+            <Plus className="h-4 w-4 mr-2" />
+            {t('buttons.createTemplate')}
+          </Button>
+        </div>
       </div>
 
       {isLoading ? (
@@ -332,78 +419,186 @@ function PackagesPage() {
             </Button>
           )}
         />
+      ) : viewMode === 'card' ? (
+        <TooltipProvider delayDuration={150}>
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
+            {packages.map((pkg: PackageTemplate) => {
+              const perNode = perNodeCount(pkg)
+              const nodeCount = pkg.nodes?.length || 0
+              return (
+                <Card key={pkg.id}>
+                  <CardHeader>
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex-1 min-w-0">
+                        <CardTitle className="text-lg truncate">
+                          {pkg.name}
+                        </CardTitle>
+                        {pkg.description && (
+                          <CardDescription className="mt-1 line-clamp-2">
+                            {pkg.description}
+                          </CardDescription>
+                        )}
+                      </div>
+                      <Badge variant="secondary" className="shrink-0">{pkg.traffic_limit_gb} GB</Badge>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="space-y-2.5 text-sm">
+                    {/* 流量周期 + 流量统计方式同一行 */}
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">{t('card.cycleDays')}</span>
+                      <span className="font-medium">{t('card.cycleDaysValue', { days: pkg.cycle_days })}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground flex items-center gap-1.5">
+                        {pkg.traffic_mode === 'twoway' ? <ArrowLeftRight className="h-3.5 w-3.5" /> : <ArrowRight className="h-3.5 w-3.5" />}
+                        {t('card.trafficMode', { defaultValue: '流量统计' })}
+                      </span>
+                      <span className="font-medium">
+                        {pkg.traffic_mode === 'twoway'
+                          ? t('card.twowayLabel', { defaultValue: '双向 ×2' })
+                          : t('card.onewayLabel', { defaultValue: '单向' })}
+                      </span>
+                    </div>
+                    {/* 套餐模板 */}
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground flex items-center gap-1.5">
+                        <FileText className="h-3.5 w-3.5" />
+                        {t('card.template', { defaultValue: '订阅模板' })}
+                      </span>
+                      <span className="font-medium truncate max-w-[160px]">{templateLabel(pkg.template_filename)}</span>
+                    </div>
+                    {/* 限速配置 */}
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground flex items-center gap-1.5">
+                        <Gauge className="h-3.5 w-3.5" />
+                        {t('card.limits', { defaultValue: '限速配置' })}
+                      </span>
+                      <span className="font-medium flex items-center gap-1.5">
+                        {fmtSpeed(pkg.speed_limit_mbps)} · {pkg.device_limit > 0 ? t('card.deviceN', { n: pkg.device_limit, defaultValue: `${pkg.device_limit} 设备` }) : t('card.deviceUnlimited', { defaultValue: '设备不限' })}
+                        {perNode > 0 && (
+                          <Badge variant="outline" className="text-[10px] px-1 py-0 border-primary text-primary">
+                            {t('card.perNodeOverride', { count: perNode, defaultValue: `${perNode} 节点单独配置` })}
+                          </Badge>
+                        )}
+                      </span>
+                    </div>
+                    {/* 节点数(hover tooltip) */}
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <div className="flex items-center justify-between cursor-help">
+                          <span className="text-muted-foreground flex items-center gap-1.5">
+                            <Network className="h-3.5 w-3.5" />
+                            {t('card.nodeCount', { defaultValue: '关联节点' })}
+                          </span>
+                          <span className="font-medium flex items-center gap-1">
+                            {nodeCount > 0 ? nodeCount : t('card.allNodes', { defaultValue: '全部节点' })}
+                            <InfoIcon className="h-3 w-3 text-muted-foreground/60" />
+                          </span>
+                        </div>
+                      </TooltipTrigger>
+                      <TooltipContent side="left" className="max-w-md p-3">
+                        {renderNodeTooltip(pkg)}
+                      </TooltipContent>
+                    </Tooltip>
+                  </CardContent>
+                  <CardFooter className="flex gap-2 flex-wrap">
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleEdit(pkg)}
+                    >
+                      <Edit2 className="h-4 w-4 mr-1" />
+                      {t('actions.edit', { ns: 'common' })}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => handleDelete(pkg.id, pkg.name)}
+                      className="text-red-600 hover:text-red-700"
+                    >
+                      <Trash2 className="h-4 w-4 mr-1" />
+                      {t('actions.delete', { ns: 'common' })}
+                    </Button>
+                  </CardFooter>
+                </Card>
+              )
+            })}
+          </div>
+        </TooltipProvider>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
-          {packages.map((pkg: PackageTemplate) => (
-            <Card key={pkg.id}>
-              <CardHeader>
-                <div className="flex items-start justify-between gap-2">
-                  <div className="flex-1 min-w-0">
-                    <CardTitle className="text-lg truncate">
-                      {pkg.name}
-                    </CardTitle>
-                    {pkg.description && (
-                      <CardDescription className="mt-1">
-                        {pkg.description}
-                      </CardDescription>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    {pkg.traffic_mode === 'twoway' && (
-                      <Badge variant="outline" className="border-orange-500 text-orange-600 dark:text-orange-400">{t('card.twoway')}</Badge>
-                    )}
-                    <Badge variant="secondary">{pkg.traffic_limit_gb} GB</Badge>
-                  </div>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-muted-foreground">{t('card.trafficQuota')}</span>
-                  <span className="text-sm font-medium">{pkg.traffic_limit_gb} GB</span>
-                </div>
-                <div className="flex items-center justify-between">
-                  <span className="text-sm text-muted-foreground">{t('card.cycleDays')}</span>
-                  <span className="text-sm font-medium">{t('card.cycleDaysValue', { days: pkg.cycle_days })}</span>
-                </div>
-                {(pkg.speed_limit_mbps > 0 || pkg.device_limit > 0) && (
-                  <div className="flex items-center gap-3 flex-wrap">
-                    {pkg.speed_limit_mbps > 0 && (
-                      <div className="flex items-center gap-1">
-                        <span className="text-sm text-muted-foreground">{t('card.speedLimit')}</span>
-                        <span className="text-sm font-medium">{pkg.speed_limit_mbps} Mbps</span>
-                      </div>
-                    )}
-                    {pkg.device_limit > 0 && (
-                      <div className="flex items-center gap-1">
-                        <span className="text-sm text-muted-foreground">{t('card.deviceLimit')}</span>
-                        <span className="text-sm font-medium">{pkg.device_limit}</span>
-                      </div>
-                    )}
-                  </div>
-                )}
-              </CardContent>
-              <CardFooter className="flex gap-2 flex-wrap">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleEdit(pkg)}
-                >
-                  <Edit2 className="h-4 w-4 mr-1" />
-                  {t('actions.edit', { ns: 'common' })}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => handleDelete(pkg.id, pkg.name)}
-                  className="text-red-600 hover:text-red-700"
-                >
-                  <Trash2 className="h-4 w-4 mr-1" />
-                  {t('actions.delete', { ns: 'common' })}
-                </Button>
-              </CardFooter>
-            </Card>
-          ))}
-        </div>
+        // 列表视图
+        <TooltipProvider delayDuration={150}>
+          <div className="border rounded-md overflow-x-auto">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>{t('list.name', { defaultValue: '套餐名' })}</TableHead>
+                  <TableHead className="text-right">{t('list.traffic', { defaultValue: '流量' })}</TableHead>
+                  <TableHead className="text-right">{t('list.cycle', { defaultValue: '周期' })}</TableHead>
+                  <TableHead>{t('list.mode', { defaultValue: '统计' })}</TableHead>
+                  <TableHead>{t('list.template', { defaultValue: '模板' })}</TableHead>
+                  <TableHead>{t('list.limits', { defaultValue: '限速' })}</TableHead>
+                  <TableHead className="text-right">{t('list.nodes', { defaultValue: '节点' })}</TableHead>
+                  <TableHead className="text-right">{t('list.actions', { defaultValue: '操作' })}</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {packages.map((pkg: PackageTemplate) => {
+                  const perNode = perNodeCount(pkg)
+                  const nodeCount = pkg.nodes?.length || 0
+                  return (
+                    <TableRow key={pkg.id}>
+                      <TableCell>
+                        <div className="font-medium">{pkg.name}</div>
+                        {pkg.description && (
+                          <div className="text-xs text-muted-foreground line-clamp-1">{pkg.description}</div>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right tabular-nums">{pkg.traffic_limit_gb} GB</TableCell>
+                      <TableCell className="text-right tabular-nums">{pkg.cycle_days} {t('list.daysUnit', { defaultValue: '天' })}</TableCell>
+                      <TableCell>
+                        {pkg.traffic_mode === 'twoway'
+                          ? t('card.twowayLabel', { defaultValue: '双向 ×2' })
+                          : t('card.onewayLabel', { defaultValue: '单向' })}
+                      </TableCell>
+                      <TableCell className="text-xs truncate max-w-[140px]">{templateLabel(pkg.template_filename)}</TableCell>
+                      <TableCell className="text-xs">
+                        <div>{fmtSpeed(pkg.speed_limit_mbps)}</div>
+                        <div className="text-muted-foreground">
+                          {pkg.device_limit > 0 ? t('card.deviceN', { n: pkg.device_limit, defaultValue: `${pkg.device_limit} 设备` }) : t('card.deviceUnlimited', { defaultValue: '设备不限' })}
+                          {perNode > 0 && <span className="ml-1 text-primary">· {t('card.perNodeOverride', { count: perNode, defaultValue: `${perNode} 单独` })}</span>}
+                        </div>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <span className="inline-flex items-center gap-1 cursor-help">
+                              <Network className="h-3.5 w-3.5 text-muted-foreground" />
+                              <span className="tabular-nums">{nodeCount > 0 ? nodeCount : '∞'}</span>
+                            </span>
+                          </TooltipTrigger>
+                          <TooltipContent side="left" className="max-w-md p-3">
+                            {renderNodeTooltip(pkg)}
+                          </TooltipContent>
+                        </Tooltip>
+                      </TableCell>
+                      <TableCell className="text-right">
+                        <div className="flex items-center justify-end gap-1">
+                          <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => handleEdit(pkg)} title={t('actions.edit', { ns: 'common' })}>
+                            <Edit2 className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button size="icon" variant="ghost" className="h-7 w-7 text-red-600 hover:text-red-700" onClick={() => handleDelete(pkg.id, pkg.name)} title={t('actions.delete', { ns: 'common' })}>
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          </div>
+        </TooltipProvider>
       )}
 
       {/* Create/Edit Dialog */}

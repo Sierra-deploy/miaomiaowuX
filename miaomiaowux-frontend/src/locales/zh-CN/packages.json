@@ -16,7 +16,21 @@
     "cycleDaysValue": "{{days}} 天",
     "speedLimit": "限速",
     "deviceLimit": "设备数",
-    "twoway": "双向"
+    "twoway": "双向",
+    "trafficMode": "流量统计",
+    "twowayLabel": "双向 ×2",
+    "onewayLabel": "单向",
+    "template": "订阅模板",
+    "templateDefault": "系统默认",
+    "limits": "限速配置",
+    "unlimited": "不限速",
+    "deviceN_one": "{{n}} 设备",
+    "deviceN_other": "{{n}} 设备",
+    "deviceUnlimited": "设备不限",
+    "perNodeOverride_one": "{{count}} 节点单独配置",
+    "perNodeOverride_other": "{{count}} 节点单独配置",
+    "nodeCount": "关联节点",
+    "allNodes": "全部节点"
   },
   "dialog": {
     "createTitle": "创建套餐模板",
@@ -65,5 +79,16 @@
     "trafficPositive": "流量额度必须大于0",
     "cyclePositive": "计量周期必须大于0",
     "externalNodeWarning": "请注意，外部节点流量不在套餐流量统计内！！！"
+  },
+  "list": {
+    "name": "套餐名",
+    "traffic": "流量",
+    "cycle": "周期",
+    "mode": "统计",
+    "template": "模板",
+    "limits": "限速",
+    "nodes": "节点",
+    "actions": "操作",
+    "daysUnit": "天"
   }
 }

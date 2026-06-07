@@ -291,7 +291,7 @@ function XrayServersPage() {
     traffic_used_gb: '',
     traffic_reset_day: '',
     steal_mode: 'default',
-    xray_mode: 'external',
+    xray_mode: 'embedded',
     traffic_stats_mode: 'both' as 'both' | 'upload' | 'download',
   })
   const [configServer, setConfigServer] = useState<{ type: 'remote'; server: RemoteServer } | null>(null)
@@ -475,7 +475,7 @@ function XrayServersPage() {
       queryClient.invalidateQueries({ queryKey: ['remote-servers'] })
       setIsEditRemoteServerDialogOpen(false)
       setEditingRemoteServer(null)
-      setRemoteFormData({ name: '', pull_address: '', domain: '', traffic_limit_gb: '', traffic_used_gb: '', traffic_reset_day: '', steal_mode: 'default', xray_mode: 'external', traffic_stats_mode: 'both' })
+      setRemoteFormData({ name: '', pull_address: '', domain: '', traffic_limit_gb: '', traffic_used_gb: '', traffic_reset_day: '', steal_mode: 'default', xray_mode: 'embedded', traffic_stats_mode: 'both' })
       toast.success(t('servers.serverUpdated'))
     },
     onError: handleServerError,
