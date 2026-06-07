@@ -54,6 +54,8 @@ interface PackageTemplate {
   reset_day: number
   nodes: number[]
   node_multipliers?: Record<string, number>
+  node_speed_limits?: Record<string, number>
+  node_device_limits?: Record<string, number>
   speed_limit_mbps: number
   device_limit: number
   traffic_mode: string
@@ -70,6 +72,8 @@ interface PackageFormData {
   cycle_days: number
   nodes: number[]
   node_multipliers: Record<number, number> // node_id → 倍率;默认 1 不写入
+  node_speed_limits: Record<number, number>  // node_id → Mbps;不在 map 表示沿用 speed_limit_mbps,0 = 显式不限速
+  node_device_limits: Record<number, number> // 同上
   speed_limit_mbps: number
   device_limit: number
   traffic_mode: string
@@ -96,6 +100,8 @@ function PackagesPage() {
     cycle_days: 30,
     nodes: [],
     node_multipliers: {},
+    node_speed_limits: {},
+    node_device_limits: {},
     speed_limit_mbps: 0,
     device_limit: 0,
     traffic_mode: 'oneway',
@@ -202,11 +208,13 @@ function PackagesPage() {
       reset_day: 1,
       nodes: [],
       node_multipliers: {},
+      node_speed_limits: {},
+      node_device_limits: {},
       speed_limit_mbps: 0,
       device_limit: 0,
       traffic_mode: 'oneway',
       template_filename: '',
-    })
+    } as PackageFormData)
   }
 
   const handleCreate = () => {
@@ -223,6 +231,18 @@ function PackagesPage() {
         mults[Number(k)] = v
       }
     }
+    const speedLimits: Record<number, number> = {}
+    if (pkg.node_speed_limits) {
+      for (const [k, v] of Object.entries(pkg.node_speed_limits)) {
+        speedLimits[Number(k)] = v
+      }
+    }
+    const deviceLimits: Record<number, number> = {}
+    if (pkg.node_device_limits) {
+      for (const [k, v] of Object.entries(pkg.node_device_limits)) {
+        deviceLimits[Number(k)] = v
+      }
+    }
     setFormData({
       id: pkg.id,
       name: pkg.name,
@@ -231,6 +251,8 @@ function PackagesPage() {
       cycle_days: pkg.cycle_days,
       nodes: pkg.nodes || [],
       node_multipliers: mults,
+      node_speed_limits: speedLimits,
+      node_device_limits: deviceLimits,
       speed_limit_mbps: pkg.speed_limit_mbps || 0,
       device_limit: pkg.device_limit || 0,
       traffic_mode: pkg.traffic_mode || 'oneway',
@@ -395,7 +417,7 @@ function PackagesPage() {
           }
         }}
       >
-        <DialogContent className="max-w-3xl md:max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
+        <DialogContent className="max-w-3xl md:max-w-5xl lg:max-w-6xl max-h-[90vh] flex flex-col overflow-hidden">
           <DialogHeader>
             <DialogTitle>{editingPackage ? t('dialog.editTitle') : t('dialog.createTitle')}</DialogTitle>
             <DialogDescription>
@@ -546,11 +568,13 @@ function PackagesPage() {
                   </div>
                 ) : (
                   <div className="border rounded-md overflow-y-auto flex-1 max-h-72 md:max-h-none bg-card">
-                    {/* 表头:sticky 在滚动时也可见,提示后面的数字框是倍率 */}
+                    {/* 表头:sticky 在滚动时也可见,提示后面的数字框列含义 */}
                     <div className="sticky top-0 z-10 flex items-center gap-2 pl-2.5 pr-2 py-1.5 bg-muted/60 backdrop-blur-sm border-b text-[11px] font-medium text-muted-foreground">
                       <div className="w-4 shrink-0" />{/* checkbox 位 */}
                       <span className="flex-1">{t('dialog.nodeColumnName', { defaultValue: '节点' })}</span>
                       <span className="shrink-0 w-[72px] text-center">{t('dialog.nodeMultiplierHeader', { defaultValue: '流量倍率' })}</span>
+                      <span className="shrink-0 w-[88px] text-center">{t('dialog.nodeSpeedLimitHeader', { defaultValue: '限速 Mbps' })}</span>
+                      <span className="shrink-0 w-[72px] text-center">{t('dialog.nodeDeviceLimitHeader', { defaultValue: '客户端数' })}</span>
                     </div>
                     <div className="divide-y">
                     {nodes.map((node: any) => {
@@ -573,10 +597,20 @@ function PackagesPage() {
                               if (checked) {
                                 setFormData({ ...formData, nodes: [...formData.nodes, node.id] })
                               } else {
-                                // 取消勾选时同步删 multiplier,避免后端清理逻辑兜底也保留个孤儿
+                                // 取消勾选时同步清 per-node 倍率 / 限速 / 客户端数,避免孤儿数据残留
                                 const nextMults = { ...formData.node_multipliers }
+                                const nextSpeed = { ...formData.node_speed_limits }
+                                const nextDevice = { ...formData.node_device_limits }
                                 delete nextMults[node.id]
-                                setFormData({ ...formData, nodes: formData.nodes.filter((id) => id !== node.id), node_multipliers: nextMults })
+                                delete nextSpeed[node.id]
+                                delete nextDevice[node.id]
+                                setFormData({
+                                  ...formData,
+                                  nodes: formData.nodes.filter((id) => id !== node.id),
+                                  node_multipliers: nextMults,
+                                  node_speed_limits: nextSpeed,
+                                  node_device_limits: nextDevice,
+                                })
                               }
                             }}
                             className="shrink-0"
@@ -620,6 +654,64 @@ function PackagesPage() {
                                 />
                                 <span className="text-sm font-semibold text-primary leading-none select-none">×</span>
                               </>
+                            ) : (
+                              <span className="text-xs text-muted-foreground/50">—</span>
+                            )}
+                          </div>
+                          {/* per-node 限速:占位符显示套餐通用值作"继承"提示;空=继承;0=显式不限速 */}
+                          <div className="flex items-center justify-end gap-0.5 shrink-0 w-[88px]">
+                            {isChecked ? (
+                              <Input
+                                type="number"
+                                step="1"
+                                min="0"
+                                value={formData.node_speed_limits[node.id] ?? ''}
+                                placeholder={formData.speed_limit_mbps > 0 ? String(formData.speed_limit_mbps) : '∞'}
+                                onChange={(e) => {
+                                  const raw = e.target.value
+                                  const nextSpeed = { ...formData.node_speed_limits }
+                                  if (raw === '') {
+                                    delete nextSpeed[node.id]
+                                  } else {
+                                    const v = parseFloat(raw)
+                                    if (Number.isFinite(v) && v >= 0) {
+                                      nextSpeed[node.id] = v
+                                    }
+                                  }
+                                  setFormData({ ...formData, node_speed_limits: nextSpeed })
+                                }}
+                                className="no-spin h-7 w-[72px] px-1.5 text-xs text-right tabular-nums"
+                                aria-label={t('dialog.nodeSpeedLimit', { defaultValue: '节点限速 (Mbps)' })}
+                              />
+                            ) : (
+                              <span className="text-xs text-muted-foreground/50">—</span>
+                            )}
+                          </div>
+                          {/* per-node 客户端数:同上 */}
+                          <div className="flex items-center justify-end gap-0.5 shrink-0 w-[72px]">
+                            {isChecked ? (
+                              <Input
+                                type="number"
+                                step="1"
+                                min="0"
+                                value={formData.node_device_limits[node.id] ?? ''}
+                                placeholder={formData.device_limit > 0 ? String(formData.device_limit) : '∞'}
+                                onChange={(e) => {
+                                  const raw = e.target.value
+                                  const nextDevice = { ...formData.node_device_limits }
+                                  if (raw === '') {
+                                    delete nextDevice[node.id]
+                                  } else {
+                                    const v = parseInt(raw, 10)
+                                    if (Number.isFinite(v) && v >= 0) {
+                                      nextDevice[node.id] = v
+                                    }
+                                  }
+                                  setFormData({ ...formData, node_device_limits: nextDevice })
+                                }}
+                                className="no-spin h-7 w-[56px] px-1.5 text-xs text-right tabular-nums"
+                                aria-label={t('dialog.nodeDeviceLimit', { defaultValue: '节点客户端数' })}
+                              />
                             ) : (
                               <span className="text-xs text-muted-foreground/50">—</span>
                             )}

@@ -51,7 +51,11 @@
     "nodeColumnName": "节点",
     "nodeMultiplierHeader": "倍率",
     "saving": "保存中...",
-    "confirmDelete": "确定要删除套餐模板 \"{{name}}\" 吗？"
+    "confirmDelete": "确定要删除套餐模板 \"{{name}}\" 吗？",
+    "nodeSpeedLimitHeader": "限速 Mbps",
+    "nodeDeviceLimitHeader": "客户端数",
+    "nodeSpeedLimit": "节点限速 (Mbps);留空 = 沿用套餐通用值;0 = 该节点不限速",
+    "nodeDeviceLimit": "节点客户端数;留空 = 沿用套餐通用值;0 = 不限"
   },
   "toast": {
     "createSuccess": "套餐模板创建成功",

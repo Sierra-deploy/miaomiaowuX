@@ -51,7 +51,11 @@
     "nodeColumnName": "Node",
     "nodeMultiplierHeader": "Multiplier",
     "saving": "Saving...",
-    "confirmDelete": "Are you sure you want to delete package template \"{{name}}\"?"
+    "confirmDelete": "Are you sure you want to delete package template \"{{name}}\"?",
+    "nodeSpeedLimitHeader": "Speed Mbps",
+    "nodeDeviceLimitHeader": "Devices",
+    "nodeSpeedLimit": "Node speed cap (Mbps); empty = inherit package; 0 = unlimited on this node",
+    "nodeDeviceLimit": "Node device limit; empty = inherit package; 0 = unlimited"
   },
   "toast": {
     "createSuccess": "Package template created",

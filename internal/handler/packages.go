@@ -64,6 +64,25 @@ func (h *PackageCreateHandler) SetLicenseManager(mgr *license.Manager) {
 	h.licenseManager = mgr
 }
 
+// hasNonZeroLimit 任何一项 > 0 都算"启用限速"。0 表示显式不限速,不算"启用"。
+func hasNonZeroLimit(m map[int64]float64) bool {
+	for _, v := range m {
+		if v > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func hasNonZeroIntLimit(m map[int64]int) bool {
+	for _, v := range m {
+		if v > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 type createPackageRequest struct {
 	Name             string                       `json:"name"`
 	Description      string                       `json:"description"`
@@ -73,6 +92,8 @@ type createPackageRequest struct {
 	ResetDay         int                          `json:"reset_day"`
 	Nodes            []int64                      `json:"nodes"`
 	NodeMultipliers  map[int64]float64            `json:"node_multipliers"` // node_id → 倍率
+	NodeSpeedLimits  map[int64]float64            `json:"node_speed_limits"`  // 套餐 per-node 限速覆盖 (Mbps);0=显式不限速,缺省=继承 SpeedLimitMbps
+	NodeDeviceLimits map[int64]int                `json:"node_device_limits"` // 套餐 per-node 客户端数覆盖;0=显式不限,缺省=继承 DeviceLimit
 	SpeedLimitMbps   float64                      `json:"speed_limit_mbps"`
 	DeviceLimit      int                          `json:"device_limit"`
 	AutoSpeedRules   []storage.AutoSpeedLimitRule `json:"auto_speed_rules"`
@@ -122,8 +143,8 @@ func (h *PackageCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// limiter 是 PRO feature — SpeedLimitMbps > 0 / AutoSpeedRules 非空 都视为启用限速。
-	if (req.SpeedLimitMbps > 0 || len(req.AutoSpeedRules) > 0) && h.licenseManager != nil && !h.licenseManager.HasFeature("limiter") {
+	// limiter 是 PRO feature — SpeedLimitMbps > 0 / AutoSpeedRules 非空 / 任何 per-node 限速值 > 0 都视为启用限速。
+	if (req.SpeedLimitMbps > 0 || len(req.AutoSpeedRules) > 0 || hasNonZeroLimit(req.NodeSpeedLimits) || hasNonZeroIntLimit(req.NodeDeviceLimits)) && h.licenseManager != nil && !h.licenseManager.HasFeature("limiter") {
 		http.Error(w, "限速器是 PRO 功能,需要许可证", http.StatusForbidden)
 		return
 	}
@@ -164,6 +185,8 @@ func (h *PackageCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		ResetDay:          req.ResetDay,
 		Nodes:             nodes,
 		NodeMultipliers:   req.NodeMultipliers,
+		NodeSpeedLimits:   req.NodeSpeedLimits,
+		NodeDeviceLimits:  req.NodeDeviceLimits,
 		SpeedLimitMbps:    req.SpeedLimitMbps,
 		DeviceLimit:       req.DeviceLimit,
 		AutoSpeedRules:    req.AutoSpeedRules,
@@ -216,6 +239,8 @@ type updatePackageRequest struct {
 	ResetDay         int                          `json:"reset_day"`
 	Nodes            []int64                      `json:"nodes"`
 	NodeMultipliers  map[int64]float64            `json:"node_multipliers"` // node_id → 倍率
+	NodeSpeedLimits  map[int64]float64            `json:"node_speed_limits"`  // 套餐 per-node 限速覆盖 (Mbps);0=显式不限速,缺省=继承 SpeedLimitMbps
+	NodeDeviceLimits map[int64]int                `json:"node_device_limits"` // 套餐 per-node 客户端数覆盖;0=显式不限,缺省=继承 DeviceLimit
 	SpeedLimitMbps   float64                      `json:"speed_limit_mbps"`
 	DeviceLimit      int                          `json:"device_limit"`
 	AutoSpeedRules   []storage.AutoSpeedLimitRule `json:"auto_speed_rules"`
@@ -251,8 +276,8 @@ func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// limiter 是 PRO feature — SpeedLimitMbps > 0 / AutoSpeedRules 非空 都视为启用限速。
-	if (req.SpeedLimitMbps > 0 || len(req.AutoSpeedRules) > 0) && h.licenseManager != nil && !h.licenseManager.HasFeature("limiter") {
+	// limiter 是 PRO feature — SpeedLimitMbps > 0 / AutoSpeedRules 非空 / 任何 per-node 限速值 > 0 都视为启用限速。
+	if (req.SpeedLimitMbps > 0 || len(req.AutoSpeedRules) > 0 || hasNonZeroLimit(req.NodeSpeedLimits) || hasNonZeroIntLimit(req.NodeDeviceLimits)) && h.licenseManager != nil && !h.licenseManager.HasFeature("limiter") {
 		http.Error(w, "限速器是 PRO 功能,需要许可证", http.StatusForbidden)
 		return
 	}
@@ -300,6 +325,8 @@ func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		ResetDay:          req.ResetDay,
 		Nodes:             nodes,
 		NodeMultipliers:   req.NodeMultipliers,
+		NodeSpeedLimits:   req.NodeSpeedLimits,
+		NodeDeviceLimits:  req.NodeDeviceLimits,
 		SpeedLimitMbps:    req.SpeedLimitMbps,
 		DeviceLimit:       req.DeviceLimit,
 		AutoSpeedRules:    req.AutoSpeedRules,

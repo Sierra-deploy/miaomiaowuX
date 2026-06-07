@@ -38,6 +38,85 @@ func (p *LimiterConfigPusher) SetLicenseManager(mgr *license.Manager) {
 	p.licenseManager = mgr
 }
 
+// resolveLimit 按 4 段优先级算用户在指定节点上的限速 + 客户端数:
+//
+//	user.NodeSpeedLimitOverrides[node_id]  ← 用户级 per-node(map 含 key 即生效)
+//	  ?? user.SpeedLimitOverride           ← 用户级全局
+//	  ?? pkg.NodeSpeedLimits[node_id]      ← 套餐级 per-node(含 routed→父 一次跳)
+//	  ?? pkg.SpeedLimitMbps                ← 套餐通用
+//	  ?? 0 (unlimited)
+//
+// 每一层用 "map 是否含 key" / "指针是否非 nil" 判断;**不能用 value > 0 判断**,
+// 因为 0 是显式不限速的有意义值。客户端数同结构。
+// nodeID = 0 时跳过 per-node 层,只用全局/通用层(常见于反查未命中)。
+func resolveLimit(user *storage.User, pkg *storage.Package, nodeID, parentID int64) (speedMbps float64, deviceLimit int) {
+	// 限速
+	switch {
+	case user != nil && nodeID > 0:
+		if v, ok := user.NodeSpeedLimitOverrides[nodeID]; ok {
+			speedMbps = v
+			break
+		}
+		if parentID > 0 {
+			if v, ok := user.NodeSpeedLimitOverrides[parentID]; ok {
+				speedMbps = v
+				break
+			}
+		}
+		if user.SpeedLimitOverride != nil {
+			speedMbps = *user.SpeedLimitOverride
+			break
+		}
+		if pkg != nil {
+			if v, ok := pkg.SpeedLimitMbpsForNode(nodeID, &parentID); ok {
+				speedMbps = v
+				break
+			}
+			speedMbps = pkg.SpeedLimitMbps
+		}
+	case user != nil:
+		if user.SpeedLimitOverride != nil {
+			speedMbps = *user.SpeedLimitOverride
+		} else if pkg != nil {
+			speedMbps = pkg.SpeedLimitMbps
+		}
+	}
+
+	// 客户端数
+	switch {
+	case user != nil && nodeID > 0:
+		if v, ok := user.NodeDeviceLimitOverrides[nodeID]; ok {
+			deviceLimit = v
+			break
+		}
+		if parentID > 0 {
+			if v, ok := user.NodeDeviceLimitOverrides[parentID]; ok {
+				deviceLimit = v
+				break
+			}
+		}
+		if user.DeviceLimitOverride != nil {
+			deviceLimit = *user.DeviceLimitOverride
+			break
+		}
+		if pkg != nil {
+			if v, ok := pkg.DeviceLimitForNode(nodeID, &parentID); ok {
+				deviceLimit = v
+				break
+			}
+			deviceLimit = pkg.DeviceLimit
+		}
+	case user != nil:
+		if user.DeviceLimitOverride != nil {
+			deviceLimit = *user.DeviceLimitOverride
+		} else if pkg != nil {
+			deviceLimit = pkg.DeviceLimit
+		}
+	}
+
+	return
+}
+
 func (p *LimiterConfigPusher) BuildLimiterConfigForServer(ctx context.Context, serverID int64) ([]WSLimiterConfigPayload, error) {
 	configs, err := p.repo.GetUserInboundConfigsByServer(ctx, serverID)
 	if err != nil {
@@ -65,6 +144,22 @@ func (p *LimiterConfigPusher) BuildLimiterConfigForServer(ctx context.Context, s
 		return nil, nil
 	}
 
+	// 预加载 inbound_tag → node(主账号走 physical,routed 子账号走 routed)
+	// 同 tag 上可能同时有 physical + routed,所以用两张 map 分流。
+	physicalByTag := make(map[string]storage.InboundNodeRef)
+	routedByTag := make(map[string]storage.InboundNodeRef)
+	if serverName != "" {
+		if refs, err := p.repo.ListInboundNodeRefsForServer(ctx, serverName); err == nil {
+			for _, r := range refs {
+				if r.NodeType == "routed" {
+					routedByTag[r.InboundTag] = r
+				} else {
+					physicalByTag[r.InboundTag] = r
+				}
+			}
+		}
+	}
+
 	usernames := make(map[string]bool)
 	for _, c := range configs {
 		usernames[c.Username] = true
@@ -73,14 +168,9 @@ func (p *LimiterConfigPusher) BuildLimiterConfigForServer(ctx context.Context, s
 		usernames[sa.Username] = true
 	}
 
-	type userLimits struct {
-		email       string
-		speedMbps   float64
-		deviceLimit int
-		packageID   int64
-	}
-	userLimitMap := make(map[string]userLimits)
-
+	// 缓存 user 对象(指针)和套餐(指针);**不预算限速值** — 现在同一用户在不同 inbound 上限速可能不同,
+	// 推迟到内层按 (user, pkg, node_id) lookup。
+	userMap := make(map[string]*storage.User)
 	pkgCache := make(map[int64]*storage.Package)
 
 	for username := range usernames {
@@ -91,83 +181,76 @@ func (p *LimiterConfigPusher) BuildLimiterConfigForServer(ctx context.Context, s
 		if !user.IsActive {
 			continue
 		}
-
-		var speedMbps float64
-		var deviceLimit int
-
+		u := user // 避免循环变量 alias
+		userMap[username] = &u
 		if user.PackageID > 0 {
-			pkg, ok := pkgCache[user.PackageID]
-			if !ok {
-				pkg, err = p.repo.GetPackage(ctx, user.PackageID)
-				if err == nil {
+			if _, ok := pkgCache[user.PackageID]; !ok {
+				if pkg, err := p.repo.GetPackage(ctx, user.PackageID); err == nil {
 					pkgCache[user.PackageID] = pkg
 				}
 			}
-			if pkg != nil {
-				speedMbps = pkg.SpeedLimitMbps
-				deviceLimit = pkg.DeviceLimit
-			}
-		}
-
-		if user.SpeedLimitOverride != nil {
-			speedMbps = *user.SpeedLimitOverride
-		}
-		if user.DeviceLimitOverride != nil {
-			deviceLimit = *user.DeviceLimitOverride
-		}
-
-		userLimitMap[username] = userLimits{
-			email:       username,
-			speedMbps:   speedMbps,
-			deviceLimit: deviceLimit,
-			packageID:   user.PackageID,
 		}
 	}
 
 	tagUsers := make(map[string][]WSUserLimitInfo)
 	tagPkgIDs := make(map[string]map[int64]bool)
+
+	// 主账号:走 c.InboundTag,反查 physical 节点的 (nodeID, parentID)
 	for _, c := range configs {
-		ul, ok := userLimitMap[c.Username]
+		user, ok := userMap[c.Username]
 		if !ok {
 			continue
 		}
+		var pkg *storage.Package
+		if user.PackageID > 0 {
+			pkg = pkgCache[user.PackageID]
+		}
+		ref := physicalByTag[c.InboundTag] // 不存在时 NodeID=0,resolveLimit 容错
+		speedMbps, deviceLimit := resolveLimit(user, pkg, ref.NodeID, ref.ParentID)
 		var speedBytes uint64
-		if ul.speedMbps > 0 {
-			speedBytes = uint64(ul.speedMbps * 1000000 / 8)
+		if speedMbps > 0 {
+			speedBytes = uint64(speedMbps * 1000000 / 8)
 		}
 		tagUsers[c.InboundTag] = append(tagUsers[c.InboundTag], WSUserLimitInfo{
-			Email:       ul.email,
+			Email:       user.Username,
 			SpeedLimit:  speedBytes,
-			DeviceLimit: ul.deviceLimit,
+			DeviceLimit: deviceLimit,
 		})
-		if ul.packageID > 0 {
+		if user.PackageID > 0 {
 			if tagPkgIDs[c.InboundTag] == nil {
 				tagPkgIDs[c.InboundTag] = make(map[int64]bool)
 			}
-			tagPkgIDs[c.InboundTag][ul.packageID] = true
+			tagPkgIDs[c.InboundTag][user.PackageID] = true
 		}
 	}
-	// 子账号:为每个 active 子账号 emit 一条 rule,继承所属 username 的 speed/device 阈值。
-	// 同 email 写一份独立 rule(子账号不共享限速桶,跟主账号语义一致)。
+
+	// 子账号:走 sa.InboundTag,反查 routed 节点的 (nodeID, parentID)。
+	// routed 节点的 per-node 限速继承 parent 物理节点(在 resolveLimit 内自动处理)。
 	for _, sa := range subaccs {
-		ul, ok := userLimitMap[sa.Username]
+		user, ok := userMap[sa.Username]
 		if !ok {
 			continue
 		}
+		var pkg *storage.Package
+		if user.PackageID > 0 {
+			pkg = pkgCache[user.PackageID]
+		}
+		ref := routedByTag[sa.InboundTag]
+		speedMbps, deviceLimit := resolveLimit(user, pkg, ref.NodeID, ref.ParentID)
 		var speedBytes uint64
-		if ul.speedMbps > 0 {
-			speedBytes = uint64(ul.speedMbps * 1000000 / 8)
+		if speedMbps > 0 {
+			speedBytes = uint64(speedMbps * 1000000 / 8)
 		}
 		tagUsers[sa.InboundTag] = append(tagUsers[sa.InboundTag], WSUserLimitInfo{
 			Email:       sa.Email,
 			SpeedLimit:  speedBytes,
-			DeviceLimit: ul.deviceLimit,
+			DeviceLimit: deviceLimit,
 		})
-		if ul.packageID > 0 {
+		if user.PackageID > 0 {
 			if tagPkgIDs[sa.InboundTag] == nil {
 				tagPkgIDs[sa.InboundTag] = make(map[int64]bool)
 			}
-			tagPkgIDs[sa.InboundTag][ul.packageID] = true
+			tagPkgIDs[sa.InboundTag][user.PackageID] = true
 		}
 	}
 

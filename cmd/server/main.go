@@ -462,6 +462,7 @@ func main() {
 	mux.Handle("/api/federation/manage", federationHandler)
 	mux.Handle("/api/federation/server-info", federationHandler)
 	mux.Handle("/api/admin/users/limits", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserLimitsHandler(repo, limiterPusher, licenseManager)))
+	mux.Handle("/api/admin/users/node-limits", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserNodeLimitsHandler(repo, limiterPusher, licenseManager)))
 	mux.Handle("/api/admin/users/delete", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserDeleteHandler(repo, remoteManageHandler, limiterPusher)))
 	mux.Handle("/api/admin/users/status", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserStatusHandler(repo, remoteManageHandler, limiterPusher)))
 
