@@ -35,7 +35,7 @@ func NewBackupDownloadHandler(repo *storage.TrafficRepository) http.Handler {
 		}
 
 		// 创建 zip 文件
-		filename := fmt.Sprintf("miaomiaowu-backup-%s.zip", time.Now().Format("20060102-150405"))
+		filename := fmt.Sprintf("miaomiaowux-backup-%s.zip", time.Now().Format("20060102-150405"))
 		w.Header().Set("Content-Type", "application/zip")
 		w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%s", filename))
 

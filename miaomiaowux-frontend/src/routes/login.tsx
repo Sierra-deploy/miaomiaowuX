@@ -75,7 +75,7 @@ function LoginPage() {
 
   if (isCheckingSetup) {
     return (
-      <div className='login-pixel-bg flex min-h-svh items-center justify-center'>
+      <div className='login-pixel-bg flex min-h-svh items-center justify-center px-4 py-12'>
         <Card className='w-full max-w-sm'>
           <CardHeader className='space-y-2 text-center'>
             <CardTitle>{t('login.loading')}</CardTitle>
@@ -447,12 +447,24 @@ function InitialSetupView() {
   })
 
   const restoreBackup = useMutation({
+    // 用 fetch 绕开 axios 1.x 对 FormData 的 transformRequest — 避免 UI 卡在恢复中
     mutationFn: async (file: File) => {
       const formData = new FormData()
       formData.append('backup', file)
-      return api.post('/api/setup/restore-backup', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      })
+      const url = (api.defaults.baseURL ?? '') + '/api/setup/restore-backup'
+      const res = await fetch(url, { method: 'POST', body: formData })
+      const text = await res.text()
+      if (!res.ok) {
+        let msg = text
+        try {
+          const j = JSON.parse(text)
+          msg = j.error || j.message || text
+        } catch {
+          // raw text
+        }
+        throw new Error(msg || `HTTP ${res.status}`)
+      }
+      return text ? JSON.parse(text) : {}
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['setup-status'] })
@@ -462,9 +474,8 @@ function InitialSetupView() {
         window.location.reload()
       }, 1500)
     },
-    onError: (error) => {
-      handleServerError(error)
-      toast.error(t('setup.restoreFailed'))
+    onError: (e: Error) => {
+      toast.error(t('setup.restoreFailed'), { description: e.message })
     },
   })
 

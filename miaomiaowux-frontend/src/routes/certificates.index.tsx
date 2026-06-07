@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 
 import { Button } from '@/components/ui/button'
+import { useIsMobile } from '@/hooks/use-mobile'
 import {
   Dialog,
   DialogContent,
@@ -138,6 +139,7 @@ function CertificatesPage() {
   const queryClient = useQueryClient()
   const { auth } = useAuthStore()
   const { t } = useTranslation('certificates')
+  const isMobile = useIsMobile()
 
   const [isCreateDialogOpen, setIsCreateDialogOpen] = useState(false)
   const [deleteDialogCert, setDeleteDialogCert] = useState<Certificate | null>(null)
@@ -522,7 +524,7 @@ function CertificatesPage() {
           </div>
         </div>
       )}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-2xl font-bold flex items-center gap-2">
             <Shield className="h-6 w-6" />
@@ -532,7 +534,7 @@ function CertificatesPage() {
             {t('page.description')}
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 flex-wrap">
           {masterCertStatus?.domain && !masterCertStatus?.https_enabled && (
             <Button
               variant="outline"
@@ -582,6 +584,81 @@ function CertificatesPage() {
             contentClassName="px-6"
             emptyState={<EmptyState className="py-8" title={t('certTable.empty')} />}
           >
+            {isMobile ? (
+              <div className='space-y-2'>
+                {certificates?.map((cert) => (
+                  <div key={cert.id} className='rounded-md border bg-card p-3 space-y-2'>
+                    <div className='flex items-start justify-between gap-2'>
+                      <div className='min-w-0 flex-1'>
+                        <div className='font-medium text-sm truncate'>{cert.domain}</div>
+                        <div className='text-[11px] text-muted-foreground flex items-center gap-1 mt-0.5'>
+                          <Server className='h-3 w-3' />
+                          {cert.remote_server_id === 0 ? 'Master' : cert.remote_server_name || `#${cert.remote_server_id}`}
+                        </div>
+                      </div>
+                      {getStatusBadge(cert.status, cert.message)}
+                    </div>
+                    <div className='flex flex-wrap gap-1.5'>
+                      <Badge variant='outline' className='text-[10px]'>{getProviderLabel(cert.provider)}</Badge>
+                      <Badge variant='secondary' className='text-[10px]'>{cert.challenge_mode}</Badge>
+                      {cert.deploy_target && cert.deploy_target !== 'none' && (
+                        <Badge variant='outline' className='text-[10px] border-blue-500 text-blue-600'>{cert.deploy_target}</Badge>
+                      )}
+                    </div>
+                    <div className='flex items-center justify-between text-[11px]'>
+                      <span className='text-muted-foreground'>{t('certTable.columns.expiry')}</span>
+                      <div className='flex items-center gap-1.5'>
+                        <span>{formatDate(cert.expiry_date)}</span>
+                        {cert.status === 'valid' && getExpiryBadge(cert.expiry_date)}
+                      </div>
+                    </div>
+                    <div className='grid grid-cols-2 gap-2 text-[11px]'>
+                      <label className='flex items-center justify-between rounded bg-muted/30 px-2 py-1.5'>
+                        <span className='text-muted-foreground'>{t('certTable.columns.autoRenew')}</span>
+                        <Switch checked={cert.auto_renew} onCheckedChange={(c) => toggleAutoRenewMutation.mutate({ id: cert.id, auto_renew: c })} />
+                      </label>
+                      <label className='flex items-center justify-between rounded bg-muted/30 px-2 py-1.5'>
+                        <span className='text-muted-foreground'>{t('certTable.columns.autoDeploy')}</span>
+                        <Switch checked={cert.auto_deploy} onCheckedChange={(c) => toggleAutoDeployMutation.mutate({ id: cert.id, auto_deploy: c })} />
+                      </label>
+                    </div>
+                    <div className='flex flex-wrap gap-2 pt-2 border-t'>
+                      {cert.status !== 'failed' && (
+                        <Button size='sm' variant='outline' className='basis-[calc(50%-0.25rem)] grow-0'
+                          disabled={cert.status === 'pending'}
+                          onClick={() => renewMutation.mutate(cert.id)}>
+                          <RefreshCw className='h-3 w-3 mr-1' />{t('tooltips.manualRenew')}
+                        </Button>
+                      )}
+                      {cert.status === 'failed' && (
+                        <Button size='sm' variant='outline' className='basis-[calc(50%-0.25rem)] grow-0'
+                          onClick={() => renewMutation.mutate(cert.id)}>
+                          <RotateCcw className='h-3 w-3 mr-1' />{t('tooltips.reapply')}
+                        </Button>
+                      )}
+                      {cert.status === 'valid' && (
+                        <Button size='sm' variant='outline' className='basis-[calc(50%-0.25rem)] grow-0'
+                          onClick={() => {
+                            setDeployTarget(cert)
+                            const filename = cert.domain.startsWith('*.') ? `_.${cert.domain.slice(2)}` : cert.domain
+                            setDeployForm({
+                              deploy_cert_path: cert.deploy_cert_path || `/usr/local/nginx/cert/${filename}.pem`,
+                              deploy_key_path: cert.deploy_key_path || `/usr/local/nginx/cert/${filename}.key`,
+                            })
+                            setIsDeployDialogOpen(true)
+                          }}>
+                          <Upload className='h-3 w-3 mr-1' />{t('tooltips.deployCert')}
+                        </Button>
+                      )}
+                      <Button size='sm' variant='destructive' className='basis-[calc(50%-0.25rem)] grow-0'
+                        onClick={() => setDeleteDialogCert(cert)}>
+                        <Trash2 className='h-3 w-3 mr-1' />{t('actions.delete', { ns: 'common' })}
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
             <Table>
               <TableHeader>
                 <TableRow>
@@ -726,6 +803,7 @@ function CertificatesPage() {
                 ))}
               </TableBody>
             </Table>
+            )}
           </TableCard>
         </TabsContent>
 
@@ -750,6 +828,38 @@ function CertificatesPage() {
             contentClassName="px-6"
             emptyState={<EmptyState className="py-8" title={t('dnsProviderTable.empty')} />}
           >
+            {isMobile ? (
+              <div className='space-y-2'>
+                {dnsProviders?.map((provider) => (
+                  <div key={provider.ID} className='rounded-md border bg-card p-3 space-y-2'>
+                    <div className='flex items-center justify-between gap-2'>
+                      <div className='flex items-center gap-2 min-w-0'>
+                        <KeyRound className='h-4 w-4 text-muted-foreground shrink-0' />
+                        <span className='font-medium text-sm truncate'>{provider.Name}</span>
+                      </div>
+                      <Badge variant='outline' className='text-[10px] shrink-0'>
+                        {getDnsProviderLabel(provider.ProviderType)}
+                      </Badge>
+                    </div>
+                    <div className='flex items-center justify-between text-[11px]'>
+                      <span className='text-muted-foreground'>{t('dnsProviderTable.columns.createdAt')}</span>
+                      <span>{formatDate(provider.CreatedAt)}</span>
+                    </div>
+                    <div className='pt-2 border-t'>
+                      <Button
+                        variant='destructive'
+                        size='sm'
+                        className='w-full'
+                        onClick={() => deleteDNSProviderMutation.mutate(provider.ID)}
+                      >
+                        <Trash2 className='h-3 w-3 mr-1' />
+                        {t('actions.delete', { ns: 'common' })}
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
             <Table>
               <TableHeader>
                 <TableRow>
@@ -788,13 +898,14 @@ function CertificatesPage() {
                 ))}
               </TableBody>
             </Table>
+            )}
           </TableCard>
         </TabsContent>
       </Tabs>
 
       {/* Create Certificate Dialog */}
       <Dialog open={isCreateDialogOpen} onOpenChange={setIsCreateDialogOpen}>
-        <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
+        <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t('createDialog.title')}</DialogTitle>
             <DialogDescription>
@@ -999,7 +1110,7 @@ function CertificatesPage() {
 
       {/* DNS Provider Dialog */}
       <Dialog open={isDNSProviderDialogOpen} onOpenChange={setIsDNSProviderDialogOpen}>
-        <DialogContent className="max-w-md">
+        <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-md max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t('dnsProviderDialog.title')}</DialogTitle>
             <DialogDescription>

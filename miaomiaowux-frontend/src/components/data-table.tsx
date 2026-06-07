@@ -173,9 +173,10 @@ export function DataTable<T>({
                     </div>
                   )}
 
-                  {/* 卡片操作按钮 */}
+                  {/* 卡片操作按钮 — flex-wrap 允许超过 viewport 时换行,
+                      消费方按钮加 basis-[calc(50%-0.25rem)] 即可强制两列两行 */}
                   {mobileCard.actions && (
-                    <div className='flex items-center justify-center gap-2 pt-2 border-t' onClick={(e) => e.stopPropagation()}>
+                    <div className='flex flex-wrap items-center justify-center gap-2 pt-2 border-t' onClick={(e) => e.stopPropagation()}>
                       {mobileCard.actions(item)}
                     </div>
                   )}

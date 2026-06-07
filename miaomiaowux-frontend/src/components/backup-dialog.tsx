@@ -3,7 +3,8 @@ import { useMutation } from '@tanstack/react-query'
 import { Download, Upload, HardDrive, AlertTriangle } from 'lucide-react'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
-import { api } from '@/lib/api'
+import { api, AUTH_HEADER } from '@/lib/api'
+import { useAuthStore } from '@/stores/auth-store'
 import {
   Dialog,
   DialogContent,
@@ -36,7 +37,7 @@ export function BackupDialog({ open, onOpenChange }: BackupDialogProps) {
       const link = document.createElement('a')
       link.href = url
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
-      link.setAttribute('download', `miaomiaowu-backup-${timestamp}.zip`)
+      link.setAttribute('download', `miaomiaowux-backup-${timestamp}.zip`)
       document.body.appendChild(link)
       link.click()
       link.remove()
@@ -49,26 +50,43 @@ export function BackupDialog({ open, onOpenChange }: BackupDialogProps) {
     }
   }
 
-  // Restore backup
+  // Restore backup — 用 fetch 直接调用,绕开 axios 1.x 对 FormData 的 transformRequest
+  // (历史上 axios 在某些环境下会把 FormData 序列化错误,导致后端 r.FormFile 永远读不到分隔符,
+  // UI 卡在"恢复中"。fetch 浏览器原生处理 multipart + boundary,稳。)
   const restoreMutation = useMutation({
     mutationFn: async (file: File) => {
       const formData = new FormData()
       formData.append('backup', file)
-      return api.post('/api/admin/backup/restore', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
+      const token = useAuthStore.getState().auth.accessToken
+      const url = (api.defaults.baseURL ?? '') + '/api/admin/backup/restore'
+      const res = await fetch(url, {
+        method: 'POST',
+        body: formData,
+        headers: token ? { [AUTH_HEADER]: token } : {},
       })
+      const text = await res.text()
+      if (!res.ok) {
+        let msg = text
+        try {
+          const j = JSON.parse(text)
+          msg = j.error || j.message || text
+        } catch {
+          // raw text
+        }
+        throw new Error(msg || `HTTP ${res.status}`)
+      }
+      return text ? JSON.parse(text) : {}
     },
     onSuccess: () => {
       toast.success(t('backup.restoreSuccess'))
       setBackupFile(null)
       onOpenChange(false)
-      // Reload page after a short delay
       setTimeout(() => {
         window.location.reload()
       }, 1500)
     },
-    onError: () => {
-      toast.error(t('backup.restoreFailed'))
+    onError: (e: Error) => {
+      toast.error(t('backup.restoreFailed'), { description: e.message })
     },
   })
 

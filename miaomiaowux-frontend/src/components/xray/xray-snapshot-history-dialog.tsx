@@ -111,7 +111,7 @@ export function XraySnapshotHistoryDialog({ open, onOpenChange, serverId, server
     <Dialog open={open} onOpenChange={onOpenChange}>
       {/* 宽度策略:手机端贴 viewport(默认 calc(100%-2rem)),sm 及以上才放宽到 5xl;
           覆盖默认的 sm:max-w-lg 必须显式带 sm: 前缀,否则 tailwind specificity 会让默认胜出 */}
-      <DialogContent className="sm:max-w-5xl w-full">
+      <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-5xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2 text-base sm:text-lg"><History className="h-4 w-4" />配置历史 - {serverName}</DialogTitle>
           <DialogDescription className="text-xs sm:text-sm">主控保存的所有 xray 配置版本。可预览任意历史快照,也可一键下发到 Agent(下发前会自动跑 xray test 验证)。</DialogDescription>

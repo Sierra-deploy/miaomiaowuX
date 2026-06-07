@@ -450,7 +450,7 @@ export function TemplateUploadDialog({
 
   return (
     <Dialog open={open} onOpenChange={handleClose}>
-      <DialogContent className="sm:max-w-[900px] w-full max-h-[85vh] overflow-y-auto">
+      <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-[900px] max-h-[85vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>{t('upload.title')}</DialogTitle>
           <DialogDescription>{t('upload.description')}</DialogDescription>

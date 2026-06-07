@@ -3,6 +3,7 @@ import { useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useQuery } from '@tanstack/react-query'
 import { createFileRoute, redirect } from '@tanstack/react-router'
+import { useIsMobile } from '@/hooks/use-mobile'
 import {
   Area,
   AreaChart,
@@ -496,6 +497,7 @@ function TrafficChart({ isLoading, isError, hasHistory, chartData, numberFormatt
 function AdminDashboard() {
   const { t } = useTranslation('dashboard')
   const { auth } = useAuthStore()
+  const isMobile = useIsMobile()
 
   const numberFormatter = useMemo(
     () => new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 2, minimumFractionDigits: 0 }),
@@ -959,6 +961,43 @@ function AdminDashboard() {
           <CardContent>
             {serverOverviewList.length === 0 ? (
               <div className="text-sm text-muted-foreground text-center py-6">{t('admin.serverOverview.noServers')}</div>
+            ) : isMobile ? (
+              /* mobile: 每个服务器一张多行小卡片,字段网格 2 列,避免横向滚动 */
+              <div className='space-y-2'>
+                {serverOverviewList.map((s) => {
+                  const remaining = s.limit > 0 ? s.limit - s.used : -1
+                  const pct = s.limit > 0 ? (s.used / s.limit) * 100 : -1
+                  return (
+                    <div key={s.name} className='rounded-md border bg-card p-3 space-y-2'>
+                      <div className='flex items-center justify-between gap-2'>
+                        <span className='font-medium text-sm truncate'>{s.name}</span>
+                        <span className='text-[11px] tabular-nums shrink-0'>
+                          <span className='text-green-600 dark:text-green-400'>↑{formatSpeed(s.upload)}</span>
+                          <span className='ml-2 text-blue-600 dark:text-blue-400'>↓{formatSpeed(s.download)}</span>
+                        </span>
+                      </div>
+                      <div className='grid grid-cols-2 gap-x-3 gap-y-1.5 text-[11px]'>
+                        <div className='flex justify-between'>
+                          <span className='text-muted-foreground'>{t('admin.serverOverview.columns.used')}</span>
+                          <span className='tabular-nums'>{formatBytes(s.used)}</span>
+                        </div>
+                        <div className='flex justify-between'>
+                          <span className='text-muted-foreground'>{t('admin.serverOverview.columns.total')}</span>
+                          <span className='tabular-nums'>{s.limit > 0 ? formatBytes(s.limit) : t('admin.serverOverview.unlimited')}</span>
+                        </div>
+                        <div className='flex justify-between'>
+                          <span className='text-muted-foreground'>{t('admin.serverOverview.columns.remaining')}</span>
+                          <span className='tabular-nums'>{remaining >= 0 ? formatBytes(remaining) : '--'}</span>
+                        </div>
+                        <div className='flex justify-between'>
+                          <span className='text-muted-foreground'>{t('admin.serverOverview.columns.usageRate')}</span>
+                          <span className='tabular-nums'>{pct >= 0 ? `${pct.toFixed(1)}%` : '--'}</span>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
             ) : (
               <Table>
                 <TableHeader>

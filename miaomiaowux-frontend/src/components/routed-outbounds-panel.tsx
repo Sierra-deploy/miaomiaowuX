@@ -2,8 +2,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
 import { toast } from 'sonner'
-import { Plus, Trash2, Copy, Route as RouteIcon } from 'lucide-react'
+import { Plus, Trash2, Copy, Route as RouteIcon, ArrowLeftRight } from 'lucide-react'
 import { useCopyToClipboard } from '@/hooks/use-copy-to-clipboard'
+import { useIsMobile } from '@/hooks/use-mobile'
 
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -67,6 +68,7 @@ const FREEDOM_TEMPLATE = JSON.stringify({ protocol: 'freedom', settings: {} }, n
  * - showHeader=false:作为子组件嵌入(Dialog 内,标题由外层 DialogHeader 给)
  */
 export function RoutedOutboundsPanel({ showHeader = true }: { showHeader?: boolean }) {
+  const isMobile = useIsMobile()
   const qc = useQueryClient()
   const [dialogOpen, setDialogOpen] = useState(false)
   const [parentId, setParentId] = useState<string>('')
@@ -254,23 +256,9 @@ export function RoutedOutboundsPanel({ showHeader = true }: { showHeader?: boole
   return (
     <div className='space-y-4'>
       {showHeader && (
-        <div className='flex items-center justify-between'>
-          <div className='flex items-center gap-2'>
-            <RouteIcon className='h-6 w-6' />
-            <h2 className='text-2xl font-bold'>路由出站管理</h2>
-          </div>
-          <Button onClick={() => setDialogOpen(true)} disabled={physicalNodes.length === 0}>
-            <Plus className='mr-2 h-4 w-4' />
-            新增路由出站
-          </Button>
-        </div>
-      )}
-      {!showHeader && (
-        <div className='flex justify-end'>
-          <Button size='sm' onClick={() => setDialogOpen(true)} disabled={physicalNodes.length === 0}>
-            <Plus className='mr-1 h-4 w-4' />
-            新增路由出站
-          </Button>
+        <div className='flex items-center gap-2'>
+          <RouteIcon className='h-6 w-6' />
+          <h2 className='text-2xl font-bold'>路由出站管理</h2>
         </div>
       )}
 
@@ -284,6 +272,9 @@ export function RoutedOutboundsPanel({ showHeader = true }: { showHeader?: boole
           </p>
           <p>
             把该 routed 节点加入套餐 → 用户绑套餐时自动开子账号 + 加入 rule.user;退订时下线但凭据保留可续费恢复。
+          </p>
+          <p className='pt-1 text-foreground'>
+            💡 创建路由出站请在「节点管理」页找到目标物理节点,点击行内的「<ArrowLeftRight className='inline h-3 w-3 align-middle' /> 新增落地节点」图标。
           </p>
         </CardContent>
       </Card>
@@ -299,6 +290,52 @@ export function RoutedOutboundsPanel({ showHeader = true }: { showHeader?: boole
           }
         />
       ) : (
+        isMobile ? (
+          /* 手机端:每个 routed 节点渲染为完整卡片,2 行信息 + 横向按钮 */
+          <div className='space-y-2'>
+            {flatRouted.map(({ parent, node }) => (
+              <Card key={node.ID}>
+                <CardContent className='p-3 space-y-2'>
+                  <div className='flex items-start justify-between gap-2'>
+                    <div className='min-w-0 flex-1'>
+                      <div className='font-medium text-sm truncate'>{node.NodeName}</div>
+                      <div className='font-mono text-[10px] text-muted-foreground mt-0.5 truncate'>
+                        #{parent.id} {parent.node_name}
+                      </div>
+                    </div>
+                    <Badge variant='outline' className='shrink-0 text-[10px]'>{node.OriginalServer}</Badge>
+                  </div>
+                  <div className='rounded-md border bg-muted/30 px-2 py-1.5 text-[11px]'>
+                    <div className='text-muted-foreground text-[10px]'>Outbound Tag</div>
+                    <div className='font-medium truncate'>{outboundDisplay[node.RoutedOutboundTag] || node.RoutedOutboundTag}</div>
+                    {outboundDisplay[node.RoutedOutboundTag] && outboundDisplay[node.RoutedOutboundTag] !== node.RoutedOutboundTag && (
+                      <div className='font-mono text-[9px] text-muted-foreground mt-0.5 truncate'>{node.RoutedOutboundTag}</div>
+                    )}
+                  </div>
+                  <div className='flex items-center gap-2'>
+                    <Button variant='outline' size='sm' className='flex-1 h-8' onClick={() => setCredPreview(node)}>
+                      <Copy className='mr-1 h-3 w-3' />
+                      Admin 凭据
+                    </Button>
+                    <Button
+                      variant='outline'
+                      size='sm'
+                      className='flex-1 h-8 text-destructive'
+                      onClick={() => {
+                        if (confirm(`确定删除路由出站 ${node.NodeName} 吗?\n会同时清理 agent 上的 outbound/rule/admin client + 所有绑定用户子账号(凭据保留)`)) {
+                          deleteM.mutate(node.ID)
+                        }
+                      }}
+                    >
+                      <Trash2 className='mr-1 h-3 w-3' />
+                      删除
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        ) : (
         <Card>
           <CardContent className='pt-4'>
             <Table>
@@ -356,7 +393,7 @@ export function RoutedOutboundsPanel({ showHeader = true }: { showHeader?: boole
               </TableBody>
             </Table>
           </CardContent>
-        </Card>
+        </Card>)
       )}
 
       {/* 创建对话框 */}

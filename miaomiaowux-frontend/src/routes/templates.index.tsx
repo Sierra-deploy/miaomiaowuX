@@ -602,23 +602,29 @@ function TemplatesPage() {
             emptyText={t('list.empty')}
             mobileCard={{
               header: (name) => <span className="font-medium text-base">{name}</span>,
-              actions: (name) => (
-                <div className="flex items-center gap-4 w-full justify-between px-2">
-                  {canModifyTemplate(name) && (
-                    <Button variant="ghost" size="sm" onClick={() => handleEdit(name)} className="flex-1">
-                      <Pencil className="h-4 w-4 mr-1.5" /> {t('list.edit')}
+              actions: (name) => {
+                const canMod = canModifyTemplate(name)
+                // 按可用按钮数自适应:3 个 → 33%、2 个 → 50%、1 个 → 100%
+                const count = canMod ? 3 : 1
+                const basis = count === 3 ? 'basis-[calc(33.333%-0.5rem)]' : count === 2 ? 'basis-[calc(50%-0.25rem)]' : 'basis-full'
+                return (
+                  <>
+                    {canMod && (
+                      <Button variant='outline' size='sm' onClick={() => handleEdit(name)} className={`${basis} grow-0`}>
+                        <Pencil className='h-4 w-4 mr-1.5' /> {t('list.edit')}
+                      </Button>
+                    )}
+                    <Button variant='outline' size='sm' onClick={() => handleListPreview(name)} className={`${basis} grow-0`}>
+                      <Eye className='h-4 w-4 mr-1.5' /> {t('list.preview')}
                     </Button>
-                  )}
-                  <Button variant="ghost" size="sm" onClick={() => handleListPreview(name)} className="flex-1">
-                    <Eye className="h-4 w-4 mr-1.5" /> {t('list.preview')}
-                  </Button>
-                  {canModifyTemplate(name) && (
-                    <Button variant="ghost" size="sm" onClick={() => handleDelete(name)} className="flex-1 text-destructive hover:text-destructive hover:bg-destructive/10">
-                      <Trash2 className="h-4 w-4 mr-1.5" /> {t('list.delete')}
-                    </Button>
-                  )}
-                </div>
-              )
+                    {canMod && (
+                      <Button variant='outline' size='sm' onClick={() => handleDelete(name)} className={`${basis} grow-0 text-destructive hover:text-destructive hover:bg-destructive/10`}>
+                        <Trash2 className='h-4 w-4 mr-1.5' /> {t('list.delete')}
+                      </Button>
+                    )}
+                  </>
+                )
+              }
             }}
           />
         </CardContent>

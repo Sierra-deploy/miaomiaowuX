@@ -1,7 +1,7 @@
 import axios, { AxiosError } from 'axios'
 import { useAuthStore } from '@/stores/auth-store'
 
-const AUTH_HEADER = 'MM-Authorization'
+export const AUTH_HEADER = 'MM-Authorization'
 const rawConfiguredBaseURL = (import.meta.env.VITE_API_BASE_URL ?? '').trim()
 
 // Determine baseURL based on environment

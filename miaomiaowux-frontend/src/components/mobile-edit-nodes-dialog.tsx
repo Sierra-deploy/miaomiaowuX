@@ -47,6 +47,8 @@ interface ProxyGroup {
   interval?: number
   strategy?: 'round-robin' | 'consistent-hashing' | 'sticky-sessions'
   use?: string[]
+  // 中转代理组:这个组的出站流量先经过指定的代理组(Clash 原生字段,与 YAML key 同名)
+  'dialer-proxy-group'?: string
 }
 
 interface Node {
@@ -393,6 +395,21 @@ export function MobileEditNodesDialog({
     onProxyGroupsChange(newGroups)
   }
 
+  // 处理"中转代理组"变更:dialer-proxy-group 字段
+  const handleDialerProxyGroupChange = (groupName: string, value: string) => {
+    const newGroups = proxyGroups.map(g => {
+      if (g.name !== groupName) return g
+      const updated = { ...g }
+      if (value === '__none__') {
+        delete updated['dialer-proxy-group']
+      } else {
+        updated['dialer-proxy-group'] = value
+      }
+      return updated
+    })
+    onProxyGroupsChange(newGroups)
+  }
+
   // 获取类型显示名称
   const getTypeLabel = (type: string) => {
     return proxyTypes.find(t => t.value === type)?.label || type
@@ -454,6 +471,12 @@ export function MobileEditNodesDialog({
                             <Badge variant="secondary" className="text-xs shrink-0">
                               {getTypeLabel(group.type)}
                             </Badge>
+                            {/* 中转代理组提示:小灰字显示「中转: <组名>」 */}
+                            {group['dialer-proxy-group'] && (
+                              <span className="text-[10px] text-muted-foreground truncate min-w-0">
+                                {t('editNodesDialog.dialerProxyLabel', { defaultValue: '中转' })}: <Twemoji>{group['dialer-proxy-group']}</Twemoji>
+                              </span>
+                            )}
                             <Badge variant="outline" className="text-xs shrink-0">
                               {group.proxies.length}{(group.use?.length || 0) > 0 && `+${group.use?.length}`}
                             </Badge>
@@ -526,6 +549,27 @@ export function MobileEditNodesDialog({
                                       </Select>
                                     </div>
                                   )}
+
+                                  {/* 中转代理组:跟桌面 ProxyTypeSelector L82-111 同源 */}
+                                  <div className="pt-2 border-t">
+                                    <p className="text-xs text-muted-foreground mb-1">{t('editNodesDialog.dialerProxyGroup', { defaultValue: '中转代理组' })}</p>
+                                    <Select
+                                      value={group['dialer-proxy-group'] || '__none__'}
+                                      onValueChange={(value) => handleDialerProxyGroupChange(group.name, value)}
+                                    >
+                                      <SelectTrigger className="h-8 text-xs">
+                                        <SelectValue placeholder={t('editNodesDialog.dialerProxyGroupNone', { defaultValue: '无' })} />
+                                      </SelectTrigger>
+                                      <SelectContent>
+                                        <SelectItem value="__none__">{t('editNodesDialog.dialerProxyGroupNone', { defaultValue: '无' })}</SelectItem>
+                                        {proxyGroups.filter((g) => g.name !== group.name).map((g) => (
+                                          <SelectItem key={g.name} value={g.name}>
+                                            <Twemoji>{g.name}</Twemoji>
+                                          </SelectItem>
+                                        ))}
+                                      </SelectContent>
+                                    </Select>
+                                  </div>
                                 </div>
                               </PopoverContent>
                             </Popover>

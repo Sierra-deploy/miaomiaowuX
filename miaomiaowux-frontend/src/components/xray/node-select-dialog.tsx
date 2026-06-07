@@ -19,6 +19,8 @@ import { Cable } from 'lucide-react'
 import { api } from '@/lib/api'
 import { getClashProtocolColor } from '@/lib/protocol-colors'
 import { toast } from 'sonner'
+import { useIsMobile } from '@/hooks/use-mobile'
+import { MobileNodeSelectDialog } from './mobile-node-select-dialog'
 
 
 interface ParsedNode {
@@ -48,7 +50,14 @@ interface NodeSelectDialogProps {
   onConfirm?: (items: Array<{ node: ParsedNode; clashConfig: any }>) => void
 }
 
-export function NodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter, multiple = false, onConfirm }: NodeSelectDialogProps) {
+export function NodeSelectDialog(props: NodeSelectDialogProps) {
+  // 手机端委托给 Sheet 版,避免 Dialog max-w 在小屏溢出 + 触屏密集行难点选
+  const isMobile = useIsMobile()
+  if (isMobile) return <MobileNodeSelectDialog {...props} />
+  return <DesktopNodeSelectDialog {...props} />
+}
+
+function DesktopNodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter, multiple = false, onConfirm }: NodeSelectDialogProps) {
   const { t } = useTranslation('xray')
   const { t: tc } = useTranslation('common')
   const [nodes, setNodes] = useState<ParsedNode[]>([])

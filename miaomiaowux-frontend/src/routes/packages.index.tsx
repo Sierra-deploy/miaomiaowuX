@@ -612,7 +612,7 @@ function PackagesPage() {
           }
         }}
       >
-        <DialogContent className="max-w-3xl md:max-w-5xl lg:max-w-6xl max-h-[90vh] flex flex-col overflow-hidden">
+        <DialogContent className="w-[95vw] max-w-[95vw] sm:max-w-3xl md:max-w-5xl lg:max-w-6xl max-h-[90vh] flex flex-col overflow-hidden">
           <DialogHeader>
             <DialogTitle>{editingPackage ? t('dialog.editTitle') : t('dialog.createTitle')}</DialogTitle>
             <DialogDescription>
@@ -716,7 +716,7 @@ function PackagesPage() {
                 />
               </div>
 
-              <ProFeatureGate feature="limiter">
+              <ProFeatureGate feature="limiter" className="mt-3 mr-2">
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">
                   <Label htmlFor="speed_limit_mbps">{t('dialog.speedLimit')}</Label>
@@ -763,67 +763,101 @@ function PackagesPage() {
                   </div>
                 ) : (
                   <div className="border rounded-md overflow-y-auto flex-1 max-h-72 md:max-h-none bg-card">
-                    {/* 表头:sticky 在滚动时也可见,提示后面的数字框列含义 */}
-                    <div className="sticky top-0 z-10 flex items-center gap-2 pl-2.5 pr-2 py-1.5 bg-muted/60 backdrop-blur-sm border-b text-[11px] font-medium text-muted-foreground">
-                      <div className="w-4 shrink-0" />{/* checkbox 位 */}
-                      <span className="flex-1">{t('dialog.nodeColumnName', { defaultValue: '节点' })}</span>
-                      <span className="shrink-0 w-[72px] text-center">{t('dialog.nodeMultiplierHeader', { defaultValue: '流量倍率' })}</span>
-                      <span className="shrink-0 w-[88px] text-center">{t('dialog.nodeSpeedLimitHeader', { defaultValue: '限速 Mbps' })}</span>
-                      <span className="shrink-0 w-[72px] text-center">{t('dialog.nodeDeviceLimitHeader', { defaultValue: '客户端数' })}</span>
-                    </div>
+                    {/* 表头:桌面端显示;mobile 改卡片渲染,无表头 */}
+                    {!isMobile && (
+                      <div className="sticky top-0 z-10 flex items-center gap-2 pl-2.5 pr-2 py-1.5 bg-muted/60 backdrop-blur-sm border-b text-[11px] font-medium text-muted-foreground">
+                        <div className="w-4 shrink-0" />
+                        <span className="flex-1">{t('dialog.nodeColumnName', { defaultValue: '节点' })}</span>
+                        <span className="shrink-0 w-[72px] text-center">{t('dialog.nodeMultiplierHeader', { defaultValue: '流量倍率' })}</span>
+                        <span className="shrink-0 w-[88px] text-center">{t('dialog.nodeSpeedLimitHeader', { defaultValue: '限速 Mbps' })}</span>
+                        <span className="shrink-0 w-[72px] text-center">{t('dialog.nodeDeviceLimitHeader', { defaultValue: '客户端数' })}</span>
+                      </div>
+                    )}
                     <div className="divide-y">
                     {nodes.map((node: any) => {
                       const isInternal = Boolean(node.inbound_tag)
                       const isChecked = formData.nodes.includes(node.id)
                       const multiplier = formData.node_multipliers[node.id] ?? 1
+                      // 点击卡片(mobile)/ checkbox 切换勾选,共用同一逻辑
+                      const toggleChecked = (next: boolean) => {
+                        if (next) {
+                          setFormData({ ...formData, nodes: [...formData.nodes, node.id] })
+                        } else {
+                          const nextMults = { ...formData.node_multipliers }
+                          const nextSpeed = { ...formData.node_speed_limits }
+                          const nextDevice = { ...formData.node_device_limits }
+                          delete nextMults[node.id]
+                          delete nextSpeed[node.id]
+                          delete nextDevice[node.id]
+                          setFormData({
+                            ...formData,
+                            nodes: formData.nodes.filter((id) => id !== node.id),
+                            node_multipliers: nextMults,
+                            node_speed_limits: nextSpeed,
+                            node_device_limits: nextDevice,
+                          })
+                        }
+                      }
                       return (
                         <div
                           key={node.id}
-                          className={`flex items-center gap-2 pl-2.5 pr-2 py-2 border-l-2 transition-colors ${
+                          className={`${
+                            isMobile
+                              ? `flex flex-col gap-2 p-3 ${isChecked ? 'ring-2 ring-primary ring-inset' : ''}`
+                              : 'flex items-center gap-2 pl-2.5 pr-2 py-2'
+                          } border-l-2 transition-colors ${
                             isChecked
                               ? 'border-l-primary bg-primary/5'
                               : 'border-l-transparent hover:bg-muted/40'
                           }`}
                         >
-                          <Checkbox
-                            id={`node-${node.id}`}
-                            checked={isChecked}
-                            onCheckedChange={(checked) => {
-                              if (checked) {
-                                setFormData({ ...formData, nodes: [...formData.nodes, node.id] })
-                              } else {
-                                // 取消勾选时同步清 per-node 倍率 / 限速 / 客户端数,避免孤儿数据残留
-                                const nextMults = { ...formData.node_multipliers }
-                                const nextSpeed = { ...formData.node_speed_limits }
-                                const nextDevice = { ...formData.node_device_limits }
-                                delete nextMults[node.id]
-                                delete nextSpeed[node.id]
-                                delete nextDevice[node.id]
-                                setFormData({
-                                  ...formData,
-                                  nodes: formData.nodes.filter((id) => id !== node.id),
-                                  node_multipliers: nextMults,
-                                  node_speed_limits: nextSpeed,
-                                  node_device_limits: nextDevice,
-                                })
-                              }
-                            }}
-                            className="shrink-0"
-                          />
-                          <Label
-                            htmlFor={`node-${node.id}`}
-                            className="cursor-pointer flex-1 flex items-center gap-1.5 min-w-0 text-sm font-normal"
-                          >
-                            <Badge
-                              variant={isInternal ? 'default' : 'outline'}
-                              className={`text-[10px] px-1 py-0 shrink-0 ${
-                                isInternal ? '' : 'border-amber-500 text-amber-600 dark:text-amber-400'
-                              }`}
+                          {/* mobile: 无 checkbox,整卡点击切换;desktop: checkbox + label */}
+                          {!isMobile && (
+                            <Checkbox
+                              id={`node-${node.id}`}
+                              checked={isChecked}
+                              onCheckedChange={(c) => toggleChecked(Boolean(c))}
+                              className='shrink-0'
+                            />
+                          )}
+                          {isMobile ? (
+                            /* mobile 头部点击区:点节点名/badge 区切勾选;数字框区在外面,自己不冒泡 */
+                            <div
+                              onClick={() => toggleChecked(!isChecked)}
+                              className='flex items-center gap-1.5 flex-wrap min-w-0 cursor-pointer'
                             >
-                              {isInternal ? t('dialog.nodeInternal') : t('dialog.nodeExternal')}
-                            </Badge>
-                            <span className="truncate">{node.node_name}</span>
-                          </Label>
+                              <Badge
+                                variant={isInternal ? 'default' : 'outline'}
+                                className={`text-[10px] px-1 py-0 shrink-0 ${
+                                  isInternal ? '' : 'border-amber-500 text-amber-600 dark:text-amber-400'
+                                }`}
+                              >
+                                {isInternal ? t('dialog.nodeInternal') : t('dialog.nodeExternal')}
+                              </Badge>
+                              {node.tag && (
+                                <Badge variant='secondary' className='text-[10px] px-1 py-0 shrink-0'>
+                                  {node.tag}
+                                </Badge>
+                              )}
+                              <span className='font-medium text-sm truncate flex-1 min-w-0'>{node.node_name}</span>
+                              {isChecked && <span className='text-[10px] text-primary font-semibold shrink-0'>✓ {t('dialog.nodeSelected', { defaultValue: '已选' })}</span>}
+                            </div>
+                          ) : (
+                            <Label
+                              htmlFor={`node-${node.id}`}
+                              className='cursor-pointer flex items-center gap-1.5 min-w-0 text-sm font-normal flex-1'
+                            >
+                              <Badge
+                                variant={isInternal ? 'default' : 'outline'}
+                                className={`text-[10px] px-1 py-0 shrink-0 ${
+                                  isInternal ? '' : 'border-amber-500 text-amber-600 dark:text-amber-400'
+                                }`}
+                              >
+                                {isInternal ? t('dialog.nodeInternal') : t('dialog.nodeExternal')}
+                              </Badge>
+                              <span className='truncate'>{node.node_name}</span>
+                            </Label>
+                          )}
                           {/* 倍率列:固定宽度 72px,跟表头对齐;勾选时显示输入,未勾选显示占位文字 */}
                           <div className="flex items-center justify-end gap-0.5 shrink-0 w-[72px]">
                             {isChecked ? (

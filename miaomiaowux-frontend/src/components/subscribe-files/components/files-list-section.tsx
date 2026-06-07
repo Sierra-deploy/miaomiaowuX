@@ -273,7 +273,7 @@ export function FilesListSection({
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value='__none__'>选择模板</SelectItem>
-                        {templates.map((tpl) => (
+                        {(Array.isArray(templates) ? templates : []).map((tpl) => (
                           <SelectItem key={tpl.filename} value={tpl.filename}>
                             {tpl.name || tpl.filename.replace(/_v3\.yaml$|__v3\.yaml$|\.yaml$/, '')}
                           </SelectItem>
@@ -531,7 +531,7 @@ export function FilesListSection({
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value='__none__'>选择模板</SelectItem>
-                        {templates.map((tpl) => (
+                        {(Array.isArray(templates) ? templates : []).map((tpl) => (
                           <SelectItem key={tpl.filename} value={tpl.filename}>
                             {tpl.name || tpl.filename.replace(/_v3\.yaml$|__v3\.yaml$|\.yaml$/, '')}
                           </SelectItem>

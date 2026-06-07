@@ -849,7 +849,7 @@ function UsersPage() {
                       <Button
                         variant='outline'
                         size='sm'
-                        className='flex-1'
+                        className='basis-[calc(50%-0.25rem)] grow-0'
                         disabled={resetMutation.isPending}
                         onClick={() =>
                           setResetState({
@@ -863,7 +863,7 @@ function UsersPage() {
                       <Button
                         variant='outline'
                         size='sm'
-                        className='flex-1'
+                        className='basis-[calc(50%-0.25rem)] grow-0'
                         onClick={() =>
                           setPackageManageState({
                             username: user.username,
@@ -880,7 +880,7 @@ function UsersPage() {
                       <Button
                         variant='outline'
                         size='sm'
-                        className='flex-1'
+                        className='basis-[calc(50%-0.25rem)] grow-0'
                         onClick={() => setSubaccountsViewUser(user.username)}
                       >
                         子账户
@@ -888,7 +888,7 @@ function UsersPage() {
                       <Button
                         variant='destructive'
                         size='sm'
-                        className='flex-1'
+                        className='basis-[calc(50%-0.25rem)] grow-0'
                         disabled={deleteMutation.isPending}
                         onClick={() => setDeleteUsername(user.username)}
                       >

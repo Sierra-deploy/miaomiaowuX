@@ -15,6 +15,8 @@ import { getXrayProtocolColor } from '@/lib/protocol-colors'
 import { api } from '@/lib/api'
 import { generateInboundConfig } from '@/lib/xray-config-generator'
 import { CertSelectField } from '@/components/xray/cert-select-field'
+import { useIsMobile } from '@/hooks/use-mobile'
+import { MobileInboundWizard } from './mobile-inbound-wizard'
 import {
   getAllProtocols,
   getTransportOptions,
@@ -188,7 +190,15 @@ interface DomainServerInfo {
 
 type SSLSetupState = 'idle' | 'loading' | 'success' | 'error'
 
-export function InboundWizard({
+export function InboundWizard(props: InboundWizardProps) {
+  const isMobile = useIsMobile()
+  if (isMobile) {
+    return <MobileInboundWizard {...props} />
+  }
+  return <DesktopInboundWizard {...props} />
+}
+
+function DesktopInboundWizard({
   servers,
   selectedServerIds,
   onCancel,
