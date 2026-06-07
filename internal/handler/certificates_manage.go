@@ -882,6 +882,10 @@ func (h *CertificateHandler) deployToRemoteServer(server *storage.RemoteServer, 
 // DeployCertToServerSync 同步把证书下发到指定 agent 的 xray 证书目录,返回 agent 上的 cert/key 路径。
 // 用于「添加 tls 入站时自动确保证书已在 agent 上」,避免证书缺失导致 xray 加载失败(502)。
 // Reload 用 "none":证书只写文件,真正生效由随后的 add inbound(gRPC) 触发,避免无谓重启。
+//
+// 优先走 WS(跟 deployToRemoteServer 一致 — agent 通过 WS 长连接收 cert_deploy 即可写文件),
+// WS 不可用 / 写失败时 fallback HTTP。WS 写完即返回路径,不等 agent ack — agent 处理是 ms 级,
+// 后续 add inbound 之间的时间差足够 agent 完成 cert 落盘。
 func (h *CertificateHandler) DeployCertToServerSync(ctx context.Context, server *storage.RemoteServer, cert *storage.Certificate) (string, string, error) {
 	name := certDeployFilename(cert.Domain)
 	certPath := "/usr/local/etc/xray/certs/" + name + ".pem"
@@ -894,9 +898,21 @@ func (h *CertificateHandler) DeployCertToServerSync(ctx context.Context, server 
 		KeyPath:  keyPath,
 		Reload:   "none",
 	}
+
+	// 1) 优先 WS
+	if h.wsHandler != nil && h.wsHandler.IsConnected(server.Token) {
+		if err := h.wsHandler.SendCertDeploy(server.Token, payload); err == nil {
+			log.Printf("[Certificate] Sync cert_deploy via WS to %s for %s", server.Name, payload.Domain)
+			return certPath, keyPath, nil
+		}
+		log.Printf("[Certificate] Sync WS cert_deploy failed for %s, falling back to HTTP", server.Name)
+	}
+
+	// 2) Fallback HTTP — 同步等 agent 200 OK 才返回
 	if err := h.deployRemoteCertificateHTTP(ctx, server, payload); err != nil {
 		return "", "", err
 	}
+	log.Printf("[Certificate] Sync cert_deploy via HTTP to %s for %s", server.Name, payload.Domain)
 	return certPath, keyPath, nil
 }
 
