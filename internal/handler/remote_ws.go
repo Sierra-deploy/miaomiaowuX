@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -272,6 +273,20 @@ type RemoteWSHandler struct {
 	// xrayConfigSyncCallback 在 auth 成功后异步触发(args: serverID + 上次 server.status),
 	// 实现见 RemoteManageHandler.SyncXrayConfigOnReconnect — 跨 handler 用 callback 注入避免循环依赖。
 	xrayConfigSyncCallback func(ctx context.Context, serverID int64, prevStatus string)
+	// authFailIPs 记录最近 auth 失败的 IP,用于"狂连"场景的 backoff:
+	//   - 同 IP 在 cooldown 内的连接直接拒绝 upgrade(节省 CPU 与日志)
+	//   - 同 IP 的失败日志按窗口聚合,防止刷屏
+	authFailIPs sync.Map // map[string]*ipFailRecord
+}
+
+// ipFailRecord 单 IP 的失败状态。
+type ipFailRecord struct {
+	mu             sync.Mutex
+	lastFailAt     time.Time
+	failsInWindow  int      // 当前聚合窗口内累计失败次数
+	windowStart    time.Time
+	rejectUntil    time.Time // 在此时间前直接拒绝 upgrade
+	suppressedLogs int       // 静默期内被压制的日志数量
 }
 
 // 创建一个新的 WebSocket 处理程序
@@ -308,10 +323,101 @@ func (h *RemoteWSHandler) SetXrayConfigSyncCallback(cb func(ctx context.Context,
 }
 
 // 处理 WebSocket 升级和连接
+// 失败 backoff 参数 — 保守取值,正常 agent 重连(5-10 秒)完全不受影响,
+// 只针对每秒数十次的死循环 agent(被删 server 后还在跑的孤儿 agent)生效。
+const (
+	wsFailCooldown      = 60 * time.Second  // 失败后 60 秒内同 IP 直接拒绝 upgrade
+	wsFailLogWindow     = 60 * time.Second  // 同 IP 失败日志聚合窗口
+	wsFailLogThreshold  = 3                 // 窗口内失败 >=3 次才进入"聚合模式"
+)
+
+// ipFromRequest 提取客户端真实 IP,优先级:CF-Connecting-IP > X-Real-IP > X-Forwarded-For > RemoteAddr。
+func ipFromRequest(r *http.Request) string {
+	if cfIP := r.Header.Get("CF-Connecting-IP"); cfIP != "" {
+		return cfIP
+	}
+	if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
+		return realIP
+	}
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		if parts := strings.SplitN(forwarded, ",", 2); len(parts) > 0 {
+			return strings.TrimSpace(parts[0])
+		}
+	}
+	// RemoteAddr 形如 "1.2.3.4:54321",剥 port 但容忍 IPv6
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+// shouldRejectIP 在 upgrade 前调用,看该 IP 是否在 cooldown 期内。
+// 返回 (reject, suppressedLogs)。reject=true 时直接关连接;suppressedLogs > 0 时本次拒绝伴随一行汇总日志。
+func (h *RemoteWSHandler) shouldRejectIP(ip string) (bool, int) {
+	v, ok := h.authFailIPs.Load(ip)
+	if !ok {
+		return false, 0
+	}
+	rec := v.(*ipFailRecord)
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	now := time.Now()
+	if now.Before(rec.rejectUntil) {
+		rec.suppressedLogs++
+		// 每 60 秒打一次汇总
+		if now.Sub(rec.windowStart) >= wsFailLogWindow {
+			n := rec.suppressedLogs
+			rec.suppressedLogs = 0
+			rec.windowStart = now
+			return true, n
+		}
+		return true, 0
+	}
+	return false, 0
+}
+
+// markAuthFail 在 auth 失败(token 错 / payload 错)时调用,更新 IP 失败记录并按需进入 cooldown。
+func (h *RemoteWSHandler) markAuthFail(ip string) {
+	v, _ := h.authFailIPs.LoadOrStore(ip, &ipFailRecord{windowStart: time.Now()})
+	rec := v.(*ipFailRecord)
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	now := time.Now()
+	// 窗口滑动
+	if now.Sub(rec.windowStart) >= wsFailLogWindow {
+		rec.windowStart = now
+		rec.failsInWindow = 0
+	}
+	rec.lastFailAt = now
+	rec.failsInWindow++
+	// 频繁失败 → 进入 cooldown,期间直接拒绝 upgrade
+	if rec.failsInWindow >= wsFailLogThreshold {
+		rec.rejectUntil = now.Add(wsFailCooldown)
+	}
+}
+
+// markAuthSuccess 在 auth 成功时调用,清掉该 IP 的失败记录(让合法 agent 不被错误 cooldown)。
+func (h *RemoteWSHandler) markAuthSuccess(ip string) {
+	h.authFailIPs.Delete(ip)
+}
+
 func (h *RemoteWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Header.Get("User-Agent") != version.AgentUserAgent {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		log.Printf("[Remote WS] Rejected connection from %s: invalid User-Agent", r.RemoteAddr)
+		return
+	}
+
+	clientIP := ipFromRequest(r)
+
+	// 在 upgrade 之前做 IP 级 backoff:
+	//   - 孤儿 agent(被删 server 后仍在跑)每秒数十次重连 → 不再消耗 WS 握手 + 密钥协商 CPU
+	//   - 合法 agent 不受影响(永远不会失败),网络抖动也不受影响(失败需累计 ≥3 次)
+	if rejected, suppressed := h.shouldRejectIP(clientIP); rejected {
+		http.Error(w, "Too many failed auth", http.StatusTooManyRequests)
+		if suppressed > 0 {
+			log.Printf("[Remote WS] Suppressed %d connection attempts from %s in last 60s (auth keeps failing — orphan agent / wrong token)", suppressed, clientIP)
+		}
 		return
 	}
 
@@ -321,16 +427,6 @@ func (h *RemoteWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientIP := r.RemoteAddr
-	if cfIP := r.Header.Get("CF-Connecting-IP"); cfIP != "" {
-		clientIP = cfIP
-	} else if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
-		clientIP = realIP
-	} else if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		if parts := strings.SplitN(forwarded, ",", 2); len(parts) > 0 {
-			clientIP = strings.TrimSpace(parts[0])
-		}
-	}
 	log.Printf("[Remote WS] New connection from %s", clientIP)
 
 	// 在 goroutine 中处理连接
@@ -599,6 +695,7 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 	}
 
 	if authPayload.Token == "" {
+		h.markAuthFail(remoteAddr)
 		h.sendAuthResult(conn, false, "Token required")
 		return nil, false
 	}
@@ -609,10 +706,24 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 
 	server, err := h.repo.GetRemoteServerByToken(ctx, authPayload.Token)
 	if err != nil {
-		log.Printf("[Remote WS] Invalid token from %s", remoteAddr)
+		h.markAuthFail(remoteAddr)
+		// 同 IP 失败累计 >=3 次后,这行也按 60s 窗口聚合(see shouldRejectIP suppressed log)
+		v, _ := h.authFailIPs.Load(remoteAddr)
+		if rec, ok := v.(*ipFailRecord); ok {
+			rec.mu.Lock()
+			fails := rec.failsInWindow
+			rec.mu.Unlock()
+			if fails < wsFailLogThreshold {
+				log.Printf("[Remote WS] Invalid token from %s", remoteAddr)
+			}
+		} else {
+			log.Printf("[Remote WS] Invalid token from %s", remoteAddr)
+		}
 		h.sendAuthResult(conn, false, "Invalid token")
 		return nil, false
 	}
+	// auth 通过 → 清掉该 IP 的失败记录,合法 agent 永远不进 cooldown
+	h.markAuthSuccess(remoteAddr)
 
 	// 检查是否已有连接 — 有的话表示老 cleanup 还没跑就新 auth 来了(快速重启),记下这个状态供后面发对应通知。
 	// 关闭并 delete 老连接,新 conn 立刻接管;老 goroutine 醒来后看到 conns 里不是自己,会跳过标 offline,避免互踩。

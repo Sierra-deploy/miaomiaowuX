@@ -138,6 +138,31 @@ api.interceptors.response.use(
   },
   async (error) => {
     if (error instanceof AxiosError) {
+      // **关键**:错误响应也可能是加密的(下游 handler 返回 4xx/5xx + 加密 body),
+      // 在分发到上层 UI 之前先解密,否则 toast 会显示密文 base64。
+      const errHeaderVal = (error.response?.headers as Record<string, string> | undefined)?.[SECURE_CHANNEL_CONSTANTS.HEADER.toLowerCase()]
+        ?? (error.response?.headers as Record<string, string> | undefined)?.[SECURE_CHANNEL_CONSTANTS.HEADER]
+      if (errHeaderVal === SECURE_CHANNEL_CONSTANTS.VERSION && error.response && typeof error.response.data === 'string') {
+        try {
+          const plain = await secureChannel.decryptBodyB64(error.response.data)
+          const text = new TextDecoder().decode(plain)
+          try {
+            error.response.data = JSON.parse(text)
+          } catch {
+            error.response.data = text
+          }
+          // 同步更新 error.message,有些代码直接读 error.message 而非 response.data.error
+          const dataAny = error.response.data as { error?: string; message?: string; msg?: string } | string
+          if (typeof dataAny === 'string') {
+            error.message = dataAny
+          } else if (dataAny && (dataAny.error || dataAny.message || dataAny.msg)) {
+            error.message = dataAny.error ?? dataAny.message ?? dataAny.msg ?? error.message
+          }
+        } catch (decErr) {
+          console.error('[securechan] decrypt error response failed:', decErr)
+        }
+      }
+
       // 412 + X-Secure-Channel-Expired:session 过期,重做握手 + 重试一次
       const expired = error.response?.headers?.[SECURE_CHANNEL_CONSTANTS.EXPIRED_HEADER.toLowerCase()]
         ?? error.response?.headers?.[SECURE_CHANNEL_CONSTANTS.EXPIRED_HEADER]
