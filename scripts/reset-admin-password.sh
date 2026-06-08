@@ -295,45 +295,90 @@ if [[ -z "$HASH" || "${HASH:0:4}" != "\$2a\$" && "${HASH:0:4}" != "\$2b\$" ]]; t
 fi
 ok "已生成 bcrypt hash"
 
-#─── 7. 备份 + 写库 ──────────────────────────────────────
+#─── 7. 停服务 → 备份 → 写库 → 启动 ───────────────────────
+# 简洁逻辑:既然改完反正要重启,直接先停服务再改 db,完成后重启。
+# 避免 sqlite "database is locked" 这种竞态。
+SERVICE_TYPE=""  # systemd / docker-<cid> / none
+
+detect_running_service() {
+    if systemctl is-active --quiet mmwx 2>/dev/null; then
+        SERVICE_TYPE="systemd"
+        return
+    fi
+    if command -v docker &>/dev/null; then
+        local cid
+        cid=$(docker ps --format '{{.ID}} {{.Image}} {{.Names}}' 2>/dev/null | grep -i mmwx | awk '{print $1}' | head -1 || true)
+        if [[ -n "$cid" ]]; then
+            SERVICE_TYPE="docker-$cid"
+            return
+        fi
+    fi
+    SERVICE_TYPE="none"
+}
+
+stop_service() {
+    case "$SERVICE_TYPE" in
+        systemd)
+            info "停止 systemd mmwx 服务..."
+            systemctl stop mmwx ;;
+        docker-*)
+            local cid="${SERVICE_TYPE#docker-}"
+            info "停止 docker 容器 $cid..."
+            docker stop "$cid" >/dev/null ;;
+        none)
+            info "未发现运行中的 mmwx 服务,跳过停止" ;;
+    esac
+}
+
+start_service() {
+    case "$SERVICE_TYPE" in
+        systemd)
+            info "启动 systemd mmwx 服务..."
+            systemctl start mmwx && ok "mmwx 服务已启动" || warn "systemctl start 失败,请手动启动" ;;
+        docker-*)
+            local cid="${SERVICE_TYPE#docker-}"
+            info "启动 docker 容器 $cid..."
+            docker start "$cid" >/dev/null && ok "mmwx 容器已启动" || warn "docker start 失败,请手动启动" ;;
+        none)
+            info "mmwx 之前未运行,无需启动" ;;
+    esac
+}
+
+detect_running_service
+
+# 探测后停服务(这会释放 WAL 锁,sqlite3 命令行可独占写入)
+stop_service
+
+# 给 sqlite 一点时间释放 WAL/SHM 文件锁
+sleep 1
+
 BACKUP="${DB_PATH}.bak-$(date +%Y%m%d%H%M%S)"
-cp -a "$DB_PATH" "$BACKUP" || { err "备份失败"; exit 4; }
+cp -a "$DB_PATH" "$BACKUP" || { err "备份失败"; start_service; exit 4; }
 ok "已备份: $BACKUP"
 
+# 写入 — 此时 mmwx 已停,sqlite3 独占写入,不会有 locked 错误
 if ! sqlite3 "$DB_PATH" <<SQL
 UPDATE users
 SET password_hash = '$HASH',
     updated_at    = CURRENT_TIMESTAMP
 WHERE username = '$TARGET' AND role = 'admin';
+UPDATE users
+SET totp_enabled = 0, totp_secret = ''
+WHERE username = '$TARGET' AND role = 'admin';
 SQL
 then
-    err "UPDATE 失败,正在回滚"; cp -af "$BACKUP" "$DB_PATH"; exit 4
+    err "UPDATE 失败,回滚备份并重启服务"
+    cp -af "$BACKUP" "$DB_PATH"
+    start_service
+    exit 4
 fi
+ok "数据库已更新"
 
-# 同时禁掉 2FA(TOTP),救场场景大概率 admin 也丢了手机
-sqlite3 "$DB_PATH" "UPDATE users SET totp_enabled=0, totp_secret='' WHERE username='$TARGET' AND role='admin';" 2>/dev/null || true
-
-#─── 8. 重启 mmwx 让最新 hash 生效(虽然 mmwx 每次现读 db,但快速重启清掉旧 session 更稳)─
+#─── 8. 启动 mmwx 让新密码生效 ────────────────────────────
 if (( RESTART == 1 )); then
-    restarted=0
-    if systemctl is-active --quiet mmwx 2>/dev/null; then
-        info "重启 systemd mmwx 服务..."
-        systemctl restart mmwx && restarted=1 || warn "systemctl restart 失败,跳过"
-    fi
-    if (( restarted == 0 )) && command -v docker &>/dev/null; then
-        cid=$(docker ps --format '{{.ID}} {{.Image}}' 2>/dev/null | grep -i mmwx | awk '{print $1}' | head -1 || true)
-        if [[ -n "$cid" ]]; then
-            info "重启 docker 容器 $cid..."
-            docker restart "$cid" >/dev/null && restarted=1 || warn "docker restart 失败"
-        fi
-    fi
-    if (( restarted == 0 )); then
-        warn "未自动重启(没找到 systemd / docker 入口),请手动重启 mmwx 进程"
-    else
-        ok "已重启 mmwx,新密码已生效"
-    fi
+    start_service
 else
-    info "已跳过重启(--no-restart);mmwx 下次校验时自动读到新 hash"
+    info "已跳过启动(--no-restart);记得手动启动 mmwx 才能用新密码登录"
 fi
 
 #─── 9. 完成 ────────────────────────────────────────────
