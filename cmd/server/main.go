@@ -963,8 +963,16 @@ func main() {
 	// 嵌入式 MCP server(streamable-HTTP):供 OpenClaw 等 agent 运维。鉴权在工具调用时按 API 令牌经 mux 复用现有链。
 	mux.Handle("/mcp", mcpserver.NewHandler(mux))
 
+	// E2E 加密通道 — 复用 internal/securechan(X25519 + AES-256-GCM + 滑动窗口防重放)
+	// 接到前端 user-facing API。客户端不发 X-Secure-Channel header 时透传,完全向后兼容。
+	secureChannelHandler := handler.NewUserSecureChannelHandler()
+	mux.Handle("/api/securechan/handshake", http.HandlerFunc(secureChannelHandler.Handshake))
+
 	silentModeManager := handler.NewSilentModeManager(repo, tokenStore)
-	handlerWithSilentMode := silentModeManager.Middleware(mux)
+	// 中间件顺序:SecureChannelMiddleware 必须在 silentMode/CORS 之**内**(更靠近 mux),
+	// 因为它会替换 request.Body 与 response body,外层 CORS/silentMode 只需看请求 path/header 即可。
+	handlerWithSecureChannel := secureChannelHandler.SecureChannelMiddleware(mux)
+	handlerWithSilentMode := silentModeManager.Middleware(handlerWithSecureChannel)
 
 	allowedOrigins := getAllowedOrigins()
 	handlerWithCORS := withCORS(handlerWithSilentMode, allowedOrigins)
