@@ -941,37 +941,18 @@ func (h *CertificateHandler) deployToAllRemotes(domain, certPEM, keyPEM, certPat
 	log.Printf("[Certificate] Initiated deploy to %d remote server(s) for %s", len(servers), domain)
 }
 
-// 通过 HTTP POST 将证书推送到代理
+// 通过 HTTP POST 将证书推送到代理。
+// 走 buildAgentURLCandidates 的 v4-first → v6-fallback 候选清单,消灭旧的 strings.LastIndex 截断 bug。
 func (h *CertificateHandler) deployRemoteCertificateHTTP(ctx context.Context, server *storage.RemoteServer, payload WSCertDeployPayload) error {
-	if server.IPAddress == "" {
-		return fmt.Errorf("server IP address unknown")
-	}
-
-	ip := server.IPAddress
-	if idx := strings.LastIndex(ip, ":"); idx != -1 {
-		if !strings.Contains(ip, "[") {
-			ip = ip[:idx]
-		}
-	}
-
-	port := "23889"
-	if server.ListenPort > 0 {
-		port = fmt.Sprintf("%d", server.ListenPort)
-	}
-
 	body, _ := json.Marshal(payload)
-	url := fmt.Sprintf("http://%s:%s/api/child/cert/deploy", ip, port)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(body)))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+server.Token)
-	req.Header.Set("User-Agent", "miaomiaowux/0.1")
+	hdr := http.Header{}
+	hdr.Set("Content-Type", "application/json")
+	hdr.Set("Authorization", "Bearer "+server.Token)
+	hdr.Set("User-Agent", "miaomiaowux/0.1")
 
 	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := tryHTTPWithFallback(ctx, client, server, http.MethodPost, "/api/child/cert/deploy", body, hdr)
 	if err != nil {
 		return err
 	}

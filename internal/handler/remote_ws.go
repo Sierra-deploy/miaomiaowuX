@@ -61,6 +61,10 @@ type WSAuthPayload struct {
 	// → 立刻反向请求 agent (HTTP) 用 v6 → 失败。心跳里也会上报,但 auth 早于第一次 heartbeat
 	// ~10s,窗口期足以触发"IP 已变 v6 → 反向不通"的可观察故障。老 agent 不发该字段 = 空串 = fallback 旧行为。
 	PublicIPv4 string `json:"public_ipv4,omitempty"`
+	// PublicIPv6 由 dual-stack agent 单独探测后上报(独立于 PublicIPv4 的 v4-first fallback v6 行为)。
+	// 用途:master HTTP 反向请求 v4 失败时,fallback 试这个 v6 地址。
+	// 老 agent 不发该字段 = 空 → master 端 IPAddressV6 保留旧值(通常也是空)→ 只走 v4 候选,行为同现状。
+	PublicIPv6 string `json:"public_ipv6,omitempty"`
 	// Capabilities agent 上报支持的扩展能力。老 agent 不发 = 全 false → master 走 HTTP 旧路径。
 	// 新 agent 上报 RPC=true → master 反向调用优先走 WS RPC,失败/超时再 fallback HTTP。
 	Capabilities AgentCapabilities `json:"capabilities,omitempty"`
@@ -113,6 +117,9 @@ type WSHeartbeatPayload struct {
 	ListenPort     int        `json:"listen_port,omitempty"`
 	LocalTimestamp int64      `json:"local_time,omitempty"`
 	PublicIPv4     string     `json:"public_ipv4,omitempty"`
+	// PublicIPv6 dual-stack v6 地址(同 WSAuthPayload.PublicIPv6 字段)。
+	// 每次心跳重发可让 master 跟随服务器 v6 地址变化(动态 prefix / 重新 detect)。
+	PublicIPv6 string `json:"public_ipv6,omitempty"`
 }
 
 // WSSpeedPayload 表示实时速度数据负载
@@ -660,7 +667,10 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 
 	updateCtx, updateCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer updateCancel()
-	if err := h.repo.UpdateRemoteServerHeartbeat(updateCtx, authPayload.Token, ip); err != nil {
+	// auth 时拿到 PublicIPv6 立刻写,**不等首次 heartbeat**(避免 ~10s 窗口期 master 仍不知 v6,
+	// 此时若 v4 已经不通,反向请求会失败但有 v6 可用的事实却没被利用)。
+	v6 := strings.TrimSpace(authPayload.PublicIPv6)
+	if err := h.repo.UpdateRemoteServerHeartbeat(updateCtx, authPayload.Token, ip, v6); err != nil {
 		log.Printf("[Remote WS] Failed to update server status for %s: %v", server.Name, err)
 	}
 
@@ -819,6 +829,9 @@ func (h *RemoteWSHandler) handleHeartbeat(wsConn *RemoteWSConnection, payload js
 	}
 	if hbPayload.PublicIPv4 != "" {
 		update.IPAddress = hbPayload.PublicIPv4
+	}
+	if v := strings.TrimSpace(hbPayload.PublicIPv6); v != "" {
+		update.IPAddressV6 = v
 	}
 	if hbPayload.BootTime != nil {
 		update.BootTime = hbPayload.BootTime

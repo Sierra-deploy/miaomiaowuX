@@ -1,13 +1,10 @@
 package handler
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	"miaomiaowux/internal/license"
@@ -310,16 +307,10 @@ func (p *LimiterConfigPusher) PushToServer(ctx context.Context, serverID int64) 
 }
 
 func (p *LimiterConfigPusher) pushViaHTTP(ctx context.Context, server *storage.RemoteServer, configs []WSLimiterConfigPayload) {
-	ip := server.IPAddress
-	if idx := strings.LastIndex(ip, ":"); idx != -1 {
-		if !strings.Contains(ip, "[") {
-			ip = ip[:idx]
-		}
-	}
-	port := 23889
-	if server.ListenPort > 0 {
-		port = server.ListenPort
-	}
+	hdr := http.Header{}
+	hdr.Set("Content-Type", "application/json")
+	hdr.Set("Authorization", "Bearer "+server.Token)
+	hdr.Set("User-Agent", version.AgentUserAgent)
 
 	for _, cfg := range configs {
 		body, err := json.Marshal(cfg)
@@ -327,18 +318,8 @@ func (p *LimiterConfigPusher) pushViaHTTP(ctx context.Context, server *storage.R
 			log.Printf("[LimiterPush] Failed to marshal config for server %s: %v", server.Name, err)
 			continue
 		}
-
-		url := fmt.Sprintf("http://%s:%d/api/child/limiter", ip, port)
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-		if err != nil {
-			log.Printf("[LimiterPush] Failed to create request for server %s: %v", server.Name, err)
-			continue
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+server.Token)
-		req.Header.Set("User-Agent", version.AgentUserAgent)
-
-		resp, err := p.httpClient.Do(req)
+		// tryHTTPWithFallback 内部 v4-first → v6-fallback,消灭旧 strings.LastIndex IPv6 截断 bug
+		resp, err := tryHTTPWithFallback(ctx, p.httpClient, server, http.MethodPost, "/api/child/limiter", body, hdr)
 		if err != nil {
 			log.Printf("[LimiterPush] HTTP push failed for server %s: %v", server.Name, err)
 			continue

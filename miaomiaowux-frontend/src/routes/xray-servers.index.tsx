@@ -1576,13 +1576,13 @@ function XrayServersPage() {
             <TableHeader>
               <TableRow>
                 <TableHead className="w-8 p-0" />
-                <TableHead>{t('servers.nameCol')}</TableHead>
+                <TableHead className="min-w-[200px]">{t('servers.nameCol')}</TableHead>
                 <TableHead>{t('servers.connectionMode')}</TableHead>
                 <TableHead className="w-[140px] max-w-[140px]">{t('servers.ipAddress')}</TableHead>
-                <TableHead className="min-w-[120px] w-[120px]">{t('servers.speedCol')}</TableHead>
+                <TableHead className="min-w-[100px] w-[100px]">{t('servers.speedCol')}</TableHead>
                 <TableHead>{t('servers.trafficCol')}</TableHead>
-                <TableHead className="min-w-[290px] w-[290px]">{t('servers.serviceCol')}</TableHead>
-                <TableHead className="text-right min-w-[230px] w-[230px]">{t('servers.actionsCol')}</TableHead>
+                <TableHead className="min-w-[230px] w-[230px]">{t('servers.serviceCol')}</TableHead>
+                <TableHead className="text-right min-w-[200px] w-[200px]">{t('servers.actionsCol')}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -1633,10 +1633,13 @@ function XrayServersPage() {
                               )}
                               {server.fallback_to_pull && (<Badge variant="secondary" className="text-xs bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200">{t('servers.degraded')}</Badge>)}
                               {server.steal_mode && server.steal_mode !== 'tunnel' && (<Badge variant="outline" className="text-xs">{server.steal_mode === 'fallback' ? t('servers.fallbackLabel') : t('servers.stealModeDefault')}</Badge>)}
-                              <Badge variant="outline" className={cn("text-xs", server.xray_mode === 'embedded' ? "border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-400" : "border-gray-300 text-gray-600 dark:border-gray-600 dark:text-gray-400")}>{server.xray_mode === 'embedded' ? t('servers.xrayModeEmbedded') : t('servers.xrayModeExternal')}</Badge>
                             </div>
                           </div>
-                          {server.last_heartbeat && (<div className="text-xs text-muted-foreground mt-0.5">{t('servers.heartbeatLabel')}: {new Date(server.last_heartbeat).toLocaleString()}</div>)}
+                          {/* 第 2 行:Xray 模式 badge + 心跳时间,移出顶部徽章组释放右侧名称空间 */}
+                          <div className="flex items-center gap-2 mt-0.5">
+                            <Badge variant="outline" className={cn("text-[10px] px-1.5 py-0 shrink-0", server.xray_mode === 'embedded' ? "border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-400" : "border-gray-300 text-gray-600 dark:border-gray-600 dark:text-gray-400")}>{server.xray_mode === 'embedded' ? t('servers.xrayModeEmbedded') : t('servers.xrayModeExternal')}</Badge>
+                            {server.last_heartbeat && (<span className="text-xs text-muted-foreground truncate">{t('servers.heartbeatLabel')}: {new Date(server.last_heartbeat).toLocaleString()}</span>)}
+                          </div>
                         </div>
                       </div>
                     </TableCell>
@@ -1660,7 +1663,7 @@ function XrayServersPage() {
                       </DropdownMenu>
                     </TableCell>
                     <TableCell className="text-muted-foreground"><IPCell raw={server.ip_address || ''} /></TableCell>
-                    <TableCell className="min-w-[120px] w-[120px] tabular-nums">
+                    <TableCell className="min-w-[100px] w-[100px] tabular-nums">
                       {server.status === 'connected' && ((server.current_upload_speed || server.current_download_speed) ? (
                         <div className="text-xs space-y-0.5">
                           <div className="text-green-600 dark:text-green-400">↑ {formatSpeed(server.current_upload_speed || 0)}</div>
@@ -1699,7 +1702,7 @@ function XrayServersPage() {
                         )}
                       </div>
                     </TableCell>
-                    <TableCell className="text-right min-w-[230px] w-[230px]">
+                    <TableCell className="text-right min-w-[200px] w-[200px]">
                       <div className="flex justify-end gap-1">
                         {server.status === 'connected' && (
                           <>

@@ -858,10 +858,13 @@ function PackagesPage() {
                               <span className='truncate'>{node.node_name}</span>
                             </Label>
                           )}
-                          {/* 倍率列:固定宽度 72px,跟表头对齐;勾选时显示输入,未勾选显示占位文字 */}
-                          <div className="flex items-center justify-end gap-0.5 shrink-0 w-[72px]">
+                          {/* 倍率列 — mobile: 上方 label + 全宽 input;桌面: 固定 72px 跟表头对齐 */}
+                          <div className={`${isMobile ? 'flex flex-col gap-1 basis-[calc(33%-0.5rem)] grow' : 'flex items-center justify-end gap-0.5 shrink-0 w-[72px]'}`}>
+                            {isMobile && (
+                              <Label className='text-[10px] text-muted-foreground'>{t('dialog.nodeMultiplierHeader', { defaultValue: '流量倍率' })}</Label>
+                            )}
                             {isChecked ? (
-                              <>
+                              <div className='flex items-center gap-0.5'>
                                 <Input
                                   type="number"
                                   step="0.1"
@@ -878,17 +881,20 @@ function PackagesPage() {
                                     }
                                     setFormData({ ...formData, node_multipliers: nextMults })
                                   }}
-                                  className="no-spin h-7 w-12 px-1.5 text-xs text-right tabular-nums"
+                                  className={`no-spin h-7 px-1.5 text-xs text-right tabular-nums ${isMobile ? 'flex-1 w-full' : 'w-12'}`}
                                   aria-label={t('dialog.nodeMultiplier', { defaultValue: '流量倍率' })}
                                 />
                                 <span className="text-sm font-semibold text-primary leading-none select-none">×</span>
-                              </>
+                              </div>
                             ) : (
                               <span className="text-xs text-muted-foreground/50">—</span>
                             )}
                           </div>
-                          {/* per-node 限速:占位符显示套餐通用值作"继承"提示;空=继承;0=显式不限速 */}
-                          <div className="flex items-center justify-end gap-0.5 shrink-0 w-[88px]">
+                          {/* per-node 限速 — mobile: label+全宽 input;桌面: 固定 88px;占位符 = 套餐通用值 */}
+                          <div className={`${isMobile ? 'flex flex-col gap-1 basis-[calc(33%-0.5rem)] grow' : 'flex items-center justify-end gap-0.5 shrink-0 w-[88px]'}`}>
+                            {isMobile && (
+                              <Label className='text-[10px] text-muted-foreground'>{t('dialog.nodeSpeedLimitHeader', { defaultValue: '限速 Mbps' })}</Label>
+                            )}
                             {isChecked ? (
                               <Input
                                 type="number"
@@ -909,15 +915,18 @@ function PackagesPage() {
                                   }
                                   setFormData({ ...formData, node_speed_limits: nextSpeed })
                                 }}
-                                className="no-spin h-7 w-[72px] px-1.5 text-xs text-right tabular-nums"
+                                className={`no-spin h-7 px-1.5 text-xs text-right tabular-nums ${isMobile ? 'w-full' : 'w-[72px]'}`}
                                 aria-label={t('dialog.nodeSpeedLimit', { defaultValue: '节点限速 (Mbps)' })}
                               />
                             ) : (
                               <span className="text-xs text-muted-foreground/50">—</span>
                             )}
                           </div>
-                          {/* per-node 客户端数:同上 */}
-                          <div className="flex items-center justify-end gap-0.5 shrink-0 w-[72px]">
+                          {/* per-node 客户端数 — mobile: label+全宽 input;桌面: 固定 72px */}
+                          <div className={`${isMobile ? 'flex flex-col gap-1 basis-[calc(33%-0.5rem)] grow' : 'flex items-center justify-end gap-0.5 shrink-0 w-[72px]'}`}>
+                            {isMobile && (
+                              <Label className='text-[10px] text-muted-foreground'>{t('dialog.nodeDeviceLimitHeader', { defaultValue: '客户端数' })}</Label>
+                            )}
                             {isChecked ? (
                               <Input
                                 type="number"
@@ -938,7 +947,7 @@ function PackagesPage() {
                                   }
                                   setFormData({ ...formData, node_device_limits: nextDevice })
                                 }}
-                                className="no-spin h-7 w-[56px] px-1.5 text-xs text-right tabular-nums"
+                                className={`no-spin h-7 px-1.5 text-xs text-right tabular-nums ${isMobile ? 'w-full' : 'w-[56px]'}`}
                                 aria-label={t('dialog.nodeDeviceLimit', { defaultValue: '节点客户端数' })}
                               />
                             ) : (

@@ -557,42 +557,56 @@ func (h *RemoteManageHandler) forwardStreamToRemote(w http.ResponseWriter, r *ht
 		return
 	}
 
-	ip := server.IPAddress
-	if idx := strings.LastIndex(ip, ":"); idx != -1 && !strings.Contains(ip, "[") {
-		ip = ip[:idx]
-	}
-	if strings.Contains(ip, ":") {
-		ip = "[" + ip + "]"
-	}
-	port := "23889"
-	if server.ListenPort > 0 {
-		port = fmt.Sprintf("%d", server.ListenPort)
-	}
-	childURL := fmt.Sprintf("http://%s:%s%s", ip, port, agentPath)
-
-	log.Printf("[Remote Manage] Forwarding stream %s to server %s (%s)", agentPath, server.Name, childURL)
-
-	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, childURL, nil)
-	if err != nil {
-		remoteSSEError(w, "failed to create request: "+err.Error())
+	// IP 候选清单:v4 优先,v6 兜底。dial 失败才 fallback;一旦 200 OK 且开始读流就不再 fallback
+	// (避免双重执行 install / upgrade 这类幂等性差的操作)。
+	candidates := buildAgentURLCandidates(server, agentPath)
+	if len(candidates) == 0 {
+		remoteSSEError(w, "server IP address unknown")
 		return
 	}
-	req.Header.Set("Authorization", "Bearer "+server.Token)
-	req.Header.Set("User-Agent", version.AgentUserAgent)
 
-	client := &http.Client{} // SSE 没有超时
-	resp, err := client.Do(req)
-	if err != nil {
-		remoteSSEError(w, "agent unreachable: "+err.Error())
-		return
+	var resp *http.Response
+	for i, childURL := range candidates {
+		log.Printf("[Remote Manage] Forwarding stream %s to server %s (%s)", agentPath, server.Name, childURL)
+
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, childURL, nil)
+		if err != nil {
+			if i+1 < len(candidates) {
+				log.Printf("[Remote Manage] stream candidate %s req-build failed (%v), trying next", childURL, err)
+				continue
+			}
+			remoteSSEError(w, "failed to create request: "+err.Error())
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+server.Token)
+		req.Header.Set("User-Agent", version.AgentUserAgent)
+
+		client := &http.Client{} // SSE 没有超时
+		r2, err := client.Do(req)
+		if err != nil {
+			if i+1 < len(candidates) {
+				log.Printf("[Remote Manage] stream candidate %s dial failed (%v), trying next", childURL, err)
+				continue
+			}
+			remoteSSEError(w, "agent unreachable: "+err.Error())
+			return
+		}
+		// 4xx/5xx 也算"这个 candidate 失败",尝试下一个 — agent install/upgrade 类幂等性差,
+		// 但 4xx 通常是 token/auth/path 错,fallback 也是同样 4xx,代价 = 1 次多发,可接受
+		if r2.StatusCode >= 400 {
+			body, _ := io.ReadAll(r2.Body)
+			r2.Body.Close()
+			if i+1 < len(candidates) {
+				log.Printf("[Remote Manage] stream candidate %s returned %d, trying next", childURL, r2.StatusCode)
+				continue
+			}
+			remoteSSEError(w, fmt.Sprintf("agent error %d: %s", r2.StatusCode, string(body)))
+			return
+		}
+		resp = r2
+		break
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		remoteSSEError(w, fmt.Sprintf("agent error %d: %s", resp.StatusCode, string(body)))
-		return
-	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -794,42 +808,55 @@ func (h *RemoteManageHandler) forwardUpgradeStream(w http.ResponseWriter, r *htt
 		// WS 不可用,继续走下面老 HTTP 路径(headers 已经写过,无副作用)
 	}
 
-	ip := server.IPAddress
-	if idx := strings.LastIndex(ip, ":"); idx != -1 && !strings.Contains(ip, "[") {
-		ip = ip[:idx]
+	// v4-first → v6-fallback 候选清单
+	candidates := buildAgentURLCandidates(server, "/api/child/agent/upgrade-stream")
+	if len(candidates) == 0 {
+		remoteSSEError(w, "server IP address unknown")
+		return
 	}
-	if strings.Contains(ip, ":") {
-		ip = "[" + ip + "]"
-	}
-	port := "23889"
-	if server.ListenPort > 0 {
-		port = fmt.Sprintf("%d", server.ListenPort)
-	}
-	childURL := fmt.Sprintf("http://%s:%s%s", ip, port, "/api/child/agent/upgrade-stream")
-	log.Printf("[Remote Manage] Forwarding upgrade stream to server %s (%s) preVersion=%q", server.Name, childURL, preVersion)
 
 	ctx, cancel := context.WithTimeout(r.Context(), upgradeTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, childURL, nil)
-	if err != nil {
-		remoteSSEError(w, "failed to create request: "+err.Error())
-		return
-	}
-	req.Header.Set("Authorization", "Bearer "+server.Token)
-	req.Header.Set("User-Agent", version.AgentUserAgent)
+	var resp *http.Response
+	for i, childURL := range candidates {
+		log.Printf("[Remote Manage] Forwarding upgrade stream to server %s (%s) preVersion=%q", server.Name, childURL, preVersion)
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		remoteSSEError(w, "agent unreachable: "+err.Error())
-		return
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, childURL, nil)
+		if err != nil {
+			if i+1 < len(candidates) {
+				log.Printf("[Remote Manage] upgrade-stream %s req-build failed (%v), trying next", childURL, err)
+				continue
+			}
+			remoteSSEError(w, "failed to create request: "+err.Error())
+			return
+		}
+		req.Header.Set("Authorization", "Bearer "+server.Token)
+		req.Header.Set("User-Agent", version.AgentUserAgent)
+
+		r2, err := http.DefaultClient.Do(req)
+		if err != nil {
+			if i+1 < len(candidates) {
+				log.Printf("[Remote Manage] upgrade-stream %s dial failed (%v), trying next", childURL, err)
+				continue
+			}
+			remoteSSEError(w, "agent unreachable: "+err.Error())
+			return
+		}
+		if r2.StatusCode >= 400 {
+			body, _ := io.ReadAll(r2.Body)
+			r2.Body.Close()
+			if i+1 < len(candidates) {
+				log.Printf("[Remote Manage] upgrade-stream %s returned %d, trying next", childURL, r2.StatusCode)
+				continue
+			}
+			remoteSSEError(w, fmt.Sprintf("agent error %d: %s", r2.StatusCode, string(body)))
+			return
+		}
+		resp = r2
+		break
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		remoteSSEError(w, fmt.Sprintf("agent error %d: %s", resp.StatusCode, string(body)))
-		return
-	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -1142,45 +1169,48 @@ func (h *RemoteManageHandler) forwardToRemoteServer(ctx context.Context, serverI
 		return nil, fmt.Errorf("server not connected (status: %s)", server.Status)
 	}
 
-	if server.IPAddress == "" {
+	// IP 候选清单:v4 优先,v6 兜底(空字段自动跳过)。用统一 helper 消灭旧 strings.LastIndex IPv6 截断 bug。
+	candidates := buildAgentURLCandidates(server, path)
+	if len(candidates) == 0 {
 		return nil, fmt.Errorf("server IP address unknown")
 	}
 
-	ip := server.IPAddress
-	if idx := strings.LastIndex(ip, ":"); idx != -1 {
-		if !strings.Contains(ip, "[") {
-			ip = ip[:idx]
+	// 逐个 candidate 尝试:成功即返回;任何错误都 fallback 到下一个候选(代价 = 业务 4xx 多发一次,可接受)。
+	// 单候选场景下退化为现状(只走一次,不重试)。
+	for i, childURL := range candidates {
+		log.Printf("[Remote Manage] Forwarding %s %s to server %s (%s)", method, path, server.Name, childURL)
+
+		var attemptResp []byte
+		var attemptErr error
+
+		if h.crypto == nil || h.crypto.Identity == nil {
+			attemptResp, attemptErr = h.doPlainPullRequest(ctx, method, childURL, server.Token, body)
+		} else {
+			sessionVal, ok := h.pullSessions.Load(serverID)
+			if !ok {
+				attemptResp, attemptErr = h.doPullKeyExchange(ctx, serverID, method, childURL, server.Token, body)
+			} else {
+				session := sessionVal.(*securechan.Session)
+				attemptResp, attemptErr = h.doEncryptedPullRequest(ctx, method, childURL, server.Token, body, session)
+				if isSessionInvalidErr(attemptErr) {
+					h.pullSessions.Delete(serverID)
+					log.Printf("[Remote Manage] Pull session invalid for server %d (%v), re-negotiating", serverID, attemptErr)
+					attemptResp, attemptErr = h.doPullKeyExchange(ctx, serverID, method, childURL, server.Token, body)
+				}
+			}
 		}
-	}
-	if strings.Contains(ip, ":") {
-		ip = "[" + ip + "]"
-	}
 
-	port := "23889"
-	if server.ListenPort > 0 {
-		port = fmt.Sprintf("%d", server.ListenPort)
+		if attemptErr == nil {
+			return attemptResp, nil
+		}
+		if i+1 < len(candidates) {
+			log.Printf("[Remote Manage] candidate %s failed (%v), trying next", childURL, attemptErr)
+			continue
+		}
+		// 最后一个候选,直接把 err 透传给上层(同原行为)
+		return attemptResp, attemptErr
 	}
-	childURL := fmt.Sprintf("http://%s:%s%s", ip, port, path)
-
-	log.Printf("[Remote Manage] Forwarding %s %s to server %s (%s)", method, path, server.Name, childURL)
-
-	if h.crypto == nil || h.crypto.Identity == nil {
-		return h.doPlainPullRequest(ctx, method, childURL, server.Token, body)
-	}
-
-	sessionVal, ok := h.pullSessions.Load(serverID)
-	if !ok {
-		return h.doPullKeyExchange(ctx, serverID, method, childURL, server.Token, body)
-	}
-
-	session := sessionVal.(*securechan.Session)
-	respBody, err = h.doEncryptedPullRequest(ctx, method, childURL, server.Token, body, session)
-	if isSessionInvalidErr(err) {
-		h.pullSessions.Delete(serverID)
-		log.Printf("[Remote Manage] Pull session invalid for server %d (%v), re-negotiating", serverID, err)
-		return h.doPullKeyExchange(ctx, serverID, method, childURL, server.Token, body)
-	}
-	return respBody, err
+	return nil, fmt.Errorf("server %d: all IP candidates exhausted", serverID)
 }
 
 // doFederationRequest 把一条远程管理命令通过拥有方主控的 /api/federation/manage 转发(分享服务器)。

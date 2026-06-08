@@ -687,6 +687,10 @@ type RemoteServer struct {
 	Status               string     `json:"status"`
 	LastHeartbeat        *time.Time `json:"last_heartbeat,omitempty"`
 	IPAddress            string     `json:"ip_address,omitempty"`
+	// IPAddressV6 由 agent 在 dual-stack 服务器上单独探测后上报。
+	// 用途:master HTTP 反向请求时,v4 dial 失败 → fallback 试 v6。
+	// 空值 = agent 不支持上报 / 服务器无 v6 → 退化为只走 v4(与历史行为一致)。
+	IPAddressV6          string     `json:"ip_address_v6,omitempty"`
 	Domain               string     `json:"domain,omitempty"`
 	BootTime             *time.Time `json:"boot_time,omitempty"`
 	XrayBootTime         *time.Time `json:"xray_boot_time,omitempty"`
@@ -1062,6 +1066,10 @@ CREATE TABLE IF NOT EXISTS users (
 	}
 	// 用户自助通知开关(/notify on):默认关,开启后 bot 每日推流量 + 临期到期提醒。
 	if err := r.ensureUserColumn("tg_notify_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// 每月按 reset_day 自动重置流量周期 — 用 last_reset_at 防止 enforcer 同一天反复触发 reset
+	if err := r.ensureUserColumn("last_reset_at", "TIMESTAMP"); err != nil {
 		return err
 	}
 	if _, err := r.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_telegram_id ON users(telegram_id) WHERE telegram_id IS NOT NULL;`); err != nil {
@@ -1886,6 +1894,10 @@ CREATE INDEX IF NOT EXISTS idx_remote_servers_status ON remote_servers(status);
 		return err
 	}
 	if err := r.ensureRemoteServerColumn("domain", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	// dual-stack IPv6 字段 — master HTTP 反向请求 v4 失败时 fallback 试 v6
+	if err := r.ensureRemoteServerColumn("ip_address_v6", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	// 双令牌系统字段
@@ -4048,6 +4060,10 @@ type User struct {
 	PackageID           int64
 	IsReset             bool
 	ResetDay            int
+	// LastResetAt 记录上次按 reset_day 自动重置流量周期的时间。
+	// CheckAll 用它做"本月是否已重置"判定,避免 enforcer 每 5 min 跑一次时同一天反复 reset。
+	// 空 = 从未重置过(刚装 / 刚分配套餐),CheckAll 在 reset_day 到了之后会触发首次 reset。
+	LastResetAt         *time.Time
 	PackageEndDate      *time.Time
 	SpeedLimitOverride  *float64
 	DeviceLimitOverride *int
@@ -7539,7 +7555,7 @@ func (r *TrafficRepository) ResolveUsernameByEmail(ctx context.Context, email st
 
 func (r *TrafficRepository) ListUsersWithPackage(ctx context.Context) ([]User, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT username, password_hash, COALESCE(email, ''), COALESCE(nickname, ''), COALESCE(avatar_url, ''), COALESCE(role, ''), is_active, COALESCE(remark, ''), COALESCE(package_id, 0), COALESCE(is_reset, 0), COALESCE(reset_day, 1), package_end_date, speed_limit_override, device_limit_override, COALESCE(node_speed_limit_overrides, '{}'), COALESCE(node_device_limit_overrides, '{}'), created_at, updated_at FROM users WHERE package_id IS NOT NULL AND package_id > 0`)
+		`SELECT username, password_hash, COALESCE(email, ''), COALESCE(nickname, ''), COALESCE(avatar_url, ''), COALESCE(role, ''), is_active, COALESCE(remark, ''), COALESCE(package_id, 0), COALESCE(is_reset, 0), COALESCE(reset_day, 1), last_reset_at, package_end_date, speed_limit_override, device_limit_override, COALESCE(node_speed_limit_overrides, '{}'), COALESCE(node_device_limit_overrides, '{}'), created_at, updated_at FROM users WHERE package_id IS NOT NULL AND package_id > 0`)
 	if err != nil {
 		return nil, err
 	}
@@ -7548,15 +7564,18 @@ func (r *TrafficRepository) ListUsersWithPackage(ctx context.Context) ([]User, e
 	for rows.Next() {
 		var u User
 		var active, isReset int
-		var endDate sql.NullTime
+		var lastResetAt, endDate sql.NullTime
 		var speedOverride sql.NullFloat64
 		var deviceOverride sql.NullInt64
 		var nodeSpeedJSON, nodeDeviceJSON string
-		if err := rows.Scan(&u.Username, &u.PasswordHash, &u.Email, &u.Nickname, &u.AvatarURL, &u.Role, &active, &u.Remark, &u.PackageID, &isReset, &u.ResetDay, &endDate, &speedOverride, &deviceOverride, &nodeSpeedJSON, &nodeDeviceJSON, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.Username, &u.PasswordHash, &u.Email, &u.Nickname, &u.AvatarURL, &u.Role, &active, &u.Remark, &u.PackageID, &isReset, &u.ResetDay, &lastResetAt, &endDate, &speedOverride, &deviceOverride, &nodeSpeedJSON, &nodeDeviceJSON, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, err
 		}
 		u.IsActive = active != 0
 		u.IsReset = isReset != 0
+		if lastResetAt.Valid {
+			u.LastResetAt = &lastResetAt.Time
+		}
 		if endDate.Valid {
 			u.PackageEndDate = &endDate.Time
 		}
@@ -7979,7 +7998,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		return nil, errors.New("traffic repository not initialized")
 	}
 
-	const query = `SELECT id, name, token, status, last_heartbeat, COALESCE(ip_address, ''), COALESCE(domain, ''),
+	const query = `SELECT id, name, token, status, last_heartbeat, COALESCE(ip_address, ''), COALESCE(ip_address_v6, ''), COALESCE(domain, ''),
 		boot_time, xray_boot_time, COALESCE(boot_count, 0), COALESCE(xray_boot_count, 0),
 		token_expires_at, last_token_refresh,
 		COALESCE(connection_mode, 'push'), COALESCE(pull_address, ''), COALESCE(pull_port, 0), COALESCE(pull_token, ''), last_pull_at,
@@ -8012,7 +8031,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		var agentTokenExpiresAt, lastAgentTokenRefresh sql.NullTime
 		var fallbackToPull, xrayRunning int
 		var timeOffsetSeconds int64
-		if err := rows.Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.Domain,
+		if err := rows.Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.Domain,
 			&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 			&tokenExpiresAt, &lastTokenRefresh,
 			&server.ConnectionMode, &server.PullAddress, &server.PullPort, &server.PullToken, &lastPullAt,
@@ -8089,7 +8108,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		return nil, errors.New("remote server id is required")
 	}
 
-	const query = `SELECT id, name, token, status, last_heartbeat, COALESCE(ip_address, ''), COALESCE(domain, ''),
+	const query = `SELECT id, name, token, status, last_heartbeat, COALESCE(ip_address, ''), COALESCE(ip_address_v6, ''), COALESCE(domain, ''),
 		boot_time, xray_boot_time, COALESCE(boot_count, 0), COALESCE(xray_boot_count, 0),
 		token_expires_at, last_token_refresh,
 		COALESCE(connection_mode, 'push'), COALESCE(pull_address, ''), COALESCE(pull_port, 0), COALESCE(pull_token, ''), last_pull_at,
@@ -8111,7 +8130,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 	var bootTime, xrayBootTime sql.NullString
 	var agentTokenExpiresAt, lastAgentTokenRefresh sql.NullTime
 	var xrayRunningInt int
-	err := r.db.QueryRowContext(ctx, query, id).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.Domain,
+	err := r.db.QueryRowContext(ctx, query, id).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.Domain,
 		&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 		&tokenExpiresAt, &lastTokenRefresh,
 		&server.ConnectionMode, &server.PullAddress, &server.PullPort, &server.PullToken, &lastPullAt,
@@ -8168,7 +8187,7 @@ func (r *TrafficRepository) GetRemoteServerByToken(ctx context.Context, token st
 		return nil, errors.New("remote server token is required")
 	}
 
-	const query = `SELECT id, name, token, status, last_heartbeat, COALESCE(ip_address, ''), COALESCE(domain, ''),
+	const query = `SELECT id, name, token, status, last_heartbeat, COALESCE(ip_address, ''), COALESCE(ip_address_v6, ''), COALESCE(domain, ''),
 		boot_time, xray_boot_time, COALESCE(boot_count, 0), COALESCE(xray_boot_count, 0),
 		token_expires_at, last_token_refresh,
 		COALESCE(connection_mode, 'push'), COALESCE(pull_address, ''), COALESCE(pull_port, 0), COALESCE(pull_token, ''), last_pull_at,
@@ -8183,7 +8202,7 @@ func (r *TrafficRepository) GetRemoteServerByToken(ctx context.Context, token st
 	var lastHeartbeat, tokenExpiresAt, lastTokenRefresh, lastPullAt sql.NullTime
 	var bootTime, xrayBootTime sql.NullString
 	var agentTokenExpiresAt, lastAgentTokenRefresh sql.NullTime
-	err := r.db.QueryRowContext(ctx, query, token).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.Domain,
+	err := r.db.QueryRowContext(ctx, query, token).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.Domain,
 		&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 		&tokenExpiresAt, &lastTokenRefresh,
 		&server.ConnectionMode, &server.PullAddress, &server.PullPort, &server.PullToken, &lastPullAt,
@@ -8233,7 +8252,7 @@ func (r *TrafficRepository) GetRemoteServerByName(ctx context.Context, name stri
 		return nil, errors.New("remote server name is required")
 	}
 
-	const query = `SELECT id, name, token, status, last_heartbeat, COALESCE(ip_address, ''), COALESCE(domain, ''),
+	const query = `SELECT id, name, token, status, last_heartbeat, COALESCE(ip_address, ''), COALESCE(ip_address_v6, ''), COALESCE(domain, ''),
 		boot_time, xray_boot_time, COALESCE(boot_count, 0), COALESCE(xray_boot_count, 0),
 		token_expires_at, last_token_refresh,
 		COALESCE(connection_mode, 'push'), COALESCE(pull_address, ''), COALESCE(pull_port, 0), COALESCE(pull_token, ''), last_pull_at,
@@ -8249,7 +8268,7 @@ func (r *TrafficRepository) GetRemoteServerByName(ctx context.Context, name stri
 	var lastHeartbeat, tokenExpiresAt, lastTokenRefresh, lastPullAt sql.NullTime
 	var bootTime, xrayBootTime sql.NullString
 	var agentTokenExpiresAt, lastAgentTokenRefresh sql.NullTime
-	err := r.db.QueryRowContext(ctx, query, name).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.Domain,
+	err := r.db.QueryRowContext(ctx, query, name).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.Domain,
 		&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 		&tokenExpiresAt, &lastTokenRefresh,
 		&server.ConnectionMode, &server.PullAddress, &server.PullPort, &server.PullToken, &lastPullAt,
@@ -8321,7 +8340,7 @@ func (r *TrafficRepository) CreateRemoteServer(ctx context.Context, server *Remo
 	// 将令牌有效期设置为从现在起 7 天
 	tokenExpiresAt := time.Now().Add(7 * 24 * time.Hour)
 
-	const stmt = `INSERT INTO remote_servers (name, token, status, ip_address, domain, token_expires_at, last_token_refresh, connection_mode, listen_port, pull_address, pull_port, pull_token, use_443, steal_mode, site_type, site_value, xray_mode, traffic_limit, traffic_used_offset, traffic_reset_day, traffic_stats_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+	const stmt = `INSERT INTO remote_servers (name, token, status, ip_address, ip_address_v6, domain, token_expires_at, last_token_refresh, connection_mode, listen_port, pull_address, pull_port, pull_token, use_443, steal_mode, site_type, site_value, xray_mode, traffic_limit, traffic_used_offset, traffic_reset_day, traffic_stats_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
 
 	stealMode := server.StealMode
 	if stealMode == "" {
@@ -8337,7 +8356,7 @@ func (r *TrafficRepository) CreateRemoteServer(ctx context.Context, server *Remo
 	if statsMode != "upload" && statsMode != "download" {
 		statsMode = "both"
 	}
-	result, err := r.db.ExecContext(ctx, stmt, server.Name, server.Token, server.Status, server.IPAddress, server.Domain, tokenExpiresAt, server.ConnectionMode, server.ListenPort, server.PullAddress, server.PullPort, server.PullToken, server.Use443, stealMode, server.SiteType, server.SiteValue, xrayMode, server.TrafficLimit, server.TrafficUsedOffset, server.TrafficResetDay, statsMode)
+	result, err := r.db.ExecContext(ctx, stmt, server.Name, server.Token, server.Status, server.IPAddress, server.IPAddressV6, server.Domain, tokenExpiresAt, server.ConnectionMode, server.ListenPort, server.PullAddress, server.PullPort, server.PullToken, server.Use443, stealMode, server.SiteType, server.SiteValue, xrayMode, server.TrafficLimit, server.TrafficUsedOffset, server.TrafficResetDay, statsMode)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return ErrRemoteServerExists
@@ -8359,6 +8378,7 @@ func (r *TrafficRepository) CreateRemoteServer(ctx context.Context, server *Remo
 type HeartbeatUpdate struct {
 	Token             string
 	IPAddress         string
+	IPAddressV6       string // dual-stack v6,可空(老 agent 不发)
 	BootTime          *time.Time
 	XrayBootTime      *time.Time
 	ListenPort        int
@@ -8379,7 +8399,8 @@ type HeartbeatResult struct {
 }
 
 // 更新远程服务器的检测信号和状态。
-func (r *TrafficRepository) UpdateRemoteServerHeartbeat(ctx context.Context, token string, ipAddress string) error {
+// ipAddressV6 为空时保留 db 现有值(老 agent 兼容)。
+func (r *TrafficRepository) UpdateRemoteServerHeartbeat(ctx context.Context, token string, ipAddress string, ipAddressV6 string) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
 	}
@@ -8389,9 +8410,15 @@ func (r *TrafficRepository) UpdateRemoteServerHeartbeat(ctx context.Context, tok
 		return errors.New("remote server token is required")
 	}
 
-	const stmt = `UPDATE remote_servers SET status = ?, last_heartbeat = CURRENT_TIMESTAMP, ip_address = ?, updated_at = CURRENT_TIMESTAMP WHERE token = ?`
+	const stmt = `UPDATE remote_servers SET
+		status = ?,
+		last_heartbeat = CURRENT_TIMESTAMP,
+		ip_address = ?,
+		ip_address_v6 = COALESCE(NULLIF(?, ''), ip_address_v6),
+		updated_at = CURRENT_TIMESTAMP
+		WHERE token = ?`
 
-	result, err := r.db.ExecContext(ctx, stmt, RemoteServerStatusConnected, ipAddress, token)
+	result, err := r.db.ExecContext(ctx, stmt, RemoteServerStatusConnected, ipAddress, ipAddressV6, token)
 	if err != nil {
 		return fmt.Errorf("update remote server heartbeat: %w", err)
 	}
@@ -8518,11 +8545,14 @@ func (r *TrafficRepository) UpdateRemoteServerHeartbeatWithRestart(ctx context.C
 		pullAddress = update.IPAddress
 	}
 
-	// 更新服务器记录
+	// 更新服务器记录。ip_address_v6 用 COALESCE(NULLIF(?, ''), ip_address_v6):
+	// agent 不发字段 = '' → 保留 db 现有值;agent 发了 = '' 也意味着"重置为无 v6",但实际
+	// agent 上报 detectPublicIPv6 失败时本来就发空,二义性可接受。
 	const stmt = `UPDATE remote_servers SET
 		status = ?,
 		last_heartbeat = CURRENT_TIMESTAMP,
 		ip_address = ?,
+		ip_address_v6 = COALESCE(NULLIF(?, ''), ip_address_v6),
 		boot_time = ?,
 		xray_boot_time = ?,
 		boot_count = ?,
@@ -8536,6 +8566,7 @@ func (r *TrafficRepository) UpdateRemoteServerHeartbeatWithRestart(ctx context.C
 	_, err = r.db.ExecContext(ctx, stmt,
 		RemoteServerStatusConnected,
 		update.IPAddress,
+		update.IPAddressV6,
 		update.BootTime,
 		update.XrayBootTime,
 		result.BootCount,
@@ -9639,6 +9670,23 @@ func (r *TrafficRepository) ResetUserTrafficCycle(ctx context.Context, username 
 		return fmt.Errorf("reset user traffic cycle: %w", err)
 	}
 
+	return nil
+}
+
+// UpdateUserLastResetAt 记录用户最近一次按 reset_day 触发的流量周期重置时间。
+// CheckAll 用这个时间戳判定"本月是否已重置过",确保 enforcer 每 5 分钟跑一次时同一天不反复 reset。
+func (r *TrafficRepository) UpdateUserLastResetAt(ctx context.Context, username string, t time.Time) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if username == "" {
+		return errors.New("username is required")
+	}
+	const stmt = `UPDATE users SET last_reset_at = ?, updated_at = CURRENT_TIMESTAMP WHERE username = ?`
+	_, err := r.db.ExecContext(ctx, stmt, t, username)
+	if err != nil {
+		return fmt.Errorf("update user last_reset_at: %w", err)
+	}
 	return nil
 }
 
