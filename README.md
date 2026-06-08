@@ -158,6 +158,15 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.2.2 (2026-06-08)
+- 🌈前后端交互安全加固
+- 🌈套餐管理显示优化
+- 🌈手机端适配优化
+- 🌈支持按入站+用户限速
+- 🛠️ fix:下发TLS证书连接失败
+- 🛠️ fix:找回密码脚本错误
+- 🛠️ fix:暴力探测接口拉黑失败
+- 🛠️ fix:简易模式证书自动配置失败
 ### v0.2.1 (2026-06-05)
 - 🌈支持cloudflare turnstile 验证码
 - 🛠️ fix: tgbot用户注册后无法访问节点
