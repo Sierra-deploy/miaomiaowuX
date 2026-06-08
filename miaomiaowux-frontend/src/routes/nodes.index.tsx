@@ -83,6 +83,7 @@ type ParsedNode = {
   clash_config: string
   enabled: boolean
   tag: string
+  tags?: string[]
   original_server: string
   original_domain: string
   inbound_tag: string
@@ -471,7 +472,9 @@ function NodesPage() {
   // 批量操作状态 - 从 localStorage 恢复选中状态
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<number>>(() => getStoredSelectedIds())
   const [batchTagDialogOpen, setBatchTagDialogOpen] = useState(false)
-  const [batchTag, setBatchTag] = useState<string>('')
+  const [batchTag, setBatchTag] = useState<string>('')          // 兼容旧入口的单 tag 草稿,提交时折叠进 batchTags
+  const [batchTags, setBatchTags] = useState<string[]>([])      // 多标签:对话框最终要应用的 tag 数组
+  const [batchTagInput, setBatchTagInput] = useState<string>('') // 当前编辑中的 chip 输入文本
   const [batchRenameDialogOpen, setBatchRenameDialogOpen] = useState(false)
   const [batchRenameText, setBatchRenameText] = useState<string>('')
   const [findText, setFindText] = useState<string>('')
@@ -1323,6 +1326,7 @@ function NodesPage() {
         clash_config: n.clash ? JSON.stringify(cloneProxyWithName(n.clash, n.name)) : '',
         enabled: n.enabled,
         tag: tag,
+        tags: [tag], // 多标签同步:后端 Tags 是真理源
       }))
 
       const response = await api.post('/api/admin/nodes/batch', { nodes: payload })
@@ -1409,9 +1413,9 @@ function NodesPage() {
     },
   })
 
-  // 批量更新节点标签
+  // 批量更新节点标签 — 接收多 tags 数组,设给后端 tags(Tag 由 serializeNodeTags 自动同步成 Tags[0])
   const batchUpdateTagMutation = useMutation({
-    mutationFn: async ({ nodeIds, tag }: { nodeIds: number[]; tag: string }) => {
+    mutationFn: async ({ nodeIds, tags }: { nodeIds: number[]; tags: string[] }) => {
       const promises = nodeIds.map((id) => {
         const node = savedNodes.find(n => n.id === id)
         if (!node) return Promise.resolve()
@@ -1423,7 +1427,8 @@ function NodesPage() {
           parsed_config: node.parsed_config,
           clash_config: node.clash_config,
           enabled: node.enabled,
-          tag: tag,
+          tag: tags[0] ?? '',
+          tags: tags,
         })
       })
       await Promise.all(promises)
@@ -1434,6 +1439,8 @@ function NodesPage() {
       setBatchTagDialogOpen(false)
       setSelectedNodeIds(new Set())
       setBatchTag('')
+      setBatchTags([])
+      setBatchTagInput('')
       setTagFilter('all') // 切换到全部标签
     },
     onError: (error: any) => {
@@ -2628,9 +2635,12 @@ function NodesPage() {
       nodes = nodes.filter(node => node.parsed?.type === selectedProtocol)
     }
 
-    // 按标签筛选
+    // 按标签筛选:优先看 tags 数组(多标签),兼容 tag 单字段
     if (tagFilter !== 'all') {
-      nodes = nodes.filter(node => node.tag === tagFilter)
+      nodes = nodes.filter(node => {
+        const tags = node.tags?.length ? node.tags : (node.tag ? [node.tag] : [])
+        return tags.includes(tagFilter)
+      })
     }
 
     return nodes
@@ -2743,11 +2753,12 @@ function NodesPage() {
 
   const tagCounts = useMemo(() => {
     const counts: Record<string, number> = { all: displayNodes.length }
-    const tags = new Set<string>()
     displayNodes.forEach(node => {
-      if (node.tag) {
-        tags.add(node.tag)
-        counts[node.tag] = (counts[node.tag] || 0) + 1
+      // 多标签:优先遍历 tags 数组,fallback 单 tag
+      const nodeTags = node.tags?.length ? node.tags : (node.tag ? [node.tag] : [])
+      for (const t of nodeTags) {
+        if (!t) continue
+        counts[t] = (counts[t] || 0) + 1
       }
     })
     return counts
@@ -2757,8 +2768,10 @@ function NodesPage() {
   const allUniqueTags = useMemo(() => {
     const tags = new Set<string>()
     savedNodes.forEach(node => {
-      if (node.tag && node.tag.trim()) {
-        tags.add(node.tag.trim())
+      const nodeTags = node.tags?.length ? node.tags : (node.tag ? [node.tag] : [])
+      for (const t of nodeTags) {
+        const trimmed = t.trim()
+        if (trimmed) tags.add(trimmed)
       }
     })
     return Array.from(tags).sort()
@@ -5258,41 +5271,78 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
             </DialogDescription>
           </DialogHeader>
           <div className='space-y-4 py-4'>
+            {/* 已选 chip 区 — 多标签视图,点 × 删除单个 */}
+            <div className='space-y-2'>
+              <Label className='text-sm font-medium'>{t('dialog.batchTag.tagNameLabel')}</Label>
+              <div className='min-h-[40px] flex flex-wrap items-center gap-1.5 rounded-md border border-input bg-background px-2 py-1.5'>
+                {batchTags.map((tag) => (
+                  <Badge key={tag} variant='secondary' className='gap-1 pl-2 pr-1 font-normal'>
+                    {tag}
+                    <button
+                      type='button'
+                      onClick={() => setBatchTags(batchTags.filter((x) => x !== tag))}
+                      className='ml-0.5 rounded-full hover:bg-destructive/20 hover:text-destructive p-0.5 transition-colors'
+                      aria-label={`remove ${tag}`}
+                    >
+                      ×
+                    </button>
+                  </Badge>
+                ))}
+                <Input
+                  className='flex-1 min-w-[120px] border-0 shadow-none focus-visible:ring-0 px-1 h-auto text-sm font-mono'
+                  placeholder={batchTags.length === 0 ? t('dialog.batchTag.tagNamePlaceholder') : ''}
+                  value={batchTagInput}
+                  onChange={(e) => setBatchTagInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ',') {
+                      e.preventDefault()
+                      const v = batchTagInput.trim()
+                      if (v && !batchTags.includes(v)) setBatchTags([...batchTags, v])
+                      setBatchTagInput('')
+                    } else if (e.key === 'Backspace' && !batchTagInput && batchTags.length > 0) {
+                      // 空 input 按 Backspace → 弹出最后一个 tag,允许快速回退
+                      setBatchTags(batchTags.slice(0, -1))
+                    }
+                  }}
+                />
+              </div>
+              <p className='text-xs text-muted-foreground'>
+                按回车 / 逗号添加标签;Backspace 删除最后一个
+              </p>
+            </div>
+
+            {/* 快速选择 — 点击切换"已选/未选" */}
             {allUniqueTags.length > 0 && (
               <div className='space-y-2'>
                 <Label className='text-sm font-medium'>{t('dialog.batchTag.quickSelect')}</Label>
                 <div className='flex flex-wrap gap-2'>
-                  {allUniqueTags.map((tag) => (
-                    <Badge
-                      key={tag}
-                      variant='outline'
-                      className='cursor-pointer hover:bg-primary hover:text-primary-foreground transition-colors'
-                      onClick={() => setBatchTag(tag)}
-                    >
-                      {tag}
-                    </Badge>
-                  ))}
+                  {allUniqueTags.map((tag) => {
+                    const active = batchTags.includes(tag)
+                    return (
+                      <Badge
+                        key={tag}
+                        variant={active ? 'default' : 'outline'}
+                        className='cursor-pointer hover:opacity-80 transition'
+                        onClick={() => {
+                          setBatchTags(active ? batchTags.filter((x) => x !== tag) : [...batchTags, tag])
+                        }}
+                      >
+                        {tag}
+                      </Badge>
+                    )
+                  })}
                 </div>
               </div>
             )}
-            <div className='space-y-2'>
-              <Label htmlFor='batch-tag-input' className='text-sm font-medium'>
-                {t('dialog.batchTag.tagNameLabel')}
-              </Label>
-              <Input
-                id='batch-tag-input'
-                placeholder={t('dialog.batchTag.tagNamePlaceholder')}
-                value={batchTag}
-                onChange={(e) => setBatchTag(e.target.value)}
-                className='font-mono text-sm'
-              />
-            </div>
+
             <div className='flex justify-end gap-2 pt-2'>
               <Button
                 variant='outline'
                 onClick={() => {
                   setBatchTagDialogOpen(false)
                   setBatchTag('')
+                  setBatchTags([])
+                  setBatchTagInput('')
                 }}
                 disabled={batchUpdateTagMutation.isPending}
               >
@@ -5300,17 +5350,19 @@ anytls://password@example.com:443/?sni=example.com&fp=chrome&alpn=h2#AnyTLS节�
               </Button>
               <Button
                 onClick={() => {
-                  if (!batchTag.trim()) {
+                  // 取 input 里未提交的草稿一并合入,保护用户没敲回车就点保存的场景
+                  const draft = batchTagInput.trim()
+                  const finalTags = draft && !batchTags.includes(draft) ? [...batchTags, draft] : batchTags
+                  if (finalTags.length === 0) {
                     toast.error(t('toast.enterTagName'))
                     return
                   }
-                  const nodeIds = Array.from(selectedNodeIds)
                   batchUpdateTagMutation.mutate({
-                    nodeIds,
-                    tag: batchTag.trim(),
+                    nodeIds: Array.from(selectedNodeIds),
+                    tags: finalTags,
                   })
                 }}
-                disabled={batchUpdateTagMutation.isPending || !batchTag.trim()}
+                disabled={batchUpdateTagMutation.isPending || (batchTags.length === 0 && !batchTagInput.trim())}
               >
                 {batchUpdateTagMutation.isPending ? t('actions.saving', { ns: 'common' }) : t('actions.save', { ns: 'common' })}
               </Button>

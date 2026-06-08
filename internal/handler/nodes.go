@@ -508,6 +508,7 @@ func (h *nodesHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		ClashConfig:  req.ClashConfig,
 		Enabled:      req.Enabled,
 		Tag:          req.Tag,
+		Tags:         req.Tags,
 		InboundTag:       req.InboundTag,
 		ChainProxyNodeID: req.ChainProxyNodeID,
 	}
@@ -695,6 +696,10 @@ func (h *nodesHandler) handleUpdate(w http.ResponseWriter, r *http.Request, idSe
 	}
 	if req.Tag != "" {
 		existing.Tag = req.Tag
+	}
+	// 多标签:前端发了 tags 则覆盖(空数组也是覆盖,代表"全部清空");没发的话保持旧值
+	if req.Tags != nil {
+		existing.Tags = req.Tags
 	}
 	existing.Enabled = req.Enabled
 	if req.hasChainProxyNodeID() {
@@ -1366,6 +1371,9 @@ type nodeRequest struct {
 	ClashConfig         string          `json:"clash_config"`
 	Enabled             bool            `json:"enabled"`
 	Tag                 string          `json:"tag"`
+	// Tags 多标签数组 — 前端 multi-select 输出。storage.serializeNodeTags 会自动把 Tag 与 Tags 同步,
+	// 任一字段为空都会用另一个兜底,所以老前端只发 Tag 也能正常工作。
+	Tags                []string        `json:"tags,omitempty"`
 	InboundTag          string          `json:"inbound_tag"`
 	ChainProxyNodeID    *int64          `json:"-"`
 	RawChainProxyNodeID json.RawMessage `json:"chain_proxy_node_id"`
@@ -1397,6 +1405,8 @@ type nodeDTO struct {
 	// Tag 是用户自定义分类标签(VIP / Asia / 测试),前端节点页用它做过滤、分组显示、批量更新。
 	// 必须下发,否则前端改了 tag 拉回来缺字段,显示永远是原状态,等同"修改不起作用"。
 	Tag              string    `json:"tag"`
+	// Tags 多标签数组;Tag 是 Tags[0] 的别名(向后兼容)。前端优先读 tags,fallback 用 tag。
+	Tags             []string  `json:"tags,omitempty"`
 	OriginalServer   string    `json:"original_server"`
 	OriginalDomain   string    `json:"original_domain"`
 	InboundTag       string    `json:"inbound_tag"`
@@ -1423,6 +1433,7 @@ func convertNode(node storage.Node) nodeDTO {
 		ClashConfig:       node.ClashConfig,
 		Enabled:           node.Enabled,
 		Tag:               node.Tag,
+		Tags:              node.Tags,
 		OriginalServer:    node.OriginalServer,
 		OriginalDomain:    node.OriginalDomain,
 		InboundTag:        node.InboundTag,

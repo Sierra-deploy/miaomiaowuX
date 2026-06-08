@@ -1193,6 +1193,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     clash_config TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
     tag TEXT NOT NULL DEFAULT '手动输入',
+    tags TEXT NOT NULL DEFAULT '[]',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -1209,6 +1210,15 @@ CREATE INDEX IF NOT EXISTS idx_nodes_enabled ON nodes(enabled);
 	if err := r.ensureNodeColumn("tag", "TEXT NOT NULL DEFAULT '手动输入'"); err != nil {
 		return err
 	}
+
+	// 多标签支持 — 老项目 miaomiaowu 同款架构:tag 是单标签兼容入口,tags 是 JSON 数组多标签。
+	// 启动时一次性把已有 tag 同步进 tags(幂等):tags 为空 '[]' 且 tag 非空时,把 tag 包成单元素 JSON 数组。
+	// 注意 SQL 字符串拼接里反斜杠转义:REPLACE 把 tag 内部的 " 转成 \" ,防止 JSON 解析失败。
+	if err := r.ensureNodeColumn("tags", "TEXT NOT NULL DEFAULT '[]'"); err != nil {
+		return err
+	}
+	_, _ = r.db.Exec(`UPDATE nodes SET tags = '["' || REPLACE(tag, '"', '\"') || '"]'
+                      WHERE (tags = '[]' OR tags = '') AND tag != '' AND tag IS NOT NULL`)
 
 	// 如果不存在，则将original_server列添加到现有节点表中
 	if err := r.ensureNodeColumn("original_server", "TEXT"); err != nil {

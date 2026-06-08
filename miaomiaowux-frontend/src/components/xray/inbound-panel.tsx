@@ -3,7 +3,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { Edit2, RefreshCw, Trash2, Eye, Plus } from 'lucide-react'
+import { Edit2, RefreshCw, Trash2, Eye, Plus, AlertTriangle, ArrowRight } from 'lucide-react'
+import { useNavigate } from '@tanstack/react-router'
 
 import { InboundWizard } from '@/components/xray/inbound-wizard'
 import { Button } from '@/components/ui/button'
@@ -41,6 +42,7 @@ export function InboundPanel({ serverId, serverName, federationPrefix }: Inbound
   const { t } = useTranslation('xray')
   const { t: tc } = useTranslation('common')
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
 
   const [editingInbound, setEditingInbound] = useState<InboundItem | null>(null)
   const [viewingInbound, setViewingInbound] = useState<XrayInbound | null>(null)
@@ -270,6 +272,32 @@ export function InboundPanel({ serverId, serverName, federationPrefix }: Inbound
             <DialogTitle>{t('inbounds.addInboundWizard')}</DialogTitle>
             <DialogDescription>{t('inbounds.addInboundWizardDescShort')}</DialogDescription>
           </DialogHeader>
+          {/* 废弃提示:此入口不走节点链路(不带节点名/emoji 国旗/倍率),未来会移除。引导用户改走「节点管理 → 添加节点」。*/}
+          <div className="shrink-0 rounded-md border border-amber-500/50 bg-amber-500/10 px-3 py-2.5 text-sm">
+            <div className="flex items-start gap-2">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 mt-0.5" />
+              <div className="flex-1 min-w-0 space-y-1">
+                <div className="font-medium text-amber-900 dark:text-amber-200">
+                  {t('inbounds.addInboundDeprecatedTitle')}
+                </div>
+                <div className="text-amber-800/90 dark:text-amber-300/90 text-xs leading-relaxed">
+                  {t('inbounds.addInboundDeprecatedBody')}
+                </div>
+              </div>
+              <Button
+                size="sm"
+                variant="outline"
+                className="shrink-0 h-7 text-xs border-amber-500/60 hover:bg-amber-500/20"
+                onClick={() => {
+                  setIsWizardDialogOpen(false)
+                  navigate({ to: '/nodes' })
+                }}
+              >
+                {t('inbounds.addInboundDeprecatedGo')}
+                <ArrowRight className="h-3 w-3 ml-1" />
+              </Button>
+            </div>
+          </div>
           <div className="flex-1 overflow-y-auto">
             <InboundWizard servers={[]} selectedServerIds={[serverId]} onCancel={() => setIsWizardDialogOpen(false)} onSubmit={handleInboundSubmit} skipServerSelection={true} usedPorts={usedPorts} />
           </div>
