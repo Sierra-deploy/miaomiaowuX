@@ -554,7 +554,8 @@
       "fixOpenai": "OpenAI 直连",
       "banPrivate": "禁止内网访问",
       "rfcEmby": "RFC EMBY (需选择出站)",
-      "tiktokUnlock": "抖音解锁 (需选择出站)"
+      "tiktokUnlock": "抖音解锁 (需选择出站)",
+      "warpAntiChina": "防止送中 (走 WARP)"
     },
     "ruleTypeLabels": {
       "protocol": "protocol",

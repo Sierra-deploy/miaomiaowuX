@@ -91,6 +91,7 @@ interface RemoteServer {
   traffic_reset_day?: number
   steal_mode?: string
   xray_mode?: 'external' | 'embedded'
+  warp_installed?: boolean
   time_offset_seconds?: number
   inbounds?: RemoteServerInboundInfo[]
   current_upload_speed?: number
@@ -1357,6 +1358,14 @@ function XrayServersPage() {
                         )}
                         {server.fallback_to_pull && (<Badge variant="secondary" className="text-xs bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 shrink-0">{t('servers.degraded')}</Badge>)}
                         {server.steal_mode && server.steal_mode !== 'tunnel' && (<Badge variant="outline" className="text-xs shrink-0">{server.steal_mode === 'fallback' ? t('servers.fallbackLabel') : t('servers.stealModeDefault')}</Badge>)}
+                        {/* 已装 WARP 的 agent — 圆形空心 W 标识(放在 xray_mode 前面) */}
+                        {server.warp_installed && (
+                          <Badge variant="outline"
+                            className="shrink-0 border-2 border-orange-500 text-orange-600 dark:border-orange-400 dark:text-orange-400 font-bold rounded-full h-5 w-5 p-0 flex items-center justify-center bg-orange-50 dark:bg-orange-950/30"
+                            title="WARP installed">
+                            <span className="text-[10px] leading-none italic" style={{ fontFamily: 'serif' }}>W</span>
+                          </Badge>
+                        )}
                         <Badge variant="outline" className={cn("text-xs shrink-0", server.xray_mode === 'embedded' ? "border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-400" : "border-gray-300 text-gray-600 dark:border-gray-600 dark:text-gray-400")}>{server.xray_mode === 'embedded' ? t('servers.xrayModeEmbedded') : t('servers.xrayModeExternal')}</Badge>
                       </div>
                       <div className="flex items-center gap-1 shrink-0 justify-end">
@@ -1637,6 +1646,11 @@ function XrayServersPage() {
                           </div>
                           {/* 第 2 行:Xray 模式 badge + 心跳时间,移出顶部徽章组释放右侧名称空间 */}
                           <div className="flex items-center gap-2 mt-0.5">
+                            {server.warp_installed && (
+                              <Badge variant="outline" className="shrink-0 border-2 border-orange-500 text-orange-600 dark:border-orange-400 dark:text-orange-400 font-bold rounded-full h-4 w-4 p-0 flex items-center justify-center bg-orange-50 dark:bg-orange-950/30" title="WARP installed">
+                                <span className="text-[9px] leading-none italic" style={{ fontFamily: 'serif' }}>W</span>
+                              </Badge>
+                            )}
                             <Badge variant="outline" className={cn("text-[10px] px-1.5 py-0 shrink-0", server.xray_mode === 'embedded' ? "border-blue-300 text-blue-700 dark:border-blue-700 dark:text-blue-400" : "border-gray-300 text-gray-600 dark:border-gray-600 dark:text-gray-400")}>{server.xray_mode === 'embedded' ? t('servers.xrayModeEmbedded') : t('servers.xrayModeExternal')}</Badge>
                             {server.last_heartbeat && (<span className="text-xs text-muted-foreground truncate">{t('servers.heartbeatLabel')}: {new Date(server.last_heartbeat).toLocaleString()}</span>)}
                           </div>

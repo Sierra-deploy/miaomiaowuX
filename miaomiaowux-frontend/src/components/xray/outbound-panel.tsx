@@ -3,9 +3,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { Edit2, RefreshCw, Trash2, Eye, Plus } from 'lucide-react'
+import { Edit2, RefreshCw, Trash2, Eye, Plus, Import, Ban, ArrowRight, Cloud, ChevronDown } from 'lucide-react'
 
-import { OutboundWizard } from '@/components/xray/outbound-wizard'
+import { NodeSelectDialog } from '@/components/xray/node-select-dialog'
+import { WarpModal } from '@/components/xray/warp-modal'
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
+} from '@/components/ui/dropdown-menu'
+import { clashConfigToOutbound } from '@/lib/xray-config-generator'
 import { Button } from '@/components/ui/button'
 import {
   Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle,
@@ -19,7 +24,6 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip
 import { api } from '@/lib/api'
 import { handleServerError } from '@/lib/handle-server-error'
 import type { XrayOutbound } from '@/lib/xray-presets'
-import { clashConfigToOutbound } from '@/lib/xray-config-generator'
 
 interface OutboundItem {
   server_id: number
@@ -40,7 +44,8 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
   const [editingFreedomOutbound, setEditingFreedomOutbound] = useState<OutboundItem | null>(null)
   const [freedomDomainStrategy, setFreedomDomainStrategy] = useState<string>('AsIs')
   const [viewingOutbound, setViewingOutbound] = useState<XrayOutbound | null>(null)
-  const [isWizardDialogOpen, setIsWizardDialogOpen] = useState(false)
+  const [isNodeSelectOpen, setIsNodeSelectOpen] = useState(false)
+  const [isWarpModalOpen, setIsWarpModalOpen] = useState(false)
   // 初始展示默认出站(direct/block 等),按钮文字提示"隐藏默认",点一下才隐藏
   const [hideDefaultOutbounds, setHideDefaultOutbounds] = useState(false)
 
@@ -158,13 +163,21 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
     setEditingFreedomOutbound(null)
   }
 
-  const handleOutboundSubmit = async (serverIds: number[], outbound: XrayOutbound, tag: string) => {
-    const trimmedTag = tag?.trim() || outbound.tag || ''
-    if (!trimmedTag) { toast.error(t('outbounds.fillTag')); return }
+  // 快捷添加 freedom / blackhole — 不弹表单,默认 tag(direct / block),直接 POST。
+  // 如果同 tag 已存在 — 给个递增后缀保证不冲突(direct-2 / block-2 …)。
+  const handleAddSimpleOutbound = async (protocol: 'freedom' | 'blackhole') => {
+    const baseTag = protocol === 'freedom' ? 'direct' : 'block'
+    const usedTags = new Set((outboundsData?.outbounds || []).map((it: any) => it.outbound?.tag))
+    let tag = baseTag
+    let n = 2
+    while (usedTags.has(tag)) {
+      tag = `${baseTag}-${n}`
+      n++
+    }
+    const outbound: XrayOutbound = { tag, protocol, settings: {} } as any
     try {
-      await remoteAddOutboundMutation.mutateAsync({ outbound: { ...outbound, tag: trimmedTag } })
-      toast.success(t('outbounds.outboundAddedToRemote'))
-      setIsWizardDialogOpen(false)
+      await remoteAddOutboundMutation.mutateAsync({ outbound })
+      toast.success(t('outbounds.outboundAddedToRemote', { defaultValue: '出站已添加到远程服务器' }))
     } catch {}
   }
 
@@ -201,7 +214,7 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
         ': ' + failed.slice(0, 3).join('; ') + (failed.length > 3 ? ' …' : ''),
       )
     }
-    setIsWizardDialogOpen(false)
+    setIsNodeSelectOpen(false)
   }
 
   const outbounds = outboundsData?.outbounds || []
@@ -251,9 +264,33 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
           >
             {hideDefaultOutbounds ? t('outbounds.showDefault') : t('outbounds.hideDefault')}
           </Button>
-          <Button size="sm" onClick={() => setIsWizardDialogOpen(true)}>
-            <Plus className="h-4 w-4 mr-1" />{t('outbounds.addOutbound')}
-          </Button>
+          {/* 添加出站 — 下拉菜单 4 种类型,不再弹复杂 wizard */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button size="sm">
+                <Plus className="h-4 w-4 mr-1" />{t('outbounds.addOutbound')}
+                <ChevronDown className="h-3 w-3 ml-1 opacity-70" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuItem onClick={() => setIsNodeSelectOpen(true)}>
+                <Import className="h-4 w-4 mr-2" />
+                {t('outbounds.createFromNode')}
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => handleAddSimpleOutbound('freedom')}>
+                <ArrowRight className="h-4 w-4 mr-2 text-green-600" />
+                Freedom <span className="ml-1 text-xs text-muted-foreground">({t('outbounds.directOutbound')})</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => handleAddSimpleOutbound('blackhole')}>
+                <Ban className="h-4 w-4 mr-2 text-red-500" />
+                Blackhole <span className="ml-1 text-xs text-muted-foreground">({t('outbounds.blockOutbound')})</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => setIsWarpModalOpen(true)}>
+                <Cloud className="h-4 w-4 mr-2 text-orange-500" />
+                {t('outbounds.warp.button')}
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
 
@@ -369,18 +406,25 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
         </DialogContent>
       </Dialog>
 
-      {/* Add Outbound Wizard Dialog */}
-      <Dialog open={isWizardDialogOpen} onOpenChange={setIsWizardDialogOpen}>
-        <DialogContent className="max-w-4xl max-h-[90vh] overflow-hidden flex flex-col">
-          <DialogHeader>
-            <DialogTitle>{t('outbounds.addOutboundWizard')}</DialogTitle>
-            <DialogDescription>{t('outbounds.addOutboundWizardDescShort')}</DialogDescription>
-          </DialogHeader>
-          <div className="flex-1 overflow-y-auto">
-            <OutboundWizard servers={[]} selectedServerIds={[]} onCancel={() => setIsWizardDialogOpen(false)} onSubmit={handleOutboundSubmit} onBulkImport={handleBulkOutboundImport} />
-          </div>
-        </DialogContent>
-      </Dialog>
+      {/* 从节点创建出站 — 选 1 个或多个节点,一键批量创建对应 outbound */}
+      <NodeSelectDialog
+        open={isNodeSelectOpen}
+        onOpenChange={setIsNodeSelectOpen}
+        multiple={true}
+        // onConfirm 接管单/多选;onSelect 是接口必填,退化路径不会被命中(onConfirm 优先)
+        onSelect={() => {}}
+        onConfirm={(items) => handleBulkOutboundImport(items)}
+        protocolFilter={['vless', 'vmess', 'trojan', 'ss', 'shadowsocks', 'socks5', 'http']}
+      />
+
+      {/* Cloudflare WARP 配置 modal */}
+      <WarpModal
+        serverId={serverId}
+        serverName={serverName}
+        open={isWarpModalOpen}
+        onOpenChange={setIsWarpModalOpen}
+        onChanged={() => queryClient.invalidateQueries({ queryKey: ['remote-outbounds', serverId] })}
+      />
     </div>
   )
 }

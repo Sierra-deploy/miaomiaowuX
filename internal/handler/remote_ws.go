@@ -69,6 +69,9 @@ type WSAuthPayload struct {
 	// Capabilities agent 上报支持的扩展能力。老 agent 不发 = 全 false → master 走 HTTP 旧路径。
 	// 新 agent 上报 RPC=true → master 反向调用优先走 WS RPC,失败/超时再 fallback HTTP。
 	Capabilities AgentCapabilities `json:"capabilities,omitempty"`
+	// WarpInstalled agent 本机是否已注册 Cloudflare WARP(成功跑过 EnsureRegistered 且 warp.json 存在)。
+	// 老 agent 不发 = false → server 卡片 W badge 不显示,完全向后兼容。
+	WarpInstalled bool `json:"warp_installed,omitempty"`
 }
 
 // AgentCapabilities 描述 agent 端支持的扩展能力位。
@@ -121,6 +124,8 @@ type WSHeartbeatPayload struct {
 	// PublicIPv6 dual-stack v6 地址(同 WSAuthPayload.PublicIPv6 字段)。
 	// 每次心跳重发可让 master 跟随服务器 v6 地址变化(动态 prefix / 重新 detect)。
 	PublicIPv6 string `json:"public_ipv6,omitempty"`
+	// WarpInstalled 心跳里也带一份(同 WSAuthPayload),让 master 跟踪 agent 主动 install/remove 后的状态变化。
+	WarpInstalled bool `json:"warp_installed,omitempty"`
 }
 
 // WSSpeedPayload 表示实时速度数据负载
@@ -746,18 +751,27 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 	}
 
 	// 提前解析 IP — wsConn 要带它,cleanup 时离线通知用 conn 自己的 IP 而不是 DB 里(可能已被新 conn 覆盖)。
-	// 从远程地址提取IP（删除端口）
-	ip := remoteAddr
-	if idx := strings.LastIndex(ip, ":"); idx != -1 {
-		// 检查是否是带有括号 [::1]:port 的 IPv6
-		if !strings.Contains(ip, "[") {
-			ip = ip[:idx]
+	// 从远程地址提取 IP(剥 port,正确处理 [::1]:port 形式 IPv6)
+	srcIP := stripPort(remoteAddr)
+	srcParsed := net.ParseIP(srcIP)
+	srcIsV4 := srcParsed != nil && srcParsed.To4() != nil
+
+	// 严格选 v4 字段:agent 上报的 PublicIPv4 优先;失败 fallback 到源 IP **仅当**源是 v4。
+	// 老 bug:agent 端 detectPublicIPv4 在 v4 探测失败时会 fallback 到 v6 → 装进 PublicIPv4 字段
+	// → master 用 v6 覆盖 db.ip_address → IPv4-only master 反向 HTTP 全部 502。
+	// 修复后:agent 端只返 v4(已修);master 端再加一层校验 — 字段不是合法 v4 字符串就丢弃,
+	// 让"上次正确的 v4"留在 db 里(UpdateRemoteServerHeartbeat 用 COALESCE/NULLIF 模式跳过空值)。
+	v4 := ""
+	if reported := strings.TrimSpace(authPayload.PublicIPv4); reported != "" {
+		if p := net.ParseIP(reported); p != nil && p.To4() != nil {
+			v4 = reported
 		}
 	}
-	// 治本:agent 自报的 PublicIPv4 优先,WS 源 IP 只作 fallback。详细原因见 WSAuthPayload 注释。
-	if reported := strings.TrimSpace(authPayload.PublicIPv4); reported != "" {
-		ip = reported
+	if v4 == "" && srcIsV4 {
+		v4 = srcIP
 	}
+	// wsConn.IPAddress 仍带一份(可能空) — cleanup 通知会用它,但若空就回退用 DB 里的旧值
+	ip := v4
 
 	// 创建新连接，继承密钥交换阶段的 session
 	wsConn := &RemoteWSConnection{
@@ -783,6 +797,10 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 	v6 := strings.TrimSpace(authPayload.PublicIPv6)
 	if err := h.repo.UpdateRemoteServerHeartbeat(updateCtx, authPayload.Token, ip, v6); err != nil {
 		log.Printf("[Remote WS] Failed to update server status for %s: %v", server.Name, err)
+	}
+	// 同步 WARP 安装状态 — 跟 IP 字段分开 update 是为了不破坏 UpdateRemoteServerHeartbeat 签名
+	if err := h.repo.UpdateRemoteServerWarpInstalled(updateCtx, authPayload.Token, authPayload.WarpInstalled); err != nil {
+		log.Printf("[Remote WS] Failed to update warp_installed for %s: %v", server.Name, err)
 	}
 
 	// 通知策略:
@@ -922,27 +940,32 @@ func (h *RemoteWSHandler) handleHeartbeat(wsConn *RemoteWSConnection, payload js
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// 从远程地址中提取IP
-	ip := remoteAddr
-	if colonIdx := len(ip) - 1; colonIdx > 0 {
-		for i := colonIdx; i >= 0; i-- {
-			if ip[i] == ':' {
-				ip = ip[:i]
-				break
-			}
+	// 严格选 v4 字段(同 handleAuth):agent 上报的 PublicIPv4 必须是合法 v4 才用;
+	// 否则 fallback 到 WS 源 IP 也只在源 IP 是 v4 时启用;都不是 v4 → 空,
+	// 走 DB UPDATE 时 COALESCE 保留旧值。
+	srcIP := stripPort(remoteAddr)
+	srcParsed := net.ParseIP(srcIP)
+	srcIsV4 := srcParsed != nil && srcParsed.To4() != nil
+
+	v4 := ""
+	if reported := strings.TrimSpace(hbPayload.PublicIPv4); reported != "" {
+		if p := net.ParseIP(reported); p != nil && p.To4() != nil {
+			v4 = reported
 		}
+	}
+	if v4 == "" && srcIsV4 {
+		v4 = srcIP
 	}
 
 	update := storage.HeartbeatUpdate{
 		Token:      wsConn.Token,
-		IPAddress:  ip,
+		IPAddress:  v4, // 空则 storage 层 COALESCE 保留 db 旧值
 		ListenPort: hbPayload.ListenPort,
 	}
-	if hbPayload.PublicIPv4 != "" {
-		update.IPAddress = hbPayload.PublicIPv4
-	}
 	if v := strings.TrimSpace(hbPayload.PublicIPv6); v != "" {
-		update.IPAddressV6 = v
+		if p := net.ParseIP(v); p != nil && p.To4() == nil {
+			update.IPAddressV6 = v // 合法 v6 才存
+		}
 	}
 	if hbPayload.BootTime != nil {
 		update.BootTime = hbPayload.BootTime
@@ -957,6 +980,10 @@ func (h *RemoteWSHandler) handleHeartbeat(wsConn *RemoteWSConnection, payload js
 
 	if _, err := h.repo.UpdateRemoteServerHeartbeatWithRestart(ctx, update); err != nil {
 		log.Printf("[Remote WS] Failed to update heartbeat for server %s: %v", wsConn.ServerName, err)
+	}
+	// 心跳里也带 warp_installed,跟踪 agent 主动 install/remove 后的状态变化
+	if err := h.repo.UpdateRemoteServerWarpInstalled(ctx, wsConn.Token, hbPayload.WarpInstalled); err != nil {
+		log.Printf("[Remote WS] Failed to update warp_installed for server %s: %v", wsConn.ServerName, err)
 	}
 
 	ackPayload, _ := json.Marshal(map[string]int64{"server_time": time.Now().Unix()})

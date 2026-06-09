@@ -554,7 +554,8 @@
       "fixOpenai": "OpenAI Direct",
       "banPrivate": "Ban Private Network",
       "rfcEmby": "RFC EMBY (select outbound)",
-      "tiktokUnlock": "TikTok Unlock (select outbound)"
+      "tiktokUnlock": "TikTok Unlock (select outbound)",
+      "warpAntiChina": "Anti-CN Routing (via WARP)"
     },
     "ruleTypeLabels": {
       "protocol": "protocol",

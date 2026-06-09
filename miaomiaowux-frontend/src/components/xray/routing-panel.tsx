@@ -73,6 +73,9 @@ function useQuickRules() {
     ban_private: { name: t('routing.banPrivate'), rule: { type: 'field', ip: ['geoip:private'], marktag: 'ban_private', outboundTag: 'block' }, needSelectOutbound: false },
     rfc_emby: { name: 'RFC EMBY', rule: { type: 'field', domain: ['rfc.uhdnow.com'], network: 'tcp', marktag: 'rfc_emby' }, needSelectOutbound: true },
     tiktok_unlock: { name: t('routing.tiktokUnlock').split(' (')[0], rule: { type: 'field', domain: ['geosite:tiktok'], marktag: 'tiktok_unlock' }, needSelectOutbound: true },
+    // 防止送中:Google / Meta 的中国大陆 PoP 经常被错路到中国境内服务器,走 WARP-v4 直连 Cloudflare 边缘解决。
+    // 仅在本机已添加 warp-v4 出站时,在快捷菜单中显示此项(由 routing-panel useQuery 判定)。
+    warp_anti_china: { name: t('routing.warpAntiChina'), rule: { type: 'field', domain: ['geosite:google', 'geosite:meta'], marktag: 'warp_anti_china', outboundTag: 'warp-v4' }, needSelectOutbound: false },
   }), [t])
 }
 
@@ -186,6 +189,13 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
     },
     enabled: isRemote || localServerId !== null,
   })
+
+  // 是否有 warp-v4 出站 → 控制"防止送中"快捷规则是否在菜单里显示。
+  // 通过 useMemo 避免 outboundsData 引用稳定但内部变化时反复计算。
+  const hasWarpOutbound = useMemo(() => {
+    const list = (outboundsData?.outbounds || []) as Array<{ tag?: string }>
+    return list.some((o) => o?.tag === 'warp-v4')
+  }, [outboundsData])
 
   // 服务器现有入站(自定义规则的 inboundTag 多选项来源)
   const { data: inboundsData } = useQuery({
@@ -492,6 +502,10 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
                 <DropdownMenuItem onClick={() => handleQuickAdd('ban_geoip_cn')}>{t('routing.banGeoipCn')}</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => handleQuickAdd('fix_openai')}>{t('routing.fixOpenai')}</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => handleQuickAdd('ban_private')}>{t('routing.banPrivate')}</DropdownMenuItem>
+                {/* 防止送中 — 仅在 server 已添加 warp-v4 出站时显示;避免点击后 outboundTag 命中不到出站被回落到 default */}
+                {hasWarpOutbound && (
+                  <DropdownMenuItem onClick={() => handleQuickAdd('warp_anti_china')}>{t('routing.warpAntiChina')}</DropdownMenuItem>
+                )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={() => handleQuickAdd('rfc_emby')}>{t('routing.rfcEmby')}</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => handleQuickAdd('tiktok_unlock')}>{t('routing.tiktokUnlock')}</DropdownMenuItem>

@@ -691,6 +691,9 @@ type RemoteServer struct {
 	// 用途:master HTTP 反向请求时,v4 dial 失败 → fallback 试 v6。
 	// 空值 = agent 不支持上报 / 服务器无 v6 → 退化为只走 v4(与历史行为一致)。
 	IPAddressV6          string     `json:"ip_address_v6,omitempty"`
+	// WarpInstalled agent 已注册 Cloudflare WARP(warp.json 存在 + device_id 非空)。
+	// agent 在 auth + heartbeat 时上报;master 用来在 server 卡片渲染空心 W 图标 badge。
+	WarpInstalled        bool       `json:"warp_installed"`
 	Domain               string     `json:"domain,omitempty"`
 	BootTime             *time.Time `json:"boot_time,omitempty"`
 	XrayBootTime         *time.Time `json:"xray_boot_time,omitempty"`
@@ -1908,6 +1911,10 @@ CREATE INDEX IF NOT EXISTS idx_remote_servers_status ON remote_servers(status);
 	}
 	// dual-stack IPv6 字段 — master HTTP 反向请求 v4 失败时 fallback 试 v6
 	if err := r.ensureRemoteServerColumn("ip_address_v6", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	// WARP 安装状态 — agent 在 auth/heartbeat 时上报,master 用于 server 卡片 W badge 显示
+	if err := r.ensureRemoteServerColumn("warp_installed", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	// 双令牌系统字段
@@ -8023,6 +8030,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		COALESCE(time_offset_seconds, 0),
 		COALESCE(traffic_used_offset, 0),
 		COALESCE(traffic_stats_mode, 'both'),
+		COALESCE(warp_installed, 0),
 		EXISTS(SELECT 1 FROM federated_servers fs WHERE fs.server_id = remote_servers.id),
 		COALESCE((SELECT prefix FROM federated_servers fs WHERE fs.server_id = remote_servers.id), ''),
 		created_at, updated_at
@@ -8039,7 +8047,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		var lastHeartbeat, tokenExpiresAt, lastTokenRefresh, lastPullAt, lastPushFail, fallbackAt, speedUpdatedAt, xrayScannedAt sql.NullTime
 		var bootTime, xrayBootTime sql.NullString
 		var agentTokenExpiresAt, lastAgentTokenRefresh sql.NullTime
-		var fallbackToPull, xrayRunning int
+		var fallbackToPull, xrayRunning, warpInstalledInt int
 		var timeOffsetSeconds int64
 		if err := rows.Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.Domain,
 			&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
@@ -8056,6 +8064,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 			&timeOffsetSeconds,
 			&server.TrafficUsedOffset,
 			&server.TrafficStatsMode,
+			&warpInstalledInt,
 			&server.IsFederated,
 			&server.FederationPrefix,
 			&server.CreatedAt, &server.UpdatedAt); err != nil {
@@ -8095,6 +8104,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		}
 		server.FallbackToPull = fallbackToPull != 0
 		server.XrayRunning = xrayRunning != 0
+		server.WarpInstalled = warpInstalledInt != 0
 		if timeOffsetSeconds != 0 {
 			server.TimeOffsetSeconds = &timeOffsetSeconds
 		}
@@ -8132,6 +8142,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		COALESCE(xray_running, 0), COALESCE(xray_version, ''),
 		COALESCE(traffic_used_offset, 0),
 		COALESCE(traffic_stats_mode, 'both'),
+		COALESCE(warp_installed, 0),
 		created_at, updated_at
 		FROM remote_servers WHERE id = ?`
 
@@ -8139,7 +8150,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 	var lastHeartbeat, tokenExpiresAt, lastTokenRefresh, lastPullAt sql.NullTime
 	var bootTime, xrayBootTime sql.NullString
 	var agentTokenExpiresAt, lastAgentTokenRefresh sql.NullTime
-	var xrayRunningInt int
+	var xrayRunningInt, warpInstalledInt int
 	err := r.db.QueryRowContext(ctx, query, id).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.Domain,
 		&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 		&tokenExpiresAt, &lastTokenRefresh,
@@ -8154,6 +8165,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		&xrayRunningInt, &server.XrayVersion,
 		&server.TrafficUsedOffset,
 		&server.TrafficStatsMode,
+		&warpInstalledInt,
 		&server.CreatedAt, &server.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -8163,6 +8175,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 	}
 
 	server.XrayRunning = xrayRunningInt != 0
+	server.WarpInstalled = warpInstalledInt != 0
 	if lastHeartbeat.Valid {
 		server.LastHeartbeat = &lastHeartbeat.Time
 	}
@@ -8408,6 +8421,27 @@ type HeartbeatResult struct {
 	TokenExpiresAt   *time.Time
 }
 
+// UpdateRemoteServerWarpInstalled 单独同步 warp_installed 字段(auth/heartbeat 上报后调)。
+// 跟主 heartbeat UPDATE 分开是为了不破坏 UpdateRemoteServerHeartbeat 签名,所有老调用方继续工作。
+// 老 agent 不上报 warp_installed → handler 不调本方法 → db 保留旧值(默认 0 / 上次值)。
+func (r *TrafficRepository) UpdateRemoteServerWarpInstalled(ctx context.Context, token string, installed bool) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return errors.New("remote server token is required")
+	}
+	installedInt := 0
+	if installed {
+		installedInt = 1
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE remote_servers SET warp_installed = ?, updated_at = CURRENT_TIMESTAMP WHERE token = ?`,
+		installedInt, token)
+	return err
+}
+
 // 更新远程服务器的检测信号和状态。
 // ipAddressV6 为空时保留 db 现有值(老 agent 兼容)。
 func (r *TrafficRepository) UpdateRemoteServerHeartbeat(ctx context.Context, token string, ipAddress string, ipAddressV6 string) error {
@@ -8420,10 +8454,12 @@ func (r *TrafficRepository) UpdateRemoteServerHeartbeat(ctx context.Context, tok
 		return errors.New("remote server token is required")
 	}
 
+	// 空 ipAddress / ipAddressV6 都不覆盖 db 旧值 — 老 agent + v4-only / v6-only 网络抖动场景下,
+	// agent 端 detectPublicIPv4 偶发失败上报空字段时,保留上次正确的 v4/v6 值,避免 master 反向连接断链。
 	const stmt = `UPDATE remote_servers SET
 		status = ?,
 		last_heartbeat = CURRENT_TIMESTAMP,
-		ip_address = ?,
+		ip_address = COALESCE(NULLIF(?, ''), ip_address),
 		ip_address_v6 = COALESCE(NULLIF(?, ''), ip_address_v6),
 		updated_at = CURRENT_TIMESTAMP
 		WHERE token = ?`
@@ -8555,13 +8591,13 @@ func (r *TrafficRepository) UpdateRemoteServerHeartbeatWithRestart(ctx context.C
 		pullAddress = update.IPAddress
 	}
 
-	// 更新服务器记录。ip_address_v6 用 COALESCE(NULLIF(?, ''), ip_address_v6):
-	// agent 不发字段 = '' → 保留 db 现有值;agent 发了 = '' 也意味着"重置为无 v6",但实际
-	// agent 上报 detectPublicIPv6 失败时本来就发空,二义性可接受。
+	// 更新服务器记录。ip_address / ip_address_v6 都用 COALESCE(NULLIF(?, ''), 旧值):
+	// agent 字段为空(detect 失败 / 老 agent 不发) → 保留 db 旧值,不覆盖。
+	// 防止 agent 端 detectPublicIPv4 偶发失败(空字段)导致 db 里上一次正确的 v4 被清空。
 	const stmt = `UPDATE remote_servers SET
 		status = ?,
 		last_heartbeat = CURRENT_TIMESTAMP,
-		ip_address = ?,
+		ip_address = COALESCE(NULLIF(?, ''), ip_address),
 		ip_address_v6 = COALESCE(NULLIF(?, ''), ip_address_v6),
 		boot_time = ?,
 		xray_boot_time = ?,

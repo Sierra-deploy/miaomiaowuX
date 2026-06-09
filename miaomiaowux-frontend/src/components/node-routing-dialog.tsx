@@ -50,6 +50,9 @@ const QUICK_RULES = {
   ban_private: { nameKey: 'nodeRoutingDialog.quickRules.banPrivate', rule: { type: 'field', ip: ['geoip:private'], marktag: 'ban_private', outboundTag: 'block' }, needOutbound: false },
   rfc_emby: { nameKey: 'nodeRoutingDialog.quickRules.rfcEmby', rule: { type: 'field', domain: ['rfc.uhdnow.com'], network: 'tcp', marktag: 'rfc_emby' }, needOutbound: true },
   tiktok_unlock: { nameKey: 'nodeRoutingDialog.quickRules.tiktokUnlock', rule: { type: 'field', domain: ['geosite:tiktok'], marktag: 'tiktok_unlock' }, needOutbound: true },
+  // 防止送中:Google / Meta 的中国大陆 PoP 经常把 GFW 后流量错路到中国境内服务器,WARP 出站直接走 Cloudflare 边缘解决。
+  // 前提:本 server 必须已安装 WARP(否则 outboundTag=warp-v4 命中找不到出站会被 xray 退回 default)。
+  warp_anti_china: { nameKey: 'nodeRoutingDialog.quickRules.warpAntiChina', rule: { type: 'field', domain: ['geosite:google', 'geosite:meta'], marktag: 'warp_anti_china', outboundTag: 'warp-v4' }, needOutbound: false },
 }
 
 function getRuleDisplayInfo(rule: RoutingRule, t: any) {

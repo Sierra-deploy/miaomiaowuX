@@ -6,7 +6,8 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { FormField } from './form-field'
 import { NodeSelectDialog } from './node-select-dialog'
-import { Import, Eye, X } from 'lucide-react'
+import { WarpModal } from './warp-modal'
+import { Import, Eye, X, Cloud } from 'lucide-react'
 import { protocolFields } from '@/lib/xray-form-fields'
 import { generateOutboundConfig } from '@/lib/xray-config-generator'
 import { getXrayProtocolColor } from '@/lib/protocol-colors'
@@ -27,14 +28,18 @@ interface OutboundWizardProps {
   onSubmit: (serverIds: number[], outbound: any, tag: string) => Promise<void>
   /** 多选导入回调:NodeSelectDialog 多选确认 → 调此回调一次性提交所有节点,wizard 表单不参与 */
   onBulkImport?: (items: Array<{ node: any; clashConfig: any }>) => void
+  /** 单 server 上下文(在 outbound-panel 中弹的 wizard 才有);为空时不显示 WARP 按钮 */
+  warpServerId?: number
+  warpServerName?: string
 }
 
-export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit, onBulkImport }: OutboundWizardProps) {
+export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit, onBulkImport, warpServerId, warpServerName }: OutboundWizardProps) {
   const { t } = useTranslation('xray')
   const { t: tc } = useTranslation('common')
   const [selectedProtocol, setSelectedProtocol] = useState<string>('')
   const [selectedTransport, setSelectedTransport] = useState<string>('TCP')
   const [selectedSecurity, setSelectedSecurity] = useState<string>('None')
+  const [showWarpModal, setShowWarpModal] = useState<boolean>(false)
   const [formData, setFormData] = useState<any>({
     address: '',
     port: 443,
@@ -302,8 +307,34 @@ export function OutboundWizard({ servers, selectedServerIds, onCancel, onSubmit,
           >
             Blackhole ({t('outbounds.blockOutbound')})
           </Button>
+          {/* WARP 仅在单 server 上下文(从 outbound-panel 进来时)显示。点击直接走 WarpModal — agent 自动注册 + 注入双 outbound。*/}
+          {warpServerId && (
+            <Button
+              variant="secondary"
+              className="border-2 border-orange-500 text-orange-600 hover:bg-orange-50 dark:hover:bg-orange-950/30"
+              onClick={() => setShowWarpModal(true)}
+              type="button"
+            >
+              <Cloud className="h-4 w-4 mr-1" />
+              {t('outbounds.warp.button')}
+            </Button>
+          )}
         </div>
       </div>
+
+      {/* WARP Modal — 安装/查看/卸载 */}
+      {warpServerId && warpServerName && (
+        <WarpModal
+          serverId={warpServerId}
+          serverName={warpServerName}
+          open={showWarpModal}
+          onOpenChange={setShowWarpModal}
+          onChanged={() => {
+            // 安装/卸载完成后关闭整个 wizard dialog,让用户回到 outbound 列表看 warp-v4 / warp-v6
+            onCancel()
+          }}
+        />
+      )}
 
       {/* Form for simple outbound (Freedom/Blackhole) */}
       {selectedProtocol && isSimpleOutbound && (
