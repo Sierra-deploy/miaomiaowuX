@@ -158,6 +158,9 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.2.3 (2026-06-09)
+- 🌈支持warp出站配置
+- 🌈迁移妙妙屋节点多标签
 ### v0.2.2 (2026-06-08)
 - 🌈前后端交互安全加固
 - 🌈套餐管理显示优化
