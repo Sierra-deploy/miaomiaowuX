@@ -3,7 +3,8 @@ import { useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
-import { RefreshCw, Trash2, Plus, ChevronDown, GripVertical, Scale, Pencil } from 'lucide-react'
+import { RefreshCw, Trash2, Plus, ChevronDown, ChevronLeft, GripVertical, Scale, Pencil } from 'lucide-react'
+import { useIsMobile } from '@/hooks/use-mobile'
 import {
   DndContext, PointerSensor, useSensor, useSensors, closestCenter, type DragEndEvent,
 } from '@dnd-kit/core'
@@ -128,6 +129,7 @@ export function RoutingPanel({ serverId, serverName, isRemote, xrayMode }: Routi
   const { t: tc } = useTranslation('common')
   const QUICK_RULES = useQuickRules()
   const queryClient = useQueryClient()
+  const isMobile = useIsMobile()
 
   const [selectedIndex, setSelectedIndex] = useState<number | null>(null)
   const [deletingIndex, setDeletingIndex] = useState<number | null>(null)
@@ -266,6 +268,15 @@ export function RoutingPanel({ serverId, serverName, isRemote, xrayMode }: Routi
     if (!outboundsData?.outbounds || !localServerId) return []
     return outboundsData.outbounds.filter((item: any) => item.server_id === localServerId).map((item: any) => item.outbound)
   }, [outboundsData, isRemote, localServerId])
+
+  // 负载均衡器 selector 候选 — 排除「路由出站」生成的 outboundTag(mmwxRoutedTags)。
+  // 这些 tag 跟特定 routed 节点绑定,放进 LB 池会让"按节点统计流量 / 套餐路由"逻辑紊乱。
+  // 普通路由规则的 outboundTag 选择(L654/L778)仍保留 routed tag,因为路由规则**就是**给
+  // routed 节点指流量用的。
+  const outboundsForBalancer = useMemo(
+    () => (outbounds as any[]).filter((o: any) => !mmwxRoutedTags.has(o.tag)),
+    [outbounds, mmwxRoutedTags]
+  )
 
   const balancers: Balancer[] = useMemo(() => {
     return normalizeBalancers(isRemote ? routingData?.routing?.balancers : routingData?.balancers)
@@ -491,9 +502,9 @@ export function RoutingPanel({ serverId, serverName, isRemote, xrayMode }: Routi
   return (
     <>
       <div className='space-y-3'>
-        <div className='flex items-center justify-between'>
+        <div className='flex flex-wrap items-center justify-between gap-2'>
           <p className='text-sm text-muted-foreground'>{t('routing.routingRules', { count: rules.length })}{isRemote && ` · ${t('routing.canDragSort')}`}</p>
-          <div className='flex items-center gap-2'>
+          <div className='flex flex-wrap items-center gap-2'>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button size='sm'><Plus className='size-4 mr-1' />{t('routing.quickAdd')}<ChevronDown className='size-4 ml-1' /></Button>
@@ -532,8 +543,13 @@ export function RoutingPanel({ serverId, serverName, isRemote, xrayMode }: Routi
         ) : rules.length === 0 ? (
           <EmptyStateCard title={t('routing.noRules')} description={t('routing.noRulesDesc')} />
         ) : (
-          <div className='flex gap-3' style={{ minHeight: 300 }}>
-            <div className='w-[40%] shrink-0 space-y-1.5 overflow-y-auto max-h-[60vh] pr-1'>
+          <div className={isMobile ? 'flex flex-col' : 'flex gap-3'} style={{ minHeight: 300 }}>
+            {/* 左栏 — desktop 显示 40% 宽,mobile 时:列表态全宽显示,详情态(selectedIndex !== null)整栏 hide */}
+            <div className={
+              isMobile
+                ? (selectedIndex !== null ? 'hidden' : 'w-full space-y-1.5 overflow-y-auto max-h-[60vh] pr-1')
+                : 'w-[40%] shrink-0 space-y-1.5 overflow-y-auto max-h-[60vh] pr-1'
+            }>
               {/* 负载均衡器:上方独立段,只读展示。详细管理走 LB Manager Dialog。 */}
               {balancers.length > 0 && (
                 <div className='mb-2 pb-2 border-b'>
@@ -571,7 +587,18 @@ export function RoutingPanel({ serverId, serverName, isRemote, xrayMode }: Routi
                 </SortableContext>
               </DndContext>
             </div>
-            <div className='flex-1 min-w-0 border rounded-lg p-4 bg-card overflow-y-auto max-h-[60vh]'>
+            {/* 右栏 — desktop 始终显示;mobile 时:列表态 hide,详情态全宽显示 + 顶部"返回列表"按钮 */}
+            <div className={
+              isMobile
+                ? (selectedIndex === null ? 'hidden' : 'w-full border rounded-lg p-4 bg-card overflow-y-auto max-h-[70vh] mt-2')
+                : 'flex-1 min-w-0 border rounded-lg p-4 bg-card overflow-y-auto max-h-[60vh]'
+            }>
+              {/* mobile 详情态顶部:返回列表入口,点击清空 selectedIndex 回到列表 */}
+              {isMobile && selectedIndex !== null && (
+                <Button variant='ghost' size='sm' className='mb-3 -ml-2 h-8' onClick={() => setSelectedIndex(null)}>
+                  <ChevronLeft className='size-4 mr-1' />{t('routing.backToList', { defaultValue: '返回列表' })}
+                </Button>
+              )}
               {selectedRule ? (
                 <div className='space-y-4'>
                   <div className='flex items-center justify-between'>
@@ -789,7 +816,7 @@ export function RoutingPanel({ serverId, serverName, isRemote, xrayMode }: Routi
         onOpenChange={setIsBalancerDialogOpen}
         serverId={serverId}
         routing={routingData?.routing}
-        outbounds={outbounds}
+        outbounds={outboundsForBalancer}
         onSaved={async () => { queryClient.invalidateQueries({ queryKey: routingQueryKey }); await restartXray() }}
       />
 

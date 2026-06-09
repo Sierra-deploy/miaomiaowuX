@@ -29,6 +29,9 @@ import {
   Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger,
 } from '@/components/ui/dialog'
 import {
+  Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle,
+} from '@/components/ui/sheet'
+import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from '@/components/ui/alert-dialog'
 import {
@@ -1276,11 +1279,15 @@ function XrayServersPage() {
             <DialogFooter><Button variant="outline" onClick={() => { setIsAddDialogOpen(false); resetAddDialog() }}>{generatedToken ? t('servers.complete') : tc('actions.cancel')}</Button></DialogFooter>
           </DialogContent>
         </Dialog>
-        <AddSharedServerDialog />
-        <Button variant="outline" disabled={remoteServers.length === 0 || upgradeAllRunning} onClick={handleUpgradeAllAgents} title={t('servers.upgradeAllAgentsTip')}>
-          {upgradeAllRunning ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowUpCircle className="mr-2 h-4 w-4" />}
-          {t('servers.upgradeAllAgents')}
-        </Button>
+        {/* 两个按钮捆绑:mobile 时 wrapper 自己是 flex-row 让它们共占一行(各 flex-1 平分宽度);
+            sm+ 用 contents 让 wrapper 透明,按钮回归外层 flex-wrap 的子项,跟桌面端原行为一致 */}
+        <div className="flex gap-2 w-full sm:contents">
+          <AddSharedServerDialog buttonClassName="flex-1 sm:flex-initial" />
+          <Button variant="outline" className="flex-1 sm:flex-initial" disabled={remoteServers.length === 0 || upgradeAllRunning} onClick={handleUpgradeAllAgents} title={t('servers.upgradeAllAgentsTip')}>
+            {upgradeAllRunning ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowUpCircle className="mr-2 h-4 w-4" />}
+            {t('servers.upgradeAllAgents')}
+          </Button>
+        </div>
         {/* 快速筛选 — ml-auto 推到行尾右对齐;点击当前激活的按钮再切回 'all' */}
         <div className="ml-auto flex items-center gap-2">
           <Button
@@ -1793,15 +1800,16 @@ function XrayServersPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Xray Config Dialog */}
-      <Dialog open={isXrayRawConfigDialogOpen} onOpenChange={(open) => { setIsXrayRawConfigDialogOpen(open); if (!open) setConfigServer(null) }}>
-        <DialogContent className="w-[50vw] h-[85vh] flex flex-col overflow-hidden sm:max-w-none">
-          <DialogHeader className="flex-shrink-0">
-            <DialogTitle>{t('servers.xrayManagement')} - {xrayRawConfigServerName}</DialogTitle>
-            <DialogDescription>{t('servers.xrayManagementDesc')}</DialogDescription>
-          </DialogHeader>
+      {/* Xray Config Dialog —— 桌面端 Dialog,手机端全屏 Sheet(side='bottom' h-[100dvh])。
+          复用同一份 Tabs/Panel 子树,只换外层容器和 Header 包装 */}
+      {(() => {
+        const handleOpenChange = (open: boolean) => { setIsXrayRawConfigDialogOpen(open); if (!open) setConfigServer(null) }
+        const tabsTree = (
           <Tabs defaultValue="config" className="flex-1 flex flex-col min-h-0">
-            <TabsList className="flex-shrink-0 w-full justify-start">
+            <TabsList className={cn(
+              'flex-shrink-0 w-full',
+              isMobile ? 'grid grid-cols-4 gap-1 h-auto' : 'justify-start'
+            )}>
               <TabsTrigger value="config">{t('servers.configManagement')}</TabsTrigger>
               <TabsTrigger value="inbounds">{t('servers.inboundManagement')}</TabsTrigger>
               <TabsTrigger value="outbounds">{t('servers.outboundManagement')}</TabsTrigger>
@@ -1895,8 +1903,34 @@ function XrayServersPage() {
               {xrayRawConfigServerId !== null && (<RoutingPanel serverId={xrayRawConfigServerId} serverName={xrayRawConfigServerName} isRemote={true} xrayMode={remoteServers.find((s: RemoteServer) => s.id === xrayRawConfigServerId)?.xray_mode as 'external' | 'embedded' | undefined} />)}
             </TabsContent>
           </Tabs>
-        </DialogContent>
-      </Dialog>
+        )
+        if (isMobile) {
+          return (
+            <Sheet open={isXrayRawConfigDialogOpen} onOpenChange={handleOpenChange}>
+              <SheetContent side="bottom" className="h-[100dvh] w-full max-w-none flex flex-col p-0 gap-0">
+                <SheetHeader className="flex-shrink-0 px-4 pt-4 pb-2 border-b text-left">
+                  <SheetTitle>{t('servers.xrayManagement')} - {xrayRawConfigServerName}</SheetTitle>
+                  <SheetDescription>{t('servers.xrayManagementDesc')}</SheetDescription>
+                </SheetHeader>
+                <div className="flex-1 flex flex-col min-h-0 px-4 pb-4 pt-2">
+                  {tabsTree}
+                </div>
+              </SheetContent>
+            </Sheet>
+          )
+        }
+        return (
+          <Dialog open={isXrayRawConfigDialogOpen} onOpenChange={handleOpenChange}>
+            <DialogContent className="w-[50vw] h-[85vh] flex flex-col overflow-hidden sm:max-w-none">
+              <DialogHeader className="flex-shrink-0">
+                <DialogTitle>{t('servers.xrayManagement')} - {xrayRawConfigServerName}</DialogTitle>
+                <DialogDescription>{t('servers.xrayManagementDesc')}</DialogDescription>
+              </DialogHeader>
+              {tabsTree}
+            </DialogContent>
+          </Dialog>
+        )
+      })()}
 
       {/* Delete Remote Server Confirm */}
       <AlertDialog open={isDeleteRemoteServerDialogOpen} onOpenChange={setIsDeleteRemoteServerDialogOpen}>

@@ -3,8 +3,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { Edit2, RefreshCw, Trash2, Eye, Plus, Import, Ban, ArrowRight, Cloud, ChevronDown } from 'lucide-react'
+import { Edit2, RefreshCw, Trash2, Eye, Plus, Import, Ban, ArrowRight, Cloud, ChevronDown, MoreHorizontal } from 'lucide-react'
 
+import { useIsMobile } from '@/hooks/use-mobile'
 import { NodeSelectDialog } from '@/components/xray/node-select-dialog'
 import { WarpModal } from '@/components/xray/warp-modal'
 import {
@@ -41,6 +42,7 @@ export function OutboundPanel({ serverId, serverName, xrayMode }: OutboundPanelP
   const { t } = useTranslation('xray')
   const { t: tc } = useTranslation('common')
   const queryClient = useQueryClient()
+  const isMobile = useIsMobile()
 
   const [editingFreedomOutbound, setEditingFreedomOutbound] = useState<OutboundItem | null>(null)
   const [freedomDomainStrategy, setFreedomDomainStrategy] = useState<string>('AsIs')
@@ -253,11 +255,11 @@ export function OutboundPanel({ serverId, serverName, xrayMode }: OutboundPanelP
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <p className="text-sm text-muted-foreground">
           {t('outbounds.remoteServerConfig', { name: serverName, count: filteredOutbounds.length })}
         </p>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             variant={hideDefaultOutbounds ? 'default' : 'outline'}
             size="sm"
@@ -345,13 +347,35 @@ export function OutboundPanel({ serverId, serverName, xrayMode }: OutboundPanelP
                     </>
                   )}
                 </CardContent>
-                <CardFooter className="flex gap-1.5 pt-2">
-                  {outbound.protocol === 'freedom' && (
-                    <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => handleEditFreedom(item)}><Edit2 className="h-3 w-3 mr-1" />{tc('actions.edit')}</Button>
-                  )}
-                  <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setViewingOutbound(outbound)}><Eye className="h-3 w-3 mr-1" />{tc('actions.view')}</Button>
-                  {!isSimpleOutbound(outbound.protocol) && !mmwxManaged && (
-                    <Button variant="outline" size="sm" className="h-7 text-xs text-red-600 hover:text-red-700" onClick={() => handleDelete(item)}><Trash2 className="h-3 w-3 mr-1" />{tc('actions.delete')}</Button>
+                <CardFooter className="flex gap-1.5 pt-2 flex-wrap">
+                  {isMobile ? (
+                    // 手机端把 [编辑/查看/删除] 收纳到右上「⋯」菜单,避免 375px 屏被 3 个按钮撑爆
+                    <div className="ml-auto">
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="outline" size="sm" className="h-7 w-7 p-0"><MoreHorizontal className="h-4 w-4" /></Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          {outbound.protocol === 'freedom' && (
+                            <DropdownMenuItem onClick={() => handleEditFreedom(item)}><Edit2 className="h-4 w-4 mr-2" />{tc('actions.edit')}</DropdownMenuItem>
+                          )}
+                          <DropdownMenuItem onClick={() => setViewingOutbound(outbound)}><Eye className="h-4 w-4 mr-2" />{tc('actions.view')}</DropdownMenuItem>
+                          {!isSimpleOutbound(outbound.protocol) && !mmwxManaged && (
+                            <DropdownMenuItem onClick={() => handleDelete(item)} className="text-red-600 focus:text-red-700"><Trash2 className="h-4 w-4 mr-2" />{tc('actions.delete')}</DropdownMenuItem>
+                          )}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
+                  ) : (
+                    <>
+                      {outbound.protocol === 'freedom' && (
+                        <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => handleEditFreedom(item)}><Edit2 className="h-3 w-3 mr-1" />{tc('actions.edit')}</Button>
+                      )}
+                      <Button variant="outline" size="sm" className="h-7 text-xs" onClick={() => setViewingOutbound(outbound)}><Eye className="h-3 w-3 mr-1" />{tc('actions.view')}</Button>
+                      {!isSimpleOutbound(outbound.protocol) && !mmwxManaged && (
+                        <Button variant="outline" size="sm" className="h-7 text-xs text-red-600 hover:text-red-700" onClick={() => handleDelete(item)}><Trash2 className="h-3 w-3 mr-1" />{tc('actions.delete')}</Button>
+                      )}
+                    </>
                   )}
                 </CardFooter>
               </Card>

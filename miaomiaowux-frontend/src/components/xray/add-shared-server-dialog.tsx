@@ -18,7 +18,7 @@ import {
 } from '@/components/ui/dialog'
 
 // 消费方:用「拥有方地址 + 分享令牌」接入一台被分享的服务器(PRO)。
-export function AddSharedServerDialog() {
+export function AddSharedServerDialog({ buttonClassName }: { buttonClassName?: string } = {}) {
   const queryClient = useQueryClient()
   const [open, setOpen] = useState(false)
   const [ownerURL, setOwnerURL] = useState('')
@@ -52,7 +52,7 @@ export function AddSharedServerDialog() {
   return (
     <Dialog open={open} onOpenChange={(o) => { setOpen(o); if (!o) reset() }}>
       <DialogTrigger asChild>
-        <Button variant="outline"><Link2 className="mr-2 h-4 w-4" />接入分享服务器</Button>
+        <Button variant="outline" className={buttonClassName}><Link2 className="mr-2 h-4 w-4" />接入分享服务器</Button>
       </DialogTrigger>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
