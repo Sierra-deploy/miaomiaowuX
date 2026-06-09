@@ -296,11 +296,14 @@ func (p *LimiterConfigPusher) PushToServer(ctx context.Context, serverID int64) 
 		return
 	}
 
+	// WS-first:写成功直接 return;写失败 fallback HTTP(socket 撕连瞬间 GetConnection 还
+	// 返回 ok 但 Send 已失败,这一次推送不能丢)。跟 deployToRemoteServer 路径对齐语义。
 	if _, ok := p.wsHandler.GetConnectionByServerID(serverID); ok {
-		if err := p.wsHandler.SendLimiterConfig(serverID, configs); err != nil {
-			log.Printf("[LimiterPush] WebSocket send failed for server %d: %v", serverID, err)
+		if err := p.wsHandler.SendLimiterConfig(serverID, configs); err == nil {
+			return
+		} else {
+			log.Printf("[LimiterPush] WebSocket send failed for server %d (%v), falling back to HTTP", serverID, err)
 		}
-		return
 	}
 
 	p.pushViaHTTP(ctx, server, configs)

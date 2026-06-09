@@ -1210,6 +1210,9 @@ function XrayServersPage() {
                         Pro
                       </span>
                     </TooltipTrigger><TooltipContent>{t('servers.xrayModeEmbeddedProHint')}</TooltipContent></Tooltip></TooltipProvider>
+                    <TooltipProvider><Tooltip><TooltipTrigger asChild>
+                      <span className="inline-flex items-center justify-center rounded-full h-5 w-5 cursor-default select-none border-2 border-orange-500 text-orange-600 italic font-serif text-[10px] font-bold leading-none">W</span>
+                    </TooltipTrigger><TooltipContent>{t('servers.xrayModeEmbeddedWarpHint')}</TooltipContent></Tooltip></TooltipProvider>
                   </div>
                 </RadioGroup>
                 <p className="text-xs text-muted-foreground">{createXrayMode === 'external' ? t('servers.xrayModeExternalDesc') : t('servers.xrayModeEmbeddedDesc')}</p>
@@ -1886,10 +1889,10 @@ function XrayServersPage() {
               {xrayRawConfigServerId !== null && (<InboundPanel serverId={xrayRawConfigServerId} serverName={xrayRawConfigServerName} federationPrefix={remoteServers.find((s: RemoteServer) => s.id === xrayRawConfigServerId)?.federation_prefix || ''} />)}
             </TabsContent>
             <TabsContent value="outbounds" className="flex-1 overflow-y-auto mt-2">
-              {xrayRawConfigServerId !== null && (<OutboundPanel serverId={xrayRawConfigServerId} serverName={xrayRawConfigServerName} />)}
+              {xrayRawConfigServerId !== null && (<OutboundPanel serverId={xrayRawConfigServerId} serverName={xrayRawConfigServerName} xrayMode={remoteServers.find((s: RemoteServer) => s.id === xrayRawConfigServerId)?.xray_mode as 'external' | 'embedded' | undefined} />)}
             </TabsContent>
             <TabsContent value="routing" className="flex-1 overflow-y-auto mt-2">
-              {xrayRawConfigServerId !== null && (<RoutingPanel serverId={xrayRawConfigServerId} serverName={xrayRawConfigServerName} isRemote={true} />)}
+              {xrayRawConfigServerId !== null && (<RoutingPanel serverId={xrayRawConfigServerId} serverName={xrayRawConfigServerName} isRemote={true} xrayMode={remoteServers.find((s: RemoteServer) => s.id === xrayRawConfigServerId)?.xray_mode as 'external' | 'embedded' | undefined} />)}
             </TabsContent>
           </Tabs>
         </DialogContent>
@@ -1981,6 +1984,9 @@ function XrayServersPage() {
                       Pro
                     </span>
                   </TooltipTrigger><TooltipContent>{t('servers.xrayModeEmbeddedProHint')}</TooltipContent></Tooltip></TooltipProvider>
+                  <TooltipProvider><Tooltip><TooltipTrigger asChild>
+                    <span className="inline-flex items-center justify-center rounded-full h-5 w-5 cursor-default select-none border-2 border-orange-500 text-orange-600 italic font-serif text-[10px] font-bold leading-none">W</span>
+                  </TooltipTrigger><TooltipContent>{t('servers.xrayModeEmbeddedWarpHint')}</TooltipContent></Tooltip></TooltipProvider>
                 </div>
               </RadioGroup>
               <p className="text-xs text-muted-foreground">{remoteFormData.xray_mode === 'external' ? t('servers.xrayModeExternalDesc') : t('servers.xrayModeEmbeddedDesc')}</p>

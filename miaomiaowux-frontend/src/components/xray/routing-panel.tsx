@@ -51,6 +51,7 @@ interface RoutingPanelProps {
   serverId: number
   serverName: string
   isRemote: boolean
+  xrayMode?: 'external' | 'embedded'
 }
 
 function getRuleDisplayInfo(rule: RoutingRule, t: (key: string) => string) {
@@ -122,7 +123,7 @@ function SortableRuleItem({ rule, index, isSelected, onClick, t, quickRules, isM
   )
 }
 
-export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelProps) {
+export function RoutingPanel({ serverId, serverName, isRemote, xrayMode }: RoutingPanelProps) {
   const { t } = useTranslation('xray')
   const { t: tc } = useTranslation('common')
   const QUICK_RULES = useQuickRules()
@@ -503,7 +504,8 @@ export function RoutingPanel({ serverId, serverName, isRemote }: RoutingPanelPro
                 <DropdownMenuItem onClick={() => handleQuickAdd('fix_openai')}>{t('routing.fixOpenai')}</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => handleQuickAdd('ban_private')}>{t('routing.banPrivate')}</DropdownMenuItem>
                 {/* 防止送中 — 仅在 server 已添加 warp-v4 出站时显示;避免点击后 outboundTag 命中不到出站被回落到 default */}
-                {hasWarpOutbound && (
+                {/* WARP 出站只在内联 Xray 上可用,外置 Xray 没注入 wireguard 能力 → 防止送中也不显示 */}
+                {hasWarpOutbound && xrayMode !== 'external' && (
                   <DropdownMenuItem onClick={() => handleQuickAdd('warp_anti_china')}>{t('routing.warpAntiChina')}</DropdownMenuItem>
                 )}
                 <DropdownMenuSeparator />

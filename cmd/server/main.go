@@ -437,6 +437,10 @@ func main() {
 	// 延迟 90s — 比 CredentialEmailMigrator(60s)晚跑,确保它先把老 email 迁完再补剩下的。
 	handler.NewOrphanInboundConfigBackfiller(repo).Start(context.Background(), 90*time.Second)
 
+	// 凌晨 03:30 扫一次,清理 xray inbound 上 db 已无主的 client(残留 vmess/trojan UUID 等)。
+	// 触发场景:用户删除时 server 离线 → push remove 失败 → db 已清但 xray config 仍残留。
+	handler.NewOrphanXrayClientCleaner(repo, remoteManageHandler).Start(context.Background())
+
 	// 依赖 limiterPusher 的端点
 	packageUpdateHandler := handler.NewPackageUpdateHandler(repo, remoteManageHandler, limiterPusher)
 	packageUpdateHandler.SetLicenseManager(licenseManager)

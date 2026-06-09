@@ -240,10 +240,18 @@ func (h *nodesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	// 数据隔离:管理员看全部节点,但屏蔽"普通用户私有"节点。
 	// 反向过滤逻辑:只有当节点 username 属于现存普通用户时才屏蔽;
 	// admin 用户/legacy "admin" 字面字符串/已不存在的用户名 → 一律保留。
+	//
+	// 例外:?include_private=1 — 套餐管理 tooltip / 节点关联 dialog 等需要 id→name 全量映射,
+	// 不能漏 routed_owner='user' 子节点或用户私有节点,否则 tooltip 显示成 "node-272" 这种 fallback。
+	// 仅 admin 视角生效(普通用户走下面 user 路径,不进这个 if)。
 	if userIsAdmin(r.Context(), h.repo, username) {
 		nodes, err := h.repo.ListAllNodes(r.Context())
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if r.URL.Query().Get("include_private") == "1" {
+			respondJSON(w, http.StatusOK, map[string]any{"nodes": convertNodes(nodes)})
 			return
 		}
 		nonAdmins, err := h.repo.ListNonAdminUsernames(r.Context())

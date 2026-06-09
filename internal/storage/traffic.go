@@ -6707,6 +6707,58 @@ func (r *TrafficRepository) DeleteBatchOutboundsByTag(ctx context.Context, tag s
 // 封装CRUD操作
 
 // 返回所有包模板
+// aliveNodeIDs 把传入 id 列表查 nodes 表,返回"实际存在"的 id 集合。
+// 出错返回 nil + err,调用方应回退到不过滤,避免单次 SQL 故障让套餐 API 整体崩。
+// 用途:套餐 nodes JSON 数组里可能有指向已删节点的孤儿 id(历史 BUG / 节点删除时套餐没联动清理),
+// 加载套餐时静默过滤,防止前端 tooltip / 关联节点 dialog 拿不到 name 显示成 "node-272" fallback。
+func (r *TrafficRepository) aliveNodeIDs(ctx context.Context, ids []int64) (map[int64]bool, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	if len(ids) == 0 {
+		return map[int64]bool{}, nil
+	}
+	placeholders := make([]string, len(ids))
+	args := make([]any, len(ids))
+	for i, id := range ids {
+		placeholders[i] = "?"
+		args[i] = id
+	}
+	query := fmt.Sprintf("SELECT id FROM nodes WHERE id IN (%s)", strings.Join(placeholders, ","))
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("query alive node ids: %w", err)
+	}
+	defer rows.Close()
+	alive := make(map[int64]bool, len(ids))
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan alive node id: %w", err)
+		}
+		alive[id] = true
+	}
+	return alive, nil
+}
+
+// filterAliveNodeIDs 保序过滤孤儿。query 失败时返回原 ids(不过滤,保活)。
+func (r *TrafficRepository) filterAliveNodeIDs(ctx context.Context, ids []int64) []int64 {
+	if len(ids) == 0 {
+		return ids
+	}
+	alive, err := r.aliveNodeIDs(ctx, ids)
+	if err != nil {
+		return ids
+	}
+	out := make([]int64, 0, len(ids))
+	for _, id := range ids {
+		if alive[id] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 func (r *TrafficRepository) ListPackages(ctx context.Context) ([]Package, error) {
 	if r == nil || r.db == nil {
 		return nil, errors.New("traffic repository not initialized")
@@ -6766,6 +6818,35 @@ func (r *TrafficRepository) ListPackages(ctx context.Context) ([]Package, error)
 		return nil, fmt.Errorf("iterate packages: %w", err)
 	}
 
+	// 静默过滤孤儿 node id — union 一次 SQL 查所有 pkg.Nodes 涉及的 id 是否在 nodes 表存在,
+	// 然后保序剔除已删 id。query 失败时不过滤(返回原 pkg.Nodes)避免单次故障让 API 崩。
+	idUnion := make([]int64, 0)
+	seen := make(map[int64]bool)
+	for _, pkg := range packages {
+		for _, id := range pkg.Nodes {
+			if !seen[id] {
+				idUnion = append(idUnion, id)
+				seen[id] = true
+			}
+		}
+	}
+	if len(idUnion) > 0 {
+		if alive, err := r.aliveNodeIDs(ctx, idUnion); err == nil {
+			for i := range packages {
+				if len(packages[i].Nodes) == 0 {
+					continue
+				}
+				out := make([]int64, 0, len(packages[i].Nodes))
+				for _, id := range packages[i].Nodes {
+					if alive[id] {
+						out = append(out, id)
+					}
+				}
+				packages[i].Nodes = out
+			}
+		}
+	}
+
 	return packages, nil
 }
 
@@ -6818,6 +6899,9 @@ func (r *TrafficRepository) GetPackage(ctx context.Context, id int64) (*Package,
 	if nodeDeviceJSON != "" && nodeDeviceJSON != "{}" {
 		unmarshalStringKeyedIntMap(nodeDeviceJSON, &pkg.NodeDeviceLimits)
 	}
+
+	// 静默过滤孤儿 node id(同 ListPackages,query 失败时不过滤保活)
+	pkg.Nodes = r.filterAliveNodeIDs(ctx, pkg.Nodes)
 
 	return &pkg, nil
 }

@@ -2088,6 +2088,22 @@ function DesktopInboundWizard({
 
                   {/* Right-side JSON preview - sticky positioned */}
                   <div className='sticky top-4 hidden w-[380px] flex-shrink-0 self-start md:block'>
+                    {/* 按钮放在专家模式右栏 JSON 卡片之前 — 用户改完字段后 sticky 跟随,
+                        不用滚到 wizard 最底部。这里在专家模式 form 渲染分支内(条件已经满足
+                        协议/传输/安全选满),按钮一定会随之渲染,不会消失。 */}
+                    <div className='mb-3 flex justify-end gap-2'>
+                      <Button variant='outline' onClick={onCancel} type='button' size='sm'>
+                        {tc('actions.cancel')}
+                      </Button>
+                      <Button
+                        onClick={handleFormSubmit}
+                        type='button'
+                        size='sm'
+                        disabled={needsServerSelection && internalSelectedServerId === null}
+                      >
+                        {t('wizard.submitConfig')}
+                      </Button>
+                    </div>
                     <Card>
                       <CardHeader>
                         <CardTitle>{t('wizard.jsonPreview')}</CardTitle>
@@ -2162,7 +2178,8 @@ function DesktopInboundWizard({
           </>
         )}
 
-      {/* Action Buttons */}
+      {/* Action Buttons — 底部兜底,桌面 + mobile 都显示。
+          桌面端在顶部 sticky bar 也有一份(下面 actionButtonsBar),用户从下往上滚都看得到。 */}
       <div className='flex justify-end gap-3 border-t pt-4'>
         <Button variant='outline' onClick={onCancel} type='button'>
           {tc('actions.cancel')}

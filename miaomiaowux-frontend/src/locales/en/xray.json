@@ -758,7 +758,8 @@
     "xrayModeEmbedded": "Embedded Xray",
     "xrayModeExternalDesc": "Uses a standalone Xray process, Agent communicates via gRPC",
     "xrayModeEmbeddedDesc": "Agent embeds Xray-core, supports auto speed limiting and device limiting",
-    "xrayModeEmbeddedProHint": "Pro supports speed limiting and connection limiting"
+    "xrayModeEmbeddedProHint": "Pro supports speed limiting and connection limiting",
+    "xrayModeEmbeddedWarpHint": "Cloudflare WARP outbound supported (not available in external Xray)"
   },
   "presets": {
     "defaultLabel": "Default"

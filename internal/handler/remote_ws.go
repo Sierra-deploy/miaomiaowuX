@@ -33,7 +33,7 @@ const (
 	WSMsgTypePing                = "ping"
 	WSMsgTypePong                = "pong"
 	WSMsgTypeSpeed               = "speed"                 // 实时速度数据
-	WSMsgTypeCertRequest         = "cert_request"          // Master -> Agent：请求证书
+	WSMsgTypeCertRequest         = "cert_request"          // DEAD CODE — agent 没实现接收方,详见 SendCertRequest 注释
 	WSMsgTypeCertUpdate          = "cert_update"           // Agent -> Master：证书结果
 	WSMsgTypeCertDeploy          = "cert_deploy"           // Master -> Agent：部署证书
 	WSMsgTypeTokenUpdate         = "token_update"          // Master -> Agent：推送新的服务器令牌
@@ -1219,7 +1219,10 @@ func (h *RemoteWSHandler) StartCleanupLoop(ctx context.Context, interval time.Du
 	}()
 }
 
-// 向特定远程服务器发送证书请求
+// DEAD CODE — 向特定远程服务器发送证书请求。
+// agent 端 client.go 没有 case WSMsgTypeCertRequest,消息发到 agent 走 default case 忽略。
+// 唯一调用方:certificates_manage.go requestRemoteCertificate(remote_server_id > 0 路径)。
+// 详见 requestRemoteCertificate 的注释,要修复请改成 master 本地申请 + deploy 推送。
 func (h *RemoteWSHandler) SendCertRequest(token string, payload WSCertRequestPayload) error {
 	connInterface, ok := h.conns.Load(token)
 	if !ok {

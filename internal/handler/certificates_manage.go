@@ -404,7 +404,19 @@ func (h *CertificateHandler) requestLocalCertificate(cert *storage.Certificate) 
 	h.checkMasterCertReady(cert)
 }
 
-// 通过 WebSocket 向远程代理发送证书请求。
+// DEAD CODE — 通过 WebSocket 向远程代理发送证书请求。
+//
+// **当前 agent 端没有实现 cert_request 消息处理,也没有 ACME 能力**(无 lego/acme.sh 依赖)。
+// SendCertRequest 发出后 agent 收到 cert_request 走 default case 忽略,master 永远收不到
+// cert_update 回响 → 证书状态卡在 Pending 直至 30s ctx 超时。
+//
+// 入口:前端「申请证书」dialog 里「目标服务器」下拉选了具体 agent 时触发(remote_server_id > 0)。
+// 选「主控本地」(=0)走 requestLocalCertificate,master 端用 lego + DNS provider token 操作
+// DNS API 申请,这条是 working 的。
+//
+// 若要修复:推荐改造为 master 本地申请(复用 acmeClient.ObtainCertificateV2)+ 申请成功后
+// 调 deployToRemoteServer(server, ...) 推送(已有 WS-first + HTTP v4/v6 fallback),
+// 不依赖 agent ACME 能力。HTTP-01 仍需 agent 配合(此场景下需另起方案)。
 func (h *CertificateHandler) requestRemoteCertificate(cert *storage.Certificate) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()

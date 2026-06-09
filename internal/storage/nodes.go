@@ -1109,6 +1109,31 @@ func (r *TrafficRepository) ListUserRoutedOutbounds(ctx context.Context, usernam
 	return out, rows.Err()
 }
 
+// ListRoutedAdminEmails 返回所有 nodes.routed_admin_email 非空的 email 集合。
+// 用途:OrphanXrayClientCleaner 把这些占位 admin email 加入白名单,避免误删 inbound 上
+// 跟着 routed 出站一起加的 admin client(routed_owner='shared' 时才有,'user' 路径下为空)。
+func (r *TrafficRepository) ListRoutedAdminEmails(ctx context.Context) (map[string]bool, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT DISTINCT routed_admin_email FROM nodes WHERE routed_admin_email IS NOT NULL AND routed_admin_email != ''`)
+	if err != nil {
+		return nil, fmt.Errorf("list routed admin emails: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]bool)
+	for rows.Next() {
+		var email string
+		if err := rows.Scan(&email); err != nil {
+			return nil, fmt.Errorf("scan routed admin email: %w", err)
+		}
+		if email != "" {
+			out[email] = true
+		}
+	}
+	return out, rows.Err()
+}
+
 // 删除一个 routed 节点(级联会自动清 user_subaccounts via FK)。
 // agent 侧的 inbound client / outbound / rule 清理由调用方负责。
 func (r *TrafficRepository) DeleteRoutedNode(ctx context.Context, id int64) error {

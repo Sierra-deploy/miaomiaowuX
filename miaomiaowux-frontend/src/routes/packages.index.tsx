@@ -133,9 +133,11 @@ function PackagesPage() {
   })
 
   const { data: nodesData } = useQuery({
-    queryKey: ['nodes'],
+    queryKey: ['nodes', 'include-private'],
     queryFn: async () => {
-      const response = await api.get('/api/admin/nodes')
+      // include_private=1:套餐管理需要 id→name 全量映射,默认接口会过滤掉 routed_owner='user'
+      // 等用户私有节点,导致 tooltip 显示 fallback "node-272"。该参数仅 admin 视角生效。
+      const response = await api.get('/api/admin/nodes?include_private=1')
       return response.data
     },
   })
@@ -358,7 +360,9 @@ function PackagesPage() {
       <div className="space-y-1 max-h-[60vh] overflow-y-auto">
         {nodeIds.map((id) => {
           const n = nodeMap.get(id)
-          const name = n?.node_name || `node-${id}`
+          // 后端 List/GetPackage 已经静默过滤孤儿 id 了,正常不会走到 fallback;
+          // 兜底文案:节点真删了 / 加载竞态 → 明确显示"已删除"提示而不是 "node-272" 这种迷惑文案
+          const name = n?.node_name || t('card.deletedNode', { id, defaultValue: `(已删除 #${id})` })
           const speed = nodeSpeedFor(pkg, id)
           const device = nodeDeviceFor(pkg, id)
           const speedKey = String(id)

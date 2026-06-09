@@ -758,7 +758,8 @@
     "xrayModeEmbedded": "内联 Xray",
     "xrayModeExternalDesc": "使用独立安装的 Xray 进程，Agent 通过 gRPC 与其通信",
     "xrayModeEmbeddedDesc": "Agent 内联 Xray-core，支持自动限速和设备数限制",
-    "xrayModeEmbeddedProHint": "Pro 支持限速与限制连接数"
+    "xrayModeEmbeddedProHint": "Pro 支持限速与限制连接数",
+    "xrayModeEmbeddedWarpHint": "支持 Cloudflare WARP 出站(外置 Xray 不支持)"
   },
   "presets": {
     "defaultLabel": "默认"

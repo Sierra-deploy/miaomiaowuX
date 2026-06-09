@@ -34,9 +34,10 @@ interface OutboundItem {
 interface OutboundPanelProps {
   serverId: number
   serverName: string
+  xrayMode?: 'external' | 'embedded'
 }
 
-export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
+export function OutboundPanel({ serverId, serverName, xrayMode }: OutboundPanelProps) {
   const { t } = useTranslation('xray')
   const { t: tc } = useTranslation('common')
   const queryClient = useQueryClient()
@@ -285,10 +286,13 @@ export function OutboundPanel({ serverId, serverName }: OutboundPanelProps) {
                 <Ban className="h-4 w-4 mr-2 text-red-500" />
                 Blackhole <span className="ml-1 text-xs text-muted-foreground">({t('outbounds.blockOutbound')})</span>
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => setIsWarpModalOpen(true)}>
-                <Cloud className="h-4 w-4 mr-2 text-orange-500" />
-                {t('outbounds.warp.button')}
-              </DropdownMenuItem>
+              {/* WARP outbound 依赖内联 Xray 进程的 wireguard 协议支持,外置 Xray 走 gRPC 无法注入 wireguard outbound */}
+              {xrayMode !== 'external' && (
+                <DropdownMenuItem onClick={() => setIsWarpModalOpen(true)}>
+                  <Cloud className="h-4 w-4 mr-2 text-orange-500" />
+                  {t('outbounds.warp.button')}
+                </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         </div>

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -127,11 +128,16 @@ func (h *ChildAPIHandler) authenticate(r *http.Request) bool {
 
 // RemoteHeartbeatRequest代表来自远程服务器的心跳请求
 type RemoteHeartbeatRequest struct {
-	BootTime     int64 `json:"boot_time"`      // MMWX进程启动时间（Unix时间戳）
-	XrayBootTime int64 `json:"xray_boot_time"` // Xray 进程开始时间（Unix 时间戳）
-	XrayPID      int   `json:"xray_pid"`       // 当前 X 射线进程 ID
-	ListenPort   int   `json:"listen_port"`    // 代理HTTP监听端口
-	LocalTime    int64 `json:"local_time"`     // agent 本地 Unix 时间戳，用于时钟偏差检测
+	BootTime     int64  `json:"boot_time"`      // MMWX进程启动时间（Unix时间戳）
+	XrayBootTime int64  `json:"xray_boot_time"` // Xray 进程开始时间（Unix 时间戳）
+	XrayPID      int    `json:"xray_pid"`       // 当前 X 射线进程 ID
+	ListenPort   int    `json:"listen_port"`    // 代理HTTP监听端口
+	LocalTime    int64  `json:"local_time"`     // agent 本地 Unix 时间戳，用于时钟偏差检测
+	// PublicIPv4/v6 由 agent 端 ipProbeLoop 缓存后随心跳上报(WS auth/heartbeat 同款字段)。
+	// master 优先用上报值写 db,fallback 才用 r.RemoteAddr 并强校验类型(避免 v6 写 v4 字段)。
+	// 老 agent 不发 → 字段为空 → 走 fallback 路径,行为退化为现状。
+	PublicIPv4 string `json:"public_ipv4,omitempty"`
+	PublicIPv6 string `json:"public_ipv6,omitempty"`
 }
 
 // RemoteHeartbeatResponse 表示心跳响应
@@ -190,30 +196,53 @@ func (h *XrayServerHandler) RemoteHeartbeat(w http.ResponseWriter, r *http.Reque
 	var req RemoteHeartbeatRequest
 	json.Unmarshal(crypto.Body, &req)
 
-	// 获取客户端IP
-	clientIP := r.RemoteAddr
+	// 获取客户端IP — X-Forwarded-For > X-Real-IP > r.RemoteAddr
+	rawIP := r.RemoteAddr
 	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
 		// 从逗号分隔列表中获取第一个 IP
-		clientIP = strings.Split(forwarded, ",")[0]
-		clientIP = strings.TrimSpace(clientIP)
+		rawIP = strings.Split(forwarded, ",")[0]
+		rawIP = strings.TrimSpace(rawIP)
 	} else if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
-		clientIP = realIP
+		rawIP = realIP
 	}
-	// 删除端口（如果存在）
-	if idx := strings.LastIndex(clientIP, ":"); idx != -1 {
-		// 检查是否是带括号的 IPv6
-		if !strings.Contains(clientIP, "[") {
-			clientIP = clientIP[:idx]
+	// 用 stripPort 正确处理 v4 / [v6]:port / 裸 v6 三种形式。
+	// 老代码用 strings.LastIndex(":") 截断,对裸 v6 会把最后一段误删,留下半截 v6 字符串塞进 db.ip_address。
+	clientIP := stripPort(rawIP)
+	clientParsed := net.ParseIP(clientIP)
+	clientIsV4 := clientParsed != nil && clientParsed.To4() != nil
+
+	// 严格选 v4 / v6 字段(同 WS handleHeartbeat 模式):
+	//   1) 优先用 agent 上报的 public_ipv4/public_ipv6(经 ipProbeLoop 校验过的本机出口 IP)
+	//   2) fallback 用 clientIP,但**只在类型匹配时**才写对应字段 — 避免 agent v6 拨号 master →
+	//      master 把 clientIP(v6) 当 v4 塞进 ip_address → IPv4-only master 反向请求全部失败
+	v4 := ""
+	if reported := strings.TrimSpace(req.PublicIPv4); reported != "" {
+		if p := net.ParseIP(reported); p != nil && p.To4() != nil {
+			v4 = reported
 		}
+	}
+	if v4 == "" && clientIsV4 {
+		v4 = clientIP
+	}
+
+	v6 := ""
+	if reported := strings.TrimSpace(req.PublicIPv6); reported != "" {
+		if p := net.ParseIP(reported); p != nil && p.To4() == nil {
+			v6 = reported
+		}
+	}
+	if v6 == "" && clientParsed != nil && !clientIsV4 {
+		v6 = clientIP
 	}
 
 	ctx := r.Context()
 
-	// 构建心跳更新
+	// 构建心跳更新 — v4/v6 字段空字符串走 storage 层 COALESCE/NULLIF 保留 db 旧值
 	update := storage.HeartbeatUpdate{
-		Token:      token,
-		IPAddress:  clientIP,
-		ListenPort: req.ListenPort,
+		Token:       token,
+		IPAddress:   v4,
+		IPAddressV6: v6,
+		ListenPort:  req.ListenPort,
 	}
 
 	// 从 Unix 时间戳转换启动时间
