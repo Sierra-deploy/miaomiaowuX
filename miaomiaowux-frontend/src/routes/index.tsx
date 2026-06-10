@@ -667,8 +667,13 @@ function AdminDashboard() {
       let used = traffic ? traffic.used + offset : (s.traffic_used ?? 0)
       if (timeRange !== 'month' && traffic) {
         const snap = snapshotByServerId.get(traffic.server_id) ?? 0
-        used = Math.max(0, used - snap)
+        used = used - snap
       }
+      // 兜底 clamp:用户手动重置流量时把 traffic_used_offset 设成了大负值(为了把
+      // 累计计数 push 回 0),后续累积赶不上偏移就会算出负数。UI 显示负 GB 是 hard
+      // failure,先 clamp 防呆。真正修法见用户提示:编辑服务器把 traffic_used_offset 设回 0
+      // 或者一个合理值(=累计 - 想计入的流量)。
+      used = Math.max(0, used)
       list.push({ name: s.name, upload: s.current_upload_speed ?? 0, download: s.current_download_speed ?? 0, used, limit: s.traffic_limit ?? 0 })
     }
     return list

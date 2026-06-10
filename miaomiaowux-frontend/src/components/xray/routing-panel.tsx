@@ -237,8 +237,7 @@ export function RoutingPanel({ serverId, serverName, isRemote, xrayMode }: Routi
     return out
   }, [nodesData])
 
-  // 妙妙屋 X routed 节点产生的 outboundTag 集合 — routing rule 的 outboundTag 命中即视为系统管理,
-  // 不允许用户编辑/删除(改了会让套餐分配 / 路由出站子账号失效)。
+  // 妙妙屋 X routed 节点产生的 outboundTag 集合 — routing rule 的 outboundTag 命中视为系统管理候选。
   const mmwxRoutedTags = useMemo(() => {
     const set = new Set<string>()
     for (const n of nodesData?.nodes || []) {
@@ -248,8 +247,11 @@ export function RoutingPanel({ serverId, serverName, isRemote, xrayMode }: Routi
     }
     return set
   }, [nodesData])
+  // "妙妙屋X 管理"的标准 = outboundTag 是 routed 出站 **且** rule 有 user 字段绑定到具体用户。
+  // user 数组就是 mmwx 用户统计 / 套餐分配挂钩的载体 — 改了它会让套餐分配 / 路由出站子账号失效。
+  // 没 user 的规则(routed 出站建好但没分用户 / 纯出站没人挂)对用户流量统计无影响,允许用户编辑。
   const isMmwxManagedRule = (r: RoutingRule) =>
-    !!r.outboundTag && mmwxRoutedTags.has(r.outboundTag)
+    !!r.outboundTag && mmwxRoutedTags.has(r.outboundTag) && (r.user?.length ?? 0) > 0
 
   const rawRules: RoutingRule[] = useMemo(() => {
     if (isRemote) return routingData?.routing?.rules || []
