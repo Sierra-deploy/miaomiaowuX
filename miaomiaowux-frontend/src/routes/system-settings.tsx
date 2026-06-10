@@ -173,6 +173,36 @@ function SystemSettingsPage() {
     }
   }, [overrideScriptsData])
 
+  // 订阅序列化格式 YAML / JSON 切换(仅影响 Clash 客户端输出)
+  const [subscriptionOutputFormat, setSubscriptionOutputFormat] = useState<'yaml' | 'json'>('yaml')
+
+  const { data: subscriptionOutputFormatData } = useQuery({
+    queryKey: ['subscription-output-format'],
+    queryFn: async () => {
+      const response = await api.get('/api/admin/system-settings/subscription-output-format')
+      return response.data as { success: boolean; subscription_output_format: 'yaml' | 'json' }
+    },
+    enabled: Boolean(auth.accessToken),
+    staleTime: 5 * 60 * 1000,
+  })
+
+  const setSubscriptionOutputFormatMutation = useMutation({
+    mutationFn: async (format: 'yaml' | 'json') => {
+      await api.put('/api/admin/system-settings/subscription-output-format', { subscription_output_format: format })
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['subscription-output-format'] })
+      toast.success(t('subscriptionOutputFormat.updated'))
+    },
+    onError: handleServerError,
+  })
+
+  useEffect(() => {
+    if (subscriptionOutputFormatData?.subscription_output_format) {
+      setSubscriptionOutputFormat(subscriptionOutputFormatData.subscription_output_format)
+    }
+  }, [subscriptionOutputFormatData])
+
   const { data: mmwFeaturesData } = useQuery({
     queryKey: ['miaomiaowu-features-enabled'],
     queryFn: async () => {
@@ -941,6 +971,41 @@ function SystemSettingsPage() {
                     }}
                     disabled={toggleOverrideScriptsMutation.isPending}
                   />
+                </div>
+
+                {/* 订阅序列化格式 — Clash 客户端 YAML / JSON 二选一 */}
+                <div className='flex items-center justify-between rounded-lg border p-3'>
+                  <div className='flex items-center gap-2'>
+                    <Label className='cursor-default'>{t('subscriptionOutputFormat.label')}</Label>
+                    <Tooltip>
+                      <TooltipTrigger asChild>
+                        <CircleHelp className='h-4 w-4 text-muted-foreground cursor-help' />
+                      </TooltipTrigger>
+                      <TooltipContent side='top' className='max-w-xs'>
+                        <p>{t('subscriptionOutputFormat.description')}</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <div className='flex gap-1'>
+                    {(['yaml', 'json'] as const).map((opt) => (
+                      <button
+                        key={opt}
+                        type='button'
+                        onClick={() => {
+                          setSubscriptionOutputFormat(opt)
+                          setSubscriptionOutputFormatMutation.mutate(opt)
+                        }}
+                        disabled={setSubscriptionOutputFormatMutation.isPending}
+                        className={`px-3 py-1 text-xs border rounded-md transition-colors ${
+                          subscriptionOutputFormat === opt
+                            ? 'bg-primary text-primary-foreground border-primary'
+                            : 'bg-background hover:bg-muted border-border'
+                        }`}
+                      >
+                        {opt.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 {/* 妙妙屋功能 */}

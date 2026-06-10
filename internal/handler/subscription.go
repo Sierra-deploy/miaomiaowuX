@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -757,6 +758,22 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	}
 	logger.Info("[⏱️ 耗时监测] YAML 重排序完成", "step", "yaml_reorder", "duration_ms", time.Since(stepStart).Milliseconds())
 
+	// 系统配置 subscription_output_format == "json" 且当前是 YAML content-type → 转 JSON 输出。
+	// 仅影响 Clash 订阅(其它客户端格式如 Surge/Sing-Box 在前面 convertSubscription 那段已切了 content-type,
+	// 不会命中这里的 text/yaml 判断)。
+	if h.repo != nil {
+		if sysCfg, err := h.repo.GetSystemConfig(r.Context()); err == nil && sysCfg.SubscriptionOutputFormat == "json" &&
+			(contentType == "text/yaml; charset=utf-8" || contentType == "text/yaml; charset=utf-8; charset=UTF-8") {
+			if jsonBytes, jsonErr := marshalSubscriptionJSON(data); jsonErr == nil {
+				data = jsonBytes
+				contentType = "application/json; charset=utf-8"
+				ext = ".json"
+			} else {
+				logger.Warn("[Subscription] YAML → JSON 转换失败,回落 YAML 输出", "error", jsonErr)
+			}
+		}
+	}
+
 	w.Header().Set("Content-Type", contentType)
 
 	// 远程服务器流量统计:
@@ -1333,6 +1350,18 @@ func (h *SubscriptionHandler) serveTokenInvalidResponse(w http.ResponseWriter, r
 			default:
 				contentType = "text/yaml; charset=utf-8"
 				ext = ".yaml"
+			}
+		}
+	}
+
+	// 同主订阅端点:sysConfig 是 JSON 且当前是 YAML content-type 就转 JSON,保持格式一致
+	if h.repo != nil {
+		if sysCfg, err := h.repo.GetSystemConfig(r.Context()); err == nil && sysCfg.SubscriptionOutputFormat == "json" &&
+			(contentType == "text/yaml; charset=utf-8" || contentType == "text/yaml; charset=utf-8; charset=UTF-8") {
+			if jsonBytes, jsonErr := marshalSubscriptionJSON(data); jsonErr == nil {
+				data = jsonBytes
+				contentType = "application/json; charset=utf-8"
+				ext = ".json"
 			}
 		}
 	}
@@ -2346,4 +2375,178 @@ func injectChainProxy(ctx context.Context, repo *storage.TrafficRepository, user
 	fixed := RemoveUnicodeEscapeQuotes(string(out))
 	logger.Info("[Subscription] 链式代理注入完成", "user", username, "injected", len(nameToChainTarget))
 	return []byte(fixed)
+}
+
+// ─── 订阅 YAML → JSON 序列化(从妙妙屋 subscription.go L2506-2679 移植,无 mmw 特化) ───
+//
+// 用 yaml.Node 解析后手工写出 JSON,这样可以:
+//   1. 保留 proxies / proxy-groups 顶层数组的多行格式(可读性)
+//   2. 元素内部的 proxy / group 字段按 name → type → server → port 排序(对照 mihomo 客户端常见展示顺序)
+//   3. 数字 / bool / null 等 YAML scalar tag 正确转 JSON 字面量(避免 "true" 这种带引号字符串)
+//
+// 输入是 SubscriptionHandler 早些处理过的 YAML 字节流,输出是 application/json 等价物。
+// 仅用于 Clash 订阅(其它 client 类型如 surge / sing-box 不调用此函数)。
+
+func marshalSubscriptionJSON(yamlData []byte) ([]byte, error) {
+	var doc yaml.Node
+	if err := yaml.Unmarshal(yamlData, &doc); err != nil {
+		return nil, err
+	}
+	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("expected YAML mapping document")
+	}
+
+	var buf bytes.Buffer
+	rootMap := doc.Content[0]
+	buf.WriteString("{\n")
+
+	for i := 0; i < len(rootMap.Content); i += 2 {
+		keyNode := rootMap.Content[i]
+		valNode := rootMap.Content[i+1]
+
+		buf.WriteString("  ")
+		jsonEncodeString(&buf, keyNode.Value)
+		buf.WriteString(": ")
+
+		reorder := keyNode.Value == "proxies" || keyNode.Value == "proxy-groups"
+
+		if valNode.Kind == yaml.SequenceNode {
+			jsonWriteSeqExpanded(&buf, valNode, reorder)
+		} else {
+			jsonWriteCompact(&buf, valNode)
+		}
+
+		if i+2 < len(rootMap.Content) {
+			buf.WriteByte(',')
+		}
+		buf.WriteByte('\n')
+	}
+
+	buf.WriteString("}\n")
+	return buf.Bytes(), nil
+}
+
+var jsonProxyKeyPriority = []string{"name", "type", "server", "port"}
+
+func jsonWriteSeqExpanded(buf *bytes.Buffer, node *yaml.Node, reorder bool) {
+	if len(node.Content) == 0 {
+		buf.WriteString("[]")
+		return
+	}
+	buf.WriteString("[\n")
+	for i, elem := range node.Content {
+		buf.WriteString("    ")
+		if reorder && elem.Kind == yaml.MappingNode {
+			jsonWriteMappingReordered(buf, elem)
+		} else {
+			jsonWriteCompact(buf, elem)
+		}
+		if i < len(node.Content)-1 {
+			buf.WriteByte(',')
+		}
+		buf.WriteByte('\n')
+	}
+	buf.WriteString("  ]")
+}
+
+func jsonWriteCompact(buf *bytes.Buffer, node *yaml.Node) {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		jsonWriteScalar(buf, node)
+	case yaml.MappingNode:
+		buf.WriteByte('{')
+		for i := 0; i < len(node.Content); i += 2 {
+			if i > 0 {
+				buf.WriteString(", ")
+			}
+			jsonEncodeString(buf, node.Content[i].Value)
+			buf.WriteString(": ")
+			jsonWriteCompact(buf, node.Content[i+1])
+		}
+		buf.WriteByte('}')
+	case yaml.SequenceNode:
+		buf.WriteByte('[')
+		for i, elem := range node.Content {
+			if i > 0 {
+				buf.WriteString(", ")
+			}
+			jsonWriteCompact(buf, elem)
+		}
+		buf.WriteByte(']')
+	}
+}
+
+func jsonWriteMappingReordered(buf *bytes.Buffer, node *yaml.Node) {
+	buf.WriteByte('{')
+
+	keyIdx := make(map[string]int, len(node.Content)/2)
+	for i := 0; i < len(node.Content); i += 2 {
+		keyIdx[node.Content[i].Value] = i
+	}
+
+	written := make(map[int]bool)
+	first := true
+
+	for _, key := range jsonProxyKeyPriority {
+		idx, ok := keyIdx[key]
+		if !ok {
+			continue
+		}
+		if !first {
+			buf.WriteString(", ")
+		}
+		jsonEncodeString(buf, key)
+		buf.WriteString(": ")
+		jsonWriteCompact(buf, node.Content[idx+1])
+		written[idx] = true
+		first = false
+	}
+
+	for i := 0; i < len(node.Content); i += 2 {
+		if written[i] {
+			continue
+		}
+		if !first {
+			buf.WriteString(", ")
+		}
+		jsonEncodeString(buf, node.Content[i].Value)
+		buf.WriteString(": ")
+		jsonWriteCompact(buf, node.Content[i+1])
+		first = false
+	}
+
+	buf.WriteByte('}')
+}
+
+func jsonWriteScalar(buf *bytes.Buffer, node *yaml.Node) {
+	switch node.Tag {
+	case "!!null":
+		buf.WriteString("null")
+	case "!!bool":
+		if node.Value == "true" {
+			buf.WriteString("true")
+		} else {
+			buf.WriteString("false")
+		}
+	case "!!int":
+		if n, err := strconv.ParseInt(node.Value, 0, 64); err == nil {
+			buf.WriteString(strconv.FormatInt(n, 10))
+		} else {
+			buf.WriteString(node.Value)
+		}
+	case "!!float":
+		v := strings.ToLower(node.Value)
+		if v == ".inf" || v == "+.inf" || v == "-.inf" || v == ".nan" {
+			jsonEncodeString(buf, node.Value)
+		} else {
+			buf.WriteString(node.Value)
+		}
+	default:
+		jsonEncodeString(buf, node.Value)
+	}
+}
+
+func jsonEncodeString(buf *bytes.Buffer, s string) {
+	b, _ := json.Marshal(s)
+	buf.Write(b)
 }

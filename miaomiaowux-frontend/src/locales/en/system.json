@@ -74,6 +74,11 @@
     "enableLabel": "Enable Override Scripts",
     "updated": "Override scripts settings updated"
   },
+  "subscriptionOutputFormat": {
+    "label": "Subscription Output Format",
+    "description": "Choose the output format for Clash subscriptions. Default is YAML; selecting JSON outputs subscriptions in JSON. Only affects Clash format — other clients (Surge, Sing-Box, etc.) are unchanged.",
+    "updated": "Subscription output format updated"
+  },
   "miaomiaowuFeatures": {
     "title": "Miaomiaowu Features",
     "description": "When enabled, shows Templates, Sub Files, Subscriptions, Sub Links, and Custom Rules menus",

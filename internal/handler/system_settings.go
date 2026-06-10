@@ -440,6 +440,58 @@ func (h *SystemSettingsHandler) SetOverrideScriptsEnabled(w http.ResponseWriter,
 	json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "覆写脚本设置已更新"})
 }
 
+// GetSubscriptionOutputFormat / SetSubscriptionOutputFormat — Clash 订阅序列化格式 yaml/json 切换
+func (h *SystemSettingsHandler) GetSubscriptionOutputFormat(w http.ResponseWriter, r *http.Request) {
+	cfg, err := h.repo.GetSystemConfig(r.Context())
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "获取设置失败"})
+		return
+	}
+	format := cfg.SubscriptionOutputFormat
+	if format == "" {
+		format = "yaml"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "subscription_output_format": format})
+}
+
+func (h *SystemSettingsHandler) SetSubscriptionOutputFormat(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SubscriptionOutputFormat string `json:"subscription_output_format"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "请求格式错误"})
+		return
+	}
+	// 二值校验:仅接受 'yaml' 或 'json',其余拒绝(避免误存 db / 后端误判 → 静默回落 yaml 的暗坑)
+	if req.SubscriptionOutputFormat != "yaml" && req.SubscriptionOutputFormat != "json" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "格式必须为 yaml 或 json"})
+		return
+	}
+	cfg, err := h.repo.GetSystemConfig(r.Context())
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "获取设置失败"})
+		return
+	}
+	cfg.SubscriptionOutputFormat = req.SubscriptionOutputFormat
+	if err := h.repo.UpdateSystemConfig(r.Context(), cfg); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "保存失败"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "订阅序列化格式已更新"})
+}
+
 func (h *SystemSettingsHandler) GetSilentMode(w http.ResponseWriter, r *http.Request) {
 	cfg, err := h.repo.GetSystemConfig(r.Context())
 	if err != nil {

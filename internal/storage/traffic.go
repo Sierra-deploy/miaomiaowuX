@@ -524,6 +524,7 @@ type SystemConfig struct {
 	NotifyDailyTrafficTime      string // "HH:MM"，默认 "08:00"
 	NotifyTrafficThresholdPercent int  // 0-100，默认 80
 	EnableOverrideScripts       bool   // 启用覆写脚本功能
+	SubscriptionOutputFormat    string // 订阅序列化格式: "yaml"(default) or "json"。仅影响 Clash 客户端输出。
 	SilentMode                  bool   // 静默模式：所有请求返回404，仅订阅接口可用
 	SilentModeTimeout           int    // 获取订阅后恢复访问的分钟数，默认15
 	EnableMiaomiaowuFeatures    bool   // 启用妙妙屋功能（模板、订阅管理等菜单）
@@ -1681,6 +1682,9 @@ CREATE INDEX IF NOT EXISTS idx_override_scripts_hook ON override_scripts(hook);
 
 	if err := r.ensureSystemConfigColumn("enable_override_scripts", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("ensure enable_override_scripts column: %w", err)
+	}
+	if err := r.ensureSystemConfigColumn("subscription_output_format", "TEXT NOT NULL DEFAULT 'yaml'"); err != nil {
+		return fmt.Errorf("ensure subscription_output_format column: %w", err)
 	}
 	if err := r.ensureSystemConfigColumn("silent_mode", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return fmt.Errorf("ensure silent_mode column: %w", err)
@@ -6097,6 +6101,7 @@ SELECT proxy_groups_source_url, client_compatibility_mode, COALESCE(enable_short
        COALESCE(notify_server_offline, 0), COALESCE(notify_server_online, 0), COALESCE(notify_traffic_threshold, 0),
        COALESCE(notify_daily_traffic_time, '08:00'), COALESCE(notify_traffic_threshold_percent, 80),
        COALESCE(enable_override_scripts, 0),
+       COALESCE(subscription_output_format, 'yaml'),
        COALESCE(silent_mode, 0), COALESCE(silent_mode_timeout, 15),
        COALESCE(enable_miaomiaowu_features, 1), COALESCE(default_template_filename, ''),
        COALESCE(enable_mmw_short_link_compat, 0),
@@ -6124,6 +6129,7 @@ WHERE id = 1
 		&notifyServerOffline, &notifyServerOnline, &notifyTrafficThreshold,
 		&cfg.NotifyDailyTrafficTime, &cfg.NotifyTrafficThresholdPercent,
 		&enableOverrideScripts,
+		&cfg.SubscriptionOutputFormat,
 		&silentMode, &silentModeTimeout,
 		&enableMiaomiaowuFeatures, &cfg.DefaultTemplateFilename,
 		&enableMmwShortLinkCompat,
@@ -6131,7 +6137,7 @@ WHERE id = 1
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return SystemConfig{EnableShortLink: true, SpeedCollectInterval: 3, TrafficCollectInterval: 60, TrafficCheckInterval: 120, HeartbeatInterval: 30, NotifyDailyTrafficTime: "08:00", NotifyTrafficThresholdPercent: 80, SilentModeTimeout: 15, EnableMiaomiaowuFeatures: true}, nil
+			return SystemConfig{EnableShortLink: true, SpeedCollectInterval: 3, TrafficCollectInterval: 60, TrafficCheckInterval: 120, HeartbeatInterval: 30, NotifyDailyTrafficTime: "08:00", NotifyTrafficThresholdPercent: 80, SubscriptionOutputFormat: "yaml", SilentModeTimeout: 15, EnableMiaomiaowuFeatures: true}, nil
 		}
 		return SystemConfig{}, fmt.Errorf("query system config: %w", err)
 	}
@@ -6147,6 +6153,9 @@ WHERE id = 1
 	cfg.NotifyServerOnline = notifyServerOnline != 0
 	cfg.NotifyTrafficThreshold = notifyTrafficThreshold != 0
 	cfg.EnableOverrideScripts = enableOverrideScripts != 0
+	if cfg.SubscriptionOutputFormat == "" {
+		cfg.SubscriptionOutputFormat = "yaml"
+	}
 	cfg.SilentMode = silentMode != 0
 	cfg.SilentModeTimeout = silentModeTimeout
 	if cfg.SilentModeTimeout <= 0 {
@@ -6183,6 +6192,7 @@ SET proxy_groups_source_url = ?,
     notify_daily_traffic_time = ?,
     notify_traffic_threshold_percent = ?,
     enable_override_scripts = ?,
+    subscription_output_format = ?,
     silent_mode = ?,
     silent_mode_timeout = ?,
     enable_miaomiaowu_features = ?,
@@ -6220,6 +6230,12 @@ WHERE id = 1
 		silentModeTimeout = 15
 	}
 
+	// 仅接受 yaml / json 二值,其他兜底 yaml(避免老配置 / 入参错乱触发 CHECK 或后端误判)
+	subOutFmt := cfg.SubscriptionOutputFormat
+	if subOutFmt != "json" {
+		subOutFmt = "yaml"
+	}
+
 	// 默认分隔符兜底(老配置可能 nil/空)
 	nnmLeft := cfg.NodeNameMultiplierLeft
 	if nnmLeft == "" {
@@ -6238,6 +6254,7 @@ WHERE id = 1
 		boolToInt(cfg.NotifyServerOffline), boolToInt(cfg.NotifyServerOnline), boolToInt(cfg.NotifyTrafficThreshold),
 		cfg.NotifyDailyTrafficTime, cfg.NotifyTrafficThresholdPercent,
 		boolToInt(cfg.EnableOverrideScripts),
+		subOutFmt,
 		boolToInt(cfg.SilentMode), silentModeTimeout,
 		boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename,
 		boolToInt(cfg.EnableMmwShortLinkCompat),
@@ -6258,9 +6275,10 @@ INSERT INTO system_config (id, proxy_groups_source_url, client_compatibility_mod
     notify_enabled, telegram_bot_token, telegram_chat_id, notify_login, notify_subscribe_fetch,
     notify_daily_traffic, notify_server_offline, notify_server_online, notify_traffic_threshold,
     notify_daily_traffic_time, notify_traffic_threshold_percent, enable_override_scripts,
+    subscription_output_format,
     silent_mode, silent_mode_timeout, enable_miaomiaowu_features, default_template_filename, enable_mmw_short_link_compat,
     node_name_multiplier_prefix_enabled, node_name_multiplier_left, node_name_multiplier_right)
-VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 		if _, err := r.db.ExecContext(ctx, insertStmt, cfg.ProxyGroupsSourceURL, compatibilityMode, enableShortLink,
 			cfg.SpeedCollectInterval, cfg.TrafficCollectInterval, cfg.TrafficCheckInterval, cfg.HeartbeatInterval, agentLogEnabled,
@@ -6269,6 +6287,7 @@ VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
 			boolToInt(cfg.NotifyServerOffline), boolToInt(cfg.NotifyServerOnline), boolToInt(cfg.NotifyTrafficThreshold),
 			cfg.NotifyDailyTrafficTime, cfg.NotifyTrafficThresholdPercent,
 			boolToInt(cfg.EnableOverrideScripts),
+			subOutFmt,
 			boolToInt(cfg.SilentMode), silentModeTimeout,
 			boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename,
 			boolToInt(cfg.EnableMmwShortLinkCompat),

@@ -771,6 +771,17 @@ func main() {
 		}
 	})))
 
+	mux.Handle("/api/admin/system-settings/subscription-output-format", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			systemSettingsHandler.GetSubscriptionOutputFormat(w, r)
+		case http.MethodPut:
+			systemSettingsHandler.SetSubscriptionOutputFormat(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
+
 	mux.Handle("/api/admin/system-settings/silent-mode", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:

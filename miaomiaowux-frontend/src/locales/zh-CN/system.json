@@ -74,6 +74,11 @@
     "enableLabel": "启用覆写脚本",
     "updated": "覆写脚本设置已更新"
   },
+  "subscriptionOutputFormat": {
+    "label": "订阅序列化格式",
+    "description": "选择 Clash 订阅的输出格式。默认 YAML，选择 JSON 后订阅将以 JSON 格式输出。仅影响 Clash 格式订阅，不影响其他客户端格式（Surge、Sing-Box 等）。",
+    "updated": "订阅序列化格式已更新"
+  },
   "miaomiaowuFeatures": {
     "title": "妙妙屋功能",
     "description": "开启后显示模板管理、订阅管理、生成订阅、订阅链接、覆写管理菜单",
