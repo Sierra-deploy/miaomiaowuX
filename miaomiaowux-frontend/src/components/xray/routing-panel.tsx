@@ -587,11 +587,13 @@ export function RoutingPanel({ serverId, serverName, isRemote, xrayMode }: Routi
                 </SortableContext>
               </DndContext>
             </div>
-            {/* 右栏 — desktop 始终显示;mobile 时:列表态 hide,详情态全宽显示 + 顶部"返回列表"按钮 */}
+            {/* 右栏 — desktop 始终显示;mobile 时:列表态 hide,详情态全宽显示 + 顶部"返回列表"按钮。
+                外层用 flex-col + overflow-hidden,让内部 JSON 块自己 flex-1 撑满剩余高度 — 用户反馈
+                老的 max-h-48 固定 12rem 太矮,且父容器下方有大量留白 */}
             <div className={
               isMobile
-                ? (selectedIndex === null ? 'hidden' : 'w-full border rounded-lg p-4 bg-card overflow-y-auto max-h-[70vh] mt-2')
-                : 'flex-1 min-w-0 border rounded-lg p-4 bg-card overflow-y-auto max-h-[60vh]'
+                ? (selectedIndex === null ? 'hidden' : 'w-full border rounded-lg p-4 bg-card flex flex-col overflow-hidden max-h-[70vh] mt-2')
+                : 'flex-1 min-w-0 border rounded-lg p-4 bg-card flex flex-col overflow-hidden max-h-[60vh]'
             }>
               {/* mobile 详情态顶部:返回列表入口,点击清空 selectedIndex 回到列表 */}
               {isMobile && selectedIndex !== null && (
@@ -600,7 +602,8 @@ export function RoutingPanel({ serverId, serverName, isRemote, xrayMode }: Routi
                 </Button>
               )}
               {selectedRule ? (
-                <div className='space-y-4'>
+                // flex-1 + flex-col + min-h-0:让外层撑满父容器剩余高度,内部 JSON 块得以 flex-1
+                <div className='space-y-4 flex-1 flex flex-col min-h-0'>
                   <div className='flex items-center justify-between'>
                     <h4 className='font-medium text-sm flex items-center gap-2'>
                       {getFriendlyName(selectedRule) || t('routing.rule', { index: selectedIndex! + 1 })}
@@ -640,9 +643,11 @@ export function RoutingPanel({ serverId, serverName, isRemote, xrayMode }: Routi
                       : <div><span className='text-muted-foreground'>outboundTag: </span><Badge variant={outboundBadgeVariant(selectedRule.outboundTag || '')} className='text-xs'>{selectedRule.outboundTag || t('routing.notSet')}</Badge></div>}
                     {selectedRule.marktag && <div><span className='text-muted-foreground'>marktag: </span>{selectedRule.marktag}</div>}
                   </div>
-                  <div>
-                    <p className='text-xs text-muted-foreground mb-1'>JSON</p>
-                    <pre className='bg-muted p-3 rounded-md text-xs overflow-auto max-h-48'>{JSON.stringify(selectedRule, null, 2)}</pre>
+                  {/* JSON 块铺满剩余高度:wrapper flex-1 min-h-0 → pre flex-1 min-h-0 overflow-auto。
+                      规则字段列表 (上方 space-y-2) 按内容自然高度,JSON 占剩余空间,内容超出再滚动 */}
+                  <div className='flex-1 flex flex-col min-h-0'>
+                    <p className='text-xs text-muted-foreground mb-1 shrink-0'>JSON</p>
+                    <pre className='bg-muted p-3 rounded-md text-xs overflow-auto flex-1 min-h-0'>{JSON.stringify(selectedRule, null, 2)}</pre>
                   </div>
                 </div>
               ) : (

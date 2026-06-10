@@ -1414,17 +1414,14 @@ function NodesPage() {
   })
 
   // 批量更新节点标签 — 接收多 tags 数组,设给后端 tags(Tag 由 serializeNodeTags 自动同步成 Tags[0])。
-  // **串行而非 Promise.all 并发**:前端 ↔ master 走 SecureChannelMiddleware E2E 加密
-  // (session.Encrypt 用递增 seq + sliding window 防重放)。并发 PUT 时:
-  //   1) axios 并发发出,到达 master 的顺序不保证跟 seq 单调
-  //   2) master entry.mu 串行 Decrypt,后到的低 seq 落入窗口边缘被认作重放 → "decrypt failed"
-  // 改串行后保证 seq 顺序到达,绕开并发解密竞态。50 节点 ~1-2s 可接受。
+  // 历史上这里用过串行(for-await)绕开 securechan race;真正根因(securechan.ts seq 在
+  // crypto.subtle.encrypt await 之后再读 s.sendSeq 而非锁本地)已修,可恢复并发。
   const batchUpdateTagMutation = useMutation({
     mutationFn: async ({ nodeIds, tags }: { nodeIds: number[]; tags: string[] }) => {
-      for (const id of nodeIds) {
+      const promises = nodeIds.map((id) => {
         const node = savedNodes.find(n => n.id === id)
-        if (!node) continue
-        await api.put(`/api/admin/nodes/${id}`, {
+        if (!node) return Promise.resolve()
+        return api.put(`/api/admin/nodes/${id}`, {
           raw_url: node.raw_url,
           node_name: node.node_name,
           protocol: node.protocol,
@@ -1434,7 +1431,8 @@ function NodesPage() {
           tag: tags[0] ?? '',
           tags: tags,
         })
-      }
+      })
+      await Promise.all(promises)
     },
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['nodes'] })

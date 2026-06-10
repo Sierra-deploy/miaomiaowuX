@@ -1367,7 +1367,7 @@ function XrayServersPage() {
                           </TooltipProvider>
                         )}
                         {server.fallback_to_pull && (<Badge variant="secondary" className="text-xs bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200 shrink-0">{t('servers.degraded')}</Badge>)}
-                        {server.steal_mode && server.steal_mode !== 'tunnel' && (<Badge variant="outline" className="text-xs shrink-0">{server.steal_mode === 'fallback' ? t('servers.fallbackLabel') : t('servers.stealModeDefault')}</Badge>)}
+                        {server.steal_mode && (<Badge variant="outline" className="text-xs shrink-0">{server.steal_mode === 'fallback' ? t('servers.fallbackLabel') : server.steal_mode === 'tunnel' ? t('servers.tunnelLabel') : t('servers.stealModeDefault')}</Badge>)}
                         {/* 已装 WARP 的 agent — 圆形空心 W 标识(放在 xray_mode 前面) */}
                         {server.warp_installed && (
                           <Badge variant="outline"
@@ -1651,7 +1651,7 @@ function XrayServersPage() {
                                 </TooltipProvider>
                               )}
                               {server.fallback_to_pull && (<Badge variant="secondary" className="text-xs bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-200">{t('servers.degraded')}</Badge>)}
-                              {server.steal_mode && server.steal_mode !== 'tunnel' && (<Badge variant="outline" className="text-xs">{server.steal_mode === 'fallback' ? t('servers.fallbackLabel') : t('servers.stealModeDefault')}</Badge>)}
+                              {server.steal_mode && (<Badge variant="outline" className="text-xs">{server.steal_mode === 'fallback' ? t('servers.fallbackLabel') : server.steal_mode === 'tunnel' ? t('servers.tunnelLabel') : t('servers.stealModeDefault')}</Badge>)}
                             </div>
                           </div>
                           {/* 第 2 行:Xray 模式 badge + 心跳时间,移出顶部徽章组释放右侧名称空间 */}

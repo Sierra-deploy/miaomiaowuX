@@ -738,6 +738,7 @@
     "stealModeDefaultDesc": "No steal-self, Xray listens directly on protocol port",
     "stealModeSwitchWarning": "Switching mode will redeploy config, existing inbounds will be preserved",
     "fallbackLabel": "Fallback",
+    "tunnelLabel": "Tunnel",
     "syncToNodes": "Sync Inbounds to Nodes",
     "syncToNodesDesc": "Sync remote server inbound configurations to node management for subscription link generation.",
     "syncServerHostPlaceholder": "Enter the remote server's public address (domain or IP)",

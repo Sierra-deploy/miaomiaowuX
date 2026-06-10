@@ -119,14 +119,27 @@ class SecureChannelClient {
   async encryptBodyB64(plaintext: Uint8Array): Promise<string> {
     if (!this.session) throw new Error('secure channel not established')
     const s = this.session
+    // RACE BUG FIX:必须把本次发送的 seq 锁到 local 变量,不能在 await 之后再读 s.sendSeq。
+    //
+    // 老逻辑:
+    //   s.sendSeq = s.sendSeq + 1n               // caller A:5
+    //   nonce = makeNonce(..., s.sendSeq)        // nonce(5)
+    //   await crypto.subtle.encrypt(nonce, ...)  // ← 让出执行权
+    //                                            // 期间 caller B 进:s.sendSeq=6
+    //   writeBigUint64BE(envelope, 1, s.sendSeq) // ← 读到 6!但密文是 nonce(5)
+    //
+    // 结果:envelope 头是 seq=6 + 用 nonce(5) 加密的密文 → 服务器用 nonce(6) 解 → AES-GCM
+    // 认证失败 → 报 "decrypt failed"。任何并发的 securechan 请求(同 mutation 链、
+    // useQuery 同时 refetch 等)都会踩到。
     s.sendSeq = s.sendSeq + 1n
-    const nonce = makeNonce(s.sendNonceBase, s.sendSeq)
+    const localSeq = s.sendSeq
+    const nonce = makeNonce(s.sendNonceBase, localSeq)
     const ct = new Uint8Array(
       await crypto.subtle.encrypt({ name: 'AES-GCM', iv: nonce as BufferSource }, s.sendKey, plaintext as BufferSource)
     )
     const envelope = new Uint8Array(1 + 8 + ct.length)
     envelope[0] = ENVELOPE_VERSION
-    writeBigUint64BE(envelope, 1, s.sendSeq)
+    writeBigUint64BE(envelope, 1, localSeq)
     envelope.set(ct, 9)
     return bytesToBase64(envelope)
   }
