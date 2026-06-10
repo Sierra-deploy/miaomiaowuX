@@ -786,21 +786,21 @@ type TrafficSnapshot struct {
 }
 
 type NodeTrafficSnapshot struct {
-	ID       int64
-	ServerID int64
-	Tag      string
-	Date     string
-	Uplink   int64
-	Downlink int64
+	ID       int64  `json:"id"`
+	ServerID int64  `json:"server_id"`
+	Tag      string `json:"tag"`
+	Date     string `json:"date"`
+	Uplink   int64  `json:"uplink"`
+	Downlink int64  `json:"downlink"`
 }
 
 type UserTrafficSnapshot struct {
-	ID       int64
-	ServerID int64
-	Username string
-	Date     string
-	Uplink   int64
-	Downlink int64
+	ID       int64  `json:"id"`
+	ServerID int64  `json:"server_id"`
+	Username string `json:"username"`
+	Date     string `json:"date"`
+	Uplink   int64  `json:"uplink"`
+	Downlink int64  `json:"downlink"`
 }
 
 var (
@@ -10691,8 +10691,20 @@ ON CONFLICT(server_id, username, date) DO UPDATE SET uplink=excluded.uplink, dow
 	return err
 }
 
+// GetNodeTrafficSnapshots 返回每个 (server_id, tag) **小于等于** date 的最新一份快照。
+// 改 = 为 <=:cron 漏跑某一天 / 用户切换 timeRange 落到没快照的日期时,自动 fallback 到上一份
+// 有数据的快照,前端"当前累计 - baseline"就能正确算出"自该日期以来的增量"。
+// 实现:每组(server_id, tag)按 date DESC 取最大值;旧逻辑 = 时严格 0 行匹配的事故消失。
 func (r *TrafficRepository) GetNodeTrafficSnapshots(ctx context.Context, date string) ([]NodeTrafficSnapshot, error) {
-	const query = `SELECT id, server_id, tag, date, uplink, downlink FROM node_traffic_snapshots WHERE date = ?`
+	const query = `
+SELECT s.id, s.server_id, s.tag, s.date, s.uplink, s.downlink
+FROM node_traffic_snapshots s
+JOIN (
+    SELECT server_id, tag, MAX(date) AS max_date
+    FROM node_traffic_snapshots
+    WHERE date <= ?
+    GROUP BY server_id, tag
+) latest ON s.server_id = latest.server_id AND s.tag = latest.tag AND s.date = latest.max_date`
 	rows, err := r.db.QueryContext(ctx, query, date)
 	if err != nil {
 		return nil, err
@@ -10709,8 +10721,17 @@ func (r *TrafficRepository) GetNodeTrafficSnapshots(ctx context.Context, date st
 	return result, rows.Err()
 }
 
+// GetUserTrafficSnapshots 同 GetNodeTrafficSnapshots 的语义,但按 (server_id, username) 维度。
 func (r *TrafficRepository) GetUserTrafficSnapshots(ctx context.Context, date string) ([]UserTrafficSnapshot, error) {
-	const query = `SELECT id, server_id, username, date, uplink, downlink FROM user_traffic_snapshots WHERE date = ?`
+	const query = `
+SELECT s.id, s.server_id, s.username, s.date, s.uplink, s.downlink
+FROM user_traffic_snapshots s
+JOIN (
+    SELECT server_id, username, MAX(date) AS max_date
+    FROM user_traffic_snapshots
+    WHERE date <= ?
+    GROUP BY server_id, username
+) latest ON s.server_id = latest.server_id AND s.username = latest.username AND s.date = latest.max_date`
 	rows, err := r.db.QueryContext(ctx, query, date)
 	if err != nil {
 		return nil, err

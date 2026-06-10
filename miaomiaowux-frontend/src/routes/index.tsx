@@ -604,15 +604,25 @@ function AdminDashboard() {
   const [drilldownPage, setDrilldownPage] = useState(0)
   const [timeRange, setTimeRange] = useState<'today' | 'week' | 'month'>('month')
 
+  // snapshotDate 是"减 baseline"用的日期 — used = 当前实时累计 - 该日期 0 点的快照。
+  // - today  → 今天 0 点
+  // - week   → 本周一 0 点
+  // - month  → 本月 1 号 0 点(老 bug:这里曾返回 ''  → 整段减法被绕过 → 「本月」实际显示
+  //            从 xray 启动以来的累计 + offset 校准,不是真正"本月 1 号起",改后跟 today/week
+  //            走同一条逻辑,语义统一)
   const snapshotDate = useMemo(() => {
-    if (timeRange === 'month') return ''
     const now = new Date()
     if (timeRange === 'today') return now.toISOString().slice(0, 10)
-    const day = now.getDay()
-    const diff = day === 0 ? 6 : day - 1
-    const monday = new Date(now)
-    monday.setDate(now.getDate() - diff)
-    return monday.toISOString().slice(0, 10)
+    if (timeRange === 'week') {
+      const day = now.getDay()
+      const diff = day === 0 ? 6 : day - 1
+      const monday = new Date(now)
+      monday.setDate(now.getDate() - diff)
+      return monday.toISOString().slice(0, 10)
+    }
+    // month: 本月 1 号
+    const firstDay = new Date(now.getFullYear(), now.getMonth(), 1)
+    return firstDay.toISOString().slice(0, 10)
   }, [timeRange])
 
   const { data: snapshotData } = useQuery({
@@ -654,7 +664,7 @@ function AdminDashboard() {
       }
     }
     const snapshotByServerId = new Map<number, number>()
-    if (timeRange !== 'month' && snapshotData?.nodeSnapshots) {
+    if (snapshotData?.nodeSnapshots) {
       for (const s of snapshotData.nodeSnapshots) {
         snapshotByServerId.set(s.server_id, (snapshotByServerId.get(s.server_id) ?? 0) + s.uplink + s.downlink)
       }
@@ -665,7 +675,7 @@ function AdminDashboard() {
       // 实时聚合(traffic.used) 不含 offset 校准,需手动加上;
       // 回退到 s.traffic_used 时后端已经把 offset 算进去了,直接用即可
       let used = traffic ? traffic.used + offset : (s.traffic_used ?? 0)
-      if (timeRange !== 'month' && traffic) {
+      if (traffic) {
         const snap = snapshotByServerId.get(traffic.server_id) ?? 0
         used = used - snap
       }
@@ -707,7 +717,7 @@ function AdminDashboard() {
     }
     const inboundSnapByKey = new Map<string, { uplink: number; downlink: number }>()
     const outboundSnapByKey = new Map<string, { uplink: number; downlink: number }>()
-    if (timeRange !== 'month' && snapshotData?.nodeSnapshots) {
+    if (snapshotData?.nodeSnapshots) {
       for (const s of snapshotData.nodeSnapshots) {
         // snapshot 数据如果带 server_name 就一起拼成 key,跟上面对齐
         const srv = (s as any).server_name || ''
@@ -728,10 +738,9 @@ function AdminDashboard() {
         const t = (isRouted ? outboundByKey : inboundByKey).get(key)
         let uplink = t?.uplink ?? 0
         let downlink = t?.downlink ?? 0
-        if (timeRange !== 'month') {
-          const snap = (isRouted ? outboundSnapByKey : inboundSnapByKey).get(key)
-          if (snap) { uplink = Math.max(0, uplink - snap.uplink); downlink = Math.max(0, downlink - snap.downlink) }
-        }
+        // 减 baseline:用 snap 当 "timeRange 起点 0 点的累计",当前累计 - snap = 期内增量
+        const snap = (isRouted ? outboundSnapByKey : inboundSnapByKey).get(key)
+        if (snap) { uplink = Math.max(0, uplink - snap.uplink); downlink = Math.max(0, downlink - snap.downlink) }
         return { node_id: n.id, tag: lookupTag, server_id: 0, server_name: '', server_names: t?.server_names ?? [srv].filter(Boolean), display_name: n.node_name, uplink, downlink, total_uplink: 0, total_downlink: 0, last_uplink: t?.last_uplink ?? 0, last_downlink: t?.last_downlink ?? 0, updated_at: '' }
       })
       // 上下行都为 0 的节点不展示(没流量的占位会把卡片刷满,信息密度低)
@@ -754,7 +763,7 @@ function AdminDashboard() {
         }
       }
     }
-    if (timeRange !== 'month' && snapshotData?.userSnapshots) {
+    if (snapshotData?.userSnapshots) {
       const snapByUser = new Map<string, { uplink: number; downlink: number }>()
       for (const s of snapshotData.userSnapshots) {
         const existing = snapByUser.get(s.username)
