@@ -1014,7 +1014,7 @@ func main() {
 	// 启动拉模式服务器的速度收集（每 3 秒）
 	go trafficCollector.StartSpeedCollection(collectorCtx)
 	// 启动每日快照和清理任务
-	go startDailySnapshotTask(collectorCtx, trafficHandler)
+	go startDailySnapshotTask(collectorCtx, trafficHandler, trafficCollector)
 	// 启动流量超限检查（每 2 分钟）
 	trafficEnforcer := handler.NewTrafficLimitEnforcer(repo, remoteManageHandler, limiterPusher)
 	go trafficEnforcer.Start(collectorCtx, time.Duration(systemConfig.TrafficCheckInterval)*time.Second)
@@ -1115,7 +1115,7 @@ func waitForShutdown(srv *http.Server, cancels ...context.CancelFunc) {
 }
 
 // 创建每日快照并清理旧数据
-func startDailySnapshotTask(ctx context.Context, trafficHandler *handler.TrafficSummaryHandler) {
+func startDailySnapshotTask(ctx context.Context, trafficHandler *handler.TrafficSummaryHandler, trafficCollector *traffic.Collector) {
 	if trafficHandler == nil {
 		return
 	}
@@ -1134,6 +1134,16 @@ func startDailySnapshotTask(ctx context.Context, trafficHandler *handler.Traffic
 
 			if err == nil {
 				logger.Info("[流量收集器] 每日流量收集成功")
+				// RecordDailyUsage 只写了 daily_usage 聚合表。前端「今天/本周」筛选需要的
+				// node_traffic_snapshots + user_traffic_snapshots 必须靠 collector 单独跑 —
+				// 老 bug:从来没人调过这俩函数,导致快照表永远空,「今天/本周」实际显示全月数据。
+				if trafficCollector != nil {
+					snapCtx, snapCancel := context.WithTimeout(ctx, 60*time.Second)
+					if serr := trafficCollector.CreateDailySnapshots(snapCtx); serr != nil {
+						logger.Error("[流量收集器] 节点/用户快照保存失败", "error", serr)
+					}
+					snapCancel()
+				}
 				return
 			}
 

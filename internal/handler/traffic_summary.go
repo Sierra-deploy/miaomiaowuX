@@ -183,32 +183,62 @@ func (h *TrafficSummaryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 func (h *TrafficSummaryHandler) RecordDailyUsage(ctx context.Context) error {
 	var totalLimit, totalRemaining, totalUsed int64
 
-	// 同步并添加外部订阅流量
+	// **聚合所有 remote servers 流量**(老 bug:这块完全没算,只算 external 订阅 → 写 0 进 db
+	// → 每日趋势图除了少数几天有 external 数据外全是 0,显示成大尖峰加 flat line)。
+	// 算法跟 BuildSummary admin 分支一致:aggregated + offset,限流的计入,不限流的丢弃。
+	// ListRemoteServers 失败时 skip 整个写入,避免 ON CONFLICT 覆盖正确历史。
+	serverListOK := false
+	if h.repo != nil {
+		if servers, err := h.repo.ListRemoteServers(ctx); err == nil {
+			serverListOK = true
+			for _, s := range servers {
+				aggregated, _ := h.repo.GetServerTrafficUsed(ctx, s.ID)
+				used := aggregated + s.TrafficUsedOffset
+				if used < 0 {
+					used = 0 // offset 设过头时兜底,防止负值拉低总数
+				}
+				if s.TrafficLimit > 0 {
+					totalLimit += s.TrafficLimit
+					totalUsed += used
+				}
+				// 不限流服务器不计入 totalLimit / totalUsed(同 BuildSummary 行为)
+			}
+		} else {
+			logger.Warn("[流量记录] ListRemoteServers 失败,跳过本次快照避免覆盖历史", "error", err)
+		}
+	}
+
+	// 同步并添加外部订阅流量(系统级 sync_traffic 开关开时才有数据)
 	externalLimit, externalUsed := h.syncAndFetchExternalSubscriptionTraffic(ctx)
 	if externalLimit > 0 || externalUsed > 0 {
 		totalLimit += externalLimit
 		totalUsed += externalUsed
-		totalRemaining = totalLimit - totalUsed
-		if totalRemaining < 0 {
-			totalRemaining = 0
-		}
-
 		logger.Info("[流量记录] 外部订阅流量",
 			"limit_gb", bytesToGigabytes(externalLimit),
 			"used_gb", bytesToGigabytes(externalUsed))
 	}
 
-	// 记录总流量
-	limitGB := roundUpTwoDecimals(bytesToGigabytes(totalLimit))
-	usedGB := roundUpTwoDecimals(bytesToGigabytes(totalUsed))
-	remainingGB := roundUpTwoDecimals(bytesToGigabytes(totalRemaining))
-	usagePercent := roundUpTwoDecimals(usagePercentage(totalUsed, totalLimit))
+	totalRemaining = totalLimit - totalUsed
+	if totalRemaining < 0 {
+		totalRemaining = 0
+	}
+
+	// 守卫:ListRemoteServers 失败 / 没数据时不写入,避免 ON CONFLICT(date) 把已有正确历史覆盖成 0。
+	// 跟 BuildSummary admin 守卫一致。
+	switch {
+	case !serverListOK:
+		logger.Warn("[流量记录] 跳过快照: ListRemoteServers 失败,无法判断当前流量")
+		return nil
+	case totalLimit == 0 && totalUsed == 0:
+		logger.Warn("[流量记录] 跳过快照: totalLimit/totalUsed 全 0,可能 DB 临时异常")
+		return nil
+	}
 
 	logger.Info("[流量记录] 总计流量",
-		"limit_gb", limitGB,
-		"used_gb", usedGB,
-		"remaining_gb", remainingGB,
-		"usage_percent", usagePercent)
+		"limit_gb", roundUpTwoDecimals(bytesToGigabytes(totalLimit)),
+		"used_gb", roundUpTwoDecimals(bytesToGigabytes(totalUsed)),
+		"remaining_gb", roundUpTwoDecimals(bytesToGigabytes(totalRemaining)),
+		"usage_percent", roundUpTwoDecimals(usagePercentage(totalUsed, totalLimit)))
 
 	if err := h.recordSnapshot(ctx, totalLimit, totalUsed, totalRemaining); err != nil {
 		logger.Error("[流量记录] 保存快照到数据库失败", "error", err)
