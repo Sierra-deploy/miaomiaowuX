@@ -82,6 +82,18 @@ export function Topbar() {
   })
   const enableMmwFeatures = mmwFeaturesData?.enable_miaomiaowu_features ?? true
 
+  // 系统级开关 `enable_override_scripts` — 同 sidebar,false 时把「覆写管理」入口隐藏
+  const { data: overrideEnabledData } = useQuery({
+    queryKey: ['system-settings', 'override-scripts'],
+    queryFn: async () => {
+      const response = await api.get('/api/admin/system-settings/override-scripts')
+      return response.data as { success: boolean; enable_override_scripts: boolean }
+    },
+    enabled: Boolean(auth.accessToken),
+    staleTime: 5 * 60 * 1000,
+  })
+  const enableOverrideScripts = overrideEnabledData?.enable_override_scripts ?? false
+
   // 普通用户:按全局权限策略动态显示妙妙屋页面。
   const { data: userPerms } = useQuery({
     queryKey: ['user-permissions'],
@@ -90,10 +102,22 @@ export function Topbar() {
     staleTime: 5 * 60 * 1000,
   })
   const allowedPages = new Set(userPerms?.pages ?? [])
-  const permittedMmwLinks = [...mmwTopNavLinks, ...mmwBottomNavLinks, ...userGrantableNavLinks].filter((l) => allowedPages.has(l.pageKey))
+
+  // 覆写管理入口 gate:enableOverrideScripts=false 时 admin / 普通用户都过滤掉 custom-rules
+  const gateOverride = <T extends { pageKey: UserPageKey }>(links: T[]) =>
+    enableOverrideScripts ? links : links.filter((l) => l.pageKey !== 'custom-rules')
+
+  const permittedMmwLinks = gateOverride(
+    [...mmwTopNavLinks, ...mmwBottomNavLinks, ...userGrantableNavLinks].filter((l) => allowedPages.has(l.pageKey)),
+  )
 
   // 计算所有导航链接
-  const adminNavLinks = [...(enableMmwFeatures ? mmwTopNavLinks : []), ...coreAdminNavLinks, ...(enableMmwFeatures ? mmwBottomNavLinks : []), ...tailAdminNavLinks]
+  const adminNavLinks = [
+    ...(enableMmwFeatures ? mmwTopNavLinks : []),
+    ...coreAdminNavLinks,
+    ...(enableMmwFeatures ? gateOverride(mmwBottomNavLinks) : []),
+    ...tailAdminNavLinks,
+  ]
   const allNavLinks = isAdmin ? [...baseNavLinks, ...adminNavLinks] : [...baseNavLinks, ...permittedMmwLinks]
   // 移动端下拉菜单链接:管理员=管理菜单,普通用户=被授权的妙妙屋页面
   const mobileMenuLinks = isAdmin ? adminNavLinks : permittedMmwLinks

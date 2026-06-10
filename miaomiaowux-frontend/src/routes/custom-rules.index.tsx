@@ -1,7 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
-import { Plus, Pencil, Trash2 } from 'lucide-react'
+import { Plus, Pencil, Trash2, Play } from 'lucide-react'
 
 import { DataTable } from '@/components/data-table'
 import type { DataTableColumn } from '@/components/data-table'
@@ -151,6 +151,62 @@ function OverrideManagementPage() {
 	const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null)
 	const [isRuleProviderConfirmOpen, setIsRuleProviderConfirmOpen] = useState(false)
 	const [pendingRuleProviderData, setPendingRuleProviderData] = useState<FormData | null>(null)
+	// 「测试运行」面板:用浏览器 new Function() 直接跑脚本验证语法 + 看输出形状。
+	// 警告:V8 ≠ goja,produce/console 内置在浏览器无 — 仅用于快速调试。
+	const [isTestPanelOpen, setIsTestPanelOpen] = useState(false)
+	const [testInput, setTestInput] = useState('')
+	const [testOutput, setTestOutput] = useState<{ ok: boolean; data: string } | null>(null)
+
+	// 默认 sample — 给 post_fetch 一个简化的 mihomo config,pre_save_nodes 一个 proxies 数组
+	const DEFAULT_POST_FETCH_SAMPLE = JSON.stringify(
+		{
+			port: 7890,
+			'socks-port': 7891,
+			mode: 'rule',
+			proxies: [
+				{ name: '🇭🇰 香港 01', type: 'ss', server: '1.2.3.4', port: 443, cipher: 'aes-256-gcm', password: 'demo' },
+			],
+			'proxy-groups': [{ name: '🚀 节点选择', type: 'select', proxies: ['🇭🇰 香港 01'] }],
+			rules: ['DOMAIN-SUFFIX,google.com,🚀 节点选择', 'GEOIP,CN,DIRECT', 'MATCH,🚀 节点选择'],
+		},
+		null,
+		2,
+	)
+	const DEFAULT_PRE_SAVE_SAMPLE = JSON.stringify(
+		[
+			{ name: '🇭🇰 香港 01', type: 'ss', server: '1.2.3.4', port: 443, cipher: 'aes-256-gcm', password: 'demo' },
+			{ name: '🇯🇵 日本 02', type: 'vmess', server: '5.6.7.8', port: 443, uuid: 'demo-uuid', alterId: 0, cipher: 'auto' },
+		],
+		null,
+		2,
+	)
+
+	const toggleTestPanel = () => {
+		if (!isTestPanelOpen) {
+			setTestInput(formData.hook === 'post_fetch' ? DEFAULT_POST_FETCH_SAMPLE : DEFAULT_PRE_SAVE_SAMPLE)
+			setTestOutput(null)
+		}
+		setIsTestPanelOpen(!isTestPanelOpen)
+	}
+
+	const runTest = () => {
+		let input: any
+		try {
+			input = JSON.parse(testInput)
+		} catch (e: any) {
+			setTestOutput({ ok: false, data: `输入 JSON 解析失败: ${e?.message || e}` })
+			return
+		}
+		try {
+			// new Function 包裹用户脚本,return main(input) 拿结果。脚本内通过 throw 抛出的错也被 catch 兜住。
+			// console.log 走浏览器原生 — 用户看 devtools console
+			const fn = new Function('input', `${formData.content}\nif (typeof main !== 'function') throw new Error('未找到 main 函数 — 请确保脚本定义了 function main(input) { ... }');\nreturn main(input);`)
+			const result = fn(input)
+			setTestOutput({ ok: true, data: JSON.stringify(result, null, 2) })
+		} catch (e: any) {
+			setTestOutput({ ok: false, data: `${e?.name || 'Error'}: ${e?.message || e}` })
+		}
+	}
 
 	const { data: rules = [], isLoading: isLoadingRules } = useQuery<CustomRule[]>({
 		queryKey: ['custom-rules'],
@@ -891,9 +947,24 @@ function OverrideManagementPage() {
 						</div>
 
 						<div className='space-y-2'>
-							<Label htmlFor='content'>
-								{isScript ? t('dialog.scriptContentLabel') : t('dialog.contentLabel')}
-							</Label>
+							<div className='flex items-center justify-between'>
+								<Label htmlFor='content'>
+									{isScript ? t('dialog.scriptContentLabel') : t('dialog.contentLabel')}
+								</Label>
+								{isScript && (
+									<Button
+										type='button'
+										variant='outline'
+										size='sm'
+										className='h-7 text-xs'
+										onClick={toggleTestPanel}
+										disabled={!formData.content.trim()}
+									>
+										<Play className='size-3 mr-1' />
+										{isTestPanelOpen ? '收起测试' : '测试运行'}
+									</Button>
+								)}
+							</div>
 							<Textarea
 								id='content'
 								value={formData.content}
@@ -905,6 +976,60 @@ function OverrideManagementPage() {
 								}
 								className='font-mono text-sm min-h-[300px] whitespace-pre-wrap break-all [field-sizing:fixed]'
 							/>
+							{isScript && isTestPanelOpen && (
+								<div className='space-y-2 rounded-md border bg-muted/30 p-3'>
+									<p className='text-[11px] text-muted-foreground'>
+										⚠️ 浏览器(V8 引擎)直接跑,实际订阅生成由后端 goja 执行 —
+										内置函数(produce / console)行为有差异,仅用于快速调试语法 + 输出形状。
+										console.log 输出请打开浏览器 DevTools 控制台查看。
+									</p>
+									<div className='grid grid-cols-1 gap-2 lg:grid-cols-2'>
+										<div className='space-y-1'>
+											<Label className='text-xs'>输入(JSON · 可编辑)</Label>
+											<Textarea
+												value={testInput}
+												onChange={(e) => setTestInput(e.target.value)}
+												className='h-40 font-mono text-[11px] whitespace-pre-wrap break-all [field-sizing:fixed]'
+											/>
+										</div>
+										<div className='space-y-1'>
+											<Label className='text-xs'>
+												{testOutput?.ok ? '✓ 输出' : testOutput && !testOutput.ok ? '✗ 错误' : '输出'}
+											</Label>
+											<pre
+												className={`h-40 overflow-auto rounded border p-2 font-mono text-[11px] ${
+													testOutput?.ok
+														? 'bg-green-50 dark:bg-green-950/30'
+														: testOutput && !testOutput.ok
+															? 'bg-red-50 dark:bg-red-950/30'
+															: 'bg-background'
+												}`}
+											>
+												{testOutput?.data || '(点击"运行"显示结果)'}
+											</pre>
+										</div>
+									</div>
+									<div className='flex justify-end gap-2'>
+										<Button
+											type='button'
+											variant='outline'
+											size='sm'
+											className='h-7 text-xs'
+											onClick={() =>
+												setTestInput(
+													formData.hook === 'post_fetch' ? DEFAULT_POST_FETCH_SAMPLE : DEFAULT_PRE_SAVE_SAMPLE,
+												)
+											}
+										>
+											重置输入
+										</Button>
+										<Button type='button' size='sm' className='h-7 text-xs' onClick={runTest}>
+											<Play className='size-3 mr-1' />
+											运行
+										</Button>
+									</div>
+								</div>
+							)}
 							<p className='text-xs text-muted-foreground'>
 								{isScript ? t('dialog.scriptContentHint') : t('dialog.contentHint')}
 							</p>

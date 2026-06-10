@@ -142,6 +142,21 @@ func RunPreSaveNodes(ctx context.Context, script string, proxies []map[string]in
 	return out, nil
 }
 
+// Lint 只编译脚本不执行,捕获 SyntaxError 等编译期问题。保存覆写脚本时调用,
+// 避免用户把"字符串里夹真实换行" / 缺括号 / typo 之类的低级语法错误持久化进 db,
+// 等订阅生成时才被 RunPostFetch 报错吞掉(用户感受是"启用后没有效果")。
+//
+// 不做运行时校验 — main 函数签名、副作用、类型 mismatch 都不在范围,只挡语法层。
+func Lint(content string) error {
+	if strings.TrimSpace(content) == "" {
+		return fmt.Errorf("script content is empty")
+	}
+	if _, err := goja.Compile("override-script", content, true); err != nil {
+		return fmt.Errorf("script syntax error: %w", err)
+	}
+	return nil
+}
+
 func runWithTimeout(ctx context.Context, vm *goja.Runtime, code string) (goja.Value, error) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, defaultTimeout)
 	defer cancel()

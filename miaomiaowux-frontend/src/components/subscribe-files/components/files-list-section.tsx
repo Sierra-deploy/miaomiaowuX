@@ -11,7 +11,7 @@
 //      `isAdmin` 决定隐藏某些只对管理员开放的列(自定义连接 / 描述 / 上下移)。
 import { useState, type ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
-import { ChevronDown, ChevronUp, Edit, Network, Settings, Trash2 } from 'lucide-react'
+import { Check, ChevronDown, ChevronUp, Edit, Network, Settings, Trash2 } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -20,7 +20,7 @@ import { Label } from '@/components/ui/label'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Progress } from '@/components/ui/progress'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Switch } from '@/components/ui/switch'
+import { cn } from '@/lib/utils'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import {
   AlertDialog,
@@ -50,8 +50,23 @@ export interface SubscribeFileRef {
   template_filename: string
   selected_tags: string[]
   selected_node_ids?: number[]
+  // 「覆写配置」列下拉:在选定具体规则 / 脚本时持久化为 id 数组
+  selected_custom_rule_ids?: number[]
+  selected_override_script_ids?: number[]
   latest_version?: number
   updated_at: string
+}
+
+// 覆写下拉候选项(从 useSupportData 拿过来后过滤 enabled=true 的最小信息)
+export interface OverrideRuleRef {
+  id: number
+  name: string
+  type: string
+}
+export interface OverrideScriptItemRef {
+  id: number
+  name: string
+  hook: string
 }
 
 interface TemplateRef {
@@ -92,7 +107,21 @@ interface FilesListSectionProps {
   onDelete: (id: number) => void
   onMoveUp: (file: SubscribeFileRef) => void
   onMoveDown: (file: SubscribeFileRef) => void
-  onToggleAutoSync: (id: number, checked: boolean) => void
+  // 系统级总开关 `enable_override_scripts` 的副本 — false 时整列「覆写配置」消失。
+  // 既然后端只在开关 ON 时跑脚本,前端关掉就别让用户做无效配置(jimlee 实际踩坑)。
+  overrideEnabled: boolean
+  // 「覆写配置」Popover 下拉所需:启用的规则 / 脚本候选 + 提交回调。父端从 useSupportData 过滤
+  // enabled=true 后传入;onUpdateOverrideConfig 内部走 updateMetadataMutation,但只透传需要变的字段
+  enabledCustomRules: OverrideRuleRef[]
+  enabledOverrideScripts: OverrideScriptItemRef[]
+  onUpdateOverrideConfig: (
+    file: SubscribeFileRef,
+    payload: {
+      auto_sync_custom_rules: boolean
+      selected_custom_rule_ids: number[]
+      selected_override_script_ids: number[]
+    },
+  ) => void
   // 管理员点击流量列触发 — 改为内嵌 Popover,父端只需提供服务器列表 + 保存回调
   trafficScopeServers?: { id: number; name: string }[]
   onSaveTrafficScope?: (file: SubscribeFileRef, statsServerIds: string) => void
@@ -123,7 +152,10 @@ export function FilesListSection({
   onDelete,
   onMoveUp,
   onMoveDown,
-  onToggleAutoSync,
+  overrideEnabled,
+  enabledCustomRules,
+  enabledOverrideScripts,
+  onUpdateOverrideConfig,
   trafficScopeServers,
   onSaveTrafficScope,
   savingTrafficScope,
@@ -136,6 +168,210 @@ export function FilesListSection({
   deletePending,
 }: FilesListSectionProps) {
   const { t } = useTranslation('subscribe')
+
+  // 「覆写配置」Popover 渲染 — desktop 列 + mobile 卡片共用。算法移植自妙妙屋
+  // miaomiaowu/src/routes/subscribe-files.index.tsx L2890-3060。
+  //
+  // 状态机:
+  //   - !auto_sync_custom_rules           → 未启用(下拉里「不启用」高亮)
+  //   - auto_sync_custom_rules && 两个 id 数组都空 → 全部启用(下拉里「全部启用」高亮)
+  //   - 任一数组非空                     → 部分勾选(对应项高亮)
+  //
+  // 切换语义:
+  //   - 当前未启用 → 单独勾某项 = 启用 + 只选该项
+  //   - 当前全部启用 → 单独取消某项 = 启用 + 选除该项外全部
+  //   - 当前部分勾选 → toggle 该项
+  //   - 选项达到全集 → 自动清空回退「全部启用」(避免持久化冗余 ID 列表)
+  //   - 全部空 → auto_sync_custom_rules=false (回退「不启用」)
+  const renderOverridePopover = (file: SubscribeFileRef, triggerClassName?: string) => {
+    const ruleIds = file.selected_custom_rule_ids || []
+    const scriptIds = file.selected_override_script_ids || []
+    const totalSelected = ruleIds.length + scriptIds.length
+    const totalAvailable = enabledCustomRules.length + enabledOverrideScripts.length
+    const isEnabled = file.auto_sync_custom_rules
+
+    const triggerLabel = !isEnabled
+      ? t('management.fileList.overrideConfigDisabled')
+      : totalSelected === 0
+        ? t('management.fileList.overrideConfigAll', { count: totalAvailable })
+        : t('management.fileList.overrideConfigSelected', { count: totalSelected })
+
+    // 通用 commit:输入两个数组,根据情况持久化。
+    //
+    // 「全集自动回退」语义:用户在「部分勾选」中继续勾选,直到达到全集时,自动回退成「全部启用」
+    // (持久化两个数组都空、auto_sync=true),避免存一堆 ID 列表。
+    //
+    // 但**只在 isEnabled && totalSelected > 0 时**(即已经在「部分勾选」中)启用回退,
+    // 否则从「未启用」点单项时,若 enabledCustomRules / enabledOverrideScripts 只有 1 个,
+    // 立刻被误识别为「填满全集」→ 清空 → auto_sync=false → UI 没反应。
+    // 这正是「点击创建的覆写脚本无效」的 bug 根因。
+    const commit = (newRuleIds: number[], newScriptIds: number[]) => {
+      if (
+        isEnabled &&
+        totalSelected > 0 &&
+        newRuleIds.length === enabledCustomRules.length &&
+        newScriptIds.length === enabledOverrideScripts.length
+      ) {
+        newRuleIds = []
+        newScriptIds = []
+      }
+      const allEmpty = newRuleIds.length === 0 && newScriptIds.length === 0
+      onUpdateOverrideConfig(file, {
+        auto_sync_custom_rules: !allEmpty,
+        selected_custom_rule_ids: newRuleIds,
+        selected_override_script_ids: newScriptIds,
+      })
+    }
+
+    const toggleRule = (ruleId: number) => {
+      let nextRules: number[]
+      let nextScripts: number[]
+      if (!isEnabled) {
+        nextRules = [ruleId]
+        nextScripts = []
+      } else if (totalSelected === 0) {
+        nextRules = enabledCustomRules.filter((r) => r.id !== ruleId).map((r) => r.id)
+        nextScripts = enabledOverrideScripts.map((s) => s.id)
+      } else {
+        nextRules = ruleIds.includes(ruleId)
+          ? ruleIds.filter((id) => id !== ruleId)
+          : [...ruleIds, ruleId]
+        nextScripts = scriptIds
+      }
+      commit(nextRules, nextScripts)
+    }
+
+    const toggleScript = (scriptId: number) => {
+      let nextRules: number[]
+      let nextScripts: number[]
+      if (!isEnabled) {
+        nextScripts = [scriptId]
+        nextRules = []
+      } else if (totalSelected === 0) {
+        nextScripts = enabledOverrideScripts.filter((s) => s.id !== scriptId).map((s) => s.id)
+        nextRules = enabledCustomRules.map((r) => r.id)
+      } else {
+        nextScripts = scriptIds.includes(scriptId)
+          ? scriptIds.filter((id) => id !== scriptId)
+          : [...scriptIds, scriptId]
+        nextRules = ruleIds
+      }
+      commit(nextRules, nextScripts)
+    }
+
+    return (
+      <Popover>
+        <PopoverTrigger asChild>
+          <Button
+            variant='outline'
+            size='sm'
+            className={cn('h-8 text-xs justify-between', triggerClassName)}
+            disabled={updateMetadataPending}
+          >
+            <span className='truncate'>{triggerLabel}</span>
+            <ChevronDown className='ml-1 h-3 w-3 shrink-0 opacity-50' />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent className='w-[240px] p-1' align='start'>
+          <div className='flex max-h-[400px] flex-col overflow-y-auto'>
+            <Button
+              variant='ghost'
+              size='sm'
+              className={cn('justify-start text-xs h-8', !isEnabled && 'bg-accent')}
+              onClick={() =>
+                onUpdateOverrideConfig(file, {
+                  auto_sync_custom_rules: false,
+                  selected_custom_rule_ids: [],
+                  selected_override_script_ids: [],
+                })
+              }
+            >
+              {!isEnabled && <Check className='mr-2 h-3 w-3' />}
+              <span className={!isEnabled ? '' : 'ml-5'}>
+                {t('management.fileList.overrideOptionDisable')}
+              </span>
+            </Button>
+            <Button
+              variant='ghost'
+              size='sm'
+              className={cn(
+                'justify-start text-xs h-8',
+                isEnabled && totalSelected === 0 && 'bg-accent',
+              )}
+              onClick={() =>
+                onUpdateOverrideConfig(file, {
+                  auto_sync_custom_rules: true,
+                  selected_custom_rule_ids: [],
+                  selected_override_script_ids: [],
+                })
+              }
+            >
+              {isEnabled && totalSelected === 0 && <Check className='mr-2 h-3 w-3' />}
+              <span className={isEnabled && totalSelected === 0 ? '' : 'ml-5'}>
+                {t('management.fileList.overrideOptionEnableAll')}
+              </span>
+            </Button>
+            {enabledCustomRules.length > 0 && (
+              <>
+                <div className='border-t mt-1 px-2 pt-1.5 py-1.5 text-xs font-medium text-muted-foreground'>
+                  {t('management.fileList.overrideGroupCustomRules')}
+                </div>
+                {enabledCustomRules.map((rule) => {
+                  const isSelected =
+                    isEnabled && (totalSelected === 0 || ruleIds.includes(rule.id))
+                  return (
+                    <Button
+                      key={`rule-${rule.id}`}
+                      variant='ghost'
+                      size='sm'
+                      className={cn('justify-start text-xs h-8', isSelected && 'bg-accent')}
+                      onClick={() => toggleRule(rule.id)}
+                    >
+                      {isSelected && <Check className='mr-2 h-3 w-3' />}
+                      <span className={isSelected ? '' : 'ml-5'}>{rule.name}</span>
+                      <Badge variant='outline' className='ml-auto px-1 py-0 text-[10px]'>
+                        {rule.type}
+                      </Badge>
+                    </Button>
+                  )
+                })}
+              </>
+            )}
+            {enabledOverrideScripts.length > 0 && (
+              <>
+                <div className='border-t mt-1 px-2 pt-1.5 py-1.5 text-xs font-medium text-muted-foreground'>
+                  {t('management.fileList.overrideGroupScripts')}
+                </div>
+                {enabledOverrideScripts.map((script) => {
+                  const isSelected =
+                    isEnabled && (totalSelected === 0 || scriptIds.includes(script.id))
+                  const hookLabel =
+                    script.hook === 'post_fetch'
+                      ? t('management.fileList.overrideHookPostFetch')
+                      : t('management.fileList.overrideHookPreSaveNodes')
+                  return (
+                    <Button
+                      key={`script-${script.id}`}
+                      variant='ghost'
+                      size='sm'
+                      className={cn('justify-start text-xs h-8', isSelected && 'bg-accent')}
+                      onClick={() => toggleScript(script.id)}
+                    >
+                      {isSelected && <Check className='mr-2 h-3 w-3' />}
+                      <span className={isSelected ? '' : 'ml-5'}>{script.name}</span>
+                      <Badge variant='outline' className='ml-auto px-1 py-0 text-[10px]'>
+                        {hookLabel}
+                      </Badge>
+                    </Button>
+                  )
+                })}
+              </>
+            )}
+          </div>
+        </PopoverContent>
+      </Popover>
+    )
+  }
 
   return (
     <Card>
@@ -191,18 +427,18 @@ export function FilesListSection({
                   ),
                   width: '140px',
                 },
-                {
-                  header: t('management.fileList.ruleSync'),
-                  cell: (file) => (
-                    <Switch
-                      checked={file.auto_sync_custom_rules || false}
-                      onCheckedChange={(checked) => onToggleAutoSync(file.id, checked)}
-                    />
-                  ),
-                  headerClassName: 'text-center',
-                  cellClassName: 'text-center',
-                  width: '80px',
-                },
+                // 系统覆写脚本开关关闭时,「覆写配置」列直接从列表里抠掉(用 spread + 三元做条件 column)
+                ...(overrideEnabled
+                  ? [
+                      {
+                        header: t('management.fileList.ruleSync'),
+                        cell: (file: SubscribeFileRef) => renderOverridePopover(file, 'w-[120px]'),
+                        headerClassName: 'text-center',
+                        cellClassName: 'text-center',
+                        width: '140px',
+                      },
+                    ]
+                  : []),
                 {
                   header: '自定义连接',
                   cell: (file) => {
@@ -581,17 +817,16 @@ export function FilesListSection({
                     ) : inner
                   },
                 },
-                {
-                  label: t('management.fileList.mobileRuleSyncLabel'),
-                  value: (file) => (
-                    <div className='flex items-center gap-2'>
-                      <Switch checked={file.auto_sync_custom_rules || false} onCheckedChange={(checked) => onToggleAutoSync(file.id, checked)} />
-                      <span className='text-xs'>
-                        {file.auto_sync_custom_rules ? t('management.fileList.ruleSyncEnabled') : t('management.fileList.ruleSyncDisabled')}
-                      </span>
-                    </div>
-                  ),
-                },
+                // mobile 同款 gate:系统覆写脚本开关关闭时,卡片字段也不渲染
+                ...(overrideEnabled
+                  ? [
+                      {
+                        label: t('management.fileList.mobileRuleSyncLabel'),
+                        // mobile 同步用 Popover,触发按钮放大到 h-9 触屏友好;align='start' 跟 desktop 一致
+                        value: (file: SubscribeFileRef) => renderOverridePopover(file, 'w-full h-9'),
+                      },
+                    ]
+                  : []),
               ],
               actions: (file) => (
                 <>

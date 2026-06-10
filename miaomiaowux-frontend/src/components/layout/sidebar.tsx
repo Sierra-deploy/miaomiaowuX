@@ -66,6 +66,19 @@ export function Sidebar() {
   })
   const enableMmwFeatures = mmwFeaturesData?.enable_miaomiaowu_features ?? true
 
+  // 系统级开关 `enable_override_scripts` — false 时单独把「覆写管理」入口 (/custom-rules) 隐藏
+  // (该入口管理覆写规则 + 覆写脚本,既然脚本系统关掉,这入口对管理员就是死路 → 干脆隐藏)
+  const { data: overrideEnabledData } = useQuery({
+    queryKey: ['system-settings', 'override-scripts'],
+    queryFn: async () => {
+      const response = await api.get('/api/admin/system-settings/override-scripts')
+      return response.data as { success: boolean; enable_override_scripts: boolean }
+    },
+    enabled: Boolean(auth.accessToken),
+    staleTime: 5 * 60 * 1000,
+  })
+  const enableOverrideScripts = overrideEnabledData?.enable_override_scripts ?? false
+
   // 普通用户:按全局权限策略动态显示妙妙屋页面。
   const { data: userPerms } = useQuery({
     queryKey: ['user-permissions'],
@@ -74,13 +87,24 @@ export function Sidebar() {
     staleTime: 5 * 60 * 1000,
   })
 
+  // 覆写管理入口 gate:enableOverrideScripts=false 时无论 admin / 普通用户都把 custom-rules 过滤掉
+  const gateOverride = <T extends { pageKey: UserPageKey }>(links: T[]) =>
+    enableOverrideScripts ? links : links.filter((l) => l.pageKey !== 'custom-rules')
+
   let allNavLinks
   if (isAdmin) {
-    const adminNavLinks = [...(enableMmwFeatures ? mmwTopNavLinks : []), ...coreAdminNavLinks, ...(enableMmwFeatures ? mmwBottomNavLinks : []), ...tailAdminNavLinks]
+    const adminNavLinks = [
+      ...(enableMmwFeatures ? mmwTopNavLinks : []),
+      ...coreAdminNavLinks,
+      ...(enableMmwFeatures ? gateOverride(mmwBottomNavLinks) : []),
+      ...tailAdminNavLinks,
+    ]
     allNavLinks = [...baseNavLinks, ...adminNavLinks]
   } else {
     const allowed = new Set(userPerms?.pages ?? [])
-    const permittedMmwLinks = [...mmwTopNavLinks, ...mmwBottomNavLinks, ...userGrantableNavLinks].filter((l) => allowed.has(l.pageKey))
+    const permittedMmwLinks = gateOverride(
+      [...mmwTopNavLinks, ...mmwBottomNavLinks, ...userGrantableNavLinks].filter((l) => allowed.has(l.pageKey)),
+    )
     allNavLinks = [...baseNavLinks, ...permittedMmwLinks]
   }
 

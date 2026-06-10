@@ -57,6 +57,8 @@ interface EditMetadataDialogProps {
   templates: TemplateRef[]
   customRules: CustomRuleRef[]
   overrideScripts: OverrideScriptRef[]
+  // 系统级总开关 `enable_override_scripts` — false 时整个「生效的覆写规则 / 覆写脚本」勾选区不渲染
+  overrideEnabled?: boolean
   nodeTags: string[]
   // 全量节点供 NodePicker(服务器分组)选择;为空数组时退回不显示 picker
   allNodes: NodePickerItem[]
@@ -78,6 +80,7 @@ export function EditMetadataDialog({
   templates,
   customRules,
   overrideScripts,
+  overrideEnabled = false,
   // nodeTags 已被 allNodes 取代(NodePickerSection 内部按服务器分组 + 提取 tag chips),保留 prop 兼容父端
   nodeTags: _nodeTags,
   allNodes,
@@ -157,7 +160,7 @@ export function EditMetadataDialog({
                 </SelectContent>
               </Select>
             </div>
-            {safeCustomRules.length > 0 && (
+            {overrideEnabled && safeCustomRules.length > 0 && (
               <div className='space-y-2'>
                 <Label>生效的覆写规则</Label>
                 <p className='text-muted-foreground text-xs'>
@@ -186,7 +189,7 @@ export function EditMetadataDialog({
                 </div>
               </div>
             )}
-            {safeOverrideScripts.length > 0 && (
+            {overrideEnabled && safeOverrideScripts.length > 0 && (
               <div className='space-y-2'>
                 <Label>生效的覆写脚本</Label>
                 <p className='text-muted-foreground text-xs'>

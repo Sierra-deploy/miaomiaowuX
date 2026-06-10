@@ -518,6 +518,7 @@ function SubscribeFilesPage() {
     remoteServersRaw: remoteServersData,
     customRules: customRulesList,
     overrideScripts: overrideScriptsList,
+    overrideEnabled,
     traffic: trafficData,
     isTrafficLoading,
   } = useSupportData()
@@ -1947,7 +1948,38 @@ function SubscribeFilesPage() {
           onDelete={handleDelete}
           onMoveUp={handleMoveUp}
           onMoveDown={handleMoveDown}
-          onToggleAutoSync={handleToggleAutoSync}
+          overrideEnabled={overrideEnabled}
+          enabledCustomRules={(customRulesList ?? [])
+            .filter((r: any) => r?.enabled !== false)
+            .map((r: any) => ({ id: r.id, name: r.name, type: r.type }))}
+          enabledOverrideScripts={(overrideScriptsList ?? [])
+            .filter((s: any) => s?.enabled !== false)
+            .map((s: any) => ({ id: s.id, name: s.name, hook: s.hook }))}
+          onUpdateOverrideConfig={(file, payload) => {
+            // 行内「覆写配置」Popover:发完整 payload,只覆盖 auto_sync_custom_rules +
+            // selected_custom_rule_ids + selected_override_script_ids 三个字段,其它字段维持现状,
+            // 跟同文件 onSaveTrafficScope / onSaveSelectedNodes 同款"避免误清"模式
+            inlineUpdateMutation.mutate({
+              id: file.id,
+              data: {
+                name: file.name,
+                description: (file as any).description || '',
+                filename: file.filename,
+                type: file.type,
+                url: (file as any).url || '',
+                template_filename: file.template_filename || '',
+                selected_tags: (file as any).selected_tags || [],
+                selected_node_ids: (file as any).selected_node_ids || [],
+                auto_sync_custom_rules: payload.auto_sync_custom_rules,
+                selected_custom_rule_ids: payload.selected_custom_rule_ids,
+                selected_override_script_ids: payload.selected_override_script_ids,
+                stats_server_ids: (file as any).stats_server_ids || '',
+                traffic_limit: (file as any).traffic_limit,
+                custom_short_code: (file as any).custom_short_code || '',
+                raw_output: (file as any).raw_output ?? false,
+              },
+            })
+          }}
           trafficScopeServers={(remoteServersData?.servers ?? []).map((s: any) => ({ id: s.id, name: s.name }))}
           savingTrafficScope={inlineUpdateMutation.isPending}
           onSaveTrafficScope={(file, statsServerIds) => {
@@ -2258,6 +2290,7 @@ function SubscribeFilesPage() {
         form={metadataForm}
         onFormChange={setMetadataForm}
         templates={templatesData ?? []}
+        overrideEnabled={overrideEnabled}
         customRules={customRulesList ?? []}
         overrideScripts={overrideScriptsList ?? []}
         nodeTags={nodeTagsData ?? []}
