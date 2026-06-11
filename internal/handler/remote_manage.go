@@ -336,6 +336,28 @@ func (h *RemoteManageHandler) HandleXrayInstall(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	// install 完成后异步自动触发"下发配置"动作 — 等价于用户手动点 UI 上的下发配置按钮。
+	// 走同一份 DeployStealSelfConfig:按 server.StealMode dispatch 到 fallback / tunnel / default
+	// 模板,与内置 xray 完全一致。否则装完 agent 跑的是"只有 api 入站"的默认配置,业务不通,
+	// 用户必须手动再点一次"下发配置"才能用 — 这一步是冗余的。
+	//
+	// install 后 agent xray 启动 + RPC 就绪有几秒延迟,先等再 deploy。
+	// 失败只 log,不影响 install 响应 — 用户仍可手动点"下发配置"重试。
+	go func() {
+		deployCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		select {
+		case <-time.After(3 * time.Second):
+		case <-deployCtx.Done():
+			return
+		}
+		if err := h.DeployStealSelfConfig(deployCtx, id); err != nil {
+			log.Printf("[Remote Manage] Post-install auto-deploy failed for server %d: %v (user can retry via UI 下发配置)", id, err)
+			return
+		}
+		log.Printf("[Remote Manage] Post-install auto-deploy succeeded for server %d", id)
+	}()
+
 	// 成功安装 xray 后触发自动部署证书
 	if h.certHandler != nil {
 		go h.certHandler.DeployAutoDeployCertificates(id)

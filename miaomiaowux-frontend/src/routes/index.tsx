@@ -717,10 +717,15 @@ function AdminDashboard() {
     }
     const inboundSnapByKey = new Map<string, { uplink: number; downlink: number }>()
     const outboundSnapByKey = new Map<string, { uplink: number; downlink: number }>()
+    // server_id → server_name 反查:snapshot API 只回 server_id,而下面节点端 key
+    // 用的是 node.original_server(字符串名)。两边必须用同一种 server 标识拼 key,
+    // 否则 key 永远对不上,snap=0,所有 timeRange 显示一模一样。
+    const serverIdToName = new Map<number, string>(
+      (remoteServersData?.servers || []).map((s: any) => [s.id, s.name])
+    )
     if (snapshotData?.nodeSnapshots) {
       for (const s of snapshotData.nodeSnapshots) {
-        // snapshot 数据如果带 server_name 就一起拼成 key,跟上面对齐
-        const srv = (s as any).server_name || ''
+        const srv = serverIdToName.get((s as any).server_id) || ''
         const map = ((s as any).type === 'outbound') ? outboundSnapByKey : inboundSnapByKey
         const k = `${srv}::${s.tag}`
         const existing = map.get(k)
@@ -746,7 +751,7 @@ function AdminDashboard() {
       // 上下行都为 0 的节点不展示(没流量的占位会把卡片刷满,信息密度低)
       .filter(item => item.uplink > 0 || item.downlink > 0)
       .sort((a, b) => (b.uplink + b.downlink) - (a.uplink + a.downlink))
-  }, [nodesData, trafficData, timeRange, snapshotData])
+  }, [nodesData, trafficData, timeRange, snapshotData, remoteServersData])
 
   const userTrafficList = useMemo<UserTrafficItem[]>(() => {
     if (!trafficData?.servers) return []
@@ -1189,6 +1194,16 @@ function formatPercentage(value: number | undefined, formatter: Intl.NumberForma
 //
 // 这里在前端用 useRef 持有上一轮的 cycle 快照 + 时间戳，下一轮 fetch 进来时差分得到真实速度。
 // 若 dt < 0.5s（如 React.StrictMode 开发期同步双调用）则保持上一次结果不更新缓存。
+//
+// 跳变保护:cycle_uplink = total - snapshot.baseline,而 snapshot 数据 fetch 失败 /
+// timeRange 切换 / 刚启动 baseline 暂时为 0 等场景会让 cycle 突然从 0 跳到几十 GB,
+// delta/dt 算出 几十 GB/s。两道防线:
+//   1) 单轮 raw delta > ANOMALY_DELTA(5GB) → 视为数据跳变(snapshot 数据切换 / 重置),
+//      drop 本轮 + 用新值更新 prev,避免污染下一轮差分
+//   2) 算出的速度 > SPEED_CEILING(5GB/s ≈ 40Gbps) → 物理不可能,clamp 0
+const ANOMALY_DELTA_BYTES = 5 * 1024 * 1024 * 1024 // 5GB 单轮跳变阈值
+const SPEED_CEILING_BPS = 5 * 1024 * 1024 * 1024   // 5GB/s 速度硬上限
+
 function useDeltaSpeeds<T>(
   items: T[],
   keyFn: (x: T) => string,
@@ -1209,12 +1224,18 @@ function useDeltaSpeeds<T>(
         const key = keyFn(it)
         const p = prev.map.get(key)
         if (p) {
-          const up = (upFn(it) - p.up) / dtSec
-          const down = (downFn(it) - p.down) / dtSec
-          speeds.set(key, {
-            up: up > 0 ? up : 0,
-            down: down > 0 ? down : 0,
-          })
+          const rawUp = upFn(it) - p.up
+          const rawDown = downFn(it) - p.down
+          // 异常跳变(snapshot baseline 刷新 / timeRange 切换 / 套餐周期重置)→ drop 本轮
+          if (Math.abs(rawUp) > ANOMALY_DELTA_BYTES || Math.abs(rawDown) > ANOMALY_DELTA_BYTES) {
+            continue
+          }
+          const up = rawUp / dtSec
+          const down = rawDown / dtSec
+          // 速度物理上限 clamp:超 40Gbps 必是脏数据,不显示
+          const safeUp = up > 0 && up < SPEED_CEILING_BPS ? up : 0
+          const safeDown = down > 0 && down < SPEED_CEILING_BPS ? down : 0
+          speeds.set(key, { up: safeUp, down: safeDown })
         }
       }
       const newMap = new Map<string, { up: number; down: number }>()
