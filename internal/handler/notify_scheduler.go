@@ -4,13 +4,55 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"miaomiaowux/internal/notify"
 	"miaomiaowux/internal/storage"
 )
+
+// 服务器上下线通知去抖动 — 同一 server 短时间内 online/offline 频繁切换(国际线路抖动 / 心跳延迟卡阈值)
+// 会 spam 用户 telegram。这里维护 per-server 上次通知时间,窗口内的同 server online/offline 都被吞掉。
+// online/offline 共用同一 key:抖动场景里用户只需要知道"这台 server 不稳",不在乎中间过程,
+// 看到 UI 实时状态即可。窗口外的下一次状态变化会照常通知,所以"真离线很久后回来"不会漏。
+//
+// 默认 5 分钟,可用 MMWX_SERVER_NOTIFY_THROTTLE_SECONDS 覆盖;<=0 → 禁用 throttle。
+var (
+	serverNotifyMu       sync.Mutex
+	serverNotifyLastSent = make(map[string]time.Time)
+)
+
+func serverNotifyThrottleInterval() time.Duration {
+	if v := os.Getenv("MMWX_SERVER_NOTIFY_THROTTLE_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			if n <= 0 {
+				return 0
+			}
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 5 * time.Minute
+}
+
+// shouldThrottleServerNotify 检查同一 server 距上次通知是否在 throttle 窗口内。
+// true = 跳过本次;false = 通过,顺手记录当前时间。
+func shouldThrottleServerNotify(serverName string) bool {
+	interval := serverNotifyThrottleInterval()
+	if interval <= 0 {
+		return false
+	}
+	serverNotifyMu.Lock()
+	defer serverNotifyMu.Unlock()
+	if last, ok := serverNotifyLastSent[serverName]; ok && time.Since(last) < interval {
+		return true
+	}
+	serverNotifyLastSent[serverName] = time.Now()
+	return false
+}
 
 func StartNotifyScheduler(ctx context.Context, repo *storage.TrafficRepository) {
 	ticker := time.NewTicker(1 * time.Minute)
@@ -186,6 +228,10 @@ func SendServerOnlineNotification(ctx context.Context, serverName, ip string) {
 	if n == nil {
 		return
 	}
+	if shouldThrottleServerNotify(serverName) {
+		log.Printf("[Notify] server=%q online suppressed by throttle (within %s window)", serverName, serverNotifyThrottleInterval())
+		return
+	}
 	_ = n.Send(ctx, notify.Event{
 		Type:    notify.EventServerOnline,
 		Title:   "🟢 服务器上线",
@@ -196,6 +242,10 @@ func SendServerOnlineNotification(ctx context.Context, serverName, ip string) {
 func SendServerOfflineNotification(ctx context.Context, serverName, ip string) {
 	n := GetNotifier()
 	if n == nil {
+		return
+	}
+	if shouldThrottleServerNotify(serverName) {
+		log.Printf("[Notify] server=%q offline suppressed by throttle (within %s window)", serverName, serverNotifyThrottleInterval())
 		return
 	}
 	_ = n.Send(ctx, notify.Event{

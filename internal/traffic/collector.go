@@ -151,10 +151,24 @@ func (c *Collector) Start(ctx context.Context) {
 	}
 }
 
+// offlineThreshold 返回标记 server 离线的"心跳过期"阈值。
+// 默认 90s — agent heartbeat 间隔 30s + 容忍 2 次延迟。原来硬编码 60s 太严格,只容 1 次,
+// 国际线路 1-2s 抖动就触发 offline → 立刻又 online → 用户被 spam 通知。
+// 通过 MMWX_OFFLINE_THRESHOLD_SECONDS 环境变量覆盖,值 < 30s 时回退默认避免低于心跳间隔。
+func offlineThreshold() time.Duration {
+	const defaultThreshold = 90 * time.Second
+	if v := os.Getenv("MMWX_OFFLINE_THRESHOLD_SECONDS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 30 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return defaultThreshold
+}
+
 // 收集所有活动服务器的流量
 func (c *Collector) collectAll(ctx context.Context) {
-	// 首先，检查并标记离线远程服务器（60秒无心跳）
-	offlineServers, err := c.repo.MarkOfflineRemoteServers(ctx, 60*time.Second)
+	// 首先，检查并标记离线远程服务器(阈值由 offlineThreshold 控制,默认 90s)
+	offlineServers, err := c.repo.MarkOfflineRemoteServers(ctx, offlineThreshold())
 	if err != nil {
 		log.Printf("[Traffic Collector] Failed to mark offline servers: %v", err)
 	}
