@@ -464,7 +464,12 @@ func (c *Collector) CleanOldData(ctx context.Context, days int) error {
 
 // 以拉取模式从远程服务器拉取流量数据
 func (c *Collector) CollectFromRemoteServer(ctx context.Context, server storage.RemoteServer) error {
-	if server.ConnectionMode != storage.ConnectionModePull {
+	// 历史 BUG:这里原本是 `ConnectionMode != Pull`,但上游 collectAll 用 ShouldUsePullMode
+	// 判断(auto + FallbackToPull = true 也返回 true)→ 两端语义不一致,
+	// 导致 auto 模式 server fallback 到 pull 后,master 实际从未真 pull,
+	// last_heartbeat 也不更新 → 60s 阈值频繁标 OFFLINE,只能等 agent 偶尔 WS 上来补一刀心跳。
+	// 跟 PullSpeedFromRemoteServer(只看 PullAddress/Port)对齐成"ShouldUsePullMode 一刀切"。
+	if !c.repo.ShouldUsePullMode(server) {
 		return nil
 	}
 
@@ -516,6 +521,14 @@ func (c *Collector) CollectFromRemoteServer(ctx context.Context, server storage.
 
 	if !response.Success {
 		return fmt.Errorf("remote server error: %s", response.Error)
+	}
+
+	// pull 成功本身就是一次有效"心跳"信号 — agent 还活着才能回 200。
+	// 跟 remote_ws.go:904 同款,更新 last_heartbeat,让 MarkOfflineRemoteServers 看到活跃。
+	// 之前 pull 路径漏调这一步 → fallback 期间 last_heartbeat 不更新 → 60s 阈值仍标 OFFLINE。
+	// 注意 stats==nil 也算心跳(无流量但 agent 在线),所以放在 nil 检查之前。
+	if _, _, _, err := c.repo.UpdateRemoteServerLastActivity(ctx, server.ID); err != nil {
+		log.Printf("[Traffic Collector] Failed to update last activity for server %s after pull: %v", server.Name, err)
 	}
 
 	if response.Stats == nil {
