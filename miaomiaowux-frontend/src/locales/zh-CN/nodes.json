@@ -156,6 +156,7 @@
     "testerRunCmd": "在家用机器上运行",
     "testerLinuxCmd": "Linux / macOS 一键运行",
     "testerWindowsCmd": "Windows PowerShell 一键运行",
+    "testerDockerCmd": "Docker 一键启动",
     "testerDownload": "在此下载测速端程序",
     "testerRunHint": "复制命令到家里的服务器/电脑终端执行,自动下载对应平台测速端并反向连入主控。",
     "testerList": "已配对测速端",

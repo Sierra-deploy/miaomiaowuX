@@ -570,6 +570,9 @@ function TestersView({ onBack, t, autoRotateId }: { onBack: () => void; t: any; 
   const scriptBaseURL = 'https://raw.githubusercontent.com/mmwx-group/mmwX-plugins/refs/heads/main/speedtest/scripts'
   const linuxCmd = newCred ? `curl -fsSL ${scriptBaseURL}/install.sh | bash -s -- -master ${masterURL} -token ${newCred.token}` : ''
   const windowsCmd = newCred ? `irm ${scriptBaseURL}/install.ps1 -OutFile install.ps1; .\\install.ps1 -Master ${masterURL} -Token ${newCred.token}` : ''
+  // Docker 一键启动:对应 mmwX-plugins/speedtest/Dockerfile 顶部注释的标准 run 命令,
+  // tester 名称从 newCred.name 注入(主控创建时即固化)。/data 持久化 mihomo 缓存避免每次重启重拉。
+  const dockerCmd = newCred ? `docker run -d --name mmwx-speedtester --restart unless-stopped -e MMWX_MASTER=${masterURL} -e MMWX_SPEEDTEST_TOKEN=${newCred.token} -e MMWX_SPEEDTEST_NAME=${newCred.name} -v mmwx-speedtester-data:/data ghcr.io/iluobei/mmwx-speedtester:latest` : ''
 
   // 从 source selector 点离线测速端进来:只展示该 tester 的安装命令/token,隐藏新建表单和测速端列表
   const compactMode = autoRotateId != null
@@ -623,6 +626,11 @@ function TestersView({ onBack, t, autoRotateId }: { onBack: () => void; t: any; 
             <div className='flex gap-2'>
               <Input readOnly value={windowsCmd} className='font-mono text-[11px]' />
               <Button variant='outline' size='icon' className='shrink-0' onClick={() => copy(windowsCmd)}><Copy className='h-4 w-4' /></Button>
+            </div>
+            <Label className='mt-1.5 text-xs'>{t('speedtest.testerDockerCmd')}</Label>
+            <div className='flex gap-2'>
+              <Input readOnly value={dockerCmd} className='font-mono text-[11px]' />
+              <Button variant='outline' size='icon' className='shrink-0' onClick={() => copy(dockerCmd)}><Copy className='h-4 w-4' /></Button>
             </div>
             <p className='text-muted-foreground text-[11px]'>{t('speedtest.testerRunHint')}</p>
           </div>

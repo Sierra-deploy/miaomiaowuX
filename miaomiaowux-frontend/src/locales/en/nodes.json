@@ -156,6 +156,7 @@
     "testerRunCmd": "Run on your home machine",
     "testerLinuxCmd": "Linux / macOS one-liner",
     "testerWindowsCmd": "Windows PowerShell one-liner",
+    "testerDockerCmd": "Docker one-liner",
     "testerDownload": "Download the tester binary",
     "testerRunHint": "Copy the command into your home server/PC terminal — auto-downloads the right binary and reverse-connects to the master.",
     "testerList": "Paired testers",
