@@ -52,11 +52,13 @@ curl -sL https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/install.sh |
 
 ### 方式 2：Docker 部署
 
+> 默认使用 host 网络模式 — 妙妙屋X 需要管理 ACME 80/443、嵌入式 nginx/xray 多端口、agent 反向连接,host 模式比 bridge 端口映射更省心,也避免后续新增端口又要改 compose。
+
 ```bash
 docker run -d \
-  --user root \
   --name miaomiaowux \
-  -p 12889:12889 \
+  --network host \
+  --restart unless-stopped \
   -v $(pwd)/data:/app/data \
   -v $(pwd)/subscribes:/app/subscribes \
   -v $(pwd)/rule_templates:/app/rule_templates \
@@ -73,12 +75,10 @@ services:
     image: ghcr.io/iluobei/miaomiaowux:latest
     container_name: miaomiaowux
     restart: unless-stopped
-    user: root
+    network_mode: host
     environment:
       - PORT=12889
       - LOG_LEVEL=info
-    ports:
-      - "12889:12889"
     volumes:
       - ./data:/app/data
       - ./subscribes:/app/subscribes
