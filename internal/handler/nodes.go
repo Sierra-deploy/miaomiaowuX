@@ -805,6 +805,19 @@ func (h *nodesHandler) handleUpdateServer(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// server 字段变了 → OriginalServer 必须重新校验:
+	//   - 新 server 命中某 remote_server.{IP,Domain,PullAddress} → OS = 该 server.Name
+	//   - 不命中任何 remote_server → 清空 OS(避免「VICTORIA 伪装节点残留 OS=GoMami」这种识别错位)
+	// 这里复用 MatchRemoteServerByNodeHost 同一份匹配规则,不走 license 校验路径
+	// (改地址不算"新增节点"占用配额)。
+	if h.remoteManage != nil {
+		if srv, _ := h.remoteManage.MatchRemoteServerByNodeHost(r.Context(), existing.ClashConfig); srv != nil {
+			existing.OriginalServer = srv.Name
+		} else {
+			existing.OriginalServer = ""
+		}
+	}
+
 	updated, err := h.repo.UpdateNode(r.Context(), existing)
 	if err != nil {
 		status := http.StatusBadRequest

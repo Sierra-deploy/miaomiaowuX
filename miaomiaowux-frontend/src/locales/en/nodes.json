@@ -55,7 +55,9 @@
     "specifyOutbound": "Specify outbound",
     "noMatchingNodes": "No matching nodes found",
     "parseFailed": "Parse Failed",
-    "unknown": "Unknown"
+    "unknown": "Unknown",
+    "serverUnknown": "— Unrecognized",
+    "externalSource": "📥 External: {{source}}"
   },
   "columns": {
     "protocol": "Protocol",

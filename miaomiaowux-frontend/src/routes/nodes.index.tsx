@@ -758,12 +758,47 @@ function NodesPage() {
     )
   }
 
-  // 取节点所属服务器名:优先 original_server,兼容老数据 tag=「远程:服务器名」
+  // 取节点所属服务器名展示。
+  //   不信任 original_server,改为以 parsed_config.server(用户在 UI 上看到的 server 字段)
+  //   反查 remote_servers,优先这个 source of truth:
+  //     1) parsed.server 命中某 remote_server 的 {IP,Domain,PullAddress} → 显示该 server.name
+  //     2) parsed.server 不命中 + 老 OS 命中 server 列表 → 显示 OS(允许 OS 仍可信的合法路径)
+  //     3) 都命不中 + 老 tag="远程:xxx" → 剥前缀兼容
+  //     4) 都命不中 + tags 有值(外部订阅:花云/家宽/SS22 等) → "📥 外部:tags[0]"
+  //     5) 全空 → ''
+  // 这套逻辑解决两类历史 bug:
+  //   - 节点 OS 残留指向入站服务器(如 VICTORIA - DMIT,clash.server=GoMami PullAddress 但 parsed.server=VICTORIA IP)
+  //   - 节点 OS 写错 server 名(如 GoMami - DMIT,OS=DMIT 但 parsed.server=GoMami IP)
   const getNodeServerName = (dbNode: any): string => {
     if (!dbNode) return ''
-    if (dbNode.original_server) return dbNode.original_server
+    const servers = (remoteServersData?.servers || []) as any[]
+    const tryParseServer = (cfgStr: string): string => {
+      if (!cfgStr) return ''
+      try {
+        const cfg = JSON.parse(cfgStr)
+        return typeof cfg?.server === 'string' ? cfg.server.trim() : ''
+      } catch { return '' }
+    }
+    const pSrv = tryParseServer(dbNode.parsed_config)
+    if (pSrv) {
+      const hit = servers.find((s: any) =>
+        [s.ip_address, s.domain, s.pull_address].some((a: string | undefined) => a && a === pSrv)
+      )
+      if (hit) return hit.name
+      // parsed.server 有值但没命中 → 用户改了 server / 这是外部节点,
+      // 不再 fallback 到 OS(可能是残留),直接走外部订阅 fallback。
+    }
+    const os = (dbNode.original_server || '').trim()
+    // OS fallback 只在 parsed.server 完全没值时生效(兼容历史 / 异常数据)
+    if (!pSrv && os && servers.some((s: any) => s.name === os)) return os
     if (typeof dbNode.tag === 'string' && dbNode.tag.startsWith('远程:')) {
       return dbNode.tag.slice(3)
+    }
+    const tagsArr = Array.isArray(dbNode.tags)
+      ? dbNode.tags
+      : (typeof dbNode.tags === 'string' ? (() => { try { return JSON.parse(dbNode.tags) } catch { return [] } })() : [])
+    if (Array.isArray(tagsArr) && tagsArr.length > 0 && typeof tagsArr[0] === 'string' && tagsArr[0].trim()) {
+      return t('nodeList.externalSource', { source: tagsArr[0], defaultValue: '📥 外部:{{source}}' })
     }
     return ''
   }

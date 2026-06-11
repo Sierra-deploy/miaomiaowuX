@@ -55,7 +55,9 @@
     "specifyOutbound": "指定出站",
     "noMatchingNodes": "没有找到匹配的节点",
     "parseFailed": "解析失败",
-    "unknown": "未知"
+    "unknown": "未知",
+    "serverUnknown": "— 未识别",
+    "externalSource": "📥 外部:{{source}}"
   },
   "columns": {
     "protocol": "协议",
