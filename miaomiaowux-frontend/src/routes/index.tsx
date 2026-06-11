@@ -763,6 +763,10 @@ function AdminDashboard() {
         if (existing) {
           existing.cycle_uplink += u.uplink ?? 0; existing.cycle_downlink += u.downlink ?? 0
           existing.last_uplink += u.last_uplink ?? 0; existing.last_downlink += u.last_downlink ?? 0
+          // 跨 server 聚合时 total 也得累加,否则 useDeltaSpeeds 拿到的 total 只反映"首台 server"。
+          // 之前漏累 total → useDeltaSpeeds 把 cycle_uplink 当 total 用,而 cycle 受 snapshot baseline 跳变影响 → 算出几 GB/s。
+          existing.total_uplink += (u.total_uplink ?? 0) + (u.uplink ?? 0)
+          existing.total_downlink += (u.total_downlink ?? 0) + (u.downlink ?? 0)
         } else {
           map.set(u.username, { username: u.username, cycle_uplink: u.uplink ?? 0, cycle_downlink: u.downlink ?? 0, total_uplink: (u.total_uplink ?? 0) + (u.uplink ?? 0), total_downlink: (u.total_downlink ?? 0) + (u.downlink ?? 0), last_uplink: u.last_uplink ?? 0, last_downlink: u.last_downlink ?? 0, updated_at: u.updated_at ?? '' })
         }
@@ -785,11 +789,16 @@ function AdminDashboard() {
 
   // 基于"两次轮询的真实差值/真实时间间隔"算速度。详见 useDeltaSpeeds。
   // 注意:speed 用裸流量(userTrafficList)算,不受套餐倍率影响。
+  //
+  // 用 total_uplink/total_downlink(全程累计 = 历史归档 + 本周期)而非 cycle_uplink:
+  //   - cycle_uplink = sum(server.users.uplink) - snapshot.baseline,baseline 在 timeRange 切换 /
+  //     snapshot 数据延迟刷新 / 切换日期等场景会跳变,delta 算出几 GB/s 虚假速度。
+  //   - total 是单调累计,不受 baseline 影响;唯一跳变源是套餐周期 reset,delta 负 → clamp 0。
   const userSpeedsMap = useDeltaSpeeds(
     userTrafficList,
     (u) => u.username,
-    (u) => u.cycle_uplink,
-    (u) => u.cycle_downlink,
+    (u) => u.total_uplink,
+    (u) => u.total_downlink,
   )
 
   // 显示用列表:计费流量 = 裸流量 × 套餐倍率(twoway×2)。与用户自己看到的已用、与限额断流口径一致。
@@ -1195,14 +1204,17 @@ function formatPercentage(value: number | undefined, formatter: Intl.NumberForma
 // 这里在前端用 useRef 持有上一轮的 cycle 快照 + 时间戳，下一轮 fetch 进来时差分得到真实速度。
 // 若 dt < 0.5s（如 React.StrictMode 开发期同步双调用）则保持上一次结果不更新缓存。
 //
-// 跳变保护:cycle_uplink = total - snapshot.baseline,而 snapshot 数据 fetch 失败 /
-// timeRange 切换 / 刚启动 baseline 暂时为 0 等场景会让 cycle 突然从 0 跳到几十 GB,
-// delta/dt 算出 几十 GB/s。两道防线:
-//   1) 单轮 raw delta > ANOMALY_DELTA(5GB) → 视为数据跳变(snapshot 数据切换 / 重置),
-//      drop 本轮 + 用新值更新 prev,避免污染下一轮差分
-//   2) 算出的速度 > SPEED_CEILING(5GB/s ≈ 40Gbps) → 物理不可能,clamp 0
-const ANOMALY_DELTA_BYTES = 5 * 1024 * 1024 * 1024 // 5GB 单轮跳变阈值
-const SPEED_CEILING_BPS = 5 * 1024 * 1024 * 1024   // 5GB/s 速度硬上限
+// 跳变保护:用 total_uplink 后绕开了 snapshot baseline 跳变源,残余跳变来自:
+//   - 套餐周期 reset 瞬间 master 异步更新 total → delta 短暂负 → clamp 0(无害)
+//   - reset 完成后第一次新累计回来 → 一次性大 delta → ANOMALY_DELTA 拦截
+//   - 多 server 心跳乱序聚合 → 小幅波动,通常 < 100MB
+// 双层防线:
+//   1) 单轮 raw delta > ANOMALY_DELTA(1GB) → 视为周期 reset / 极端跳变,drop 本轮
+//      1GB / 3s 轮询 ≈ 333 MB/s,已经超过单台 1Gbps 网卡 2.6 倍,任何合理流量都低于此值
+//   2) 算出的速度 > SPEED_CEILING(1.5GB/s ≈ 12Gbps) → 物理不可能,clamp 0
+//      12 Gbps 即便用户跨 5 台 1Gbps server 同时满速合计 5Gbps 也远在范围内
+const ANOMALY_DELTA_BYTES = 1 * 1024 * 1024 * 1024         // 1GB 单轮跳变阈值
+const SPEED_CEILING_BPS = 1.5 * 1024 * 1024 * 1024         // 1.5GB/s 速度硬上限
 
 function useDeltaSpeeds<T>(
   items: T[],
