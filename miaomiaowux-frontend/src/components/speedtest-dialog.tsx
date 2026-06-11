@@ -572,7 +572,7 @@ function TestersView({ onBack, t, autoRotateId }: { onBack: () => void; t: any; 
   const windowsCmd = newCred ? `irm ${scriptBaseURL}/install.ps1 -OutFile install.ps1; .\\install.ps1 -Master ${masterURL} -Token ${newCred.token}` : ''
   // Docker 一键启动:对应 mmwX-plugins/speedtest/Dockerfile 顶部注释的标准 run 命令,
   // tester 名称从 newCred.name 注入(主控创建时即固化)。/data 持久化 mihomo 缓存避免每次重启重拉。
-  const dockerCmd = newCred ? `docker run -d --name mmwx-speedtester --restart unless-stopped -e MMWX_MASTER=${masterURL} -e MMWX_SPEEDTEST_TOKEN=${newCred.token} -e MMWX_SPEEDTEST_NAME=${newCred.name} -v mmwx-speedtester-data:/data ghcr.io/iluobei/mmwx-speedtester:latest` : ''
+  const dockerCmd = newCred ? `docker run -d --name mmwx-speedtester --restart unless-stopped -e MMWX_MASTER=${masterURL} -e MMWX_SPEEDTEST_TOKEN=${newCred.token} -e MMWX_SPEEDTEST_NAME=${newCred.name} -v mmwx-speedtester-data:/data ghcr.io/mmwx-group/mmwx-speedtester:latest` : ''
 
   // 从 source selector 点离线测速端进来:只展示该 tester 的安装命令/token,隐藏新建表单和测速端列表
   const compactMode = autoRotateId != null
