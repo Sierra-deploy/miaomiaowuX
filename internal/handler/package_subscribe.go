@@ -157,6 +157,19 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	// 通知 admin "用户拉了套餐订阅" + 静默期记录访问 IP — 跟 SubscriptionHandler L286 同款。
+	// 之前套餐订阅这条路径完全没有这两个调用,所以 admin tg 从来收不到「用户拉套餐订阅」通知。
+	// 放在这里:此前所有可能失败的步骤(查套餐 / 拼节点 / 加模板 / 渲染)都已成功,
+	// 仅剩格式转换 + 写响应。语义清晰:订阅会真正发出去时才通知,提前 writeError 不会触发。
+	ua := r.Header.Get("User-Agent")
+	if ua == "" {
+		ua = "unknown"
+	}
+	SendSubscribeFetchNotification(r.Context(), username, ua, GetClientIP(r))
+	if silentMgr := GetSilentModeManager(); silentMgr != nil {
+		silentMgr.RecordSubscriptionAccessWithIP(username, GetClientIP(r))
+	}
+
 	// Format conversion
 	clientType := strings.TrimSpace(r.URL.Query().Get("t"))
 	if clientType == "" || clientType == "clash" || clientType == "clashmeta" {
