@@ -60,7 +60,9 @@
   },
   "actions": {
     "resetPassword": "重置密码",
-    "deleteUser": "删除"
+    "deleteUser": "删除",
+    "disableUser": "禁用",
+    "enableUser": "启用"
   },
   "createDialog": {
     "title": "新增用户",

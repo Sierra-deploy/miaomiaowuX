@@ -289,7 +289,9 @@ function SubscriptionGeneratorPage() {
   // 规则模式状态
   const [ruleMode, setRuleMode] = useState<'custom' | 'template'>('custom')
   const [selectedTemplateUrl, setSelectedTemplateUrl] = useState<string>('')
-  const [hasManuallyGrouped, setHasManuallyGrouped] = useState(false)
+  // legacy:hasManuallyGrouped 原本是 rule-templates(v3)保存前的"先手动分组"约束读取信号,
+  // 该约束已移除。保留 setter 以免改动 5 处 set 调用点(各分组逻辑里的小标记),reader 槽位丢弃。
+  const [, setHasManuallyGrouped] = useState(false)
 
   // 模板管理对话框状态
   const [templateManageDialogOpen, setTemplateManageDialogOpen] =
@@ -388,7 +390,11 @@ function SubscriptionGeneratorPage() {
     staleTime: 5 * 60 * 1000,
   })
 
-  const useNewTemplateSystem = userConfig?.use_new_template_system !== false // 默认 true
+  // 一刀切 false:统一用「模板管理」页面同款的数据源(/api/admin/rule-templates 目录里的 YAML 文件)。
+  // 命名包袱 — useNewTemplateSystem=true 是早期 /api/admin/templates(db 表 + ACL4SSR 在线转换),
+  // 但用户视角的"模板"指模板管理页面(rule_templates 目录),已撤掉 settings 切换语义。
+  // db 字段 user_settings.use_new_template_system 暂保留(不迁移),前端不再读。
+  const useNewTemplateSystem = false
   const enableProxyProvider = userConfig?.enable_proxy_provider ?? false
 
   // 获取已保存的节点
@@ -1018,25 +1024,25 @@ function SubscriptionGeneratorPage() {
         // 修复 short-id 空值显示
         finalConfig = fixShortIdInYaml(finalConfig)
       } else {
-        // 旧模板系统：直接读取 YAML 文件并填充 proxies
-        const response = await api.get(selectedTemplateUrl)
-        const templateContent = response.data.content as string
+        // rule-templates(模板管理 / v3):调后端 TemplateV3Processor 完整渲染。
+        // 之前是前端拉文件 + yaml.load + 塞 proxies — 模板里的 __filter__include / include-all /
+        // proxy-groups filter 表达式等不被处理,等于没用模板的高级特性。改走 /api/admin/template-v3/process
+        // 跟套餐订阅 [package_subscribe.go:140] 同一份处理器,完全对齐。
+        const selectedTemplate = allTemplates.find((t) => t.url === selectedTemplateUrl)
+        const templateName = selectedTemplate?.name
+        if (!templateName) {
+          toast.error(t('generator.toast.selectTemplate'))
+          return
+        }
+        // 字段排序保留:proxy 内部字段顺序一致,客户端 hash 稳定 — 跟新模板系统的输出格式对齐
+        const orderedProxies = proxies.map((proxy) => reorderProxyFields(proxy))
+        const response = await api.post('/api/admin/template-v3/process', {
+          template_name: templateName,
+          proxies: orderedProxies,
+        })
+        finalConfig = response.data.content as string
 
-        // 解析模板
-        const templateConfig = yaml.load(templateContent) as any
-
-        // 插入代理节点，并重新排序字段
-        templateConfig.proxies = proxies.map((proxy) =>
-          reorderProxyFields(proxy)
-        )
-
-        // 确保 short-id 字段始终作为字符串
-        const processedConfig = ensureShortIdAsString(templateConfig)
-
-        // 转换回 YAML
-        finalConfig = yaml.dump(processedConfig, YAML_DUMP_OPTIONS)
-
-        // 修复 short-id 空值显示
+        // 修复 short-id 空值显示(后端 yaml.Marshal 偶尔把空 short-id 序列化为 null,客户端不识别)
         finalConfig = fixShortIdInYaml(finalConfig)
       }
 
@@ -1292,15 +1298,8 @@ function SubscriptionGeneratorPage() {
       toast.error(t('generator.toast.generateConfigFirst'))
       return
     }
-    // 使用旧模板系统时，必须先手动分组
-    if (
-      ruleMode === 'template' &&
-      !hasManuallyGrouped &&
-      !useNewTemplateSystem
-    ) {
-      toast.error(t('generator.toast.manualGroupFirst'))
-      return
-    }
+    // 历史:rule-templates 系统(v3)曾要求"先点手动分组才能保存",已移除。
+    // 模板 YAML 本身已含完整 proxy-groups,内部已自动按 filter/include-all 重排,无需用户额外操作。
     setSaveDialogOpen(true)
   }
 

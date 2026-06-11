@@ -89,6 +89,22 @@ api.interceptors.request.use(async (config) => {
       const method = (config.method ?? 'get').toUpperCase()
       const hasBody = method === 'POST' || method === 'PUT' || method === 'PATCH'
 
+      // 二进制 body 短路:FormData / Blob / ArrayBuffer / URLSearchParams 等不能通过文本加密通道。
+      // JSON.stringify(FormData) → "{}",文件内容彻底丢失;后端解密拿到空对象 → ParseMultipartForm
+      // 失败 → 400 bad request。典型场景:rule-templates/upload 上传 YAML 模板、头像上传等。
+      // 这些请求走明文 — HTTPS 仍提供传输层加密,模板/头像本身也不算高敏数据。
+      const isBinaryBody = hasBody && (
+        (typeof FormData !== 'undefined' && config.data instanceof FormData)
+        || (typeof Blob !== 'undefined' && config.data instanceof Blob)
+        || (typeof ArrayBuffer !== 'undefined' && config.data instanceof ArrayBuffer)
+        || (typeof URLSearchParams !== 'undefined' && config.data instanceof URLSearchParams)
+      )
+      if (isBinaryBody) {
+        // 不加 X-Secure-Channel header → 后端 middleware 透传 → 下游 handler 直接收 multipart。
+        // 不动 responseType:让 axios 走默认行为(JSON 解析或 blob,按 Content-Type)。
+        return config
+      }
+
       config.headers = config.headers ?? new AxiosHeaders()
       config.headers[SECURE_CHANNEL_CONSTANTS.HEADER] = SECURE_CHANNEL_CONSTANTS.VERSION
       const sid = secureChannel.getSessionId()

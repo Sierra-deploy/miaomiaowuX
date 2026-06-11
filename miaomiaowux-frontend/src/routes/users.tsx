@@ -667,19 +667,16 @@ function UsersPage() {
                 {
                   header: t('columns.status'),
                   cell: (user) => {
-                    const isSelf = user.username === profile?.username
-                    const isAdminRow = user.role === 'admin'
-                    return (
-                      <Switch
-                        checked={user.is_active}
-                        disabled={statusMutation.isPending || isSelf || isAdminRow}
-                        onCheckedChange={(checked) =>
-                          statusMutation.mutate({
-                            username: user.username,
-                            is_active: checked,
-                          })
-                        }
-                      />
+                    // 状态切换从这一列的 Switch 挪到「操作」列的 disable/enable 按钮 — 用户反馈 Switch 不够明显。
+                    // 这里只显示状态 badge:启用=主色,禁用=灰色。
+                    return user.is_active ? (
+                      <span className='inline-flex items-center rounded-md bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:text-emerald-400'>
+                        {t('status.enabled')}
+                      </span>
+                    ) : (
+                      <span className='inline-flex items-center rounded-md bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground'>
+                        {t('status.disabled')}
+                      </span>
                     )
                   },
                   headerClassName: 'text-center',
@@ -690,10 +687,29 @@ function UsersPage() {
                   header: t('columns.actions'),
                   cell: (user) => {
                     const isAdminRow = user.role === 'admin'
+                    const isSelf = user.username === profile?.username
                     return isAdminRow ? (
                       <span className='text-sm text-muted-foreground'>—</span>
                     ) : (
                       <div className='flex items-center justify-end gap-2'>
+                        <Button
+                          size='sm'
+                          variant='outline'
+                          // 禁用 = 红色文案 / 启用 = 绿色文案;同一 mutation 路径(/api/admin/users/status)。
+                          // 自己 / 加载中 → disabled,防误操作。
+                          className={user.is_active
+                            ? 'text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300'
+                            : 'text-emerald-600 hover:text-emerald-700 dark:text-emerald-400 dark:hover:text-emerald-300'}
+                          disabled={statusMutation.isPending || isSelf}
+                          onClick={() =>
+                            statusMutation.mutate({
+                              username: user.username,
+                              is_active: !user.is_active,
+                            })
+                          }
+                        >
+                          {user.is_active ? t('actions.disableUser') : t('actions.enableUser')}
+                        </Button>
                         <Button
                           size='sm'
                           variant='outline'

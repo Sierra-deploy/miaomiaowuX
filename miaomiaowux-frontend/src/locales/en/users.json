@@ -60,7 +60,9 @@
   },
   "actions": {
     "resetPassword": "Reset Password",
-    "deleteUser": "Delete"
+    "deleteUser": "Delete",
+    "disableUser": "Disable",
+    "enableUser": "Enable"
   },
   "createDialog": {
     "title": "Add User",
