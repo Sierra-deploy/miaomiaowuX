@@ -78,6 +78,10 @@ function useQuickRules() {
     // 防止送中:Google / Meta 的中国大陆 PoP 经常被错路到中国境内服务器,走 WARP-v4 直连 Cloudflare 边缘解决。
     // 仅在本机已添加 warp-v4 出站时,在快捷菜单中显示此项(由 routing-panel useQuery 判定)。
     warp_anti_china: { name: t('routing.warpAntiChina'), rule: { type: 'field', domain: ['geosite:google', 'geosite:meta'], marktag: 'warp_anti_china', outboundTag: 'warp-v4' }, needSelectOutbound: false },
+    // 家宽常用:金融 / 支付 / 卡组织 / 成人,这些站点国内住宅 IP 经常被风控,走 WARP-v4 隐藏住宅出口特征。
+    home_broadband_warp: { name: t('routing.homeBroadbandWarp'), rule: { type: 'field', domain: ['geosite:category-finance', 'geosite:paypal', 'geosite:stripe', 'geosite:visa', 'geosite:mastercard', 'geosite:category-porn'], marktag: 'home_broadband_warp', outboundTag: 'warp-v4' }, needSelectOutbound: false },
+    // 测速分流:speedtest / cloudflare-speed / dl.google.com 走 WARP,避免影响实际节点测速读数。
+    speedtest_warp: { name: t('routing.speedtestWarp'), rule: { type: 'field', domain: ['geosite:speedtest', 'speed.cloudflare.com', 'dl.google.com'], marktag: 'speedtest_warp', outboundTag: 'warp-v4' }, needSelectOutbound: false },
   }), [t])
 }
 
@@ -519,7 +523,11 @@ export function RoutingPanel({ serverId, serverName, isRemote, xrayMode }: Routi
                 {/* 防止送中 — 仅在 server 已添加 warp-v4 出站时显示;避免点击后 outboundTag 命中不到出站被回落到 default */}
                 {/* WARP 出站只在内联 Xray 上可用,外置 Xray 没注入 wireguard 能力 → 防止送中也不显示 */}
                 {hasWarpOutbound && xrayMode !== 'external' && (
-                  <DropdownMenuItem onClick={() => handleQuickAdd('warp_anti_china')}>{t('routing.warpAntiChina')}</DropdownMenuItem>
+                  <>
+                    <DropdownMenuItem onClick={() => handleQuickAdd('warp_anti_china')}>{t('routing.warpAntiChina')}</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleQuickAdd('home_broadband_warp')}>{t('routing.homeBroadbandWarp')}</DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => handleQuickAdd('speedtest_warp')}>{t('routing.speedtestWarp')}</DropdownMenuItem>
+                  </>
                 )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={() => handleQuickAdd('rfc_emby')}>{t('routing.rfcEmby')}</DropdownMenuItem>

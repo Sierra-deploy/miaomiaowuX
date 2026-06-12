@@ -446,6 +446,8 @@
     "rfcEmby": "RFC EMBY (select outbound)",
     "tiktokUnlock": "TikTok Unlock (select outbound)",
     "warpAntiChina": "Anti-CN Routing (via WARP)",
+    "homeBroadbandWarp": "Home Broadband Bypass (via WARP)",
+    "speedtestWarp": "Speedtest Bypass (via WARP)",
     "noRules": "No Routing Rules",
     "noRulesDesc": "Click \"Quick Add\" or \"Custom Rule\" to add",
     "clickToView": "Click a rule on the left to view details",
