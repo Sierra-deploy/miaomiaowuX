@@ -16,7 +16,17 @@
     "secretKeyPlaceholder": "0x4AAAAAAA... (保密,后端 siteverify 用)",
     "secretKeyConfigured": "已配置(填入新值替换)",
     "hint": "前往 Cloudflare Dashboard → Turnstile 申请 Site Key 与 Secret Key。",
-    "docLinkLabel": "查看完整配置教程 →"
+    "docLinkLabel": "查看完整配置教程 →",
+    "testTitle": "配置自测",
+    "testWaitingUser": "在下方完成验证以测试",
+    "testRequiresSecret": "请先填写 Secret Key 并失焦保存,才能开始自测",
+    "testSuccess": "验证通过!Cloudflare 已识别本站域名为 {{hostname}},配置无误。",
+    "testFailed": "Cloudflare 拒绝验证,请检查下方错误码并修正配置:",
+    "testRetry": "重新测试",
+    "errInvalidSecret": "Secret Key 与 Cloudflare 控制台不一致,请重新复制粘贴。",
+    "errMissingSecret": "后端未读取到 Secret Key,请确认填写并失焦保存。",
+    "errTimeoutOrDup": "Token 已被消费 / 已过期,请点重新测试。",
+    "errInvalidResponse": "Token 非法,可能是 site_key 与 secret_key 不属于同一个 Turnstile 应用。"
   },
   "intervals": {
     "title": "定时配置",
@@ -143,5 +153,6 @@
     "trialHint": "当前为试用许可证，PRO 功能（限速器、节点测速等）不可用。访问以下地址注册并免费获取许可证（包含 PRO 功能，还会持续新增功能...）："
   },
   "configUpdated": "设置已更新",
-  "configUpdateFailed": "更新设置失败"
+  "configUpdateFailed": "更新设置失败",
+  "autoSaved": "已自动保存"
 }

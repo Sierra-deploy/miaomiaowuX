@@ -16,7 +16,17 @@
     "secretKeyPlaceholder": "0x4AAAAAAA... (private, used by backend siteverify)",
     "secretKeyConfigured": "Configured (type a new value to replace)",
     "hint": "Apply for Site Key & Secret Key at Cloudflare Dashboard → Turnstile.",
-    "docLinkLabel": "Read the full setup guide →"
+    "docLinkLabel": "Read the full setup guide →",
+    "testTitle": "Config self-test",
+    "testWaitingUser": "complete the challenge below to test",
+    "testRequiresSecret": "Fill in Secret Key and let it blur-save before running the test.",
+    "testSuccess": "Verification passed! Cloudflare recognized hostname {{hostname}}.",
+    "testFailed": "Cloudflare rejected the verification. Check the error code(s) below:",
+    "testRetry": "Test again",
+    "errInvalidSecret": "Secret Key doesn't match Cloudflare's record. Re-copy from the dashboard.",
+    "errMissingSecret": "Backend didn't pick up Secret Key — confirm it's saved (blur the input).",
+    "errTimeoutOrDup": "Token already consumed or expired. Click Test again.",
+    "errInvalidResponse": "Token is invalid; site_key and secret_key may belong to different Turnstile apps."
   },
   "intervals": {
     "title": "Scheduled Tasks",
@@ -143,5 +153,6 @@
     "trialHint": "You are on a trial license. PRO features (rate limiter, node speed test, etc.) are not available. Register and claim your license (includes PRO features, with more coming...) at:"
   },
   "configUpdated": "Settings updated",
-  "configUpdateFailed": "Failed to update settings"
+  "configUpdateFailed": "Failed to update settings",
+  "autoSaved": "Auto-saved"
 }

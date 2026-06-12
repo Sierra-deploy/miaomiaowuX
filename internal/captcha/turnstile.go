@@ -57,11 +57,34 @@ func (t *Turnstile) SiteKey(ctx context.Context) string {
 // Verify 调 CF siteverify。Enabled 为 false 直接通过,等价"未启用就不拦"。
 // token 空 + Enabled 为 true → 必拒;反之走 HTTP 验证看 success 字段。
 func (t *Turnstile) Verify(ctx context.Context, token, remoteIP string) bool {
+	result, _ := t.VerifyDetailed(ctx, token, remoteIP)
+	return result.Success
+}
+
+// VerifyResult Cloudflare siteverify 返回的关键字段,转发给前端做诊断。
+// 典型 error_codes:
+//   - "missing-input-response" — 没传 token
+//   - "invalid-input-response" — token 已用过 / 过期 / 错
+//   - "invalid-input-secret" — secret_key 错(配错或未保存)
+//   - "timeout-or-duplicate" — token 已被消费
+type VerifyResult struct {
+	Success     bool     `json:"success"`
+	ErrorCodes  []string `json:"error_codes,omitempty"`
+	Hostname    string   `json:"hostname,omitempty"`
+	ChallengeTS string   `json:"challenge_ts,omitempty"`
+	Action      string   `json:"action,omitempty"`
+	// Skipped=true 表示根本没调 CF(未启用 / token 空),由调用方区分语义
+	Skipped bool `json:"skipped,omitempty"`
+}
+
+// VerifyDetailed 跟 Verify 同款流程,但返回 cloudflare 完整响应供前端做"配置测试"诊断。
+// 注意 secret_key 来源仍是 DB(避免前端拿到的是 mask 字符串)。
+func (t *Turnstile) VerifyDetailed(ctx context.Context, token, remoteIP string) (VerifyResult, error) {
 	if !t.Enabled(ctx) {
-		return true
+		return VerifyResult{Success: true, Skipped: true}, nil
 	}
 	if strings.TrimSpace(token) == "" {
-		return false
+		return VerifyResult{Success: false, ErrorCodes: []string{"missing-input-response"}}, nil
 	}
 	secret, _ := t.repo.GetSystemSetting(ctx, settingKeySecretKey)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, siteVerifyURL, strings.NewReader(url.Values{
@@ -70,20 +93,30 @@ func (t *Turnstile) Verify(ctx context.Context, token, remoteIP string) bool {
 		"remoteip": {remoteIP},
 	}.Encode()))
 	if err != nil {
-		return false
+		return VerifyResult{}, err
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := t.client.Do(req)
 	if err != nil {
-		return false
+		return VerifyResult{}, err
 	}
 	defer resp.Body.Close()
 
-	var result struct {
-		Success bool `json:"success"`
+	var cfResp struct {
+		Success     bool     `json:"success"`
+		ErrorCodes  []string `json:"error-codes"`
+		Hostname    string   `json:"hostname"`
+		ChallengeTS string   `json:"challenge_ts"`
+		Action      string   `json:"action"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return false
+	if err := json.NewDecoder(resp.Body).Decode(&cfResp); err != nil {
+		return VerifyResult{}, err
 	}
-	return result.Success
+	return VerifyResult{
+		Success:     cfResp.Success,
+		ErrorCodes:  cfResp.ErrorCodes,
+		Hostname:    cfResp.Hostname,
+		ChallengeTS: cfResp.ChallengeTS,
+		Action:      cfResp.Action,
+	}, nil
 }

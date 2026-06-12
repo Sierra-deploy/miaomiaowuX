@@ -3,7 +3,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { createFileRoute, Link, redirect } from '@tanstack/react-router'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
-import { BookOpen, CircleHelp, Copy, Eye, EyeOff, KeyRound, Lock, RefreshCw, Settings, ShieldCheck, Timer } from 'lucide-react'
+import { BookOpen, CheckCircle2, CircleHelp, Copy, Eye, EyeOff, KeyRound, Loader2, Lock, RefreshCw, Settings, ShieldCheck, Timer, XCircle } from 'lucide-react'
+import { useTurnstile } from '@/hooks/useTurnstile'
 import { Topbar } from '@/components/layout/topbar'
 import {
   Card,
@@ -561,6 +562,9 @@ function SystemSettingsPage() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['security-settings'] })
+      // 自动保存 input onBlur 没有按钮反馈,加个 toast 让用户知道写盘成功。
+      // toast.id 复用 — 短时间内多个字段连续 blur 不会堆叠成一摞 toast。
+      toast.success(t('autoSaved'), { id: 'security-config-autosaved' })
     },
     onError: handleServerError,
   })
@@ -1627,6 +1631,11 @@ function SystemSettingsPage() {
                   onBlur={() => saveSecurityConfig({ turnstile_secret_key: securityConfig.turnstile_secret_key })}
                 />
               </div>
+              {/* 配置自测:用户填完两 key 后立刻能验证一次,防止配错域名/secret 直到登录页才发现挂了 */}
+              <TurnstileTestPanel
+                siteKey={securityConfig.turnstile_site_key}
+                secretKeyConfigured={Boolean(securityConfig.turnstile_secret_key)}
+              />
               <p className='text-xs text-muted-foreground'>
                 {t('turnstile.hint')}{' '}
                 <a
@@ -2023,6 +2032,113 @@ function ProFeaturesPanel({ features }: { features: string[] }) {
           )
         })}
       </div>
+    </div>
+  )
+}
+
+// TurnstileTestPanel 卡片底部"测试当前配置"块。
+//   - site_key 空 → 整块隐藏
+//   - secret_key 空 → 提示"请先填 secret_key 并失焦保存"
+//   - 都填了 → 渲染 turnstile widget,用户勾选 → 自动 POST /api/admin/security-settings/turnstile/test
+//   - 显示成功(hostname)/ 失败(error_codes + 常见错误中文解释)
+// widget 端错误(site_key 错 / 域名没白名单 → cloudflare 返回 err 110200)由 widget 自己在 dom 里报错,
+// 这里只关心后端 siteverify(secret_key 错 / 网络不通 / token 错)。
+function TurnstileTestPanel({
+  siteKey,
+  secretKeyConfigured,
+}: {
+  siteKey: string
+  secretKeyConfigured: boolean
+}) {
+  const { t } = useTranslation('system')
+  const { containerRef, token, reset } = useTurnstile(siteKey || undefined)
+  const [status, setStatus] = useState<'idle' | 'verifying' | 'success' | 'failed'>('idle')
+  const [hostname, setHostname] = useState<string>('')
+  const [errorCodes, setErrorCodes] = useState<string[]>([])
+  const [errorMsg, setErrorMsg] = useState<string>('')
+
+  useEffect(() => {
+    if (!token) return
+    setStatus('verifying')
+    setErrorCodes([])
+    setErrorMsg('')
+    api
+      .post('/api/admin/security-settings/turnstile/test', { token })
+      .then((res) => {
+        const d = res.data as { success: boolean; error_codes?: string[]; hostname?: string; skipped?: boolean }
+        if (d.success) {
+          setStatus('success')
+          setHostname(d.hostname || '')
+        } else {
+          setStatus('failed')
+          setErrorCodes(d.error_codes || [])
+        }
+      })
+      .catch((e: any) => {
+        setStatus('failed')
+        setErrorMsg(e?.response?.data?.error || e?.message || 'request failed')
+      })
+  }, [token])
+
+  if (!siteKey) return null
+
+  if (!secretKeyConfigured) {
+    return (
+      <div className='rounded-md border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-700 dark:text-amber-400'>
+        {t('turnstile.testRequiresSecret')}
+      </div>
+    )
+  }
+
+  const handleRetry = () => {
+    reset()
+    setStatus('idle')
+    setErrorCodes([])
+    setErrorMsg('')
+    setHostname('')
+  }
+
+  return (
+    <div className='space-y-2 rounded-md border bg-muted/30 p-3'>
+      <div className='flex items-center gap-2 text-sm font-medium'>
+        {t('turnstile.testTitle')}
+        {status === 'idle' && <span className='text-xs text-muted-foreground'>· {t('turnstile.testWaitingUser')}</span>}
+        {status === 'verifying' && <Loader2 className='h-3 w-3 animate-spin' />}
+        {status === 'success' && <CheckCircle2 className='h-4 w-4 text-emerald-600' />}
+        {status === 'failed' && <XCircle className='h-4 w-4 text-red-600' />}
+      </div>
+      <div ref={containerRef} />
+      {status === 'success' && (
+        <p className='text-xs text-emerald-700 dark:text-emerald-400'>
+          ✓ {t('turnstile.testSuccess', { hostname: hostname || '—' })}
+        </p>
+      )}
+      {status === 'failed' && (
+        <div className='space-y-1 text-xs text-red-700 dark:text-red-400'>
+          <p>✗ {t('turnstile.testFailed')}</p>
+          {errorCodes.length > 0 && (
+            <p className='font-mono'>{errorCodes.join(', ')}</p>
+          )}
+          {errorMsg && errorCodes.length === 0 && <p>{errorMsg}</p>}
+          {errorCodes.includes('invalid-input-secret') && (
+            <p className='text-muted-foreground'>{t('turnstile.errInvalidSecret')}</p>
+          )}
+          {errorCodes.includes('missing-input-secret') && (
+            <p className='text-muted-foreground'>{t('turnstile.errMissingSecret')}</p>
+          )}
+          {errorCodes.includes('timeout-or-duplicate') && (
+            <p className='text-muted-foreground'>{t('turnstile.errTimeoutOrDup')}</p>
+          )}
+          {errorCodes.includes('invalid-input-response') && (
+            <p className='text-muted-foreground'>{t('turnstile.errInvalidResponse')}</p>
+          )}
+        </div>
+      )}
+      {(status === 'success' || status === 'failed') && (
+        <Button size='sm' variant='outline' onClick={handleRetry}>
+          {t('turnstile.testRetry')}
+        </Button>
+      )}
     </div>
   )
 }

@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"miaomiaowux/internal/captcha"
 	"miaomiaowux/internal/storage"
 )
 
@@ -256,4 +257,43 @@ func readBoolSetting(ctx context.Context, repo *storage.TrafficRepository, key s
 		return fallback
 	}
 	return b
+}
+
+// TurnstileTestHandler 接收前端"测试当前 turnstile 配置是否正确"的 widget token。
+// 后端用 DB 里已保存的 secret_key 调 cloudflare siteverify,返回完整结果(含 error_codes / hostname)
+// 给前端做诊断 — 用户填完两 key 不再担心"登录页用不了才发现配错"。
+//
+// 路由:POST /api/admin/security-settings/turnstile/test
+// Body: {"token": "<widget 拿到的 token>"}
+// Resp: {"success": bool, "error_codes": [...], "hostname": "...", "skipped": bool}
+type TurnstileTestHandler struct {
+	verifier *captcha.Turnstile
+}
+
+func NewTurnstileTestHandler(verifier *captcha.Turnstile) *TurnstileTestHandler {
+	return &TurnstileTestHandler{verifier: verifier}
+}
+
+func (h *TurnstileTestHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if h.verifier == nil {
+		writeJSONError(w, http.StatusInternalServerError, "turnstile verifier not configured")
+		return
+	}
+	var req struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	result, err := h.verifier.VerifyDetailed(r.Context(), req.Token, GetClientIP(r))
+	if err != nil {
+		writeJSONError(w, http.StatusBadGateway, "cloudflare siteverify failed: "+err.Error())
+		return
+	}
+	respondJSON(w, http.StatusOK, result)
 }
