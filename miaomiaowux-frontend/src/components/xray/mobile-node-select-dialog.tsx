@@ -4,6 +4,7 @@
 // 节点占 2 行:第 1 行 checkbox + 协议 badge + 节点名(可截断),第 2 行 tag + server:port。
 // 行高加大方便手指点选;搜索 / tag filter / 多选工具栏全部保留。
 import { useState, useEffect, useMemo } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import {
   Sheet,
@@ -56,43 +57,49 @@ export function MobileNodeSelectDialog({
 }: MobileNodeSelectDialogProps) {
   const { t } = useTranslation('xray')
   const { t: tc } = useTranslation('common')
-  const [nodes, setNodes] = useState<ParsedNode[]>([])
-  const [nodeOrder, setNodeOrder] = useState<number[]>([])
-  const [tunnels, setTunnels] = useState<any[]>([])
-  const [loading, setLoading] = useState(false)
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<number>>(new Set())
   const [searchTerm, setSearchTerm] = useState('')
   const [tagFilter, setTagFilter] = useState<string>('all')
 
+  // 与桌面端 NodeSelectDialog 共享同 queryKey ['nodes'] / ['user-config'] / ['admin-tunnels'] —
+  // 节点管理改 tag → invalidateQueries(['nodes']) → 桌面/手机两端 dialog 都自动刷新。
+  const nodesQ = useQuery({
+    queryKey: ['nodes'],
+    queryFn: async () => (await api.get('/api/admin/nodes')).data,
+    enabled: open,
+  })
+  const userCfgQ = useQuery({
+    queryKey: ['user-config'],
+    queryFn: async () => (await api.get('/api/user/config')).data,
+    enabled: open,
+  })
+  const tunnelsQ = useQuery({
+    queryKey: ['admin-tunnels'],
+    queryFn: async () => (await api.get('/api/admin/tunnels')).data,
+    enabled: open,
+  })
+
+  const nodes: ParsedNode[] = nodesQ.data?.nodes ?? []
+  const nodeOrder: number[] = userCfgQ.data?.node_order ?? []
+  const tunnels: any[] = tunnelsQ.data?.tunnels ?? []
+  const loading = nodesQ.isLoading
+
   useEffect(() => {
     if (open) {
-      loadAll()
       setSelectedNodeIds(new Set())
       setSearchTerm('')
       setTagFilter('all')
     }
   }, [open])
 
-  const loadAll = async () => {
-    setLoading(true)
-    try {
-      const [nodesRes, ucRes, tnRes] = await Promise.all([
-        api.get('/api/admin/nodes'),
-        api.get('/api/user/config').catch(() => ({ data: {} })),
-        api.get('/api/admin/tunnels').catch(() => ({ data: { tunnels: [] } })),
-      ])
-      setNodes(nodesRes.data?.nodes || [])
-      setNodeOrder(ucRes.data?.node_order || [])
-      setTunnels(tnRes.data?.tunnels || [])
-    } catch (error: any) {
+  useEffect(() => {
+    if (nodesQ.isError && open) {
+      const err: any = nodesQ.error
       toast.error(t('nodeSelect.loadFailed'), {
-        description: error.response?.data?.message || error.message,
+        description: err?.response?.data?.message || err?.message || String(err),
       })
-      setNodes([])
-    } finally {
-      setLoading(false)
     }
-  }
+  }, [nodesQ.isError, nodesQ.error, open, t])
 
   const tunnelsByTarget = useMemo(() => {
     const map = new Map<string, any[]>()

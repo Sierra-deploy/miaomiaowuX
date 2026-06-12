@@ -1,5 +1,6 @@
 // @ts-nocheck
 import { useState, useEffect, useMemo } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import {
   Dialog,
@@ -60,44 +61,53 @@ export function NodeSelectDialog(props: NodeSelectDialogProps) {
 function DesktopNodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter, multiple = false, onConfirm }: NodeSelectDialogProps) {
   const { t } = useTranslation('xray')
   const { t: tc } = useTranslation('common')
-  const [nodes, setNodes] = useState<ParsedNode[]>([])
-  const [nodeOrder, setNodeOrder] = useState<number[]>([])
-  const [tunnels, setTunnels] = useState<any[]>([])
-  const [loading, setLoading] = useState(false)
   const [selectedNodeIds, setSelectedNodeIds] = useState<Set<number>>(new Set())
   const [searchTerm, setSearchTerm] = useState('')
   const [tagFilter, setTagFilter] = useState<string>('all')
 
-  // Load node list + user_config(取节点排序) + tunnels(标记被 tunnel 转发的节点)
+  // 节点列表 / 用户配置(取 node_order)/ tunnels — 走 TanStack Query cache,
+  // queryKey ['nodes'] 跟 nodes.index.tsx / outbound-panel.tsx 一致 → 节点管理改 tag 后
+  // invalidateQueries(['nodes']) 自动刷新到本 dialog,不再"打开还是旧 tag"。
+  // enabled: open 关闭时不占资源。
+  const nodesQ = useQuery({
+    queryKey: ['nodes'],
+    queryFn: async () => (await api.get('/api/admin/nodes')).data,
+    enabled: open,
+  })
+  const userCfgQ = useQuery({
+    queryKey: ['user-config'],
+    queryFn: async () => (await api.get('/api/user/config')).data,
+    enabled: open,
+  })
+  const tunnelsQ = useQuery({
+    queryKey: ['admin-tunnels'],
+    queryFn: async () => (await api.get('/api/admin/tunnels')).data,
+    enabled: open,
+  })
+
+  const nodes: ParsedNode[] = nodesQ.data?.nodes ?? []
+  const nodeOrder: number[] = userCfgQ.data?.node_order ?? []
+  const tunnels: any[] = tunnelsQ.data?.tunnels ?? []
+  const loading = nodesQ.isLoading
+
+  // 打开 dialog 时清 UI 选择/搜索状态(数据本身由 useQuery 管,不在这里 fetch)
   useEffect(() => {
     if (open) {
-      loadAll()
       setSelectedNodeIds(new Set())
       setSearchTerm('')
       setTagFilter('all')
     }
   }, [open])
 
-  const loadAll = async () => {
-    setLoading(true)
-    try {
-      const [nodesRes, ucRes, tnRes] = await Promise.all([
-        api.get('/api/admin/nodes'),
-        api.get('/api/user/config').catch(() => ({ data: {} })),
-        api.get('/api/admin/tunnels').catch(() => ({ data: { tunnels: [] } })),
-      ])
-      setNodes(nodesRes.data?.nodes || [])
-      setNodeOrder(ucRes.data?.node_order || [])
-      setTunnels(tnRes.data?.tunnels || [])
-    } catch (error) {
+  // 拉节点列表失败给个 toast(其它两个 query 失败回退空数组,不阻塞)
+  useEffect(() => {
+    if (nodesQ.isError && open) {
+      const err: any = nodesQ.error
       toast.error(t('nodeSelect.loadFailed'), {
-        description: error.response?.data?.message || error.message,
+        description: err?.response?.data?.message || err?.message || String(err),
       })
-      setNodes([])
-    } finally {
-      setLoading(false)
     }
-  }
+  }, [nodesQ.isError, nodesQ.error, open, t])
 
   // server:port → tunnel[](和 nodes 主页的 renderForwardedBadge 同源,判断该节点是否被某 tunnel 转发)
   const tunnelsByTarget = useMemo(() => {
@@ -213,7 +223,10 @@ function DesktopNodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter,
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-3xl max-h-[80vh] overflow-hidden flex flex-col">
+      {/* 节点行内含 5 项(协议 badge / 节点名 / tunnel 标记 / tag / 服务器:端口) — 单行 flex 布局,
+          max-w-3xl(768px)在 1080p+ 桌面上节点名常被强 truncate,看起来"堆叠/挤压"。
+          桌面端放宽到 5xl(1024px) / 大屏 6xl(1152px),小屏仍按 3xl 兜底避免溢出。 */}
+      <DialogContent className="max-w-3xl md:max-w-5xl xl:max-w-6xl max-h-[80vh] overflow-hidden flex flex-col">
         <DialogHeader>
           <DialogTitle>{t('nodeSelect.importFromNode')}</DialogTitle>
           <DialogDescription>{t('nodeSelect.importDesc')}</DialogDescription>
