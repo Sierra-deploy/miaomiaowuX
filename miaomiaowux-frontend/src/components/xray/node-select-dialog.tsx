@@ -11,7 +11,6 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Badge } from '@/components/ui/badge'
@@ -316,10 +315,6 @@ function DesktopNodeSelectDialog({ open, onOpenChange, onSelect, protocolFilter,
                       }`}
                       onClick={() => handleSelectNode(node.id)}
                     >
-                      <Checkbox
-                        checked={selectedNodeIds.has(node.id)}
-                        onCheckedChange={() => handleSelectNode(node.id)}
-                      />
                       {/* 节点信息单行显示:协议 + 节点名 + tunnel 标记 + 标签 + 地址 */}
                       <div className="flex flex-1 min-w-0 items-center gap-2 text-sm">
                         <Badge

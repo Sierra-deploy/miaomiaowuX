@@ -1,7 +1,7 @@
 // @ts-nocheck
 // 手机端专版节点选择器 — 用 Sheet 从底部上拉到全屏,代替 Dialog。
 // 与 NodeSelectDialog 的桌面行布局(单行展示协议+名+标签+地址)不同,mobile 版每个
-// 节点占 2 行:第 1 行 checkbox + 协议 badge + 节点名(可截断),第 2 行 tag + server:port。
+// 节点占 2 行:第 1 行 协议 badge + 节点名(可截断),第 2 行 tag + server:port;点击行即选中。
 // 行高加大方便手指点选;搜索 / tag filter / 多选工具栏全部保留。
 import { useState, useEffect, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
@@ -15,7 +15,6 @@ import {
   SheetTitle,
 } from '@/components/ui/sheet'
 import { Button } from '@/components/ui/button'
-import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Badge } from '@/components/ui/badge'
 import { Cable } from 'lucide-react'
@@ -291,11 +290,6 @@ export function MobileNodeSelectDialog({
                         isSelected ? 'bg-primary/10 border-primary' : 'bg-card hover:bg-muted/40'
                       }`}
                     >
-                      <Checkbox
-                        checked={isSelected}
-                        onCheckedChange={() => handleSelectNode(node.id)}
-                        className='mt-1 size-5 shrink-0'
-                      />
                       <div className='flex-1 min-w-0 space-y-1.5'>
                         {/* Row 1: 协议 + 节点名 + tunnel 标记 */}
                         <div className='flex items-center gap-2 min-w-0'>
