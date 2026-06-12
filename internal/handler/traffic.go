@@ -345,18 +345,26 @@ func (h *TrafficHandler) handleNodeUsers(w http.ResponseWriter, r *http.Request)
 		LastDownlink int64  `json:"last_downlink"`
 	}
 	byUser := make(map[string]*item)
+	// 节点视角的用户流量字段语义:用 xray 当前 cumulative(LastUplink/LastDownlink)而非
+	// cycle delta 累加值(Uplink/Downlink)。原因:
+	// - collector 的 cycle delta 算法依赖"xray 重启检测",user_email_traffic 跟 node_traffic
+	//   的重启检测**不同步**(stats.User 跟 stats.Outbound 两个 map 重置时机不一致),
+	//   长期累积后 user_email_traffic.uplink 会超过节点真实流量(本案例:节点 209 MB / 用户 591 MB)。
+	// - LastUplink/LastDownlink 直接来自 xray 当前 cumulative,跟节点流量(同样基于 cumulative)对齐,
+	//   永远不会出现"用户流量 > 节点总流量"的矛盾。
+	// - 用户感知上略输 cycle 重置语义,但准确性优先 — 数据一致 > 语义精细。
 	addUser := func(username string, uet storage.UserEmailTraffic) {
 		if existing, ok := byUser[username]; ok {
-			existing.Uplink += uet.Uplink
-			existing.Downlink += uet.Downlink
+			existing.Uplink += uet.LastUplink
+			existing.Downlink += uet.LastDownlink
 			existing.LastUplink += uet.LastUplink
 			existing.LastDownlink += uet.LastDownlink
 			return
 		}
 		byUser[username] = &item{
 			Username:     username,
-			Uplink:       uet.Uplink,
-			Downlink:     uet.Downlink,
+			Uplink:       uet.LastUplink,
+			Downlink:     uet.LastDownlink,
 			LastUplink:   uet.LastUplink,
 			LastDownlink: uet.LastDownlink,
 		}
