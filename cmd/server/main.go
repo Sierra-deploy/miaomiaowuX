@@ -1025,6 +1025,15 @@ func main() {
 	remoteWSHandler.StartCleanupLoop(collectorCtx, 1*time.Minute)
 	// 启动通知调度器
 	go handler.StartNotifyScheduler(collectorCtx, repo)
+
+	// 一次性数据迁移:给老 routed 节点补 creator 的 user_subaccounts 行 — 让 admin 自己用 routed 节点的
+	// 流量能走 user_subaccounts 命中而不依赖 ResolveUsernameByEmail 的 _admin__ 反查 fallback。
+	// 幂等:NOT EXISTS 保护重启不重复写。新建节点已在 routed_outbound.create 同步处理,这里只补历史欠账。
+	if n, err := repo.BackfillRoutedCreatorSubaccounts(context.Background()); err != nil {
+		log.Printf("[Startup] BackfillRoutedCreatorSubaccounts failed: %v", err)
+	} else if n > 0 {
+		log.Printf("[Startup] BackfillRoutedCreatorSubaccounts: filled %d creator subaccount row(s) for legacy routed nodes", n)
+	}
 	// 启动分享服务器(联邦)状态/流量轮询（每 30 秒从拥有方拉取）
 	handler.SetFederationLicense(licenseManager)
 	go handler.StartFederationPoller(collectorCtx, repo)

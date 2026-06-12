@@ -7440,6 +7440,40 @@ type UserSubaccount struct {
 	UpdatedAt      time.Time
 }
 
+// BackfillRoutedCreatorSubaccounts 给所有 routed 节点补 creator 自己的 user_subaccounts 行。
+// 老代码 routed_outbound.create 时只写"占位 admin client",没给 creator 自己写子账号,
+// 导致 ResolveUsernameByEmail 走 _admin__ 兜底 fallback,多 admin 系统下归属错乱。
+//
+// 这里幂等地一次性补:用 nodes 表里已存的 routed_admin_email + routed_admin_credential
+// 直接写到 user_subaccounts(username=nodes.username,即父节点 owner = creator)。
+// 老的 _admin__ 占位 email 不动 — agent inbound + routing rule 继续工作,本步只让流量归属走子账号查询命中。
+//
+// 返回新写入的行数。NOT EXISTS 保护:已有的不重复写。
+func (r *TrafficRepository) BackfillRoutedCreatorSubaccounts(ctx context.Context) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	const stmt = `
+INSERT INTO user_subaccounts (username, routed_node_id, email, credential_json, is_active, created_at, updated_at)
+SELECT n.username, n.id, n.routed_admin_email, n.routed_admin_credential, 1,
+       CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+FROM nodes n
+WHERE n.node_type = 'routed'
+  AND n.username IS NOT NULL AND n.username != ''
+  AND n.routed_admin_email IS NOT NULL AND n.routed_admin_email != ''
+  AND n.routed_admin_credential IS NOT NULL AND n.routed_admin_credential != ''
+  AND NOT EXISTS (
+    SELECT 1 FROM user_subaccounts s
+    WHERE s.username = n.username AND s.routed_node_id = n.id
+  )`
+	res, err := r.db.ExecContext(ctx, stmt)
+	if err != nil {
+		return 0, fmt.Errorf("backfill routed creator subaccounts: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // UpsertUserSubaccount 新建或更新一个子账号。续费时若已存在,credential 不变(由调用方决定);
 // 这里只负责持久化传入字段。
 func (r *TrafficRepository) UpsertUserSubaccount(ctx context.Context, sa UserSubaccount) (int64, error) {
@@ -7638,16 +7672,20 @@ func (r *TrafficRepository) ListSubaccountEmailToUsername(ctx context.Context) (
 
 // ResolveUsernameByEmail 把 xray 上报的 stats.User key (email) 反查到 mmwx 用户名。
 // 优先级:
-//  1. user_subaccounts.email → username (子账号路径)
-//  2. 以 "_admin__" 开头 → 返回空(占位 admin 流量丢弃)
-//  3. 否则原值返回(主账号路径,email == username 是 mmwx 历史约定)
+//  1. user_subaccounts.email → username (子账号路径,包括 admin 把自己作为 routed 子账号的情况)
+//  2. _admin__ 占位 email 没命中 user_subaccounts → 反查 nodes.routed_admin_email 找到对应 routed 节点,
+//     归属给系统 admin owner(GetSystemNodeOwner)— admin 自己用占位 client 直连的流量归 admin
+//  3. users.email 反查(主账号 inbound 凭据有时把 client.email 设成主账号 email)
+//  4. 否则按 "<username>__<tag>" 取首段 / 原值兜底
+//
+// 历史 BUG:之前 _admin__ 前缀直接 return "",所有 admin 自己用 routed 节点 admin 占位 uuid
+// 连上线的流量全部丢失 — admin 在节点视图看不到自己用 routed 节点的流量。
+// 修复:先查 user_subaccounts(覆盖被 scan_result auto-claim 写过的情况),没命中再用
+// routed_admin_email 反查 + admin owner fallback。
 //
 // 该函数应在流量采集热路径上调用,后续可加内存 cache 优化。
 func (r *TrafficRepository) ResolveUsernameByEmail(ctx context.Context, email string) string {
 	if email == "" {
-		return ""
-	}
-	if strings.HasPrefix(email, "_admin__") {
 		return ""
 	}
 	var username string
@@ -7655,6 +7693,20 @@ func (r *TrafficRepository) ResolveUsernameByEmail(ctx context.Context, email st
 		`SELECT username FROM user_subaccounts WHERE email = ? LIMIT 1`, email).Scan(&username)
 	if err == nil && username != "" {
 		return username
+	}
+	// _admin__ 占位:架构上多个 admin 共享同一个 client(用 routed_admin_email 标识),
+	// 流量在 xray 上报时合并为一行,master 端无法区分是 admin A 还是 admin B 产生的。
+	// 这里反查 nodes.username 取**创建者** username 作为归属 — 单 admin 系统准确,
+	// 多 admin 系统会偏向 creator(承认不完美,彻底解决见占位架构改造路线)。
+	if strings.HasPrefix(email, "_admin__") {
+		var creator string
+		eerr := r.db.QueryRowContext(ctx,
+			`SELECT username FROM nodes WHERE routed_admin_email = ? LIMIT 1`, email).Scan(&creator)
+		if eerr == nil && creator != "" {
+			return creator
+		}
+		// 没有任何 routed node 持有这个占位 email → 真孤儿,丢弃避免归属混乱
+		return ""
 	}
 	// 用户直接 inbound 凭据有时把 client.email 设成主账号 email(如 share@2ha.me) —
 	// 既不符合 `<username>__<tag>` 新格式,也不在 user_subaccounts,

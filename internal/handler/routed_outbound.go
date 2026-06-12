@@ -150,7 +150,15 @@ func (h *RoutedOutboundHandler) create(w http.ResponseWriter, r *http.Request) {
 	shortID := fmt.Sprintf("p%d", parent.ID)
 	outboundTag := fmt.Sprintf("routed:%s:%s", shortID, labelSlug)
 	marktag := outboundTag
-	adminEmail := fmt.Sprintf("_admin__%s__%s", shortID, labelSlug)
+	// 占位 client email 用 creator(父节点 owner)前缀 — 不再用 "_admin__" 共享占位。
+	// 历史 BUG:`_admin__<short>__<label>` 不带 creator username,多 admin 系统下 admin A 和
+	// admin B 用同一节点会共享同一 uuid → xray 端流量合并 → master 端无法区分归属。
+	// 现在用 `<creator>__<short>__<label>` 让每个 admin 都有专属 client,跟普通用户子账号同款命名。
+	creatorUsername := strings.TrimSpace(parent.Username)
+	if creatorUsername == "" {
+		creatorUsername = h.repo.GetSystemNodeOwner(ctx)
+	}
+	adminEmail := fmt.Sprintf("%s__%s__%s", creatorUsername, shortID, labelSlug)
 
 	// 检查唯一性(同父节点同 label 不能重复)
 	existing, _ := h.repo.ListRoutedNodesByParent(ctx, parent.ID)
@@ -270,7 +278,20 @@ func (h *RoutedOutboundHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("[RoutedOutbound] created routed node id=%d tag=%s parent=%d", created.ID, outboundTag, parent.ID)
+	// 给 creator 自己也写一行 user_subaccounts:让 creator 拉订阅时(buildRoutedProxyForUser)
+	// 能拿到这个 routed 节点 + 占位 client 凭据,流量上报后 ResolveUsernameByEmail 命中 → 归 creator。
+	// 之前 admin 没这行 → 用户视角"看不到自己的路由出站流量"。
+	if _, suErr := h.repo.UpsertUserSubaccount(ctx, storage.UserSubaccount{
+		Username:       creatorUsername,
+		RoutedNodeID:   created.ID,
+		Email:          adminEmail,
+		CredentialJSON: string(credBytes),
+		IsActive:       true,
+	}); suErr != nil {
+		log.Printf("[RoutedOutbound] creator subaccount upsert failed (node %d, creator %s): %v — 节点已创建,流量归属需手动修复", created.ID, creatorUsername, suErr)
+	}
+
+	log.Printf("[RoutedOutbound] created routed node id=%d tag=%s parent=%d creator=%s", created.ID, outboundTag, parent.ID, creatorUsername)
 	respondJSON(w, http.StatusOK, map[string]any{
 		"success": true,
 		"node":    created,
