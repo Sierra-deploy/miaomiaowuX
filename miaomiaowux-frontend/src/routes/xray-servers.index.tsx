@@ -78,6 +78,7 @@ interface RemoteServer {
   status: 'pending' | 'connected' | 'offline'
   last_heartbeat?: string
   ip_address?: string
+  ip_address_v6?: string
   domain?: string
   connection_mode: 'push' | 'pull' | 'websocket' | 'http' | 'auto'
   pull_address?: string
@@ -1436,7 +1437,7 @@ function XrayServersPage() {
                     </div>
                   </div>
                   <CardDescription className="text-xs text-muted-foreground flex flex-wrap items-center gap-2 min-w-0">
-                    <span>{server.ip_address || t('servers.waitConnection')}</span>
+                    <span>{server.ip_address || server.ip_address_v6 || t('servers.waitConnection')}</span>
                     <DropdownMenu>
                       <DropdownMenuTrigger asChild>
                         <Button variant="ghost" size="sm" className="h-5 px-1.5 text-xs gap-1" onClick={(e) => e.stopPropagation()}>
@@ -1557,7 +1558,7 @@ function XrayServersPage() {
                                 <DropdownMenuSeparator />
                               </>
                             )}
-                            <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setSyncingServerId(server.id); setSyncServerHost(server.ip_address || ''); setIsSyncNodesDialogOpen(true) }}><RefreshCw className="mr-2 h-4 w-4" />{t('servers.syncNodes')}</DropdownMenuItem>
+                            <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setSyncingServerId(server.id); setSyncServerHost(server.ip_address || server.ip_address_v6 || ''); setIsSyncNodesDialogOpen(true) }}><RefreshCw className="mr-2 h-4 w-4" />{t('servers.syncNodes')}</DropdownMenuItem>
                             <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setHistoryServerId(server.id); setHistoryServerName(server.name); setHistoryPreviewId(null); setHistoryPreviewConfig(''); setHistoryDialogOpen(true) }}><History className="mr-2 h-4 w-4" />配置历史</DropdownMenuItem>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
@@ -1686,7 +1687,7 @@ function XrayServersPage() {
                         </DropdownMenuContent>
                       </DropdownMenu>
                     </TableCell>
-                    <TableCell className="text-muted-foreground"><IPCell raw={server.ip_address || ''} /></TableCell>
+                    <TableCell className="text-muted-foreground"><IPCell raw={server.ip_address || server.ip_address_v6 || ''} /></TableCell>
                     <TableCell className="min-w-[100px] w-[100px] tabular-nums">
                       {server.status === 'connected' && ((server.current_upload_speed || server.current_download_speed) ? (
                         <div className="text-xs space-y-0.5">
@@ -1745,7 +1746,7 @@ function XrayServersPage() {
                                       <DropdownMenuSeparator />
                                     </>
                                   )}
-                                  <DropdownMenuItem onClick={() => { setSyncingServerId(server.id); setSyncServerHost(server.ip_address || ''); setIsSyncNodesDialogOpen(true) }}><RefreshCw className="mr-2 h-4 w-4" />{t('servers.syncNodes')}</DropdownMenuItem>
+                                  <DropdownMenuItem onClick={() => { setSyncingServerId(server.id); setSyncServerHost(server.ip_address || server.ip_address_v6 || ''); setIsSyncNodesDialogOpen(true) }}><RefreshCw className="mr-2 h-4 w-4" />{t('servers.syncNodes')}</DropdownMenuItem>
                                   <DropdownMenuItem onClick={() => { setHistoryServerId(server.id); setHistoryServerName(server.name); setHistoryPreviewId(null); setHistoryPreviewConfig(''); setHistoryDialogOpen(true) }}><History className="mr-2 h-4 w-4" />配置历史</DropdownMenuItem>
                                   <DropdownMenuSeparator />
                                   <DropdownMenuItem
@@ -2096,7 +2097,7 @@ function XrayServersPage() {
                 <div className="border-t pt-4 space-y-2">
                   <h4 className="font-medium text-sm">{t('servers.serverInfo')}</h4>
                   <div className="text-xs text-muted-foreground space-y-1">
-                    <p>IP: {managingRemoteServer.ip_address || t('servers.unknown')}</p>
+                    <p>IP: {managingRemoteServer.ip_address || managingRemoteServer.ip_address_v6 || t('servers.unknown')}</p>
                     {managingRemoteServer.last_heartbeat && (<p>{t('servers.lastHeartbeat')}: {new Date(managingRemoteServer.last_heartbeat).toLocaleString()}</p>)}
                   </div>
                 </div>
