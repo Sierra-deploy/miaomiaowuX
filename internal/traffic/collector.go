@@ -80,6 +80,11 @@ type Collector struct {
 	speedMu      sync.RWMutex
 	serverSpeeds map[int64]*ServerSpeed           // serverID -> 速度数据
 	lastTraffic  map[int64]*serverTrafficSnapshot // serverID -> 最后的流量快照
+
+	// xray 重启检测器 — 用 agent 上报的 xray_boot_time 判定真重启,替代 new<last 启发式。
+	// 历史 BUG 来源:启发式把 client 增删导致的 user counter reset 误判为 xray 重启
+	// → user_email_traffic.total_downlink 渐进累积偏移(实测 382MB)。
+	restartDetector *XrayRestartDetector
 }
 
 // 创建一个新的流量收集器
@@ -91,6 +96,7 @@ func NewCollector(repo *storage.TrafficRepository) *Collector {
 		speedInterval:      3 * time.Second,
 		defaultMetricsPort: 38889,       // 配置模板中的默认指标端口
 		defaultMetricsHost: "127.0.0.1", // 默认指标主机
+		restartDetector:    NewXrayRestartDetector(),
 		serverSpeeds:       make(map[int64]*ServerSpeed),
 		lastTraffic:        make(map[int64]*serverTrafficSnapshot),
 	}
@@ -328,16 +334,20 @@ func (c *Collector) ProcessMetrics(ctx context.Context, serverID int64, metrics 
 	// 计算和更新速度
 	c.updateServerSpeed(serverID, totalUplink, totalDownlink)
 
+	// 本地 server(主控自跑 xray)— 没有 xray_boot_time 上报路径,boot 信息不可得 →
+	// 退化成"非重启"路径(detector 看 nil 返回 false),用 max(0, new-last) 算 delta 不污染 total。
+	isRestart := c.restartDetector.CheckAndUpdate(serverID, nil)
+
 	// 处理入站流量
 	for tag, data := range stats.Inbound {
-		if err := c.repo.UpsertNodeTraffic(ctx, serverID, tag, "inbound", data.Uplink, data.Downlink); err != nil {
+		if err := c.repo.UpsertNodeTraffic(ctx, serverID, tag, "inbound", data.Uplink, data.Downlink, isRestart); err != nil {
 			log.Printf("[Traffic Collector] Failed to upsert inbound traffic for %s: %v", tag, err)
 		}
 	}
 
 	// 处理出站流量
 	for tag, data := range stats.Outbound {
-		if err := c.repo.UpsertNodeTraffic(ctx, serverID, tag, "outbound", data.Uplink, data.Downlink); err != nil {
+		if err := c.repo.UpsertNodeTraffic(ctx, serverID, tag, "outbound", data.Uplink, data.Downlink, isRestart); err != nil {
 			log.Printf("[Traffic Collector] Failed to upsert outbound traffic for %s: %v", tag, err)
 		}
 	}
@@ -347,11 +357,7 @@ func (c *Collector) ProcessMetrics(ctx context.Context, serverID int64, metrics 
 	//   - 主账号 email(== mmwx username,历史约定),直接落库
 	//   - 子账号 email(<username>__<routed_label>),通过 user_subaccounts 反查归到 username
 	//   - _admin__ 前缀的占位 client,流量丢弃(管理员测试用,不属任何用户)
-	// !!! 必须先按 username 聚合再写库 — 直接每个 email 调一次 UpsertUserTraffic,
-	// 多个 email 映射到同一 username 时,UpsertUserTraffic 内部按"cumulative 计数器减 LastUplink"算 delta,
-	// 同一行 LastUplink 在循环里被一会儿写成 jimlee 的累计、一会儿写成 wtt 的累计,delta 会一会儿负(被当 xray 重启
-	// 把整个 LastUplink 推进 total)、一会儿正(整段累计当 delta 加),一轮 collector 把流量指数级放大。
-	aggregateAndUpsertUserTraffic(ctx, c.repo, serverID, stats.User)
+	aggregateAndUpsertUserTraffic(ctx, c.repo, serverID, stats.User, isRestart)
 
 	log.Printf("[Traffic Collector] Processed metrics for server %d: %d inbounds, %d outbounds, %d users",
 		serverID, len(stats.Inbound), len(stats.Outbound), len(stats.User))
@@ -360,27 +366,32 @@ func (c *Collector) ProcessMetrics(ctx context.Context, serverID int64, metrics 
 }
 
 // 处理从远程服务器报告的指标
-func (c *Collector) ProcessRemoteMetrics(ctx context.Context, serverID int64, stats *XrayStats) error {
+//
+// xrayBootTime 来自 remote_servers 表(agent 心跳上报),用于判定 xray 是否真重启。
+// 调用方传 nil 等价"未知" → 退化到"非重启"路径,Upsert* 用 max(0, new-last) 算 delta 不污染 total。
+func (c *Collector) ProcessRemoteMetrics(ctx context.Context, serverID int64, stats *XrayStats, xrayBootTime *time.Time) error {
 	if stats == nil {
 		return nil
 	}
 
+	isRestart := c.restartDetector.CheckAndUpdate(serverID, xrayBootTime)
+
 	// 处理入站流量
 	for tag, data := range stats.Inbound {
-		if err := c.repo.UpsertNodeTraffic(ctx, serverID, tag, "inbound", data.Uplink, data.Downlink); err != nil {
+		if err := c.repo.UpsertNodeTraffic(ctx, serverID, tag, "inbound", data.Uplink, data.Downlink, isRestart); err != nil {
 			log.Printf("[Traffic Collector] Failed to upsert remote inbound traffic for %s: %v", tag, err)
 		}
 	}
 
 	// 处理出站流量
 	for tag, data := range stats.Outbound {
-		if err := c.repo.UpsertNodeTraffic(ctx, serverID, tag, "outbound", data.Uplink, data.Downlink); err != nil {
+		if err := c.repo.UpsertNodeTraffic(ctx, serverID, tag, "outbound", data.Uplink, data.Downlink, isRestart); err != nil {
 			log.Printf("[Traffic Collector] Failed to upsert remote outbound traffic for %s: %v", tag, err)
 		}
 	}
 
 	// 用户流量同上 — 必须先按 username 聚合
-	aggregateAndUpsertUserTraffic(ctx, c.repo, serverID, stats.User)
+	aggregateAndUpsertUserTraffic(ctx, c.repo, serverID, stats.User, isRestart)
 
 	log.Printf("[Traffic Collector] Processed remote metrics for server %d: %d inbounds, %d outbounds, %d users",
 		serverID, len(stats.Inbound), len(stats.Outbound), len(stats.User))
@@ -394,13 +405,13 @@ func (c *Collector) ProcessRemoteMetrics(ctx context.Context, serverID int64, st
 //
 // 同时**并行双写** user_email_traffic — 保留 email 维度,供前端 drilldown 看"用户每个节点的流量"。
 // 老 user_traffic 是套餐扣减热路径,继续按 username 聚合;新表是 email 细分,只用于细粒度展示。
-func aggregateAndUpsertUserTraffic(ctx context.Context, repo userTrafficRepo, serverID int64, userStats map[string]TrafficData) {
+func aggregateAndUpsertUserTraffic(ctx context.Context, repo userTrafficRepo, serverID int64, userStats map[string]TrafficData, isXrayRestarted bool) {
 	type sum struct{ uplink, downlink int64 }
 	byUsername := make(map[string]*sum)
 	for emailKey, data := range userStats {
 		// 双写新表 — email 维度原样保留,即使 ResolveUsernameByEmail 解析不到 username 也写
 		// (野 client 也算"该 server 的 email 流量",前端可显示成"未识别节点")
-		if err := repo.UpsertUserEmailTraffic(ctx, serverID, emailKey, data.Uplink, data.Downlink); err != nil {
+		if err := repo.UpsertUserEmailTraffic(ctx, serverID, emailKey, data.Uplink, data.Downlink, isXrayRestarted); err != nil {
 			log.Printf("[Traffic Collector] Failed to upsert user email traffic for %s on server %d: %v", emailKey, serverID, err)
 		}
 
@@ -416,7 +427,7 @@ func aggregateAndUpsertUserTraffic(ctx context.Context, repo userTrafficRepo, se
 		}
 	}
 	for username, s := range byUsername {
-		if err := repo.UpsertUserTraffic(ctx, serverID, username, s.uplink, s.downlink); err != nil {
+		if err := repo.UpsertUserTraffic(ctx, serverID, username, s.uplink, s.downlink, isXrayRestarted); err != nil {
 			log.Printf("[Traffic Collector] Failed to upsert user traffic for %s on server %d: %v", username, serverID, err)
 		}
 	}
@@ -425,8 +436,8 @@ func aggregateAndUpsertUserTraffic(ctx context.Context, repo userTrafficRepo, se
 // userTrafficRepo 只取 collector 实际用到的方法,避免去 import 整个 storage 接口
 type userTrafficRepo interface {
 	ResolveUsernameByEmail(ctx context.Context, email string) string
-	UpsertUserTraffic(ctx context.Context, serverID int64, username string, uplink, downlink int64) error
-	UpsertUserEmailTraffic(ctx context.Context, serverID int64, email string, uplink, downlink int64) error
+	UpsertUserTraffic(ctx context.Context, serverID int64, username string, uplink, downlink int64, isXrayRestarted bool) error
+	UpsertUserEmailTraffic(ctx context.Context, serverID int64, email string, uplink, downlink int64, isXrayRestarted bool) error
 }
 
 // 为所有服务器创建每日快照
@@ -536,8 +547,8 @@ func (c *Collector) CollectFromRemoteServer(ctx context.Context, server storage.
 		return nil
 	}
 
-	// 处理指标
-	if err := c.ProcessRemoteMetrics(ctx, server.ID, response.Stats); err != nil {
+	// 处理指标 — server 对象已含 XrayBootTime,直接传给 ProcessRemoteMetrics 做重启判定
+	if err := c.ProcessRemoteMetrics(ctx, server.ID, response.Stats, server.XrayBootTime); err != nil {
 		return fmt.Errorf("process metrics: %w", err)
 	}
 

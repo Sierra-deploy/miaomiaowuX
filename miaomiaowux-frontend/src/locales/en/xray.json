@@ -448,6 +448,8 @@
     "warpAntiChina": "Anti-CN Routing (via WARP)",
     "homeBroadbandWarp": "Home Broadband Bypass (via WARP)",
     "speedtestWarp": "Speedtest Bypass (via WARP)",
+    "warpNotInstalled": "Install WARP outbound from \"Outbound Manager\" before adding this rule",
+    "warpRequiresEmbedded": "External Xray doesn't support embedded WARP — switch the server to \"Embedded Xray\" mode",
     "noRules": "No Routing Rules",
     "noRulesDesc": "Click \"Quick Add\" or \"Custom Rule\" to add",
     "clickToView": "Click a rule on the left to view details",

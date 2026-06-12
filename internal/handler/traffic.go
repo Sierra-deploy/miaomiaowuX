@@ -902,8 +902,8 @@ func (h *RemoteTrafficHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		SendServerOnlineNotification(ctx, serverName, serverIP)
 	}
 
-	// 处理指标
-	if err := h.collector.ProcessRemoteMetrics(ctx, serverID, req.Stats); err != nil {
+	// 处理指标 — remoteServer 已经从 db 取过,直接用其 XrayBootTime
+	if err := h.collector.ProcessRemoteMetrics(ctx, serverID, req.Stats, remoteServer.XrayBootTime); err != nil {
 		log.Printf("[Remote Traffic] Failed to process metrics from %s: %v", remoteServer.Name, err)
 		h.writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
 			"success": false,

@@ -1034,6 +1034,50 @@ func main() {
 	} else if n > 0 {
 		log.Printf("[Startup] BackfillRoutedCreatorSubaccounts: filled %d creator subaccount row(s) for legacy routed nodes", n)
 	}
+
+	// 一次性数据迁移:清掉旧"new<last 启发式重启检测"误判累加的 total_* 脏数据。
+	// 新算法用 agent 上报的 xray_boot_time 作权威重启信号,total_* 从下一轮 collector tick
+	// 起按真重启累加。详见 internal/storage/traffic.go:ResetTrafficTotalsForXrayBootTimeMigration。
+	// flag = traffic_total_reset_v2_done,system_settings 表里防重复。
+	if n, alreadyDone, err := repo.ResetTrafficTotalsForXrayBootTimeMigration(context.Background()); err != nil {
+		log.Printf("[Startup] ResetTrafficTotalsForXrayBootTimeMigration failed: %v", err)
+	} else if alreadyDone {
+		log.Printf("[Startup] ResetTrafficTotalsForXrayBootTimeMigration: already done, skip")
+	} else {
+		log.Printf("[Startup] ResetTrafficTotalsForXrayBootTimeMigration: reset done, %d rows affected (3 tables)", n)
+	}
+
+	// 紧急修复:reset migration 把 node_traffic.uplink/downlink 改成了 last_*(很小),snapshot
+	// baseline 还是历史累计 → 服务器视图算"已用 = current - snapshot"全负数 → clamp 0 → "流量丢失"。
+	// 真正修复:从 node_traffic_snapshots 反推恢复 node_traffic 到 reset 前的累计值。
+	// 取每个 (server, tag) 历史 snapshot 中 (uplink+downlink) 最大值,绕开 today snapshot 被
+	// reset 后写入的污染数据。详见 internal/storage/traffic.go:RestoreNodeTrafficFromSnapshots。
+	if n, alreadyDone, err := repo.RestoreNodeTrafficFromSnapshots(context.Background()); err != nil {
+		log.Printf("[Startup] RestoreNodeTrafficFromSnapshots failed: %v", err)
+	} else if alreadyDone {
+		log.Printf("[Startup] RestoreNodeTrafficFromSnapshots: already done, skip")
+	} else {
+		log.Printf("[Startup] RestoreNodeTrafficFromSnapshots: restored %d node_traffic row(s) from snapshots", n)
+	}
+	// 同款,对 user_traffic 表
+	if n, alreadyDone, err := repo.RestoreUserTrafficFromSnapshots(context.Background()); err != nil {
+		log.Printf("[Startup] RestoreUserTrafficFromSnapshots failed: %v", err)
+	} else if alreadyDone {
+		log.Printf("[Startup] RestoreUserTrafficFromSnapshots: already done, skip")
+	} else {
+		log.Printf("[Startup] RestoreUserTrafficFromSnapshots: restored %d user_traffic row(s) from snapshots", n)
+	}
+
+	// 清掉 reset 前用户用 admin UI "重置流量"留下的负偏移 — reset migration 已经做过等效操作,
+	// 负偏移叠加只会让"已用 = (current+offset) - snapshot" 算成大负数 → clamp 0,显示假象。
+	// 正偏移保留(用户记账累计的语义,有保留价值)。
+	if n, alreadyDone, err := repo.ClearNegativeTrafficUsedOffsetsAfterReset(context.Background()); err != nil {
+		log.Printf("[Startup] ClearNegativeTrafficUsedOffsetsAfterReset failed: %v", err)
+	} else if alreadyDone {
+		log.Printf("[Startup] ClearNegativeTrafficUsedOffsetsAfterReset: already done, skip")
+	} else {
+		log.Printf("[Startup] ClearNegativeTrafficUsedOffsetsAfterReset: cleared %d server(s) with negative offset", n)
+	}
 	// 启动分享服务器(联邦)状态/流量轮询（每 30 秒从拥有方拉取）
 	handler.SetFederationLicense(licenseManager)
 	go handler.StartFederationPoller(collectorCtx, repo)

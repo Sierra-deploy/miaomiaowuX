@@ -906,7 +906,12 @@ func (h *RemoteWSHandler) handleTraffic(wsConn *RemoteWSConnection, payload json
 	}
 	// 上线通知由 auth handler 那一头负责发(WS 重连必然走 auth),这里不重复
 
-	if err := h.collector.ProcessRemoteMetrics(ctx, wsConn.ServerID, trafficPayload.Stats); err != nil {
+	// 从 db 读 xray_boot_time 用于真重启判定(避免 collector 启发式误判把 client 增删当 xray 重启)
+	var xrayBootTime *time.Time
+	if server, gerr := h.repo.GetRemoteServer(ctx, wsConn.ServerID); gerr == nil && server != nil {
+		xrayBootTime = server.XrayBootTime
+	}
+	if err := h.collector.ProcessRemoteMetrics(ctx, wsConn.ServerID, trafficPayload.Stats, xrayBootTime); err != nil {
 		log.Printf("[Remote WS] Failed to process traffic from server %s: %v", wsConn.ServerName, err)
 		return
 	}

@@ -448,6 +448,8 @@
     "warpAntiChina": "防止送中 (走 WARP)",
     "homeBroadbandWarp": "家宽常用 (走 WARP)",
     "speedtestWarp": "测速分流 (走 WARP)",
+    "warpNotInstalled": "请先在「出站管理」安装 WARP 出站后再添加此规则",
+    "warpRequiresEmbedded": "外置 Xray 不支持嵌入式 WARP,请将服务器切换为「内置 Xray」模式",
     "noRules": "暂无路由规则",
     "noRulesDesc": "点击\"快捷添加\"或\"自定义规则\"添加",
     "clickToView": "点击左侧规则查看详情",

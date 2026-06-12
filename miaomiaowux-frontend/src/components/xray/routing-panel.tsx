@@ -378,6 +378,19 @@ export function RoutingPanel({ serverId, serverName, isRemote, xrayMode }: Routi
   const handleQuickAdd = (key: string) => {
     const preset = QUICK_RULES[key as keyof typeof QUICK_RULES]
     if (!preset) return
+    // 走 WARP 的快捷规则(防止送中 / 家宽常用 / 测速分流)— 没装 warp 出站时点击不直接静默失败,
+    // 给清晰提示让用户去出站管理装。外置 xray 没集成 wireguard,即便装了也跑不起来,单独提示。
+    const tag = (preset.rule as any).outboundTag as string | undefined
+    if (tag === 'warp-v4' || tag === 'warp-v6') {
+      if (xrayMode === 'external') {
+        toast.error(t('routing.warpRequiresEmbedded'))
+        return
+      }
+      if (!hasWarpOutbound) {
+        toast.error(t('routing.warpNotInstalled'))
+        return
+      }
+    }
     if (preset.needSelectOutbound) {
       setPendingRule({ rule: { ...preset.rule } }); setSelectedOutbound(''); setIsOutboundSelectDialogOpen(true)
     } else addRuleMutation.mutate(preset.rule)
@@ -520,15 +533,11 @@ export function RoutingPanel({ serverId, serverName, isRemote, xrayMode }: Routi
                 <DropdownMenuItem onClick={() => handleQuickAdd('ban_geoip_cn')}>{t('routing.banGeoipCn')}</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => handleQuickAdd('fix_openai')}>{t('routing.fixOpenai')}</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => handleQuickAdd('ban_private')}>{t('routing.banPrivate')}</DropdownMenuItem>
-                {/* 防止送中 — 仅在 server 已添加 warp-v4 出站时显示;避免点击后 outboundTag 命中不到出站被回落到 default */}
-                {/* WARP 出站只在内联 Xray 上可用,外置 Xray 没注入 wireguard 能力 → 防止送中也不显示 */}
-                {hasWarpOutbound && xrayMode !== 'external' && (
-                  <>
-                    <DropdownMenuItem onClick={() => handleQuickAdd('warp_anti_china')}>{t('routing.warpAntiChina')}</DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => handleQuickAdd('home_broadband_warp')}>{t('routing.homeBroadbandWarp')}</DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => handleQuickAdd('speedtest_warp')}>{t('routing.speedtestWarp')}</DropdownMenuItem>
-                  </>
-                )}
+                {/* 走 WARP 的快捷规则:始终展示;点击时 handleQuickAdd 检查 hasWarpOutbound + xrayMode,
+                    没装 WARP 或外置 xray 给清晰 toast,引导用户去出站管理安装 */}
+                <DropdownMenuItem onClick={() => handleQuickAdd('warp_anti_china')}>{t('routing.warpAntiChina')}</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => handleQuickAdd('home_broadband_warp')}>{t('routing.homeBroadbandWarp')}</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => handleQuickAdd('speedtest_warp')}>{t('routing.speedtestWarp')}</DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem onClick={() => handleQuickAdd('rfc_emby')}>{t('routing.rfcEmby')}</DropdownMenuItem>
                 <DropdownMenuItem onClick={() => handleQuickAdd('tiktok_unlock')}>{t('routing.tiktokUnlock')}</DropdownMenuItem>

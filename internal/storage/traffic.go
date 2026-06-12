@@ -7440,6 +7440,146 @@ type UserSubaccount struct {
 	UpdatedAt      time.Time
 }
 
+// ClearNegativeTrafficUsedOffsetsAfterReset 紧急修复 — 配套 ResetTrafficTotalsForXrayBootTimeMigration。
+//
+// traffic_used_offset 字段记录用户手动校准的累计偏移。**负 offset** 通常是用户点了 admin UI 上的
+// "重置流量"按钮 → 把当时累计的负数填进去,显示 used = 0,从那一刻起算。
+// 但 reset migration 已经把 uplink/downlink 改成 last_*(等效又做了一次 reset),负 offset 叠加
+// → used = (小值 + 大负数) - snap → 大负数 → clamp 0 → 服务器视图"已用 0"假象。
+//
+// 修复:把所有 server 的负 offset 清零,正 offset 保留(那是用户记账的累计基线,有保留价值)。
+// 用 flag 防重复跑。
+func (r *TrafficRepository) ClearNegativeTrafficUsedOffsetsAfterReset(ctx context.Context) (n int64, alreadyDone bool, err error) {
+	const flagKey = "traffic_offset_clear_negative_v1_done"
+	if v, gerr := r.GetSystemSetting(ctx, flagKey); gerr == nil && v == "1" {
+		return 0, true, nil
+	}
+	res, eerr := r.db.ExecContext(ctx, `UPDATE remote_servers SET traffic_used_offset = 0 WHERE traffic_used_offset < 0`)
+	if eerr != nil {
+		return 0, false, fmt.Errorf("clear negative offsets: %w", eerr)
+	}
+	n, _ = res.RowsAffected()
+	if serr := r.SetSystemSetting(ctx, flagKey, "1"); serr != nil {
+		return n, false, fmt.Errorf("set flag: %w", serr)
+	}
+	return n, false, nil
+}
+
+// ResyncSnapshotsAfterReset 已废弃 — 改用 RestoreNodeTrafficFromSnapshots 真正反推恢复。
+// 保留接口供 main.go 调用兼容,直接返回 alreadyDone=true 跳过。
+func (r *TrafficRepository) ResyncSnapshotsAfterReset(ctx context.Context) (n int64, alreadyDone bool, err error) {
+	return 0, true, nil
+}
+
+// RestoreNodeTrafficFromSnapshots 从 node_traffic_snapshots 表反推恢复 reset 前的 node_traffic.uplink/downlink。
+//
+// 原理:CreateDailySnapshots 每天把 node_traffic 表的 uplink/downlink(cycle delta 累加)快照到
+// node_traffic_snapshots,所以历史 snapshot 完整保留了 reset 前的累计值。reset migration 把
+// node_traffic.uplink/downlink 改成 last_*(当前 xray cumulative,很小),snapshot 没动。
+// 取每个 (server, tag) 历史 snapshot 中 (uplink + downlink) 最大值,反写到 node_traffic —
+// 等同于"恢复到 reset 前最近一次完整快照的累计"。
+//
+// 注意只动 uplink/downlink,不动 last_*:
+//   - last_* 是 xray 当前 cumulative,collector 算 delta 用,改了会让下次 tick 算错
+//   - 恢复后 collector 下次 tick:delta = current_xray - last (保持 = 当前 xray cumulative) = 真实增量
+//   - 用户视角:node_traffic.uplink/downlink 恢复成 reset 前的累计 + 后续真实增量
+//
+// 选 max(uplink+downlink) 而非 max(date):
+//   - reset 后 today snapshot 会被 reset 后的小值污染(CreateDailySnapshots 直接读 node_traffic
+//     当前小值写 snapshot)
+//   - cumulative 单调递增,reset 前的 snapshot 值远大于 reset 后 → max 自动选 reset 前最大值,绕开污染
+//
+// 用 flag `traffic_restore_v1_done` 防重复跑。
+func (r *TrafficRepository) RestoreNodeTrafficFromSnapshots(ctx context.Context) (n int64, alreadyDone bool, err error) {
+	const flagKey = "traffic_restore_node_v1_done"
+	if v, gerr := r.GetSystemSetting(ctx, flagKey); gerr == nil && v == "1" {
+		return 0, true, nil
+	}
+	const stmt = `
+UPDATE node_traffic
+SET uplink = COALESCE((SELECT s.uplink FROM node_traffic_snapshots s
+                       WHERE s.server_id = node_traffic.server_id
+                         AND s.tag = node_traffic.tag
+                       ORDER BY (s.uplink + s.downlink) DESC LIMIT 1), uplink),
+    downlink = COALESCE((SELECT s.downlink FROM node_traffic_snapshots s
+                         WHERE s.server_id = node_traffic.server_id
+                           AND s.tag = node_traffic.tag
+                         ORDER BY (s.uplink + s.downlink) DESC LIMIT 1), downlink)
+WHERE EXISTS (SELECT 1 FROM node_traffic_snapshots s
+              WHERE s.server_id = node_traffic.server_id
+                AND s.tag = node_traffic.tag);`
+	res, eerr := r.db.ExecContext(ctx, stmt)
+	if eerr != nil {
+		return 0, false, fmt.Errorf("restore node_traffic from snapshots: %w", eerr)
+	}
+	n, _ = res.RowsAffected()
+	if serr := r.SetSystemSetting(ctx, flagKey, "1"); serr != nil {
+		return n, false, fmt.Errorf("set restore flag: %w", serr)
+	}
+	return n, false, nil
+}
+
+// RestoreUserTrafficFromSnapshots 跟 RestoreNodeTrafficFromSnapshots 同款,对 user_traffic 表
+// 从 user_traffic_snapshots 反推恢复。key 维度换 (server_id, username)。
+func (r *TrafficRepository) RestoreUserTrafficFromSnapshots(ctx context.Context) (n int64, alreadyDone bool, err error) {
+	const flagKey = "traffic_restore_user_v1_done"
+	if v, gerr := r.GetSystemSetting(ctx, flagKey); gerr == nil && v == "1" {
+		return 0, true, nil
+	}
+	const stmt = `
+UPDATE user_traffic
+SET uplink = COALESCE((SELECT s.uplink FROM user_traffic_snapshots s
+                       WHERE s.server_id = user_traffic.server_id
+                         AND s.username = user_traffic.username
+                       ORDER BY (s.uplink + s.downlink) DESC LIMIT 1), uplink),
+    downlink = COALESCE((SELECT s.downlink FROM user_traffic_snapshots s
+                         WHERE s.server_id = user_traffic.server_id
+                           AND s.username = user_traffic.username
+                         ORDER BY (s.uplink + s.downlink) DESC LIMIT 1), downlink)
+WHERE EXISTS (SELECT 1 FROM user_traffic_snapshots s
+              WHERE s.server_id = user_traffic.server_id
+                AND s.username = user_traffic.username);`
+	res, eerr := r.db.ExecContext(ctx, stmt)
+	if eerr != nil {
+		return 0, false, fmt.Errorf("restore user_traffic from snapshots: %w", eerr)
+	}
+	n, _ = res.RowsAffected()
+	if serr := r.SetSystemSetting(ctx, flagKey, "1"); serr != nil {
+		return n, false, fmt.Errorf("set restore flag: %w", serr)
+	}
+	return n, false, nil
+}
+
+// ResetTrafficTotalsForXrayBootTimeMigration 一次性数据修复 — 配套 collector 切到 xray_boot_time
+// 重启检测的新算法。3 张流量表的 `total_*` 是历史"启发式重启检测"误判累加的脏数据,
+// 切到新算法后这部分总要清,否则前端展示一直带历史误差。
+//
+// 把每行的 total_* 清零、uplink/downlink 对齐 last_*,保留 last_* 作为下一轮 delta 的 baseline。
+// 用 system_settings 的 flag 防重复跑,首次启动时调用一次即可。
+//
+// 返回三表受影响行数 + flag 是否已经存在(已存在 → 跳过)。
+func (r *TrafficRepository) ResetTrafficTotalsForXrayBootTimeMigration(ctx context.Context) (n int64, alreadyDone bool, err error) {
+	const flagKey = "traffic_total_reset_v2_done"
+	if v, gerr := r.GetSystemSetting(ctx, flagKey); gerr == nil && v == "1" {
+		return 0, true, nil
+	}
+	const stmt = `
+UPDATE user_email_traffic SET total_uplink = 0, total_downlink = 0, uplink = last_uplink, downlink = last_downlink;
+UPDATE user_traffic       SET total_uplink = 0, total_downlink = 0, uplink = last_uplink, downlink = last_downlink;
+UPDATE node_traffic       SET total_uplink = 0, total_downlink = 0, uplink = last_uplink, downlink = last_downlink;`
+	// SQLite Exec 支持多语句执行(modernc.org/sqlite),三表一次写完
+	res, eerr := r.db.ExecContext(ctx, stmt)
+	if eerr != nil {
+		return 0, false, fmt.Errorf("reset traffic totals: %w", eerr)
+	}
+	n, _ = res.RowsAffected()
+	if serr := r.SetSystemSetting(ctx, flagKey, "1"); serr != nil {
+		// 标志写失败不致命 — 下次启动会重跑,SQL 幂等,损失只是再 reset 一次最新 last(可能丢几秒 delta)。
+		return n, false, fmt.Errorf("set migration flag: %w", serr)
+	}
+	return n, false, nil
+}
+
 // BackfillRoutedCreatorSubaccounts 给所有 routed 节点补 creator 自己的 user_subaccounts 行。
 // 老代码 routed_outbound.create 时只写"占位 admin client",没给 creator 自己写子账号,
 // 导致 ResolveUsernameByEmail 走 _admin__ 兜底 fallback,多 admin 系统下归属错乱。
@@ -9496,7 +9636,7 @@ func (r *TrafficRepository) MarkOfflineRemoteServers(ctx context.Context, timeou
 // UpsertNodeTraffic 通过重新启动检测来更新或插入节点流量。
 // 如果当前值小于上次值，则意味着 Xray 已重新启动，
 // 所以我们在更新之前将最后的值累加到总计。
-func (r *TrafficRepository) UpsertNodeTraffic(ctx context.Context, serverID int64, tag, trafficType string, uplink, downlink int64) error {
+func (r *TrafficRepository) UpsertNodeTraffic(ctx context.Context, serverID int64, tag, trafficType string, uplink, downlink int64, isXrayRestarted bool) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
 	}
@@ -9536,22 +9676,33 @@ func (r *TrafficRepository) UpsertNodeTraffic(ctx context.Context, serverID int6
 		return nil
 	}
 
-	// 检查 Xray 是否重新启动（当前 < 上次）
+	// 重启判定权威来自 isXrayRestarted(由 collector 用 xray_boot_time 判断),不再用 new<last 启发式。
+	// 历史 BUG:启发式把 inbound client 增删导致的 user counter reset 误判为 xray 重启 →
+	// total_* 渐进累积(user_email_traffic 591MB vs node_traffic 209MB 的 382MB 差额)。
 	var deltaUplink, deltaDownlink int64
 	var newTotalUplink, newTotalDownlink int64
 
-	if uplink < existing.LastUplink || downlink < existing.LastDownlink {
-		// Xray 重新启动 - 将最后的值累加到总计
-		log.Printf("[Traffic] Detected Xray restart for server %d, %s tag %s: uplink %d -> %d, downlink %d -> %d (accumulating to total)",
+	if isXrayRestarted {
+		// Xray 真重启 — 把上次 cumulative 归档到 total,delta 用新 cumulative 起算。
+		log.Printf("[Traffic] Xray restart for server %d, %s tag %s: uplink %d -> %d, downlink %d -> %d (accumulating to total)",
 			serverID, trafficType, tag, existing.LastUplink, uplink, existing.LastDownlink, downlink)
 		newTotalUplink = existing.TotalUplink + existing.LastUplink
 		newTotalDownlink = existing.TotalDownlink + existing.LastDownlink
 		deltaUplink = uplink
 		deltaDownlink = downlink
 	} else {
-		// 正常情况 - 计算 delta
-		deltaUplink = uplink - existing.LastUplink
-		deltaDownlink = downlink - existing.LastDownlink
+		// 非 xray 重启 — counter 任何下降都视为 client 被删/重加(非真重启),不污染 total。
+		// delta 用 max(0, new - last),避免负数 / cumulative 倒退被错误累加。
+		if uplink >= existing.LastUplink {
+			deltaUplink = uplink - existing.LastUplink
+		} else {
+			deltaUplink = 0
+		}
+		if downlink >= existing.LastDownlink {
+			deltaDownlink = downlink - existing.LastDownlink
+		} else {
+			deltaDownlink = 0
+		}
 		newTotalUplink = existing.TotalUplink
 		newTotalDownlink = existing.TotalDownlink
 	}
@@ -9619,7 +9770,7 @@ func (r *TrafficRepository) GetAllNodeTraffic(ctx context.Context) ([]NodeTraffi
 // ==================== 用户流量CRUD ====================
 
 // 通过重新启动检测来更新或插入用户流量。
-func (r *TrafficRepository) UpsertUserTraffic(ctx context.Context, serverID int64, username string, uplink, downlink int64) error {
+func (r *TrafficRepository) UpsertUserTraffic(ctx context.Context, serverID int64, username string, uplink, downlink int64, isXrayRestarted bool) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
 	}
@@ -9654,22 +9805,28 @@ func (r *TrafficRepository) UpsertUserTraffic(ctx context.Context, serverID int6
 		return nil
 	}
 
-	// 检查 Xray 是否重新启动（当前 < 上次）
+	// 重启判定来自 isXrayRestarted(详见 UpsertNodeTraffic 同款注释)。
 	var deltaUplink, deltaDownlink int64
 	var newTotalUplink, newTotalDownlink int64
 
-	if uplink < existing.LastUplink || downlink < existing.LastDownlink {
-		// Xray 重新启动 - 将最后的值累加到总计
-		log.Printf("[Traffic] Detected Xray restart for server %d, user %s: uplink %d -> %d, downlink %d -> %d (accumulating to total)",
+	if isXrayRestarted {
+		log.Printf("[Traffic] Xray restart for server %d, user %s: uplink %d -> %d, downlink %d -> %d (accumulating to total)",
 			serverID, username, existing.LastUplink, uplink, existing.LastDownlink, downlink)
 		newTotalUplink = existing.TotalUplink + existing.LastUplink
 		newTotalDownlink = existing.TotalDownlink + existing.LastDownlink
 		deltaUplink = uplink
 		deltaDownlink = downlink
 	} else {
-		// 正常情况 - 计算 delta
-		deltaUplink = uplink - existing.LastUplink
-		deltaDownlink = downlink - existing.LastDownlink
+		if uplink >= existing.LastUplink {
+			deltaUplink = uplink - existing.LastUplink
+		} else {
+			deltaUplink = 0
+		}
+		if downlink >= existing.LastDownlink {
+			deltaDownlink = downlink - existing.LastDownlink
+		} else {
+			deltaDownlink = 0
+		}
 		newTotalUplink = existing.TotalUplink
 		newTotalDownlink = existing.TotalDownlink
 	}
@@ -9702,7 +9859,7 @@ type UserEmailTraffic struct {
 // UpsertUserEmailTraffic 跟 UpsertUserTraffic 完全一样的 delta/restart 检测逻辑,key 换成 email。
 // collector 同一次循环里跟 UpsertUserTraffic 并行调用,**双写两张表**:user_traffic 按 username
 // 聚合(老路径不变),user_email_traffic 保留 email 细分(新功能用)。
-func (r *TrafficRepository) UpsertUserEmailTraffic(ctx context.Context, serverID int64, email string, uplink, downlink int64) error {
+func (r *TrafficRepository) UpsertUserEmailTraffic(ctx context.Context, serverID int64, email string, uplink, downlink int64, isXrayRestarted bool) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
 	}
@@ -9733,17 +9890,25 @@ func (r *TrafficRepository) UpsertUserEmailTraffic(ctx context.Context, serverID
 		return nil
 	}
 
+	// 重启判定来自 isXrayRestarted(详见 UpsertNodeTraffic 同款注释 — 历史 BUG 的核心来源就在这里)。
 	var deltaUplink, deltaDownlink int64
 	var newTotalUplink, newTotalDownlink int64
-	if uplink < existing.LastUplink || downlink < existing.LastDownlink {
-		// Xray 重启 — total 累计旧 last,delta 用新值起算
+	if isXrayRestarted {
 		newTotalUplink = existing.TotalUplink + existing.LastUplink
 		newTotalDownlink = existing.TotalDownlink + existing.LastDownlink
 		deltaUplink = uplink
 		deltaDownlink = downlink
 	} else {
-		deltaUplink = uplink - existing.LastUplink
-		deltaDownlink = downlink - existing.LastDownlink
+		if uplink >= existing.LastUplink {
+			deltaUplink = uplink - existing.LastUplink
+		} else {
+			deltaUplink = 0
+		}
+		if downlink >= existing.LastDownlink {
+			deltaDownlink = downlink - existing.LastDownlink
+		} else {
+			deltaDownlink = 0
+		}
 		newTotalUplink = existing.TotalUplink
 		newTotalDownlink = existing.TotalDownlink
 	}
