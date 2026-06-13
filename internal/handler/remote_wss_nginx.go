@@ -145,12 +145,16 @@ type wssInboundInfo struct {
 	Port   string
 }
 
-// syncWSSNginx 查该 server 所有 vless+ws 入站,聚合渲染 nginx domain.conf 并下发 agent。
+// SyncWSSNginx 查该 server 所有 vless+ws 入站,聚合渲染 nginx domain.conf 并下发 agent。
 // 关键约束:
 //   - server.domain 必须有(无域名直接跳过,日志即可)
 //   - 根域必须有可用证书(无证书直接跳过 — 调用前前端已预检,只兜底)
 //   - 不下发主 nginx.conf(留空),只覆盖 servers/{domain}.conf
-func (h *RemoteManageHandler) syncWSSNginx(ctx context.Context, serverID int64) error {
+//   - infos 为空(用户删完所有 WSS 入站)时也走渲染流程下发空 location 的 server 块,
+//     借模板的 default `location / { return 404; }` 兜底,把旧 location 全部覆盖,避免死 backend 残留。
+//
+// 大写导出:nodes.go 的 deleteRemoteInbound 也要调,删节点路径不走 HandleInbounds remove。
+func (h *RemoteManageHandler) SyncWSSNginx(ctx context.Context, serverID int64) error {
 	server, err := h.repo.GetRemoteServer(ctx, serverID)
 	if err != nil {
 		return fmt.Errorf("server not found: %v", err)
@@ -223,11 +227,11 @@ func (h *RemoteManageHandler) syncWSSNginx(ctx context.Context, serverID int64) 
 		infos = append(infos, wssInboundInfo{WSPath: path, Port: portStr})
 	}
 
+	// 空 infos 也继续走模板渲染:渲染后是「只有 ssl 配置 + 默认 404 location」的 server 块,
+	// 覆盖 servers/{domain}.conf 后,旧的 WSS location 全部被冲掉,不再残留死 backend。
+	// 当前架构假设 WSS 与 reality 在同 domain 互斥(同 conf 文件覆盖),没有共存场景下的副作用。
 	if len(infos) == 0 {
-		// 用户删了所有 WSS 入站。reality 等其它 nginx 配置可能存在,我们不主动删 servers/{domain}.conf
-		// (避免误删 reality 配置)。残留 location 已经没有 backend,nginx 会 504,但不影响其它服务。
-		log.Printf("[WSS-Nginx] server %d domain=%s 已无 vless+ws 入站,跳过下发", serverID, domain)
-		return nil
+		log.Printf("[WSS-Nginx] server %d domain=%s 已无 vless+ws 入站,下发空 location 兜底(覆盖残留)", serverID, domain)
 	}
 
 	tplBytes, err := templates.ReadFile("wss_domain.conf.tpl")

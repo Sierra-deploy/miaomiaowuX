@@ -1039,14 +1039,9 @@ func (h *nodesHandler) handleDelete(w http.ResponseWriter, r *http.Request, idSe
 		}
 	}
 
-	// 如果节点链接到远程服务器:routed 节点只需清掉它绑定的 outbound + rule(不能动 inbound,会误删其它节点);
-	// 普通物理节点保持原来"清掉整个 inbound"的行为。
-	if !nodeNotFound && node.OriginalServer != "" {
-		if node.NodeType == "routed" && node.RoutedOutboundTag != "" {
-			h.deleteRemoteRoutedOutbound(r.Context(), node.OriginalServer, node.RoutedOutboundTag)
-		} else if node.InboundTag != "" {
-			h.deleteRemoteInbound(r.Context(), node.OriginalServer, node.InboundTag)
-		}
+	// 远程闭环:routed 清 rule+outbound+client,physical 清 inbound(并兜底刷 nginx)。单删 / 批删共用 helper。
+	if !nodeNotFound {
+		h.cleanupRemoteForNode(r.Context(), &node)
 	}
 
 	// 删除节点(按权限:管理员任意,普通用户仅自己的)
@@ -1155,35 +1150,25 @@ func (h *nodesHandler) handleBatchDelete(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// 在删除之前获取所有节点信息以进行 YAML 同步和远程入站清理
-	type nodeInfo struct {
-		name           string
-		originalServer string
-		inboundTag     string
-	}
 	isAdmin := userIsAdmin(r.Context(), h.repo, username)
 
 	// 只处理调用者有权访问的节点(管理员任意,普通用户仅自己的)。
+	// 保留完整 *storage.Node:后续 cleanupRemoteForNode 需要 NodeType + RoutedOutboundTag 判断分支,
+	// 之前 nodeInfo 只存 inboundTag → routed 节点走 deleteRemoteInbound 误删父 inbound、漏清 outbound/rule。
 	accessibleIDs := make([]int64, 0, len(req.NodeIDs))
-	nodes := make([]nodeInfo, 0, len(req.NodeIDs))
+	nodes := make([]storage.Node, 0, len(req.NodeIDs))
 	for _, id := range req.NodeIDs {
 		node, err := h.fetchNodeForAccess(r.Context(), id, username, isAdmin)
 		if err != nil {
 			continue
 		}
 		accessibleIDs = append(accessibleIDs, id)
-		nodes = append(nodes, nodeInfo{
-			name:           node.NodeName,
-			originalServer: node.OriginalServer,
-			inboundTag:     node.InboundTag,
-		})
+		nodes = append(nodes, node)
 	}
 
-	// 删除座席的远程入站
-	for _, n := range nodes {
-		if n.originalServer != "" && n.inboundTag != "" {
-			h.deleteRemoteInbound(r.Context(), n.originalServer, n.inboundTag)
-		}
+	// 远程闭环(routed → outbound+rule+client;physical → inbound,WSS 兜底刷 nginx)
+	for i := range nodes {
+		h.cleanupRemoteForNode(r.Context(), &nodes[i])
 	}
 
 	// 从数据库中删除节点(按权限)
@@ -1198,8 +1183,8 @@ func (h *nodesHandler) handleBatchDelete(w http.ResponseWriter, r *http.Request)
 	// 使用同步管理器批量同步删除 YAML 文件
 	nodeNames := make([]string, 0, len(nodes))
 	for _, n := range nodes {
-		if n.name != "" {
-			nodeNames = append(nodeNames, n.name)
+		if n.NodeName != "" {
+			nodeNames = append(nodeNames, n.NodeName)
 		}
 	}
 	if len(nodeNames) > 0 {
@@ -1215,11 +1200,35 @@ func (h *nodesHandler) handleBatchDelete(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-// 通过 RemoteManageHandler 将删除入站请求转发给代理。
-// deleteRemoteRoutedOutbound:routed 节点删除时清掉服务器侧的 routing rule + outbound,但不动 inbound。
+// cleanupRemoteForNode 删节点(单删/批删)统一闭环入口:按节点类型选清理路径。
+//   - routed:清 routing rule + outbound + inbound 内 admin/sub clients(对称 routed_outbound.create)
+//   - physical:清 inbound(并在 WSS 场景兜底刷新 nginx,见 deleteRemoteInbound 末尾)
+//   - 无 originalServer / 全空:跳过(纯导入节点,本来没远程资源)
+//
+// 设计:本 helper 替代各调用方手抄 if-else 的旧模式,降低单删/批删行为分歧风险(批删之前漏判 routed)。
+// RoutedAdminEmail 不在 storage.Node 上(只在 RoutedNodeDetail),helper 内 routed 分支自动 fetch detail。
+func (h *nodesHandler) cleanupRemoteForNode(ctx context.Context, node *storage.Node) {
+	if node == nil || node.OriginalServer == "" {
+		return
+	}
+	if node.NodeType == "routed" && node.RoutedOutboundTag != "" {
+		adminEmail := ""
+		if detail, err := h.repo.GetRoutedNodeDetail(ctx, node.ID); err == nil {
+			adminEmail = detail.RoutedAdminEmail
+		}
+		h.deleteRemoteRoutedOutbound(ctx, node.OriginalServer, node.RoutedOutboundTag, node.InboundTag, adminEmail, node.ID)
+		return
+	}
+	if node.InboundTag != "" {
+		h.deleteRemoteInbound(ctx, node.OriginalServer, node.InboundTag)
+	}
+}
+
+// deleteRemoteRoutedOutbound:routed 节点删除时清掉服务器侧的 routing rule + outbound + inbound 内 admin/sub clients。
 // 同 outboundTag 的 rule 可能不止一条(理论上 sync 单一对一,防御性地全删);outbound 按 tag 删一次。
-// inbound 里的 client 留着 — 节点配置已经删了,client 留着也无害,后续如果重建可以复用同凭据。
-func (h *nodesHandler) deleteRemoteRoutedOutbound(ctx context.Context, serverName, outboundTag string) {
+// inbound 内的占位 client(admin 占位 + 全部 sub 子账号)对称 routed_outbound.create 的 add client 步骤,
+// 不清会污染 inbound clients(后续重建会 dup,且数据冗余)。
+func (h *nodesHandler) deleteRemoteRoutedOutbound(ctx context.Context, serverName, outboundTag, inboundTag, adminEmail string, nodeID int64) {
 	if h.remoteManage == nil {
 		return
 	}
@@ -1254,6 +1263,22 @@ func (h *nodesHandler) deleteRemoteRoutedOutbound(ctx context.Context, serverNam
 	} else {
 		log.Printf("[Nodes] routed delete: cleared rule+outbound %s on %s", outboundTag, serverName)
 	}
+	// 3. 清 inbound 内 admin/sub 占位 client(对称 routed_outbound.create:194-207)
+	if inboundTag != "" {
+		subaccs, _ := h.repo.ListSubaccountsByRoutedNode(ctx, nodeID)
+		for _, sa := range subaccs {
+			if sa.Email != "" {
+				if err := removeClientFromInbound(ctx, h.remoteManage, server.ID, inboundTag, sa.Email); err != nil {
+					log.Printf("[Nodes] routed delete: remove sub client (server=%s inbound=%s email=%s) failed: %v", serverName, inboundTag, sa.Email, err)
+				}
+			}
+		}
+		if adminEmail != "" {
+			if err := removeClientFromInbound(ctx, h.remoteManage, server.ID, inboundTag, adminEmail); err != nil {
+				log.Printf("[Nodes] routed delete: remove admin client (server=%s inbound=%s email=%s) failed: %v", serverName, inboundTag, adminEmail, err)
+			}
+		}
+	}
 }
 
 func (h *nodesHandler) deleteRemoteInbound(ctx context.Context, serverName, inboundTag string) {
@@ -1274,9 +1299,19 @@ func (h *nodesHandler) deleteRemoteInbound(ctx context.Context, serverName, inbo
 
 	if _, err := h.remoteManage.forwardToRemoteServer(ctx, server.ID, "POST", "/api/child/inbounds", body); err != nil {
 		log.Printf("[Nodes] Failed to delete remote inbound %s on server %s: %v", inboundTag, serverName, err)
-	} else {
-		log.Printf("[Nodes] Deleted remote inbound %s on server %s", inboundTag, serverName)
+		return
 	}
+	log.Printf("[Nodes] Deleted remote inbound %s on server %s", inboundTag, serverName)
+
+	// 删的可能是 vless+ws,跟 HandleInbounds remove 路径保持一致 — 异步聚合重渲 nginx,
+	// 清掉对应 location;若 server 上已无任何 WSS 入站,SyncWSSNginx 内部会下发只含 default 404
+	// 的兜底 server 块,把残留 location 全冲掉。
+	serverID := server.ID
+	go func() {
+		if err := h.remoteManage.SyncWSSNginx(context.Background(), serverID); err != nil {
+			log.Printf("[Nodes] SyncWSSNginx after delete inbound %s on server=%d failed: %v", inboundTag, serverID, err)
+		}
+	}()
 }
 
 func (h *nodesHandler) handleBatchRename(w http.ResponseWriter, r *http.Request) {

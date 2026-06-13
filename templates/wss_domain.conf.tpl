@@ -28,4 +28,10 @@
             proxy_read_timeout 5d;
         }
 {{end}}
+
+        # 兜底:精确 location 未命中(也包括 WSS 入站全删完时)一律 404,避免老 path 残留命中已死 upstream。
+        # 精确匹配 `location = /ws/xxx` 优先级高于前缀 `/`,正常 WSS 流量不受影响。
+        location / {
+            return 404;
+        }
     }

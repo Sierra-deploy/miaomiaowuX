@@ -1927,7 +1927,7 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 					// VLESS+WS 入站添加成功 → 异步聚合渲染该 server 全部 WSS location 下发 nginx
 					if isVlessWSInboundReq(inboundReq) {
 						go func() {
-							if err := h.syncWSSNginx(context.Background(), id); err != nil {
+							if err := h.SyncWSSNginx(context.Background(), id); err != nil {
 								log.Printf("[WSS-Nginx] sync after add server=%d failed: %v", id, err)
 							}
 						}()
@@ -1947,7 +1947,7 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 					}
 					// 不知道被删的入站是否 vless+ws,稳妥起见每次 remove 都触发 sync(代价是一次 GET inbounds + 渲染)
 					go func() {
-						if err := h.syncWSSNginx(context.Background(), id); err != nil {
+						if err := h.SyncWSSNginx(context.Background(), id); err != nil {
 							log.Printf("[WSS-Nginx] sync after remove server=%d failed: %v", id, err)
 						}
 					}()
