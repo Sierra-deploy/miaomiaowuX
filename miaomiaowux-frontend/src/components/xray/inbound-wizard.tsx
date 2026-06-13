@@ -71,6 +71,7 @@ import { Twemoji } from '@/components/twemoji'
 import { ArrayField } from './array-field'
 import { FormField } from './form-field'
 import { VlessDecryptionField } from './vless-decryption-field'
+import { WssPrecheckDialog } from './wss-precheck-dialog'
 
 
 // Security protocol display labels - needs t() at call site
@@ -675,7 +676,22 @@ function DesktopInboundWizard({
     setSelectedProtocol(protocol)
   }
 
+  // WSS 入站需要远程服务器 nginx + 证书联动,选 WSS 时先弹预检 dialog;
+  // 预检全部通过(nginx 装好 + 有证书)才继续,否则用户得自己「手动配置」或先去补 nginx/证书
+  const [wssPrecheckOpen, setWssPrecheckOpen] = useState(false)
+  const [pendingWssTransport, setPendingWssTransport] = useState<string | null>(null)
+
   const handleTransportSelect = (transport: string) => {
+    if (transport === 'WSS') {
+      // 没选服务器就不能预检 — 等用户先选服务器
+      if (!effectiveServerId) {
+        setSelectedTransport(transport)
+        return
+      }
+      setPendingWssTransport(transport)
+      setWssPrecheckOpen(true)
+      return
+    }
     setSelectedTransport(transport)
   }
 
@@ -1136,8 +1152,7 @@ function DesktopInboundWizard({
       }
       if (selectedTransport === 'Websocket' && !submitData.path)
         submitData.path = '/ws'
-      if (selectedTransport === 'WSS' && !submitData.path)
-        submitData.path = '/wss'
+      // WSS path 由后端强制随机化,前端不再填默认值,避免可猜路径泄漏
       if (selectedTransport === 'XHTTP' && !submitData.path)
         submitData.path = '/xhttp'
       if (selectedTransport === 'XHTTP' && !submitData.mode)
@@ -1789,16 +1804,32 @@ function DesktopInboundWizard({
                               <p className='text-xs text-muted-foreground'>{t('wizard.nodeNameDesc')}</p>
                             </div>
                           )}
-                          {commonFields.map((field) => (
-                            <FormField
-                              key={field.name}
-                              field={field}
-                              value={formData[field.name]}
-                              onChange={(value) =>
-                                handleFieldChange(field.name, value)
+                          {/* WSS 入站:port / listen 由后端强制分配 + 改写成 127.0.0.1,这里隐藏,显示提示 */}
+                          {selectedTransport === 'WSS' && (
+                            <div className='rounded-md border border-blue-300 bg-blue-50 p-3 text-xs text-blue-700 dark:border-blue-400/60 dark:bg-blue-900/20 dark:text-blue-200'>
+                              {t('wizard.wssAutoPortPathHint', {
+                                defaultValue:
+                                  'WSS 入站走 nginx 反代,本地监听端口与 /ws/<随机>path 提交后由系统自动生成,创建后可在节点详情查看。',
+                              })}
+                            </div>
+                          )}
+                          {commonFields
+                            .filter((field) => {
+                              if (selectedTransport === 'WSS') {
+                                return field.name !== 'port' && field.name !== 'listen'
                               }
-                            />
-                          ))}
+                              return true
+                            })
+                            .map((field) => (
+                              <FormField
+                                key={field.name}
+                                field={field}
+                                value={formData[field.name]}
+                                onChange={(value) =>
+                                  handleFieldChange(field.name, value)
+                                }
+                              />
+                            ))}
                         </CardContent>
                       </Card>
 
@@ -2279,6 +2310,21 @@ function DesktopInboundWizard({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* WSS 入站预检 — 选 WSS transport 时阻拦,nginx + 证书都就绪才 onPass 继续 */}
+      <WssPrecheckDialog
+        open={wssPrecheckOpen}
+        onOpenChange={(v) => {
+          setWssPrecheckOpen(v)
+          if (!v) setPendingWssTransport(null)
+        }}
+        serverId={effectiveServerId}
+        onPass={() => {
+          if (pendingWssTransport) setSelectedTransport(pendingWssTransport)
+          setWssPrecheckOpen(false)
+          setPendingWssTransport(null)
+        }}
+      />
     </div>
   )
 }

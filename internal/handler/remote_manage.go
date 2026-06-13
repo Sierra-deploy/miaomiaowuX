@@ -1847,6 +1847,24 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
+	// VLESS + WSS 入站添加:强制 listen=127.0.0.1、自动分配本地端口、自动随机 path、security=none
+	// (TLS 由 nginx 在 443 处理,xray 只接 ws upgrade)。后续 forward 成功再调 syncWSSNginx 聚合渲染。
+	// per-server 锁:防止并发添加抢到同一端口。
+	if r.Method == http.MethodPost && inboundReq != nil {
+		if action, _ := inboundReq["action"].(string); (action == "" || strings.ToLower(action) == "add") && isVlessWSInboundReq(inboundReq) {
+			lock := wssServerLock(id)
+			lock.Lock()
+			defer lock.Unlock()
+			newBody, perr := h.preprocessWSSInbound(r.Context(), id, body, inboundReq)
+			if perr != nil {
+				remoteWriteError(w, http.StatusBadGateway, perr.Error())
+				return
+			}
+			body = newBody
+			_ = json.Unmarshal(body, &inboundReq)
+		}
+	}
+
 	// TLS 入站兜底校验:hysteria2 / vless+tls / trojan 等必须 TLS 的协议,前端漏填证书时
 	// xray-core 的错是 "both file and bytes are empty",对用户不友好且让人怀疑后端 bug。
 	// 这里在 forward 前明确拒绝并给出用户能看懂的提示。
@@ -1906,6 +1924,14 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 							ForwardNodeID: int64(forwardNodeID),
 						})
 					}
+					// VLESS+WS 入站添加成功 → 异步聚合渲染该 server 全部 WSS location 下发 nginx
+					if isVlessWSInboundReq(inboundReq) {
+						go func() {
+							if err := h.syncWSSNginx(context.Background(), id); err != nil {
+								log.Printf("[WSS-Nginx] sync after add server=%d failed: %v", id, err)
+							}
+						}()
+					}
 				} else if actionLower == "remove" {
 					// 删除入站：发布事件
 					if tag, ok := inboundReq["tag"].(string); ok && tag != "" {
@@ -1919,6 +1945,12 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 					if len(preDeleteRealityDomains) > 0 {
 						go h.restoreTunnelRouteForReality(context.Background(), id, preDeleteRealityDomains)
 					}
+					// 不知道被删的入站是否 vless+ws,稳妥起见每次 remove 都触发 sync(代价是一次 GET inbounds + 渲染)
+					go func() {
+						if err := h.syncWSSNginx(context.Background(), id); err != nil {
+							log.Printf("[WSS-Nginx] sync after remove server=%d failed: %v", id, err)
+						}
+					}()
 				}
 			}
 		}
@@ -2009,6 +2041,12 @@ func (h *RemoteManageHandler) autoSyncInboundToNodes(ctx context.Context, server
 				tunnelPort = 443
 			}
 		}
+	}
+	// WSS 入站 → 客户端视角 (port 443, sni, Host header)。覆盖上面 tunnel 端口判断,因为
+	// listen=127.0.0.1 的 WSS 入站本来就跟 tunnel 互斥。
+	if effPort, effHost := applyWSSClientRewrite(inbound, server); effPort > 0 {
+		tunnelPort = effPort
+		serverHost = effHost
 	}
 	clashProxy, err := h.inboundToClashProxy(inbound, serverHost, server.Name, tunnelPort)
 	if err != nil {
@@ -2586,7 +2624,12 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 		if tunnelInSettingsPort > 0 && int(port) == tunnelInSettingsPort {
 			tunnelPort = 443
 		}
-		clashProxy, err := h.inboundToClashProxy(inbound, serverHost, server.Name, tunnelPort)
+		effectiveServerHost := serverHost
+		if effPort, effHost := applyWSSClientRewrite(inbound, server); effPort > 0 {
+			tunnelPort = effPort
+			effectiveServerHost = effHost
+		}
+		clashProxy, err := h.inboundToClashProxy(inbound, effectiveServerHost, server.Name, tunnelPort)
 		if err != nil {
 			response.Errors = append(response.Errors, fmt.Sprintf("tag=%s: %v", tag, err))
 			response.SkippedCount++
@@ -2923,7 +2966,12 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 				if tunnelInSettingsPort > 0 && int(port) == tunnelInSettingsPort {
 					tunnelPortForKey = 443
 				}
-				proxy, err := h.inboundToClashProxy(ib.rawInbound, serverHost, server.Name, tunnelPortForKey)
+				effectiveServerHostForKey := serverHost
+				if effPort, effHost := applyWSSClientRewrite(ib.rawInbound, server); effPort > 0 {
+					tunnelPortForKey = effPort
+					effectiveServerHostForKey = effHost
+				}
+				proxy, err := h.inboundToClashProxy(ib.rawInbound, effectiveServerHostForKey, server.Name, tunnelPortForKey)
 				if err != nil || proxy == nil {
 					log.Printf("[Remote Manage] auto-create routed node for email=%q skip: build clash failed: %v", email, err)
 					continue
@@ -3642,6 +3690,11 @@ func (h *RemoteManageHandler) InboundToClashProxyByServerID(serverID int64, inbo
 		inboundMap[k] = v
 	}
 
+	if effPort, effHost := applyWSSClientRewrite(inboundMap, server); effPort > 0 {
+		tunnelPort = effPort
+		serverHost = effHost
+	}
+
 	proxy, err := h.inboundToClashProxy(inboundMap, serverHost, server.Name, tunnelPort)
 	if err != nil {
 		return "", err
@@ -3653,6 +3706,57 @@ func (h *RemoteManageHandler) InboundToClashProxyByServerID(serverID int64, inbo
 	}
 
 	return string(clashJSON), nil
+}
+
+// applyWSSClientRewrite 若 inbound 是 VLESS WSS 入站(network=ws + security=none + listen 127.0.0.1),
+// 把 inboundMap 原地改写为"客户端视角"(security=tls, tlsSettings.serverName=domain, wsSettings.headers.Host=domain),
+// 并返回客户端连接用的端口(443) + serverHost(域名)。
+//
+// 否则不修改 inboundMap,返回 (0, "")。调用方据此判断是否覆盖默认 tunnelPort/serverHost。
+//
+// 设计上 server.Domain 必须有 — 没域名 nginx + TLS 链路根本起不来,所以 WSS 入站本来就要求 domain 存在。
+func applyWSSClientRewrite(inboundMap map[string]interface{}, server *storage.RemoteServer) (port int, host string) {
+	if server == nil || server.Domain == "" {
+		return 0, ""
+	}
+	if proto, _ := inboundMap["protocol"].(string); !strings.EqualFold(proto, "vless") {
+		return 0, ""
+	}
+	ss, _ := inboundMap["streamSettings"].(map[string]interface{})
+	if ss == nil {
+		return 0, ""
+	}
+	network, _ := ss["network"].(string)
+	security, _ := ss["security"].(string)
+	listen, _ := inboundMap["listen"].(string)
+	if network != "ws" || !(security == "" || security == "none") || !(listen == "127.0.0.1" || listen == "localhost") {
+		return 0, ""
+	}
+
+	// 不污染外面持有的 streamSettings,做浅拷贝
+	ssCopy := make(map[string]interface{}, len(ss)+1)
+	for k, v := range ss {
+		ssCopy[k] = v
+	}
+	ssCopy["security"] = "tls"
+	ssCopy["tlsSettings"] = map[string]interface{}{"serverName": server.Domain}
+
+	ws, _ := ssCopy["wsSettings"].(map[string]interface{})
+	wsCopy := make(map[string]interface{}, len(ws)+1)
+	for k, v := range ws {
+		wsCopy[k] = v
+	}
+	headers, _ := wsCopy["headers"].(map[string]interface{})
+	if headers == nil {
+		headers = map[string]interface{}{}
+	}
+	if _, ok := headers["Host"]; !ok {
+		headers["Host"] = server.Domain
+	}
+	wsCopy["headers"] = headers
+	ssCopy["wsSettings"] = wsCopy
+	inboundMap["streamSettings"] = ssCopy
+	return 443, server.Domain
 }
 
 // 重置服务器令牌（代理用于推送到服务器）

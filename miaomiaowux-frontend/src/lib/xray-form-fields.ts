@@ -215,14 +215,9 @@ export const transportFields: Record<string, Field[]> = {
     },
   ],
   WSS: [
-    {
-      name: 'path',
-      label: 'fields.path',
-      type: 'text',
-      placeholder: '/wss',
-      defaultValue: '/wss',
-      description: 'fields.pathDesc_wss',
-    },
+    // WSS 入站走 nginx 反代,xray 监听 127.0.0.1:<本地端口>,nginx 在 443 终结 TLS 后转发到 xray。
+    // 端口 + path 都由后端自动生成 + 强制覆盖(听 127.0.0.1,随机 path 避免被扫),前端这里不再要求用户填。
+    // 创建成功后可在节点详情查看实际 path / port。
   ],
 }
 

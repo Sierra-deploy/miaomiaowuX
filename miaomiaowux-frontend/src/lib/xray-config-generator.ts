@@ -230,6 +230,12 @@ function generateStreamSettings(formData: any, transport: string, security: stri
       streamSettings.wsSettings = {
         path: formData.path || '/ws',
       }
+      // VLESS WSS 入站走 nginx + xray:nginx 在 443 接 TLS,反代到 xray 127.0.0.1:<port>(ws upgrade)。
+      // 所以 streamSettings.security 必须 "none"(TLS 已被 nginx 终结),否则 xray 会再次握 TLS 直接挂。
+      // 后端 preprocessWSSInbound 也会强制 security=none + 自动分配 port + 随机 path,这里前端先填好语义一致。
+      if (transport === 'WSS') {
+        streamSettings.security = 'none'
+      }
       break
 
     case 'GRPC':
