@@ -237,13 +237,13 @@ func buildLoonRules(rules []string, ruleProviders map[string]ClashRuleProvider) 
 		}
 	}
 
-	result := strings.Join(lines, "\n")
-
-	// Append [Remote Rule] section if there are rule-providers
+	// [Remote Rule] 在 [Rule] 上面 — 跟 loon_kelee.lcf 模板和 Loon 习惯顺序一致
+	// (Loon 客户端解析按 section 头匹配,顺序对功能无影响,但用户预期/对照模板时一致)。
+	var result string
 	if len(remoteRules) > 0 {
-		result += "\n\n[Remote Rule]\n"
-		result += strings.Join(remoteRules, "\n")
+		result = "[Remote Rule]\n" + strings.Join(remoteRules, "\n") + "\n\n"
 	}
+	result += strings.Join(lines, "\n")
 
 	return result
 }
