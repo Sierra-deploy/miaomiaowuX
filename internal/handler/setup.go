@@ -342,17 +342,16 @@ func deployLocalNginx(domain string, repo *storage.TrafficRepository) error {
 	if nginxBin == "" {
 		return fmt.Errorf("未找到 nginx 可执行文件")
 	}
-	if err := exec.Command(nginxBin, "-s", "reload").Run(); err != nil {
-		logger.Warn("[本机Nginx] reload 失败，尝试启动", "error", err)
-		if startErr := exec.Command("systemctl", "start", "nginx").Run(); startErr != nil {
-			return fmt.Errorf("nginx 启动失败: %w", startErr)
-		}
+	if err := ensureNginxRunning(nginxBin); err != nil {
+		return fmt.Errorf("nginx 启动失败: %w", err)
 	}
 
-	// 确保 nginx 开机自启 — 主控部署一键脚本可能跳过 enable,服务器重启后 nginx 不起会让主控反代失效。
-	// 失败只 warn 不阻塞:enable 是补防御,主流程已经把 nginx 跑起来了。
-	if err := exec.Command("systemctl", "enable", "nginx").Run(); err != nil {
-		logger.Warn("[本机Nginx] systemctl enable nginx 失败 (开机自启未设置)", "error", err)
+	// 确保 nginx 开机自启 — 裸机部署一键脚本可能跳过 enable,服务器重启后 nginx 不起会让主控反代失效。
+	// 失败只 warn 不阻塞:enable 是补防御,主流程已经把 nginx 跑起来了。Docker 容器内没 systemd,跳过。
+	if !isDocker() {
+		if err := exec.Command("systemctl", "enable", "nginx").Run(); err != nil {
+			logger.Warn("[本机Nginx] systemctl enable nginx 失败 (开机自启未设置)", "error", err)
+		}
 	}
 	return nil
 }

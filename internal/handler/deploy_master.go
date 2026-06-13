@@ -151,10 +151,32 @@ func isNginxInstalled() bool {
 }
 
 func installNginxLocal() error {
+	// Docker 镜像里 nginx 已经 apt 预装 + symlink 兼容(见 Dockerfile),不用跑 install-nginx.sh —
+	// 那个脚本依赖 systemctl daemon-reload + enable --now,容器里没 systemd 会失败。
+	// findNginxBinary() 在 docker 镜像里通过 /usr/local/nginx/sbin/nginx 这条 symlink 找得到。
+	if isDocker() {
+		return nil
+	}
 	cmd := exec.Command("bash", "-c", "curl -fsSL https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/install-nginx.sh | bash")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// ensureNginxRunning 让 nginx 在跑:先尝试 `nginx -s reload`(已跑 → 重载 OK);失败说明没跑或 PID 文件丢,
+// 兜底拉起守护进程。
+//   - Docker 模式:直接 `nginx`(无参数会以 daemon 形式 fork);容器内没 systemd,systemctl 调用无意义
+//   - 裸机:`systemctl start nginx`(配合 install-nginx.sh 装好的 systemd unit + enable 开机自启)
+//
+// 三处 nginx 配置部署函数(EnableHTTPS / deployLocalNginx / deployLocalNginxWithCert)统一用本 helper。
+func ensureNginxRunning(nginxBin string) error {
+	if err := exec.Command(nginxBin, "-s", "reload").Run(); err == nil {
+		return nil
+	}
+	if isDocker() {
+		return exec.Command(nginxBin).Run()
+	}
+	return exec.Command("systemctl", "start", "nginx").Run()
 }
 
 func isPort443InUse() bool {
@@ -263,11 +285,9 @@ func (h *CertificateHandler) EnableHTTPS(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if err := exec.Command(nginxBin, "-s", "reload").Run(); err != nil {
-		if startErr := exec.Command("systemctl", "start", "nginx").Run(); startErr != nil {
-			respondJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": fmt.Sprintf("Nginx 启动失败: %v", startErr)})
-			return
-		}
+	if err := ensureNginxRunning(nginxBin); err != nil {
+		respondJSON(w, http.StatusInternalServerError, map[string]any{"success": false, "message": fmt.Sprintf("Nginx 启动失败: %v", err)})
+		return
 	}
 
 	newMasterURL := "https://" + domain

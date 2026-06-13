@@ -65,13 +65,26 @@ FROM debian:bookworm-slim
 
 WORKDIR /app
 
-# Install ca-certificates for HTTPS requests and gosu for privilege dropping
+# Install ca-certificates for HTTPS requests, gosu for privilege dropping, nginx for HTTPS reverse proxy.
+#
+# nginx 镜像内置:解决 docker 部署 + 点「部署到 HTTPS」时找不到 nginx 的问题。
+# 历史上 EnableHTTPS 会调 install-nginx.sh 编译 + systemctl 装 nginx,容器里没 systemd,装不上。
+# 现在镜像里直接 apt 装 nginx;现有代码硬编码 /usr/local/nginx/* 路径全部通过 symlink 兜底,
+# 业务代码零改动。容器内 reload 走 `nginx -s reload`/`nginx`(替代 systemctl),由 ensureNginxRunning 处理。
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
     gosu \
     wget \
-    && rm -rf /var/lib/apt/lists/*
+    nginx \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /usr/local/nginx/sbin /etc/nginx/cert /etc/nginx/servers /etc/nginx/stream_servers /etc/nginx/html \
+    && ln -sfn /usr/sbin/nginx           /usr/local/nginx/sbin/nginx \
+    && ln -sfn /etc/nginx/nginx.conf     /usr/local/nginx/nginx.conf \
+    && ln -sfn /etc/nginx/cert           /usr/local/nginx/cert \
+    && ln -sfn /etc/nginx/servers        /usr/local/nginx/servers \
+    && ln -sfn /etc/nginx/stream_servers /usr/local/nginx/stream_servers \
+    && ln -sfn /etc/nginx/html           /usr/local/nginx/html
 
 # Create non-root user
 RUN groupadd -g 1000 appuser && \
