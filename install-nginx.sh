@@ -264,7 +264,10 @@ WantedBy=multi-user.target
 EOF
 
     $USE_SUDO systemctl daemon-reload
-    print_info "systemd 服务创建完成"
+    # 开机自启 — 不加这一行的话,服务器重启后 nginx 不起,主控/agent 反代全挂。
+    # `enable --now` 同步启动一次,装完立刻可用(后续 setup-ssl reload 才不会因为 nginx 没起而失败)。
+    $USE_SUDO systemctl enable --now nginx
+    print_info "systemd 服务创建完成,已 enable 开机自启并启动"
 }
 
 # 设置端口权限
@@ -322,13 +325,15 @@ show_info() {
     echo -e "配置文件: ${YELLOW}${NGINX_ROOT_PATH}/nginx.conf${NC}"
     echo -e "日志目录: ${YELLOW}/var/log/nginx/${NC}"
     echo ""
+    echo -e "${GREEN}状态:${NC}"
+    echo -e "  已 ${YELLOW}enable --now${NC} —— 已启动并设置开机自启"
+    echo ""
     echo -e "${GREEN}常用命令:${NC}"
     echo -e "  启动服务: ${YELLOW}systemctl start nginx${NC}"
     echo -e "  停止服务: ${YELLOW}systemctl stop nginx${NC}"
     echo -e "  重启服务: ${YELLOW}systemctl restart nginx${NC}"
     echo -e "  重载配置: ${YELLOW}systemctl reload nginx${NC}"
     echo -e "  查看状态: ${YELLOW}systemctl status nginx${NC}"
-    echo -e "  开机自启: ${YELLOW}systemctl enable nginx${NC}"
     echo ""
     echo -e "  测试配置: ${YELLOW}${NGINX_ROOT_PATH}/sbin/nginx -t${NC}"
     echo -e "  查看版本: ${YELLOW}${NGINX_ROOT_PATH}/sbin/nginx -v${NC}"
@@ -354,12 +359,6 @@ main() {
     copy_default_config
     cleanup
     show_info
-
-    if [ -n "$USE_SUDO" ]; then
-        print_info "您可以运行 'sudo systemctl start nginx' 来启动 nginx"
-    else
-        print_info "您可以运行 'systemctl start nginx' 来启动 nginx"
-    fi
 }
 
 # 运行主函数
