@@ -166,6 +166,8 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.2.6 (2026-06-14)
+- 🛠️ fix:迁移前端代码到单独的仓库
 ### v0.2.5 (2026-06-14)
 - 迁移前端代码到单独的仓库
 - 🌈docker镜像内置nginx(beta)
