@@ -38,15 +38,36 @@ fi
 # 1. 构建前端
 echo ""
 echo "[1/3] 构建前端项目..."
-cd "$FRONTEND_DIR"
-if [ ! -d "node_modules" ]; then
-    echo "安装前端依赖..."
-    npm install
-fi
 
-echo "编译前端代码..."
-npm run build
-cd ..
+# 前端源码已迁到独立私有 repo,本仓库不再含前端 source。开发者需手动 clone 到 $FRONTEND_DIR/。
+# 已有 internal/web/dist/(从 release artifact 拉的 / CI 跑过的)+ SKIP_FRONTEND=1 → 跳过 npm,直接用现有 dist。
+if [ "${SKIP_FRONTEND:-0}" = "1" ]; then
+    echo "SKIP_FRONTEND=1, 跳过前端 build,沿用 internal/web/dist 现有产物"
+    if [ ! -d "internal/web/dist" ] || [ -z "$(ls -A internal/web/dist 2>/dev/null)" ]; then
+        echo "❌ internal/web/dist 为空,无法跳过 build"
+        echo "   要么 unset SKIP_FRONTEND 跑完整流程,要么先拉一份 dist 产物放进去"
+        exit 1
+    fi
+elif [ ! -d "$FRONTEND_DIR" ]; then
+    echo "❌ 前端源码不存在: $FRONTEND_DIR/"
+    echo ""
+    echo "本仓库不含前端 source,请先 clone 私有前端 repo:"
+    echo "  git clone git@github.com:<OWNER>/<FRONTEND-REPO>.git $FRONTEND_DIR"
+    echo ""
+    echo "或仅 build 后端(沿用现有 dist):"
+    echo "  SKIP_FRONTEND=1 ./build.sh"
+    exit 1
+else
+    cd "$FRONTEND_DIR"
+    if [ ! -d "node_modules" ]; then
+        echo "安装前端依赖..."
+        npm install
+    fi
+
+    echo "编译前端代码..."
+    npm run build
+    cd ..
+fi
 echo "前端构建完成 ✓"
 
 # 2. 构建 Go 后端 (Linux)

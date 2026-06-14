@@ -2,6 +2,16 @@
 # 自动发布脚本
 # 触发方式：commit message 包含 [release] 时由 post-commit hook 调用
 # 流程：bump version -> 更新 README changelog -> commit -> tag -> push -> 创建 GitHub Release
+#
+# 用法:
+#   bash scripts/release.sh           # bump patch (0.2.4 -> 0.2.5)
+#   bash scripts/release.sh minor     # bump minor (0.2.4 -> 0.3.0)
+#   bash scripts/release.sh major     # bump major (0.2.4 -> 1.0.0)
+#   bash scripts/release.sh 0.5.0     # 直接指定版本号
+#
+# 历史背景:之前从 miaomiaowux-frontend/package.json 用 npm version bump,前端迁私有 repo 后
+# 改成后端 internal/version/version.go 作唯一来源,bump 用纯 bash awk 解析 X.Y.Z 自增。
+# 前端版本号同 tag 由私有 repo 自管,不再 cross-update。
 
 set -e
 
@@ -29,17 +39,35 @@ echo ""
 
 # 1. bump version
 echo "[1/5] 升级版本号..."
-cd "$PROJECT_ROOT/miaomiaowux-frontend"
-if [ -n "$1" ]; then
-  npm version "$1" --no-git-tag-version
-else
-  npm version patch --no-git-tag-version
+CURRENT_VERSION=$(grep 'const Version' "${PROJECT_ROOT}/internal/version/version.go" | sed -n 's/.*"\(.*\)".*/\1/p')
+if [ -z "$CURRENT_VERSION" ]; then
+  echo "[ERROR] 无法从 internal/version/version.go 读取现有版本号"
+  exit 1
 fi
-NEW_VERSION=$(node -p "require('./package.json').version")
-cd "$PROJECT_ROOT"
 
-# 同步版本号到其他文件
-bash scripts/sync-version.sh
+BUMP_ARG="${1:-patch}"
+case "$BUMP_ARG" in
+  major)
+    NEW_VERSION=$(echo "$CURRENT_VERSION" | awk -F. '{printf "%d.0.0", $1+1}')
+    ;;
+  minor)
+    NEW_VERSION=$(echo "$CURRENT_VERSION" | awk -F. '{printf "%d.%d.0", $1, $2+1}')
+    ;;
+  patch)
+    NEW_VERSION=$(echo "$CURRENT_VERSION" | awk -F. '{printf "%d.%d.%d", $1, $2, $3+1}')
+    ;;
+  [0-9]*.[0-9]*.[0-9]*)
+    # 直接指定 X.Y.Z
+    NEW_VERSION="$BUMP_ARG"
+    ;;
+  *)
+    echo "[ERROR] 无效的 bump 参数: $BUMP_ARG (应为 major / minor / patch 或 X.Y.Z)"
+    exit 1
+    ;;
+esac
+
+# 写新版本到 version.go + install.sh + quick-install.sh
+bash scripts/sync-version.sh "$NEW_VERSION"
 
 echo "  -> 新版本: v${NEW_VERSION}"
 

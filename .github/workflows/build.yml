@@ -14,6 +14,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 前端源码在独立私有 repo,用 FRONTEND_PAT (fine-grained PAT,只读私有前端 repo) checkout 到本地。
+      # ref: 用同名 tag/branch,跟后端版本严格对齐。FRONTEND_REPO 形如 owner/repo-name。
+      # 用 vars.FRONTEND_REPO 把 repo 全名外移,避免硬编码 + 方便 fork 改名后不动 workflow。
+      - name: Checkout private frontend
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.FRONTEND_REPO }}
+          token: ${{ secrets.FRONTEND_PAT }}
+          path: miaomiaowux-frontend
+          ref: ${{ github.ref_name }}
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -82,6 +93,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Checkout private frontend
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.FRONTEND_REPO }}
+          token: ${{ secrets.FRONTEND_PAT }}
+          path: miaomiaowux-frontend
+          ref: ${{ github.ref_name }}
+
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -139,6 +158,14 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Checkout private frontend
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ vars.FRONTEND_REPO }}
+          token: ${{ secrets.FRONTEND_PAT }}
+          path: miaomiaowux-frontend
+          ref: ${{ github.ref_name }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
