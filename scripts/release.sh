@@ -111,10 +111,10 @@ if [ ! -d "$FRONTEND_DIR/.git" ]; then
   exit 1
 fi
 
-echo "[4/6] 前端 repo 打同名 tag v${NEW_VERSION}..."
+echo "[4/6] 前端 repo 同步版本号 + 打同名 tag v${NEW_VERSION}..."
 pushd "$FRONTEND_DIR" >/dev/null
 
-# 前端 working tree 必须干净 — 否则 tag 会指向脏状态的 commit,而 CI 拉的是 origin tag,内容不一致
+# 前端 working tree 必须干净 — 否则脏状态的改动会跟下面 sed 的改动混在同一个 commit,语义混乱
 if ! git diff-index --quiet HEAD --; then
   echo "[ERROR] 前端 repo working tree 有未 commit 改动,请先 commit + push 再 release:"
   git status --short
@@ -136,10 +136,25 @@ if [ -n "$REMOTE_HEAD" ] && [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
   exit 1
 fi
 
-# 已存在同名 tag → 直接复用(支持 release.sh 重试场景,前端先打了 tag 但后端流程挂在后面)
+# 已存在同名 tag → 跳过整个 bump + commit 流程(支持 release.sh 重试)
 if git rev-parse "v${NEW_VERSION}" >/dev/null 2>&1; then
-  echo "  -> 前端 tag v${NEW_VERSION} 已存在,跳过打 tag"
+  echo "  -> 前端 tag v${NEW_VERSION} 已存在,跳过 bump + commit + tag"
 else
+  # 同步前端 2 处硬编码版本号 — 否则前端展示版本号 + 检查更新机制对比都用旧值,
+  # 用户更新后 UI 仍显示老版本(0.2.4)且持续提示"有新版本"。
+  echo "  -> 更新 package.json + src/hooks/use-version-check.ts 到 ${NEW_VERSION}..."
+  # package.json: 顶部 "version": "x.y.z" — 用 sed 改首个匹配,避免改到 dependencies 里的 ^x.y.z
+  sed -i "0,/\"version\":/s/\"version\": \"[^\"]*\"/\"version\": \"${NEW_VERSION}\"/" package.json
+  # use-version-check.ts: const CURRENT_VERSION = '...'
+  sed -i "s/const CURRENT_VERSION = '[^']*'/const CURRENT_VERSION = '${NEW_VERSION}'/" src/hooks/use-version-check.ts
+
+  # commit + push 到 main(必须先到 origin,后面 tag 才能指向 push 出去的 commit)
+  git add package.json src/hooks/use-version-check.ts
+  git commit -m "v${NEW_VERSION}" --no-verify
+  git push origin "$REMOTE_BRANCH"
+  echo "  -> 前端 bump commit 已 push 到 origin/$REMOTE_BRANCH"
+
+  # 打 tag(指向刚 push 的 commit)+ push tag
   git tag "v${NEW_VERSION}"
   echo "  -> 前端打 tag: v${NEW_VERSION}"
 fi
