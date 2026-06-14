@@ -38,7 +38,7 @@ echo "$COMMITS"
 echo ""
 
 # 1. bump version
-echo "[1/5] 升级版本号..."
+echo "[1/6] 升级版本号..."
 CURRENT_VERSION=$(grep 'const Version' "${PROJECT_ROOT}/internal/version/version.go" | sed -n 's/.*"\(.*\)".*/\1/p')
 if [ -z "$CURRENT_VERSION" ]; then
   echo "[ERROR] 无法从 internal/version/version.go 读取现有版本号"
@@ -72,7 +72,7 @@ bash scripts/sync-version.sh "$NEW_VERSION"
 echo "  -> 新版本: v${NEW_VERSION}"
 
 # 2. 更新 README changelog
-echo "[2/5] 更新 README changelog..."
+echo "[2/6] 更新 README changelog..."
 TODAY=$(date +%Y-%m-%d)
 
 TMPFILE=$(mktemp)
@@ -93,20 +93,67 @@ rm -f "$TMPFILE"
 echo "  -> README 已更新"
 
 # 3. commit + tag
-echo "[3/5] 创建 commit 和 tag..."
+echo "[3/6] 创建后端 commit 和 tag..."
 git add -A
 git commit -m "v${NEW_VERSION}" --no-verify
 git tag "v${NEW_VERSION}"
 
 echo "  -> tag: v${NEW_VERSION}"
 
-# 4. push
-echo "[4/5] 推送到远程..."
+# 4. 前端 repo 同步打 tag(GitHub Actions 拉前端时用 ref: ${{ github.ref_name }} 同 tag 严格对齐,
+# 必须先在前端 repo 推 tag,后端 tag push 触发 CI 时才能拉到匹配的前端 source。
+# 前端 repo 当前 HEAD 必须已经是 release 想要的版本 → 上游 push 过)
+FRONTEND_DIR="$PROJECT_ROOT/miaomiaowux-frontend"
+if [ ! -d "$FRONTEND_DIR/.git" ]; then
+  echo "[ERROR] 前端 repo 不存在或非 git work tree: $FRONTEND_DIR"
+  echo "       同 tag 策略要求前端 repo 在本地,请先 clone:"
+  echo "         git clone git@github.com:iluobei/miaomiaowux-frontend.git $FRONTEND_DIR"
+  exit 1
+fi
+
+echo "[4/6] 前端 repo 打同名 tag v${NEW_VERSION}..."
+pushd "$FRONTEND_DIR" >/dev/null
+
+# 前端 working tree 必须干净 — 否则 tag 会指向脏状态的 commit,而 CI 拉的是 origin tag,内容不一致
+if ! git diff-index --quiet HEAD --; then
+  echo "[ERROR] 前端 repo working tree 有未 commit 改动,请先 commit + push 再 release:"
+  git status --short
+  popd >/dev/null
+  exit 1
+fi
+
+# 检查本地 HEAD 跟 origin 是否同步,避免 tag 指向只有本地有的 commit
+git fetch origin --quiet
+LOCAL_HEAD=$(git rev-parse HEAD)
+REMOTE_BRANCH=$(git symbolic-ref --short HEAD 2>/dev/null || echo "main")
+REMOTE_HEAD=$(git rev-parse "origin/$REMOTE_BRANCH" 2>/dev/null || echo "")
+if [ -n "$REMOTE_HEAD" ] && [ "$LOCAL_HEAD" != "$REMOTE_HEAD" ]; then
+  echo "[ERROR] 前端 repo HEAD 跟 origin/$REMOTE_BRANCH 不一致:"
+  echo "          local:  $LOCAL_HEAD"
+  echo "          remote: $REMOTE_HEAD"
+  echo "        请先 push 本地 commit: cd $FRONTEND_DIR && git push origin $REMOTE_BRANCH"
+  popd >/dev/null
+  exit 1
+fi
+
+# 已存在同名 tag → 直接复用(支持 release.sh 重试场景,前端先打了 tag 但后端流程挂在后面)
+if git rev-parse "v${NEW_VERSION}" >/dev/null 2>&1; then
+  echo "  -> 前端 tag v${NEW_VERSION} 已存在,跳过打 tag"
+else
+  git tag "v${NEW_VERSION}"
+  echo "  -> 前端打 tag: v${NEW_VERSION}"
+fi
+git push origin "v${NEW_VERSION}"
+echo "  -> 前端 tag v${NEW_VERSION} 已推送到 origin"
+popd >/dev/null
+
+# 5. push 后端
+echo "[5/6] 推送后端到远程..."
 git push origin main
 git push origin "v${NEW_VERSION}"
 
-# 5. 创建 GitHub Release
-echo "[5/5] 创建 GitHub Release..."
+# 6. 创建 GitHub Release
+echo "[6/6] 创建 GitHub Release..."
 RELEASE_BODY="## 更新日志
 ## [妙妙屋 & 妙妙屋 X 交流群](https://t.me/miaomiaowux)
 

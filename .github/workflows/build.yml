@@ -20,10 +20,30 @@ jobs:
       - name: Checkout private frontend
         uses: actions/checkout@v4
         with:
-          repository: ${{ vars.FRONTEND_REPO }}
+          repository: iluobei/miaomiaowux-frontend
           token: ${{ secrets.FRONTEND_PAT }}
           path: miaomiaowux-frontend
           ref: ${{ github.ref_name }}
+
+      - name: Verify frontend checkout
+        # 用 verify step 把模糊的"setup-node 找不到 lock file"翻译成具体诊断:
+        # 多半是 vars/secrets 没配,或私有前端 repo 没打同名 tag。
+        run: |
+          if [ ! -f miaomiaowux-frontend/package.json ] || [ ! -f miaomiaowux-frontend/package-lock.json ]; then
+            echo "::error::私有前端 checkout 失败 — miaomiaowux-frontend/ 缺 package.json 或 package-lock.json"
+            echo ""
+            echo "排查清单:"
+            echo "  1. 公开 repo Settings → Secrets and variables → Actions:"
+            echo "     - Secret: FRONTEND_PAT = 私有前端 repo (iluobei/miaomiaowux-frontend) 的 fine-grained PAT (Contents: Read)"
+            echo "  2. 私有前端 repo 是否打了同名 tag '${{ github.ref_name }}'?"
+            echo "     若没有: 在前端 repo cd 进去,git tag ${{ github.ref_name }} && git push origin ${{ github.ref_name }}"
+            echo "  3. FRONTEND_PAT 是否过期?"
+            echo ""
+            echo "miaomiaowux-frontend/ 实际内容:"
+            ls -la miaomiaowux-frontend/ 2>&1 || echo "  (目录不存在或为空)"
+            exit 1
+          fi
+          echo "✓ 私有前端 checkout 成功 (有 package.json + package-lock.json)"
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -96,10 +116,30 @@ jobs:
       - name: Checkout private frontend
         uses: actions/checkout@v4
         with:
-          repository: ${{ vars.FRONTEND_REPO }}
+          repository: iluobei/miaomiaowux-frontend
           token: ${{ secrets.FRONTEND_PAT }}
           path: miaomiaowux-frontend
           ref: ${{ github.ref_name }}
+
+      - name: Verify frontend checkout
+        # 用 verify step 把模糊的"setup-node 找不到 lock file"翻译成具体诊断:
+        # 多半是 vars/secrets 没配,或私有前端 repo 没打同名 tag。
+        run: |
+          if [ ! -f miaomiaowux-frontend/package.json ] || [ ! -f miaomiaowux-frontend/package-lock.json ]; then
+            echo "::error::私有前端 checkout 失败 — miaomiaowux-frontend/ 缺 package.json 或 package-lock.json"
+            echo ""
+            echo "排查清单:"
+            echo "  1. 公开 repo Settings → Secrets and variables → Actions:"
+            echo "     - Secret: FRONTEND_PAT = 私有前端 repo (iluobei/miaomiaowux-frontend) 的 fine-grained PAT (Contents: Read)"
+            echo "  2. 私有前端 repo 是否打了同名 tag '${{ github.ref_name }}'?"
+            echo "     若没有: 在前端 repo cd 进去,git tag ${{ github.ref_name }} && git push origin ${{ github.ref_name }}"
+            echo "  3. FRONTEND_PAT 是否过期?"
+            echo ""
+            echo "miaomiaowux-frontend/ 实际内容:"
+            ls -la miaomiaowux-frontend/ 2>&1 || echo "  (目录不存在或为空)"
+            exit 1
+          fi
+          echo "✓ 私有前端 checkout 成功 (有 package.json + package-lock.json)"
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -162,10 +202,30 @@ jobs:
       - name: Checkout private frontend
         uses: actions/checkout@v4
         with:
-          repository: ${{ vars.FRONTEND_REPO }}
+          repository: iluobei/miaomiaowux-frontend
           token: ${{ secrets.FRONTEND_PAT }}
           path: miaomiaowux-frontend
           ref: ${{ github.ref_name }}
+
+      - name: Verify frontend checkout
+        # 用 verify step 把模糊的"setup-node 找不到 lock file"翻译成具体诊断:
+        # 多半是 vars/secrets 没配,或私有前端 repo 没打同名 tag。
+        run: |
+          if [ ! -f miaomiaowux-frontend/package.json ] || [ ! -f miaomiaowux-frontend/package-lock.json ]; then
+            echo "::error::私有前端 checkout 失败 — miaomiaowux-frontend/ 缺 package.json 或 package-lock.json"
+            echo ""
+            echo "排查清单:"
+            echo "  1. 公开 repo Settings → Secrets and variables → Actions:"
+            echo "     - Secret: FRONTEND_PAT = 私有前端 repo (iluobei/miaomiaowux-frontend) 的 fine-grained PAT (Contents: Read)"
+            echo "  2. 私有前端 repo 是否打了同名 tag '${{ github.ref_name }}'?"
+            echo "     若没有: 在前端 repo cd 进去,git tag ${{ github.ref_name }} && git push origin ${{ github.ref_name }}"
+            echo "  3. FRONTEND_PAT 是否过期?"
+            echo ""
+            echo "miaomiaowux-frontend/ 实际内容:"
+            ls -la miaomiaowux-frontend/ 2>&1 || echo "  (目录不存在或为空)"
+            exit 1
+          fi
+          echo "✓ 私有前端 checkout 成功 (有 package.json + package-lock.json)"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
