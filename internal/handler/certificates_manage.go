@@ -387,6 +387,7 @@ func (h *CertificateHandler) requestLocalCertificate(cert *storage.Certificate) 
 		log.Printf("[Certificate] ObtainCertificate failed for %s: %v", cert.Domain, err)
 		appendLog("证书申请失败: " + err.Error())
 		_ = h.repo.UpdateCertificateStatus(ctx, cert.ID, storage.CertStatusFailed, err.Error())
+		SendCertResultNotification(ctx, cert.Domain, false, err.Error())
 		return
 	}
 
@@ -398,6 +399,7 @@ func (h *CertificateHandler) requestLocalCertificate(cert *storage.Certificate) 
 	}
 
 	log.Printf("[Certificate] Successfully issued certificate for %s, expires %s", cert.Domain, result.ExpiryDate.Format("2006-01-02"))
+	SendCertResultNotification(ctx, cert.Domain, true, fmt.Sprintf("有效期至 %s", result.ExpiryDate.Format("2006-01-02")))
 
 	// 如果配置则本地部署
 	h.deployAfterIssue(cert, result)

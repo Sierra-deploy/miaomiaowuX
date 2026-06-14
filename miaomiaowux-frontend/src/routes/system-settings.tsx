@@ -451,6 +451,18 @@ function SystemSettingsPage() {
     notify_traffic_threshold: boolean
     notify_daily_traffic_time: string
     notify_traffic_threshold_percent: number
+    // Phase 2: 9 个新通知开关 + 2 个参数
+    notify_traffic_threshold_80: boolean
+    notify_over_limit: boolean
+    notify_package_expiring: boolean
+    notify_package_expiring_days: number
+    notify_package_expired: boolean
+    notify_user_registered: boolean
+    notify_telegram_bound: boolean
+    notify_cert_result: boolean
+    notify_agent_long_offline: boolean
+    notify_agent_long_offline_minutes: number
+    notify_device_limit_exceeded: boolean
   }
   const [notifyConfig, setNotifyConfig] = useState<NotifyConfig>({
     notify_enabled: false,
@@ -464,6 +476,17 @@ function SystemSettingsPage() {
     notify_traffic_threshold: false,
     notify_daily_traffic_time: '08:00',
     notify_traffic_threshold_percent: 80,
+    notify_traffic_threshold_80: false,
+    notify_over_limit: false,
+    notify_package_expiring: false,
+    notify_package_expiring_days: 3,
+    notify_package_expired: false,
+    notify_user_registered: false,
+    notify_telegram_bound: false,
+    notify_cert_result: false,
+    notify_agent_long_offline: false,
+    notify_agent_long_offline_minutes: 30,
+    notify_device_limit_exceeded: false,
   })
   const [editingBotToken, setEditingBotToken] = useState('')
 
@@ -1325,6 +1348,68 @@ function SystemSettingsPage() {
                                   className='h-7 w-16 text-xs'
                                 />
                               )}
+                            </div>
+
+                            {/* Phase 2: 9 个新通知开关 — 文案直接中文,跟现有 telegram.events.* 文风保留 */}
+                            <div className='border-t pt-2 mt-2 text-xs text-muted-foreground'>用户生命周期 / 运营事件</div>
+                            <div className='flex items-center gap-2'>
+                              <Checkbox id='notify-threshold-80' checked={notifyConfig.notify_traffic_threshold_80}
+                                onCheckedChange={(checked) => saveNotifyConfig({ notify_traffic_threshold_80: checked === true })} />
+                              <Label htmlFor='notify-threshold-80' className='cursor-pointer text-sm'>用户流量达 80% 预警</Label>
+                            </div>
+                            <div className='flex items-center gap-2'>
+                              <Checkbox id='notify-over-limit' checked={notifyConfig.notify_over_limit}
+                                onCheckedChange={(checked) => saveNotifyConfig({ notify_over_limit: checked === true })} />
+                              <Label htmlFor='notify-over-limit' className='cursor-pointer text-sm'>用户流量超 100%(已踢)</Label>
+                            </div>
+                            <div className='flex items-center gap-2'>
+                              <Checkbox id='notify-package-expiring' checked={notifyConfig.notify_package_expiring}
+                                onCheckedChange={(checked) => saveNotifyConfig({ notify_package_expiring: checked === true })} />
+                              <Label htmlFor='notify-package-expiring' className='cursor-pointer text-sm'>套餐即将到期(N 天前)</Label>
+                              {notifyConfig.notify_package_expiring && (
+                                <Input type='number' min={1} max={30}
+                                  value={notifyConfig.notify_package_expiring_days}
+                                  onChange={(e) => setNotifyConfig({ ...notifyConfig, notify_package_expiring_days: Number(e.target.value) })}
+                                  onBlur={() => saveNotifyConfig({ notify_package_expiring_days: notifyConfig.notify_package_expiring_days })}
+                                  className='h-7 w-16 text-xs' />
+                              )}
+                            </div>
+                            <div className='flex items-center gap-2'>
+                              <Checkbox id='notify-package-expired' checked={notifyConfig.notify_package_expired}
+                                onCheckedChange={(checked) => saveNotifyConfig({ notify_package_expired: checked === true })} />
+                              <Label htmlFor='notify-package-expired' className='cursor-pointer text-sm'>套餐已到期</Label>
+                            </div>
+                            <div className='flex items-center gap-2'>
+                              <Checkbox id='notify-user-registered' checked={notifyConfig.notify_user_registered}
+                                onCheckedChange={(checked) => saveNotifyConfig({ notify_user_registered: checked === true })} />
+                              <Label htmlFor='notify-user-registered' className='cursor-pointer text-sm'>新用户注册</Label>
+                            </div>
+                            <div className='flex items-center gap-2'>
+                              <Checkbox id='notify-telegram-bound' checked={notifyConfig.notify_telegram_bound}
+                                onCheckedChange={(checked) => saveNotifyConfig({ notify_telegram_bound: checked === true })} />
+                              <Label htmlFor='notify-telegram-bound' className='cursor-pointer text-sm'>首次绑定 Telegram</Label>
+                            </div>
+                            <div className='flex items-center gap-2'>
+                              <Checkbox id='notify-cert-result' checked={notifyConfig.notify_cert_result}
+                                onCheckedChange={(checked) => saveNotifyConfig({ notify_cert_result: checked === true })} />
+                              <Label htmlFor='notify-cert-result' className='cursor-pointer text-sm'>证书申请成败</Label>
+                            </div>
+                            <div className='flex items-center gap-2'>
+                              <Checkbox id='notify-agent-long-offline' checked={notifyConfig.notify_agent_long_offline}
+                                onCheckedChange={(checked) => saveNotifyConfig({ notify_agent_long_offline: checked === true })} />
+                              <Label htmlFor='notify-agent-long-offline' className='cursor-pointer text-sm'>Agent 长期离线(N 分钟)</Label>
+                              {notifyConfig.notify_agent_long_offline && (
+                                <Input type='number' min={5} max={1440}
+                                  value={notifyConfig.notify_agent_long_offline_minutes}
+                                  onChange={(e) => setNotifyConfig({ ...notifyConfig, notify_agent_long_offline_minutes: Number(e.target.value) })}
+                                  onBlur={() => saveNotifyConfig({ notify_agent_long_offline_minutes: notifyConfig.notify_agent_long_offline_minutes })}
+                                  className='h-7 w-16 text-xs' />
+                              )}
+                            </div>
+                            <div className='flex items-center gap-2'>
+                              <Checkbox id='notify-device-limit' checked={notifyConfig.notify_device_limit_exceeded}
+                                onCheckedChange={(checked) => saveNotifyConfig({ notify_device_limit_exceeded: checked === true })} />
+                              <Label htmlFor='notify-device-limit' className='cursor-pointer text-sm'>设备数超限(agent 上报)</Label>
                             </div>
                           </div>
                         </div>

@@ -318,6 +318,8 @@ func (h *TGBotAPIHandler) bindExisting(ctx context.Context, w http.ResponseWrite
 		writeJSONError(w, http.StatusBadRequest, "消耗邀请码失败: "+err.Error())
 		return
 	}
+	// 绑前先查原 telegram_id 判断是否首次绑(=0 即未绑过)
+	wasUnbound := h.repo.GetTelegramIDByUsername(ctx, user.Username) == 0
 	if err := h.repo.BindTelegram(ctx, user.Username, tgID, tgHandle); err != nil {
 		writeJSONError(w, http.StatusInternalServerError,
 			"绑定失败: "+err.Error()+" (邀请码已消耗,请联系管理员)")
@@ -327,6 +329,9 @@ func (h *TGBotAPIHandler) bindExisting(ctx context.Context, w http.ResponseWrite
 		TGID: tgID, Username: user.Username,
 		Action: "bind", Detail: "invite_code=" + ic.Code,
 	})
+	if wasUnbound {
+		SendTelegramBoundNotification(ctx, user.Username, tgID, tgHandle)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"success":  true,
 		"username": user.Username,
@@ -377,6 +382,7 @@ func (h *TGBotAPIHandler) bindNew(ctx context.Context, w http.ResponseWriter,
 		writeJSONError(w, http.StatusInternalServerError, "创建账号失败: "+err.Error())
 		return
 	}
+	SendUserRegisteredNotification(ctx, requestedUsername, email, "TG 注册")
 	// 确保生成 user_tokens 行 + 用户短码,否则订阅链接缺用户码(/x/<套餐码> 而非 /x/<套餐码><用户码>)。
 	_, _ = h.repo.GetOrCreateUserToken(ctx, requestedUsername)
 
@@ -416,6 +422,7 @@ func (h *TGBotAPIHandler) bindNew(ctx context.Context, w http.ResponseWriter,
 			"TG 绑定失败: "+err.Error()+" (账号已创建,请联系管理员手动绑)")
 		return
 	}
+	SendTelegramBoundNotification(ctx, requestedUsername, tgID, tgHandle)
 	_ = h.repo.WriteTGAudit(ctx, storage.TGAudit{
 		TGID: tgID, Username: requestedUsername,
 		Action: "register", Detail: "invite_code=" + ic.Code,

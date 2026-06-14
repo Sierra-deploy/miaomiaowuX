@@ -1304,6 +1304,10 @@ type WSScanResultPayload struct {
 	XrayRunning bool                     `json:"xray_running"`
 	XrayVersion string                   `json:"xray_version,omitempty"`
 	Inbounds    []map[string]interface{} `json:"inbounds,omitempty"`
+	// Phase 3B 新增:每个 email 累计「设备数超限被踢」次数(自 agent 启动起单调递增)。
+	// 主控按 delta = current - prev_seen 算单周期增量,delta>0 触发 tg 通知。
+	// 向后兼容:老 agent 无此字段 → 主控当 0;新 agent + 老主控也无害。
+	DeviceKicks map[string]int64 `json:"device_kicks,omitempty"`
 }
 
 // ScanResultHandler 是处理扫描结果的回调函数类型

@@ -30,34 +30,80 @@ func (n *Notifier) GetConfig() Config {
 	return n.cfg
 }
 
-func (n *Notifier) IsEnabled(eventType EventType) bool {
+// SkipReason 取值:enabled / global_disabled / bot_token_empty / chat_id_empty / event_disabled
+// 上层 helper 根据 reason 做 throttled log,排查"为什么有时不发"用。
+type SkipReason string
+
+const (
+	ReasonEnabled         SkipReason = ""
+	ReasonGlobalDisabled  SkipReason = "global_disabled"
+	ReasonBotTokenEmpty   SkipReason = "bot_token_empty"
+	ReasonChatIDEmpty     SkipReason = "chat_id_empty"
+	ReasonEventDisabled   SkipReason = "event_disabled"
+)
+
+// CheckEnabled 返回 (是否启用, 不启用原因)。
+//   - 全部配置就绪 + 该事件开关打开:(true, ReasonEnabled)
+//   - 全局关 / 缺 token / 缺 chat_id / 该事件开关 off:(false, 对应 reason)
+//
+// 上层 notifyAsync 拿 reason 做 throttled log,避免静默丢消息时用户无法排查。
+func (n *Notifier) CheckEnabled(eventType EventType) (bool, SkipReason) {
 	n.mu.RLock()
 	defer n.mu.RUnlock()
 
-	if !n.cfg.Enabled || n.cfg.BotToken == "" || n.cfg.ChatID == "" {
-		return false
+	if !n.cfg.Enabled {
+		return false, ReasonGlobalDisabled
+	}
+	if n.cfg.BotToken == "" {
+		return false, ReasonBotTokenEmpty
+	}
+	if n.cfg.ChatID == "" {
+		return false, ReasonChatIDEmpty
 	}
 
+	var on bool
 	switch eventType {
 	case EventLogin:
-		return n.cfg.NotifyLogin
+		on = n.cfg.NotifyLogin
 	case EventSubscribeFetch:
-		return n.cfg.NotifySubscribeFetch
+		on = n.cfg.NotifySubscribeFetch
 	case EventDailyTraffic:
-		return n.cfg.NotifyDailyTraffic
+		on = n.cfg.NotifyDailyTraffic
 	case EventServerOffline:
-		return n.cfg.NotifyServerOffline
+		on = n.cfg.NotifyServerOffline
 	case EventServerOnline:
-		return n.cfg.NotifyServerOnline
+		on = n.cfg.NotifyServerOnline
 	case EventTrafficThreshold:
-		return n.cfg.NotifyTrafficThreshold
+		on = n.cfg.NotifyTrafficThreshold
+	case EventTrafficThreshold80:
+		on = n.cfg.NotifyTrafficThreshold80
+	case EventOverLimit:
+		on = n.cfg.NotifyOverLimit
+	case EventPackageExpiring:
+		on = n.cfg.NotifyPackageExpiring
+	case EventPackageExpired:
+		on = n.cfg.NotifyPackageExpired
+	case EventUserRegistered:
+		on = n.cfg.NotifyUserRegistered
+	case EventTelegramBound:
+		on = n.cfg.NotifyTelegramBound
+	case EventCertResult:
+		on = n.cfg.NotifyCertResult
+	case EventAgentLongOffline:
+		on = n.cfg.NotifyAgentLongOffline
+	case EventDeviceLimitExceeded:
+		on = n.cfg.NotifyDeviceLimitExceeded
 	default:
-		return false
+		on = false
 	}
+	if !on {
+		return false, ReasonEventDisabled
+	}
+	return true, ReasonEnabled
 }
 
 func (n *Notifier) Send(ctx context.Context, event Event) error {
-	if !n.IsEnabled(event.Type) {
+	if ok, _ := n.CheckEnabled(event.Type); !ok {
 		return nil
 	}
 	// 串行进入 telegram 发送 — 防止多个 go n.Send 并发跑时 HTTP 顺序乱掉(下/上线倒序的根因)

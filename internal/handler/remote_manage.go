@@ -160,6 +160,32 @@ func hasNonTemplateContent(cfgJSON string) bool {
 	return false
 }
 
+// deviceKickPrev 主控内存:per (serverID, email) → 上次见到的累计 kick 值。
+// agent 每次 scan_result 上报累计值,主控算 delta = current - prev_seen;delta > 0 → tg 通知。
+// agent 重启会让累计值回到 0,主控这里检测到 current < prev → 重置 prev = current(避免负 delta 误触发)。
+var deviceKickPrevMu sync.Mutex
+var deviceKickPrev = make(map[string]int64) // key = fmt.Sprintf("%d|%s", serverID, email)
+
+func handleDeviceKickDelta(ctx context.Context, serverID int64, kicks map[string]int64) {
+	deviceKickPrevMu.Lock()
+	defer deviceKickPrevMu.Unlock()
+	for email, current := range kicks {
+		key := fmt.Sprintf("%d|%s", serverID, email)
+		prev, seen := deviceKickPrev[key]
+		if !seen || current < prev {
+			// 第一次见或 agent 重启了累计值,记当前值即可,不产生 delta(避免误触发)
+			deviceKickPrev[key] = current
+			continue
+		}
+		delta := int(current - prev)
+		if delta > 0 {
+			deviceKickPrev[key] = current
+			// device_limit 主控不易拿到精确值(email 可能是子账号 email),通知文案不带 limit,只带 delta
+			SendDeviceLimitExceededNotification(ctx, email, delta, 0)
+		}
+	}
+}
+
 // 处理通过 WebSocket 从代理收到的扫描结果。
 func (h *RemoteManageHandler) HandleScanResult(serverID int64, payload WSScanResultPayload) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -173,6 +199,13 @@ func (h *RemoteManageHandler) HandleScanResult(serverID int64, payload WSScanRes
 		if server, gErr := h.repo.GetRemoteServer(ctx, serverID); gErr == nil && server != nil {
 			SendXrayStatusChangeNotification(ctx, server.Name, server.IPAddress, payload.XrayRunning)
 		}
+	}
+
+	// Phase 3B: device kicks delta 触发设备超限通知。
+	// payload.DeviceKicks 是累计量(自 agent 启动起单调递增),主控内存记录上次见到的值,算 delta。
+	// 设备超限通知给 admin,文案带 email + delta。同一 email 5min 节流由 notifyAsync 兜底。
+	if len(payload.DeviceKicks) > 0 {
+		handleDeviceKickDelta(ctx, serverID, payload.DeviceKicks)
 	}
 
 	if payload.XrayRunning {

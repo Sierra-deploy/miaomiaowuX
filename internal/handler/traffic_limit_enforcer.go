@@ -91,6 +91,12 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 			if err := e.repo.RemovePackageFromUser(ctx, user.Username); err != nil {
 				log.Printf("[TrafficLimitEnforcer] Failed to remove package from %s: %v", user.Username, err)
 			}
+			// 套餐过期 tg 通知 — 用户的当前 package_id 在 RemovePackageFromUser 之前的快照里
+			pkgName := ""
+			if p, perr := e.repo.GetPackage(ctx, user.PackageID); perr == nil && p != nil {
+				pkgName = p.Name
+			}
+			SendPackageExpiredNotification(ctx, user.Username, pkgName)
 			// 套餐过期跟 user delete 一样,需要通知所有 agent limiter 同步移除该用户
 			// 否则 agent 内存里的 limiter UserInfo 还有这个用户,旧 IP 复用时仍能匹配 bucket。
 			if e.pusher != nil {
@@ -146,12 +152,28 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 		wasOverLimit, _ := e.repo.IsUserOverLimit(ctx, user.Username)
 		isOverLimit := totalTraffic*pkg.TrafficMultiplier() >= pkg.TrafficLimitBytes
 
+		// 流量 80% 预警(在没超限的 ramp 期触发一次,用 user_overflag 复用记忆易混淆,
+		// 借现有 IsTrafficThresholdNotified 同款表会跟 server 阈值冲突 → 简单:每次都判断,Send 端节流即可
+		// 实际重复触发会有,5min log throttle 兜底;若用户报"被打扰",再加专用记忆表)
+		usedWeighted := totalTraffic * pkg.TrafficMultiplier()
+		if !isOverLimit && pkg.TrafficLimitBytes > 0 {
+			pct := float64(usedWeighted) / float64(pkg.TrafficLimitBytes) * 100
+			if pct >= 80 {
+				usedGB := float64(usedWeighted) / (1024 * 1024 * 1024)
+				limitGB := float64(pkg.TrafficLimitBytes) / (1024 * 1024 * 1024)
+				SendTrafficThreshold80Notification(ctx, user.Username, usedGB, limitGB)
+			}
+		}
+
 		if isOverLimit && !wasOverLimit {
 			log.Printf("[TrafficLimitEnforcer] User %s exceeded limit (%d/%d bytes), removing from inbounds",
 				user.Username, totalTraffic, pkg.TrafficLimitBytes)
 			e.removeUserFromAllInbounds(ctx, user.Username)
 			suspendUserPrivateRouted(ctx, e.remoteManage, e.repo, user.Username)
 			e.repo.UpdateUserOverLimit(ctx, user.Username, true)
+			usedGB := float64(usedWeighted) / (1024 * 1024 * 1024)
+			limitGB := float64(pkg.TrafficLimitBytes) / (1024 * 1024 * 1024)
+			SendOverLimitNotification(ctx, user.Username, usedGB, limitGB)
 		} else if !isOverLimit && wasOverLimit {
 			log.Printf("[TrafficLimitEnforcer] User %s back under limit (%d/%d bytes), restoring inbounds",
 				user.Username, totalTraffic, pkg.TrafficLimitBytes)

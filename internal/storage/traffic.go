@@ -523,6 +523,19 @@ type SystemConfig struct {
 	NotifyTrafficThreshold      bool
 	NotifyDailyTrafficTime      string // "HH:MM"，默认 "08:00"
 	NotifyTrafficThresholdPercent int  // 0-100，默认 80
+
+	// Phase 2: 9 个新通知开关 + 2 个参数(默认全 false / 0,需 admin 在系统设置主动开)
+	NotifyTrafficThreshold80     bool // 用户流量达 80% 预警
+	NotifyOverLimit              bool // 用户流量超 100%(已踢)
+	NotifyPackageExpiring        bool // 套餐 N 天内到期
+	NotifyPackageExpiringDays    int  // N 默认 3
+	NotifyPackageExpired         bool // 套餐已到期
+	NotifyUserRegistered         bool // 新用户注册
+	NotifyTelegramBound          bool // 用户首次绑定 TG
+	NotifyCertResult             bool // 证书申请成败
+	NotifyAgentLongOffline       bool // agent 长期离线
+	NotifyAgentLongOfflineMinutes int // 默认 30
+	NotifyDeviceLimitExceeded    bool // 设备数超限(agent 上报触发)
 	EnableOverrideScripts       bool   // 启用覆写脚本功能
 	SubscriptionOutputFormat    string // 订阅序列化格式: "yaml"(default) or "json"。仅影响 Clash 客户端输出。
 	SilentMode                  bool   // 静默模式：所有请求返回404，仅订阅接口可用
@@ -1560,6 +1573,41 @@ WHERE NOT EXISTS (SELECT 1 FROM system_config WHERE id = 1);
 		return err
 	}
 	if err := r.ensureSystemConfigColumn("notify_traffic_threshold_percent", "INTEGER NOT NULL DEFAULT 80"); err != nil {
+		return err
+	}
+
+	// Phase 2: 9 个新通知开关 + 2 个数值参数(默认全 false / 默认值)
+	if err := r.ensureSystemConfigColumn("notify_traffic_threshold_80", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("notify_over_limit", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("notify_package_expiring", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("notify_package_expiring_days", "INTEGER NOT NULL DEFAULT 3"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("notify_package_expired", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("notify_user_registered", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("notify_telegram_bound", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("notify_cert_result", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("notify_agent_long_offline", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("notify_agent_long_offline_minutes", "INTEGER NOT NULL DEFAULT 30"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("notify_device_limit_exceeded", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 
@@ -6107,7 +6155,18 @@ SELECT proxy_groups_source_url, client_compatibility_mode, COALESCE(enable_short
        COALESCE(enable_mmw_short_link_compat, 0),
        COALESCE(node_name_multiplier_prefix_enabled, 0),
        COALESCE(node_name_multiplier_left, '「'),
-       COALESCE(node_name_multiplier_right, '」')
+       COALESCE(node_name_multiplier_right, '」'),
+       COALESCE(notify_traffic_threshold_80, 0),
+       COALESCE(notify_over_limit, 0),
+       COALESCE(notify_package_expiring, 0),
+       COALESCE(notify_package_expiring_days, 3),
+       COALESCE(notify_package_expired, 0),
+       COALESCE(notify_user_registered, 0),
+       COALESCE(notify_telegram_bound, 0),
+       COALESCE(notify_cert_result, 0),
+       COALESCE(notify_agent_long_offline, 0),
+       COALESCE(notify_agent_long_offline_minutes, 30),
+       COALESCE(notify_device_limit_exceeded, 0)
 FROM system_config
 WHERE id = 1
 `
@@ -6119,6 +6178,8 @@ WHERE id = 1
 	var enableOverrideScripts, silentMode, silentModeTimeout int
 	var enableMiaomiaowuFeatures, enableMmwShortLinkCompat int
 	var nodeNameMultPrefixEnabled int
+	var notifyTH80, notifyOverLimit, notifyPkgExpiring, notifyPkgExpired int
+	var notifyUserReg, notifyTGBound, notifyCert, notifyAgentLO, notifyDeviceLimit int
 	err := r.db.QueryRowContext(ctx, query).Scan(
 		&cfg.ProxyGroupsSourceURL, &compatibilityMode, &enableShortLink,
 		&cfg.SpeedCollectInterval, &cfg.TrafficCollectInterval,
@@ -6134,6 +6195,9 @@ WHERE id = 1
 		&enableMiaomiaowuFeatures, &cfg.DefaultTemplateFilename,
 		&enableMmwShortLinkCompat,
 		&nodeNameMultPrefixEnabled, &cfg.NodeNameMultiplierLeft, &cfg.NodeNameMultiplierRight,
+		&notifyTH80, &notifyOverLimit, &notifyPkgExpiring, &cfg.NotifyPackageExpiringDays,
+		&notifyPkgExpired, &notifyUserReg, &notifyTGBound, &notifyCert, &notifyAgentLO,
+		&cfg.NotifyAgentLongOfflineMinutes, &notifyDeviceLimit,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -6164,6 +6228,21 @@ WHERE id = 1
 	cfg.EnableMiaomiaowuFeatures = enableMiaomiaowuFeatures != 0
 	cfg.EnableMmwShortLinkCompat = enableMmwShortLinkCompat != 0
 	cfg.NodeNameMultiplierPrefixEnabled = nodeNameMultPrefixEnabled != 0
+	cfg.NotifyTrafficThreshold80 = notifyTH80 != 0
+	cfg.NotifyOverLimit = notifyOverLimit != 0
+	cfg.NotifyPackageExpiring = notifyPkgExpiring != 0
+	cfg.NotifyPackageExpired = notifyPkgExpired != 0
+	cfg.NotifyUserRegistered = notifyUserReg != 0
+	cfg.NotifyTelegramBound = notifyTGBound != 0
+	cfg.NotifyCertResult = notifyCert != 0
+	cfg.NotifyAgentLongOffline = notifyAgentLO != 0
+	cfg.NotifyDeviceLimitExceeded = notifyDeviceLimit != 0
+	if cfg.NotifyPackageExpiringDays <= 0 {
+		cfg.NotifyPackageExpiringDays = 3
+	}
+	if cfg.NotifyAgentLongOfflineMinutes <= 0 {
+		cfg.NotifyAgentLongOfflineMinutes = 30
+	}
 	return cfg, nil
 }
 
@@ -6201,6 +6280,17 @@ SET proxy_groups_source_url = ?,
     node_name_multiplier_prefix_enabled = ?,
     node_name_multiplier_left = ?,
     node_name_multiplier_right = ?,
+    notify_traffic_threshold_80 = ?,
+    notify_over_limit = ?,
+    notify_package_expiring = ?,
+    notify_package_expiring_days = ?,
+    notify_package_expired = ?,
+    notify_user_registered = ?,
+    notify_telegram_bound = ?,
+    notify_cert_result = ?,
+    notify_agent_long_offline = ?,
+    notify_agent_long_offline_minutes = ?,
+    notify_device_limit_exceeded = ?,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = 1
 `
@@ -6246,6 +6336,16 @@ WHERE id = 1
 		nnmRight = "」"
 	}
 
+	// Phase 2 默认值兜底:0 表示用户从未设过,落库时给个合理初值
+	pkgExpiringDays := cfg.NotifyPackageExpiringDays
+	if pkgExpiringDays <= 0 {
+		pkgExpiringDays = 3
+	}
+	agentLOMinutes := cfg.NotifyAgentLongOfflineMinutes
+	if agentLOMinutes <= 0 {
+		agentLOMinutes = 30
+	}
+
 	result, err := r.db.ExecContext(ctx, updateStmt, cfg.ProxyGroupsSourceURL, compatibilityMode, enableShortLink,
 		cfg.SpeedCollectInterval, cfg.TrafficCollectInterval, cfg.TrafficCheckInterval, cfg.HeartbeatInterval,
 		agentLogEnabled,
@@ -6258,7 +6358,13 @@ WHERE id = 1
 		boolToInt(cfg.SilentMode), silentModeTimeout,
 		boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename,
 		boolToInt(cfg.EnableMmwShortLinkCompat),
-		boolToInt(cfg.NodeNameMultiplierPrefixEnabled), nnmLeft, nnmRight)
+		boolToInt(cfg.NodeNameMultiplierPrefixEnabled), nnmLeft, nnmRight,
+		boolToInt(cfg.NotifyTrafficThreshold80), boolToInt(cfg.NotifyOverLimit),
+		boolToInt(cfg.NotifyPackageExpiring), pkgExpiringDays,
+		boolToInt(cfg.NotifyPackageExpired), boolToInt(cfg.NotifyUserRegistered),
+		boolToInt(cfg.NotifyTelegramBound), boolToInt(cfg.NotifyCertResult),
+		boolToInt(cfg.NotifyAgentLongOffline), agentLOMinutes,
+		boolToInt(cfg.NotifyDeviceLimitExceeded))
 	if err != nil {
 		return fmt.Errorf("update system config: %w", err)
 	}
@@ -6277,8 +6383,11 @@ INSERT INTO system_config (id, proxy_groups_source_url, client_compatibility_mod
     notify_daily_traffic_time, notify_traffic_threshold_percent, enable_override_scripts,
     subscription_output_format,
     silent_mode, silent_mode_timeout, enable_miaomiaowu_features, default_template_filename, enable_mmw_short_link_compat,
-    node_name_multiplier_prefix_enabled, node_name_multiplier_left, node_name_multiplier_right)
-VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    node_name_multiplier_prefix_enabled, node_name_multiplier_left, node_name_multiplier_right,
+    notify_traffic_threshold_80, notify_over_limit, notify_package_expiring, notify_package_expiring_days,
+    notify_package_expired, notify_user_registered, notify_telegram_bound, notify_cert_result,
+    notify_agent_long_offline, notify_agent_long_offline_minutes, notify_device_limit_exceeded)
+VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 		if _, err := r.db.ExecContext(ctx, insertStmt, cfg.ProxyGroupsSourceURL, compatibilityMode, enableShortLink,
 			cfg.SpeedCollectInterval, cfg.TrafficCollectInterval, cfg.TrafficCheckInterval, cfg.HeartbeatInterval, agentLogEnabled,
@@ -6291,7 +6400,13 @@ VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
 			boolToInt(cfg.SilentMode), silentModeTimeout,
 			boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename,
 			boolToInt(cfg.EnableMmwShortLinkCompat),
-			boolToInt(cfg.NodeNameMultiplierPrefixEnabled), nnmLeft, nnmRight); err != nil {
+			boolToInt(cfg.NodeNameMultiplierPrefixEnabled), nnmLeft, nnmRight,
+			boolToInt(cfg.NotifyTrafficThreshold80), boolToInt(cfg.NotifyOverLimit),
+			boolToInt(cfg.NotifyPackageExpiring), pkgExpiringDays,
+			boolToInt(cfg.NotifyPackageExpired), boolToInt(cfg.NotifyUserRegistered),
+			boolToInt(cfg.NotifyTelegramBound), boolToInt(cfg.NotifyCertResult),
+			boolToInt(cfg.NotifyAgentLongOffline), agentLOMinutes,
+			boolToInt(cfg.NotifyDeviceLimitExceeded)); err != nil {
 			return fmt.Errorf("insert system config: %w", err)
 		}
 	}
