@@ -115,25 +115,37 @@ func (h *XraySnapshotHandler) handleRecoveryStatus(w http.ResponseWriter, r *htt
 		return
 	}
 
+	// with_config=true 时返回完整 config_json — 用于前端 dialog 渲染 diff。
+	// 默认不带(banner 15s 轮询不需要拉几十 KB 配置),只在用户打开决策 dialog 时显式请求一次。
+	withConfig := r.URL.Query().Get("with_config") == "true"
+
 	resp := map[string]interface{}{
 		"has_pending": pending != nil,
 		"has_current": current != nil,
 	}
 	if pending != nil {
-		resp["pending"] = map[string]interface{}{
+		entry := map[string]interface{}{
 			"id":          pending.ID,
 			"config_hash": pending.ConfigHash,
 			"source":      pending.Source,
 			"created_at":  pending.CreatedAt,
 		}
+		if withConfig {
+			entry["config_json"] = pending.ConfigJSON
+		}
+		resp["pending"] = entry
 	}
 	if current != nil {
-		resp["current"] = map[string]interface{}{
+		entry := map[string]interface{}{
 			"id":          current.ID,
 			"config_hash": current.ConfigHash,
 			"source":      current.Source,
 			"created_at":  current.CreatedAt,
 		}
+		if withConfig {
+			entry["config_json"] = current.ConfigJSON
+		}
+		resp["current"] = entry
 	}
 	respondJSON(w, http.StatusOK, resp)
 }
@@ -257,8 +269,11 @@ func (h *XraySnapshotHandler) handleRestore(w http.ResponseWriter, r *http.Reque
 	})
 }
 
-// applyConfigToAgent: test → PUT /api/child/xray/config。
-// test 失败 / PUT 失败 → 返回 wrapped error,调用方 4xx 给前端。
+// applyConfigToAgent: test → PUT /api/child/xray/config → restart xray。
+// test 失败 / PUT 失败 / restart 失败 → 返回 wrapped error,调用方 4xx 给前端。
+// agent 端 setXrayConfig 只写盘不重启,所以下发完必须显式 restart 让新配置生效,
+// 否则用户在 UI 看到"恢复成功"但 agent 实际还在跑旧配置 — 跟其他下发路径(deploy_tunnel
+// / deploy_fallback / remote_reality_domains)的"PUT + restartXrayWithRecovery"约定一致。
 func (h *XraySnapshotHandler) applyConfigToAgent(r *http.Request, serverID int64, configJSON string) error {
 	// 1) agent test-config 验证
 	testBody, _ := json.Marshal(map[string]string{"config": configJSON})
@@ -288,6 +303,11 @@ func (h *XraySnapshotHandler) applyConfigToAgent(r *http.Request, serverID int64
 	putBody, _ := json.Marshal(map[string]interface{}{"config": configJSON, "force": true})
 	if _, perr := h.remoteManage.forwardToRemoteServer(r.Context(), serverID, "POST", "/api/child/xray/config", putBody); perr != nil {
 		return fmt.Errorf("agent PUT config failed: %w", perr)
+	}
+
+	// 3) restart xray 让新配置生效
+	if rerr := h.remoteManage.restartXrayWithRecovery(r.Context(), serverID, "XraySnapshotApply"); rerr != nil {
+		return fmt.Errorf("agent restart xray failed: %w", rerr)
 	}
 	return nil
 }
