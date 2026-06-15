@@ -34,6 +34,20 @@ func parseNullTimeString(ns sql.NullString) *time.Time {
 
 const (
 	pragmaJournalMode = "PRAGMA journal_mode=WAL;"
+
+	// DSN 中嵌入的 per-connection pragma — modernc.org/sqlite 在 sql.Open 解析 file: URI 时
+	// 把每条 _pragma 装进新连接的 init 钩子,新 conn 拿来时自动跑。原来 SetMaxOpenConns(1) +
+	// 单次 db.Exec(pragmaJournalMode) 够用,改成多连接(L3:防 token 复用引爆的 DB 写脉冲
+	// 饿死无关 server)后必须每 conn 都设 busy_timeout,否则锁竞争立刻报 SQLITE_BUSY。
+	//   - busy_timeout=5000  写锁忙时自动等 5s(刚好匹配业务层 5s context),避免立刻失败
+	//   - journal_mode=WAL   多 reader 并发 + 1 writer,跟现有 pragmaJournalMode 一致
+	//   - synchronous=NORMAL WAL 推荐组合(FULL 仅在断电时多一层保护,代价是显著变慢)
+	sqliteDSNPragma = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(normal)"
+
+	// 多连接数:实测 1 个 SQLite 数据库文件并发写仍串行(文件锁),但多 conn 让"读 / 短写"
+	// 不会被"长写 / 等锁"完全堵死。8 ≈ 典型 server 数 + 后台采集/订阅生成的并发,留充裕度。
+	sqliteMaxOpenConns = 8
+	sqliteMaxIdleConns = 4
 )
 
 const (
@@ -836,13 +850,23 @@ func NewTrafficRepository(path string) (*TrafficRepository, error) {
 		}
 	}
 
-	db, err := sql.Open("sqlite", path)
+	// 把裸路径转成 file: URI 并挂载 per-connection pragma(busy_timeout / WAL / synchronous)。
+	// :memory: 与已是 file: URI 的 DSN 保持原样;后者由调用方负责挂载需要的 pragma。
+	dsn := path
+	if path != ":memory:" && !strings.HasPrefix(path, "file:") {
+		dsn = "file:" + path + "?" + sqliteDSNPragma
+	}
+
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite db: %w", err)
 	}
 
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(sqliteMaxOpenConns)
+	db.SetMaxIdleConns(sqliteMaxIdleConns)
 
+	// 兜底再 Exec 一次 — DSN _pragma 在某些 modernc.org/sqlite 版本路径异常时可能不生效,
+	// 这里在第一个 conn 上强制设一次 journal_mode 让整库进入 WAL(db-level、persistent)。
 	if _, err := db.Exec(pragmaJournalMode); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("enable wal: %w", err)

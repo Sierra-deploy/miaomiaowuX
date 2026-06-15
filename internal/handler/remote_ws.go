@@ -282,6 +282,21 @@ type RemoteWSHandler struct {
 	//   - 同 IP 在 cooldown 内的连接直接拒绝 upgrade(节省 CPU 与日志)
 	//   - 同 IP 的失败日志按窗口聚合,防止刷屏
 	authFailIPs sync.Map // map[string]*ipFailRecord
+	// tokenConflicts 记录 agent_token 复用冲突:两台机器配同一份 token 时,
+	// 第一次抢占检测到旧 conn IP ≠ 新 conn IP 且旧 conn 仍活跃 → 锁定 winnerIP,
+	// cooldown 期内其它 IP 直接拒绝 — 防止互踩 reconnect 风暴打满 SQLite 单写连接,
+	// 拖垮其它无关 server 的心跳更新导致它们被误标 offline / fallback_to_pull。
+	tokenConflicts sync.Map // map[string]*tokenConflictRecord
+}
+
+// tokenConflictRecord 单 token 复用冲突状态:winnerIP 是当前被允许连接的 agent IP,
+// rejectUntil 之前其它 IP 的同 token auth 直接拒绝 + 日志聚合。
+type tokenConflictRecord struct {
+	mu             sync.Mutex
+	winnerIP       string
+	rejectUntil    time.Time
+	suppressedLogs int
+	windowStart    time.Time
 }
 
 // ipFailRecord 单 IP 的失败状态。
@@ -334,6 +349,12 @@ const (
 	wsFailCooldown      = 60 * time.Second  // 失败后 60 秒内同 IP 直接拒绝 upgrade
 	wsFailLogWindow     = 60 * time.Second  // 同 IP 失败日志聚合窗口
 	wsFailLogThreshold  = 3                 // 窗口内失败 >=3 次才进入"聚合模式"
+
+	// token 复用判定:旧 conn 最近 LastPing 比这个新就视为"还活着" — 异 IP 抢占算冲突。
+	// 比 collector 默认 90s offline 阈值小,确保只锁定真在线的 server。
+	tokenConflictFreshness = 60 * time.Second
+	// token 冲突 cooldown:winnerIP 一旦确定,期内其它 IP 一律拒绝;到期自动失效,允许真换机。
+	tokenConflictCooldown = 60 * time.Second
 )
 
 // ipFromRequest 提取客户端真实 IP,优先级:CF-Connecting-IP > X-Real-IP > X-Forwarded-For > RemoteAddr。
@@ -404,6 +425,49 @@ func (h *RemoteWSHandler) markAuthFail(ip string) {
 // markAuthSuccess 在 auth 成功时调用,清掉该 IP 的失败记录(让合法 agent 不被错误 cooldown)。
 func (h *RemoteWSHandler) markAuthSuccess(ip string) {
 	h.authFailIPs.Delete(ip)
+}
+
+// isTokenConflictRejected 在 conn 进 conns map 前判断:本 token 是否已被另一 IP 锁定。
+// 返回 (reject, winnerIP, suppressed)。reject=true 时调用方应立刻 sendAuthResult+return;
+// suppressed > 0 表示伴随一行汇总日志(60s 窗口内被压制的拒绝数)。
+// 同 winnerIP 重连(fast reconnect)始终放行,不算冲突。
+func (h *RemoteWSHandler) isTokenConflictRejected(token, ip string) (bool, string, int) {
+	v, ok := h.tokenConflicts.Load(token)
+	if !ok {
+		return false, "", 0
+	}
+	rec := v.(*tokenConflictRecord)
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	now := time.Now()
+	if now.After(rec.rejectUntil) {
+		// cooldown 过期 — 不删除,留待 markTokenConflict 覆盖或下次 GC;不影响判定。
+		return false, "", 0
+	}
+	if ip == rec.winnerIP {
+		return false, rec.winnerIP, 0
+	}
+	rec.suppressedLogs++
+	// 每 wsFailLogWindow 打一次汇总,避免刷屏
+	if now.Sub(rec.windowStart) >= wsFailLogWindow {
+		n := rec.suppressedLogs
+		rec.suppressedLogs = 0
+		rec.windowStart = now
+		return true, rec.winnerIP, n
+	}
+	return true, rec.winnerIP, 0
+}
+
+// markTokenConflict 锁定 token 给指定 winnerIP,cooldown 期内拒绝其它 IP 的同 token auth。
+// 调用方应在第一次检测到异 IP 抢占时调用,winnerIP 通常选已在线的旧 conn IP(不踢老的)。
+func (h *RemoteWSHandler) markTokenConflict(token, winnerIP string) {
+	now := time.Now()
+	rec := &tokenConflictRecord{
+		winnerIP:    winnerIP,
+		rejectUntil: now.Add(tokenConflictCooldown),
+		windowStart: now,
+	}
+	h.tokenConflicts.Store(token, rec)
 }
 
 func (h *RemoteWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -730,27 +794,8 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 	// auth 通过 → 清掉该 IP 的失败记录,合法 agent 永远不进 cooldown
 	h.markAuthSuccess(remoteAddr)
 
-	// 检查是否已有连接 — 有的话表示老 cleanup 还没跑就新 auth 来了(快速重启),记下这个状态供后面发对应通知。
-	// 关闭并 delete 老连接,新 conn 立刻接管;老 goroutine 醒来后看到 conns 里不是自己,会跳过标 offline,避免互踩。
-	_, hadPrev := h.conns.Load(authPayload.Token)
-	if hadPrev {
-		if existingAny, ok := h.conns.LoadAndDelete(authPayload.Token); ok {
-			existing := existingAny.(*RemoteWSConnection)
-			existing.mu.Lock()
-			existing.Conn.Close()
-			existing.mu.Unlock()
-			log.Printf("[Remote WS] Closed existing connection for server %s", server.Name)
-		}
-	}
-
-	// 强制加密检查
-	if h.crypto != nil && h.crypto.RequireEncryption() && (preAuthConn == nil || preAuthConn.session == nil) {
-		log.Printf("[Remote WS] Encryption required but agent %s has no encrypted session", remoteAddr)
-		h.sendAuthResult(conn, false, "Encryption required")
-		return nil, false
-	}
-
 	// 提前解析 IP — wsConn 要带它,cleanup 时离线通知用 conn 自己的 IP 而不是 DB 里(可能已被新 conn 覆盖)。
+	// 也用于 token 复用检测:同 token 异 IP 抢占 → 拒绝并锁定 winnerIP。
 	// 从远程地址提取 IP(剥 port,正确处理 [::1]:port 形式 IPv6)
 	srcIP := stripPort(remoteAddr)
 	srcParsed := net.ParseIP(srcIP)
@@ -772,6 +817,54 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 	}
 	// wsConn.IPAddress 仍带一份(可能空) — cleanup 通知会用它,但若空就回退用 DB 里的旧值
 	ip := v4
+
+	// L1:token 已被另一 IP 锁定 → 直接拒绝(冷却期内每 60s 出一行汇总日志,避免刷屏)。
+	// 配 unique token 的合法 agent 命中不到这里;只有 token 复用场景才会被挡。
+	if rejected, winnerIP, suppressed := h.isTokenConflictRejected(authPayload.Token, ip); rejected {
+		if suppressed > 0 {
+			log.Printf("[Remote WS] WARN: agent_token reuse — server %s locked to %s, rejected %d auth attempt(s) from other IP(s) in last %v; latest from %s",
+				server.Name, winnerIP, suppressed, wsFailLogWindow, ip)
+		}
+		h.markAuthFail(remoteAddr)
+		h.sendAuthResult(conn, false, "token conflict: another agent is using this token; each server must have a unique agent_token")
+		return nil, false
+	}
+
+	// 检查是否已有连接 — 有的话表示老 cleanup 还没跑就新 auth 来了(快速重启),记下这个状态供后面发对应通知。
+	// L2:异 IP 抢占 + 旧 conn 仍活跃 → token 复用,锁定旧 winner + 拒绝新 conn(不 Close 旧 conn,不动 conns map)。
+	// 同 IP fast-reconnect / 旧 conn 已僵(LastPing 超 tokenConflictFreshness)→ 走正常抢占流程。
+	existingAny, hadPrev := h.conns.Load(authPayload.Token)
+	if hadPrev {
+		existing := existingAny.(*RemoteWSConnection)
+		existing.mu.Lock()
+		existingIP := existing.IPAddress
+		existingLastPing := existing.LastPing
+		existing.mu.Unlock()
+
+		if existingIP != "" && existingIP != ip && time.Since(existingLastPing) < tokenConflictFreshness {
+			log.Printf("[Remote WS] WARN: agent_token reuse detected for server %s — existing conn from %s (last ping %v ago), rejected new conn from %s; locking token to %s for %v. Each server must use a unique agent_token.",
+				server.Name, existingIP, time.Since(existingLastPing).Round(time.Second), ip, existingIP, tokenConflictCooldown)
+			h.markTokenConflict(authPayload.Token, existingIP)
+			h.markAuthFail(remoteAddr)
+			h.sendAuthResult(conn, false, "token conflict: another agent is using this token; each server must have a unique agent_token")
+			return nil, false
+		}
+
+		// 同 IP fast-reconnect 或旧 conn 已僵 → 正常抢占
+		if _, ok := h.conns.LoadAndDelete(authPayload.Token); ok {
+			existing.mu.Lock()
+			existing.Conn.Close()
+			existing.mu.Unlock()
+			log.Printf("[Remote WS] Closed existing connection for server %s", server.Name)
+		}
+	}
+
+	// 强制加密检查
+	if h.crypto != nil && h.crypto.RequireEncryption() && (preAuthConn == nil || preAuthConn.session == nil) {
+		log.Printf("[Remote WS] Encryption required but agent %s has no encrypted session", remoteAddr)
+		h.sendAuthResult(conn, false, "Encryption required")
+		return nil, false
+	}
 
 	// 创建新连接，继承密钥交换阶段的 session
 	wsConn := &RemoteWSConnection{
