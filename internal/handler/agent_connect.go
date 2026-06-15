@@ -706,8 +706,15 @@ case $ARCH in
         ;;
 esac
 
-# Get latest release URL
-RELEASE_URL="https://github.com/iluobei/mmw-agent/releases/latest/download/mmw-agent-linux-${ARCH_NAME}"
+# 镜像链 — 顺序尝试,任一成功即停。
+# 必要性:GitHub Release binary 重定向到 objects.githubusercontent.com(只有 A 记录,无 AAAA),
+# 纯 v6 机器直连 github 会 "network is unreachable" → 安装失败。
+# ghproxy / gh-proxy 是 v4+v6 双栈反代,放在前面让 v6-only 机器优先命中。
+MIRRORS=(
+    "https://mirror.ghproxy.com/https://github.com/iluobei/mmw-agent/releases/latest/download/mmw-agent-linux-${ARCH_NAME}"
+    "https://gh-proxy.com/https://github.com/iluobei/mmw-agent/releases/latest/download/mmw-agent-linux-${ARCH_NAME}"
+    "https://github.com/iluobei/mmw-agent/releases/latest/download/mmw-agent-linux-${ARCH_NAME}"
+)
 
 # Download binary — 优先用 curl(更普遍),没有就用 wget;两者都没就按发行版包管理器装一个,
 # 杜绝 "wget: command not found" 噪声 / "ERROR: 都没装" 卡死。
@@ -733,12 +740,26 @@ ensure_downloader() {
         return 1
     fi
 }
-echo "Downloading from $RELEASE_URL..."
 ensure_downloader || exit 1
-if command -v curl >/dev/null 2>&1; then
-    curl -fsSL -o /tmp/mmw-agent "$RELEASE_URL"
-else
-    wget -q --show-progress -O /tmp/mmw-agent "$RELEASE_URL"
+download_ok=0
+for url in "${MIRRORS[@]}"; do
+    echo "Downloading from $url ..."
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fsSL --connect-timeout 10 --max-time 180 -o /tmp/mmw-agent "$url"; then
+            download_ok=1
+            break
+        fi
+    else
+        if wget -q --connect-timeout=10 --read-timeout=180 -O /tmp/mmw-agent "$url"; then
+            download_ok=1
+            break
+        fi
+    fi
+    echo "  → 该镜像失败,尝试下一个..."
+done
+if [ "$download_ok" != "1" ]; then
+    echo "ERROR: 所有镜像均下载失败(GitHub + ghproxy + gh-proxy 全部不可达)" >&2
+    exit 1
 fi
 
 # Install binary
