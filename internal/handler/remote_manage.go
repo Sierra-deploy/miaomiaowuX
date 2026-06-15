@@ -2664,6 +2664,13 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 		}
 		clashProxy, err := h.inboundToClashProxy(inbound, effectiveServerHost, server.Name, tunnelPort)
 		if err != nil {
+			// "no settings found" — agent listInbounds 返回的"孤儿入站"(只有 tag/protocol/port,缺 settings),
+			// 既无法生成节点配置也对用户毫无价值。后台静默调 agent remove RPC 清理掉,
+			// 不污染前端 SkippedCount/Errors,用户感知不到。
+			if err.Error() == "no settings found" {
+				go h.silentlyRemoveOrphanInbound(serverID, tag)
+				continue
+			}
 			response.Errors = append(response.Errors, fmt.Sprintf("tag=%s: %v", tag, err))
 			response.SkippedCount++
 			continue
@@ -3335,6 +3342,25 @@ func chooseClashServerHost(server *storage.RemoteServer) string {
 	return strings.TrimSpace(server.IPAddress)
 }
 
+// silentlyRemoveOrphanInbound 在后台静默删除 agent 上的"孤儿入站"(listInbounds 返回但 settings 缺失)。
+// 触发场景:agent 的 xray runtime 里残留只有 tag/protocol/port 没 settings 的入站,通常来自:
+//   - 手动 SSH 操作时半截写入的入站
+//   - 历史 bug 留下的损坏入站
+//   - confdir 下 *.json 文件丢失但 runtime 还在跑
+// 这类入站既无法生成节点配置,留着只会每次扫描污染 SkippedCount/Errors,用户也看不懂。
+// 直接调 agent 的 inbounds remove RPC 清掉,跟 deleteRemoteInbound 同款路径。
+// 失败只 log,不阻塞 sync 流程;成功也只 log,前端无感。
+func (h *RemoteManageHandler) silentlyRemoveOrphanInbound(serverID int64, tag string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	body, _ := json.Marshal(map[string]string{"action": "remove", "tag": tag})
+	if _, err := h.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/inbounds", body); err != nil {
+		log.Printf("[SyncInbounds] silent cleanup of orphan inbound %s on server=%d failed: %v", tag, serverID, err)
+		return
+	}
+	log.Printf("[SyncInbounds] silently removed orphan inbound %s on server=%d (no settings found)", tag, serverID)
+}
+
 // inboundToClashProxy 将 Xray 入站配置转换为 Clash 代理配置。
 // tunnelPort > 0 表示服务器使用隧道模式；将其用作节点的外部端口。
 func (h *RemoteManageHandler) inboundToClashProxy(inbound map[string]interface{}, serverHost, serverName string, tunnelPort int) (map[string]interface{}, error) {
@@ -3358,7 +3384,12 @@ func (h *RemoteManageHandler) inboundToClashProxy(inbound map[string]interface{}
 		client, _ = accounts[0].(map[string]interface{})
 	}
 
-	if client == nil && protocol != "shadowsocks" {
+	// shadowsocks server 端 password 在 settings 顶层不在 clients[];socks / http 无认证模式 accounts 可空;
+	// dokodemo-door 是端口转发,本来就没 clients/users/accounts。这几个协议允许 client == nil 继续走下游 case 分支。
+	// 历史 bug:只放过 shadowsocks → 无认证 SOCKS5 入站扫描时这里报 "no client/account found",
+	// syncInboundsToNodes SkippedCount++ → 节点不进 DB → UI 节点列表看不到 + 无法删除。
+	noClientProtocols := map[string]bool{"shadowsocks": true, "socks": true, "http": true, "dokodemo-door": true}
+	if client == nil && !noClientProtocols[protocol] {
 		return nil, fmt.Errorf("no client/account found")
 	}
 
@@ -3483,11 +3514,14 @@ func (h *RemoteManageHandler) inboundToClashProxy(inbound map[string]interface{}
 
 	case "socks", "http":
 		proxy["type"] = protocol
-		if user, ok := client["user"].(string); ok {
-			proxy["username"] = user
-		}
-		if pass, ok := client["pass"].(string); ok {
-			proxy["password"] = pass
+		// client 为 nil 时(无认证模式),clash 配置不带 username/password,客户端按无认证直连。
+		if client != nil {
+			if user, ok := client["user"].(string); ok {
+				proxy["username"] = user
+			}
+			if pass, ok := client["pass"].(string); ok {
+				proxy["password"] = pass
+			}
 		}
 
 	default:
