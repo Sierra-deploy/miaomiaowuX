@@ -762,6 +762,21 @@ type RemoteServer struct {
 	// 影响:主控聚合该服务器节点流量时按规则累加。**用户流量不受此字段影响**,
 	// 用户已用流量按套餐 traffic_mode(oneway/twoway)单独算。
 	TrafficStatsMode string `json:"traffic_stats_mode"`
+	// TrafficSource 服务器"已用流量"的数据源 — "xray"(默认,聚合 node_traffic,跟节点视图口径一致)
+	// 或 "system"(用 agent 上报的 /proc/net/dev 累计 RX/TX,跟 VPS 服务商网卡计费口径一致)。
+	// 节点视图 / 用户视图 / 套餐 enforcement 不受此字段影响,它们恒为 xray 维度。
+	TrafficSource string `json:"traffic_source"`
+	// SystemRxCycle / SystemTxCycle 当前 cycle(reset_day 之间)内累加的系统网卡 RX/TX 字节,
+	// 用于 traffic_source='system' 时算 server.traffic_used = SystemRxCycle + SystemTxCycle + offset(按 stats_mode)。
+	SystemRxCycle int64 `json:"system_rx_cycle"`
+	SystemTxCycle int64 `json:"system_tx_cycle"`
+	// SystemLastSeenRx / SystemLastSeenTx 上次 agent 上报的 /proc/net/dev 累计值,
+	// 用于算 delta 与 reboot 检测:RX 倒退(同 boot_time 下)= /proc 异常,差跳过 1 次后续正常;
+	// SystemBootTimeUnix 跟 agent 上报的值对比变化 → 正常 reboot,基线重建不计 delta。
+	SystemLastSeenRx       int64 `json:"system_last_seen_rx"`
+	SystemLastSeenTx       int64 `json:"system_last_seen_tx"`
+	SystemBootTimeUnix     int64 `json:"system_boot_time_unix"`
+	SystemTrafficUpdatedAt *time.Time `json:"system_traffic_updated_at,omitempty"`
 	IsFederated           bool       `json:"is_federated"`       // 是否为接入的"分享服务器"(联邦)，非持久化字段
 	FederationPrefix      string     `json:"federation_prefix"`  // 分享服务器上新增入站的 tag 前缀，非持久化字段
 	CreatedAt             time.Time  `json:"created_at"`
@@ -781,6 +796,15 @@ type NodeTraffic struct {
 	LastUplink    int64     `json:"last_uplink"`
 	LastDownlink  int64     `json:"last_downlink"`
 	UpdatedAt     time.Time `json:"updated_at"`
+}
+
+// ServerSystemTrafficSnapshot 每日 00:00 拍摄的"该 server 此时的 system_rx_cycle / system_tx_cycle"。
+// 前端服务器视图 traffic_source='system' 模式下,用 (当前 cycle - 选定日期 baseline) 算今日/本周/本月增量。
+type ServerSystemTrafficSnapshot struct {
+	ServerID int64  `json:"server_id"`
+	Date     string `json:"date"`
+	RxCycle  int64  `json:"rx_cycle"`
+	TxCycle  int64  `json:"tx_cycle"`
 }
 
 // UserTraffic 表示用户的流量统计信息。
@@ -2036,6 +2060,34 @@ CREATE INDEX IF NOT EXISTS idx_remote_servers_status ON remote_servers(status);
 	if err := r.ensureRemoteServerColumn("traffic_stats_mode", "TEXT NOT NULL DEFAULT 'both'"); err != nil {
 		return err
 	}
+	// traffic_source 决定 server.traffic_used 的数据源:
+	//   'xray'(默认,向后兼容)  → SUM(node_traffic.uplink+downlink),跟现有口径一致
+	//   'system'               → 服务器系统级网卡累计 RX/TX,跟 VPS 计费口径一致
+	// 节点视图 / 用户视图 / 套餐 enforcement 永远走 xray 维度,不受此字段影响。
+	if err := r.ensureRemoteServerColumn("traffic_source", "TEXT NOT NULL DEFAULT 'xray'"); err != nil {
+		return err
+	}
+	// 系统流量 cycle 累计(reset_day 触发时归零)+ 上次 agent 上报快照(用于算 delta 与 reboot 检测)
+	if err := r.ensureRemoteServerColumn("system_rx_cycle", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureRemoteServerColumn("system_tx_cycle", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureRemoteServerColumn("system_last_seen_rx", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureRemoteServerColumn("system_last_seen_tx", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// system_boot_time_unix 跟 agent 上报的 boot_time_unix 对比,变化 = 系统重启,重建基线不计 delta;
+	// 不变但 rx_total 倒退 = 单次 /proc 异常,跳一次也不计 delta(防止瞬时回滚导致错误大 delta)。
+	if err := r.ensureRemoteServerColumn("system_boot_time_unix", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureRemoteServerColumn("system_traffic_updated_at", "TIMESTAMP"); err != nil {
+		return err
+	}
 
 	// 套餐限速字段
 	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN speed_limit_mbps REAL NOT NULL DEFAULT 0")
@@ -2245,6 +2297,26 @@ CREATE INDEX IF NOT EXISTS idx_user_traffic_snapshots_date ON user_traffic_snaps
 `
 	if _, err := r.db.Exec(userTrafficSnapshotsSchema); err != nil {
 		return fmt.Errorf("migrate user_traffic_snapshots: %w", err)
+	}
+
+	// 服务器系统级流量快照 — daily snapshot 之 system 维度。
+	// 每天 00:00 跟 node_traffic_snapshots / user_traffic_snapshots 一起拍,记下"此刻的 rx_cycle / tx_cycle"。
+	// 前端服务器视图 traffic_source='system' 模式下用 (当前 cycle - 该日 baseline) 算今日/本周/本月增量,
+	// 跟 xray path 的 node snapshot 减法语义一致 — UI 三个时间按钮在 system 模式下也能工作。
+	const serverSystemTrafficSnapshotsSchema = `
+CREATE TABLE IF NOT EXISTS server_system_traffic_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    rx_cycle INTEGER NOT NULL DEFAULT 0,
+    tx_cycle INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(server_id, date)
+);
+CREATE INDEX IF NOT EXISTS idx_server_system_traffic_snapshots_date ON server_system_traffic_snapshots(date);
+`
+	if _, err := r.db.Exec(serverSystemTrafficSnapshotsSchema); err != nil {
+		return fmt.Errorf("migrate server_system_traffic_snapshots: %w", err)
 	}
 
 	// ACL4SSR 规则配置模板表
@@ -6504,17 +6576,43 @@ func (r *TrafficRepository) ListXrayServers(ctx context.Context) ([]XrayServer, 
 	return servers, nil
 }
 
-// 从node_traffic 表中计算服务器使用的总流量。
+// GetServerTrafficUsed 计算服务器的"已用流量",按 traffic_source 分支:
+//   - source='xray'(默认)→ SUM(node_traffic.uplink+downlink),跟节点视图口径一致
+//   - source='system'    → 累加 system_rx_cycle + system_tx_cycle(agent /proc/net/dev 上报)
+//
+// traffic_stats_mode (both/upload/download) 对两种数据源同样适用:
+//   - upload = 出方向 = node_traffic.uplink 或 system_tx_cycle
+//   - download = 入方向 = node_traffic.downlink 或 system_rx_cycle
+//
+// 用户流量按套餐 traffic_mode 走,不在此处处理。
 func (r *TrafficRepository) GetServerTrafficUsed(ctx context.Context, serverID int64) (int64, error) {
 	if r == nil || r.db == nil {
 		return 0, errors.New("traffic repository not initialized")
 	}
 
-	// 应用服务器层 traffic_stats_mode:
-	//   both(默认) → uplink+downlink;upload → 仅 uplink;download → 仅 downlink。
-	// 用户流量按套餐 traffic_mode 走,不在此处处理。
-	mode := "both"
-	_ = r.db.QueryRowContext(ctx, `SELECT COALESCE(traffic_stats_mode, 'both') FROM remote_servers WHERE id = ?`, serverID).Scan(&mode)
+	var (
+		mode   = "both"
+		source = "xray"
+		sysRx  int64
+		sysTx  int64
+	)
+	_ = r.db.QueryRowContext(ctx, `
+		SELECT COALESCE(traffic_stats_mode, 'both'), COALESCE(traffic_source, 'xray'),
+		       COALESCE(system_rx_cycle, 0), COALESCE(system_tx_cycle, 0)
+		FROM remote_servers WHERE id = ?`, serverID).Scan(&mode, &source, &sysRx, &sysTx)
+
+	if source == "system" {
+		switch mode {
+		case "upload":
+			return sysTx, nil
+		case "download":
+			return sysRx, nil
+		default:
+			return sysRx + sysTx, nil
+		}
+	}
+
+	// source = "xray" — 保持原行为(走 node_traffic 聚合)
 	expr := "uplink + downlink"
 	switch mode {
 	case "upload":
@@ -6530,6 +6628,78 @@ func (r *TrafficRepository) GetServerTrafficUsed(ctx context.Context, serverID i
 		return 0, fmt.Errorf("get server traffic used: %w", err)
 	}
 	return total, nil
+}
+
+// UpsertRemoteServerSystemTraffic 处理 agent 每次 traffic 上报里带的系统级累计 RX/TX:
+//   - boot_time_unix 与 server.system_boot_time_unix 不一致 → 系统重启,基线重建,本次不计 delta
+//   - 同 boot 周期下 rxTotal 倒退(/proc 抖动)→ 跳一次不计 delta,避免一个错值毁掉 cycle 累计
+//   - 正常:rxDelta = rxTotal - last_seen_rx,累加到 system_rx_cycle;tx 同理
+//   - last_seen_rx/tx 和 system_boot_time_unix 永远更新为本次上报值
+//
+// 在 RemoteTrafficHandler 解析到 payload.system 时调用。
+func (r *TrafficRepository) UpsertRemoteServerSystemTraffic(ctx context.Context, serverID, rxTotal, txTotal, bootTimeUnix int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+
+	var (
+		lastRx   int64
+		lastTx   int64
+		lastBoot int64
+	)
+	err := r.db.QueryRowContext(ctx, `
+		SELECT COALESCE(system_last_seen_rx, 0), COALESCE(system_last_seen_tx, 0),
+		       COALESCE(system_boot_time_unix, 0)
+		FROM remote_servers WHERE id = ?`, serverID).Scan(&lastRx, &lastTx, &lastBoot)
+	if err != nil {
+		return fmt.Errorf("read server system traffic state: %w", err)
+	}
+
+	rxDelta, txDelta := int64(0), int64(0)
+	// lastBoot=0 是首次上报;lastBoot != bootTimeUnix 是系统/agent 重启 — 两种情况都不计 delta
+	if lastBoot != 0 && lastBoot == bootTimeUnix {
+		if rxTotal >= lastRx {
+			rxDelta = rxTotal - lastRx
+		}
+		if txTotal >= lastTx {
+			txDelta = txTotal - lastTx
+		}
+	}
+
+	_, err = r.db.ExecContext(ctx, `
+		UPDATE remote_servers SET
+			system_rx_cycle = COALESCE(system_rx_cycle, 0) + ?,
+			system_tx_cycle = COALESCE(system_tx_cycle, 0) + ?,
+			system_last_seen_rx = ?,
+			system_last_seen_tx = ?,
+			system_boot_time_unix = ?,
+			system_traffic_updated_at = CURRENT_TIMESTAMP,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`,
+		rxDelta, txDelta, rxTotal, txTotal, bootTimeUnix, serverID)
+	if err != nil {
+		return fmt.Errorf("update server system traffic: %w", err)
+	}
+	return nil
+}
+
+// ResetRemoteServerSystemCycle 清零 cycle 累计,保留 last_seen / boot_time_unix(物理网卡累计不变)。
+// 在套餐周期 reset 触发时调用,跟 node_traffic 的归零同步。
+func (r *TrafficRepository) ResetRemoteServerSystemCycle(ctx context.Context, serverID int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	_, err := r.db.ExecContext(ctx, `
+		UPDATE remote_servers SET
+			system_rx_cycle = 0,
+			system_tx_cycle = 0,
+			system_traffic_updated_at = CURRENT_TIMESTAMP,
+			updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`, serverID)
+	if err != nil {
+		return fmt.Errorf("reset server system cycle: %w", err)
+	}
+	return nil
 }
 
 func (r *TrafficRepository) GetRemoteServerTrafficTotals(ctx context.Context, serverIDs []int64) (limit int64, used int64, err error) {
@@ -8489,6 +8659,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		COALESCE(time_offset_seconds, 0),
 		COALESCE(traffic_used_offset, 0),
 		COALESCE(traffic_stats_mode, 'both'),
+		COALESCE(traffic_source, 'xray'),
 		COALESCE(warp_installed, 0),
 		EXISTS(SELECT 1 FROM federated_servers fs WHERE fs.server_id = remote_servers.id),
 		COALESCE((SELECT prefix FROM federated_servers fs WHERE fs.server_id = remote_servers.id), ''),
@@ -8523,6 +8694,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 			&timeOffsetSeconds,
 			&server.TrafficUsedOffset,
 			&server.TrafficStatsMode,
+			&server.TrafficSource,
 			&warpInstalledInt,
 			&server.IsFederated,
 			&server.FederationPrefix,
@@ -8601,6 +8773,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		COALESCE(xray_running, 0), COALESCE(xray_version, ''),
 		COALESCE(traffic_used_offset, 0),
 		COALESCE(traffic_stats_mode, 'both'),
+		COALESCE(traffic_source, 'xray'),
 		COALESCE(warp_installed, 0),
 		created_at, updated_at
 		FROM remote_servers WHERE id = ?`
@@ -8624,6 +8797,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		&xrayRunningInt, &server.XrayVersion,
 		&server.TrafficUsedOffset,
 		&server.TrafficStatsMode,
+		&server.TrafficSource,
 		&warpInstalledInt,
 		&server.CreatedAt, &server.UpdatedAt)
 	if err != nil {
@@ -8822,7 +8996,7 @@ func (r *TrafficRepository) CreateRemoteServer(ctx context.Context, server *Remo
 	// 将令牌有效期设置为从现在起 7 天
 	tokenExpiresAt := time.Now().Add(7 * 24 * time.Hour)
 
-	const stmt = `INSERT INTO remote_servers (name, token, status, ip_address, ip_address_v6, domain, token_expires_at, last_token_refresh, connection_mode, listen_port, pull_address, pull_port, pull_token, use_443, steal_mode, site_type, site_value, xray_mode, traffic_limit, traffic_used_offset, traffic_reset_day, traffic_stats_mode, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+	const stmt = `INSERT INTO remote_servers (name, token, status, ip_address, ip_address_v6, domain, token_expires_at, last_token_refresh, connection_mode, listen_port, pull_address, pull_port, pull_token, use_443, steal_mode, site_type, site_value, xray_mode, traffic_limit, traffic_used_offset, traffic_reset_day, traffic_stats_mode, traffic_source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
 
 	stealMode := server.StealMode
 	if stealMode == "" {
@@ -8838,7 +9012,11 @@ func (r *TrafficRepository) CreateRemoteServer(ctx context.Context, server *Remo
 	if statsMode != "upload" && statsMode != "download" {
 		statsMode = "both"
 	}
-	result, err := r.db.ExecContext(ctx, stmt, server.Name, server.Token, server.Status, server.IPAddress, server.IPAddressV6, server.Domain, tokenExpiresAt, server.ConnectionMode, server.ListenPort, server.PullAddress, server.PullPort, server.PullToken, server.Use443, stealMode, server.SiteType, server.SiteValue, xrayMode, server.TrafficLimit, server.TrafficUsedOffset, server.TrafficResetDay, statsMode)
+	trafficSource := strings.TrimSpace(server.TrafficSource)
+	if trafficSource != "system" {
+		trafficSource = "xray"
+	}
+	result, err := r.db.ExecContext(ctx, stmt, server.Name, server.Token, server.Status, server.IPAddress, server.IPAddressV6, server.Domain, tokenExpiresAt, server.ConnectionMode, server.ListenPort, server.PullAddress, server.PullPort, server.PullToken, server.Use443, stealMode, server.SiteType, server.SiteValue, xrayMode, server.TrafficLimit, server.TrafficUsedOffset, server.TrafficResetDay, statsMode, trafficSource)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return ErrRemoteServerExists
@@ -9567,7 +9745,7 @@ func (r *TrafficRepository) ShouldUsePullMode(server RemoteServer) bool {
 }
 
 // 更新远程服务器的基本信息（名称、域、流量设置、连接模式、Xray模式）。
-func (r *TrafficRepository) UpdateRemoteServer(ctx context.Context, id int64, name, domain string, trafficLimit int64, trafficResetDay int, connectionMode, xrayMode, trafficStatsMode string) error {
+func (r *TrafficRepository) UpdateRemoteServer(ctx context.Context, id int64, name, domain string, trafficLimit int64, trafficResetDay int, connectionMode, xrayMode, trafficStatsMode, trafficSource string) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
 	}
@@ -9591,6 +9769,11 @@ func (r *TrafficRepository) UpdateRemoteServer(ctx context.Context, id int64, na
 	if mode := strings.TrimSpace(trafficStatsMode); mode == "both" || mode == "upload" || mode == "download" {
 		setClauses = append(setClauses, "traffic_stats_mode = ?")
 		args = append(args, mode)
+	}
+	// 服务器流量统计源切换 — 默认 'xray' 保留向后兼容,切到 'system' 后 GetServerTrafficUsed 改读 system_*_cycle
+	if src := strings.TrimSpace(trafficSource); src == "xray" || src == "system" {
+		setClauses = append(setClauses, "traffic_source = ?")
+		args = append(args, src)
 	}
 	setClauses = append(setClauses, "updated_at = CURRENT_TIMESTAMP")
 	args = append(args, id)
@@ -11130,6 +11313,115 @@ JOIN (
 		result = append(result, s)
 	}
 	return result, rows.Err()
+}
+
+// CreateServerSystemTrafficSnapshot 拍下"当前 server 的 system_rx_cycle / system_tx_cycle"作为该日 baseline。
+// 由 collector.CreateDailySnapshots 在每日 00:00 调用。
+// ON CONFLICT 是为了"同一天多次跑"的边角情况(主控重启 + 调度补偿)— 后写覆盖前写。
+func (r *TrafficRepository) CreateServerSystemTrafficSnapshot(ctx context.Context, serverID int64, date string) error {
+	const stmt = `
+INSERT INTO server_system_traffic_snapshots (server_id, date, rx_cycle, tx_cycle)
+SELECT id, ?, COALESCE(system_rx_cycle, 0), COALESCE(system_tx_cycle, 0) FROM remote_servers WHERE id = ?
+ON CONFLICT(server_id, date) DO UPDATE SET rx_cycle = excluded.rx_cycle, tx_cycle = excluded.tx_cycle`
+	_, err := r.db.ExecContext(ctx, stmt, date, serverID)
+	return err
+}
+
+// GetServerSystemTrafficSnapshots 返回每个 server 在 <= date 的最新一份 baseline。
+// 跟 GetNodeTrafficSnapshots 同样的 <= ? + GROUP BY MAX(date) fallback 模式 —
+// 某天 snapshot 没跑(主控当时离线 / 服务器没数据)时自动回退到上一份有数据的快照,
+// 减法不会因为找不到 baseline 而崩。
+func (r *TrafficRepository) GetServerSystemTrafficSnapshots(ctx context.Context, date string) ([]ServerSystemTrafficSnapshot, error) {
+	const query = `
+SELECT s.server_id, s.date, s.rx_cycle, s.tx_cycle
+FROM server_system_traffic_snapshots s
+JOIN (
+    SELECT server_id, MAX(date) AS max_date
+    FROM server_system_traffic_snapshots
+    WHERE date <= ?
+    GROUP BY server_id
+) latest ON s.server_id = latest.server_id AND s.date = latest.max_date`
+	rows, err := r.db.QueryContext(ctx, query, date)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []ServerSystemTrafficSnapshot
+	for rows.Next() {
+		var s ServerSystemTrafficSnapshot
+		if err := rows.Scan(&s.ServerID, &s.Date, &s.RxCycle, &s.TxCycle); err != nil {
+			return nil, err
+		}
+		result = append(result, s)
+	}
+	return result, rows.Err()
+}
+
+// MigrateXraySnapshotsToSystem 在 server.traffic_source 从 xray 切到 system 时调用,
+// 把 xray 流量的"当前累计 + daily snapshot 历史"完整搬到 system 维度,让切换后:
+//   - server.traffic_used 显示 = xray 总累计(等同切换前 xray 视角)
+//   - 服务器视图 today / week / month 三个时间按钮立即可用(每个日期都有 baseline)
+//
+// 三步事务:
+//   1. system_rx_cycle / system_tx_cycle = SUM(downlink) / SUM(uplink) FROM node_traffic
+//      → mode=both 时 cycle 和 = SUM(uplink+downlink) = xray total
+//   2. **traffic_used_offset = 0**(关键!): 历史 bug 防御 + 语义复位
+//      之前版本只 SET cycle 没动 offset → 切换瞬间 handler 算的 offset(基于"system 真实小累加")
+//      跟 migrate 后 cycle(= xray total)脱节 → traffic_used = cycle + offset 翻倍。
+//      reset offset = 0 意味着 server.traffic_used = cycle 单独,跟 xray 视角自然对齐。
+//      用户后续若要校准已用流量,通过 dialog 显式填入(handler 的 if req.TrafficUsed != nil 路径)。
+//   3. server_system_traffic_snapshots 按 node_traffic_snapshots 每日聚合填充
+//      → 之后 daily snapshot job 继续每天 00:00 拍新行
+//
+// 上一轮切换的 server 缺少这步迁移 → daily snapshot baseline 全 0 + offset 错锁 → 翻倍 bug,
+// 启动 backfill goroutine 用本函数补齐。
+func (r *TrafficRepository) MigrateXraySnapshotsToSystem(ctx context.Context, serverID int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+
+	// Step A+B 合一: cycle SET = xray 累计;offset 复位为 0(避免历史 bug 锁定的脱节 offset)
+	const updateCycleStmt = `
+UPDATE remote_servers SET
+  system_rx_cycle = COALESCE((SELECT SUM(downlink) FROM node_traffic WHERE server_id = ?), 0),
+  system_tx_cycle = COALESCE((SELECT SUM(uplink)   FROM node_traffic WHERE server_id = ?), 0),
+  traffic_used_offset = 0,
+  system_traffic_updated_at = CURRENT_TIMESTAMP,
+  updated_at = CURRENT_TIMESTAMP
+WHERE id = ?`
+	if _, err := r.db.ExecContext(ctx, updateCycleStmt, serverID, serverID, serverID); err != nil {
+		return fmt.Errorf("migrate cycle to xray baseline: %w", err)
+	}
+
+	// Step C: 复制 daily snapshot 历史(per server per date 聚合 node 流量)
+	const copySnapshotsStmt = `
+INSERT INTO server_system_traffic_snapshots (server_id, date, rx_cycle, tx_cycle)
+SELECT server_id, date, COALESCE(SUM(downlink), 0), COALESCE(SUM(uplink), 0)
+FROM node_traffic_snapshots
+WHERE server_id = ?
+GROUP BY date
+ON CONFLICT(server_id, date) DO UPDATE SET
+  rx_cycle = excluded.rx_cycle,
+  tx_cycle = excluded.tx_cycle`
+	if _, err := r.db.ExecContext(ctx, copySnapshotsStmt, serverID); err != nil {
+		return fmt.Errorf("migrate daily snapshots to system: %w", err)
+	}
+
+	return nil
+}
+
+// CountServerSystemTrafficSnapshots 返回某 server 已有的 system snapshot 行数,
+// 启动 backfill 用此判断"上一轮切换时是否漏迁移"(< 7 视为需要补)。
+func (r *TrafficRepository) CountServerSystemTrafficSnapshots(ctx context.Context, serverID int64) (int, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	var n int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM server_system_traffic_snapshots WHERE server_id = ?`, serverID).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count server system snapshots: %w", err)
+	}
+	return n, nil
 }
 
 func (r *TrafficRepository) IsTrafficThresholdNotified(ctx context.Context, serverID int64) (bool, error) {

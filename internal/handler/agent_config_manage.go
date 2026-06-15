@@ -83,6 +83,7 @@ type RemoteServerCreateRequest struct {
 	SiteValue         string `json:"site_value"`          // 静态路径或反向代理地址
 	XrayMode          string `json:"xray_mode"`           // "external" 或 "embedded"，默认 "external"
 	TrafficStatsMode  string `json:"traffic_stats_mode"`  // "both"(默认) | "upload" | "download" — 节点流量统计方向
+	TrafficSource     string `json:"traffic_source"`      // "xray"(默认,聚合 node_traffic) | "system"(用 agent 上报系统级网卡累计)
 }
 
 // RemoteServerResponse 表示带有远程服务器数据的响应
@@ -139,6 +140,7 @@ type RemoteServerUpdateRequest struct {
 	PullToken       string `json:"pull_token"`
 	XrayMode         string `json:"xray_mode"`
 	TrafficStatsMode string `json:"traffic_stats_mode"` // both | upload | download
+	TrafficSource    string `json:"traffic_source"`     // xray | system
 }
 
 // 生成加密安全令牌
@@ -381,6 +383,13 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 	if trafficStatsMode != "upload" && trafficStatsMode != "download" {
 		trafficStatsMode = "both"
 	}
+	// 新建 server 默认 system — VPS 计费口径,跟 UI 默认保持一致。
+	// 前端 dialog 默认勾选「系统网卡流量」;API 直调时 req 没传 traffic_source 也走 system。
+	// 仅 req 显式传 "xray" 才走 xray 路径(中转机 / 需要协议级口径的特殊场景)。
+	trafficSource := strings.TrimSpace(req.TrafficSource)
+	if trafficSource != "xray" {
+		trafficSource = "system"
+	}
 
 	server := &storage.RemoteServer{
 		Name:              req.Name,
@@ -402,6 +411,7 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		TrafficUsedOffset: trafficUsedOffset,
 		TrafficResetDay:   resetDay,
 		TrafficStatsMode:  trafficStatsMode,
+		TrafficSource:     trafficSource,
 	}
 
 	if err := h.repo.CreateRemoteServer(ctx, server); err != nil {
@@ -642,7 +652,22 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		return
 	}
 
-	if err := h.repo.UpdateRemoteServer(ctx, req.ID, req.Name, req.Domain, req.TrafficLimit, req.TrafficResetDay, req.ConnectionMode, req.XrayMode, req.TrafficStatsMode); err != nil {
+	// 检测 traffic_source 是否变更 — 用于切换时自动迁移 offset,让 server.traffic_used 显示值连续,
+	// 避免用户从 xray 切到 system 时数字突然变小(只剩主控升级以来累积的几小时 system 流量),
+	// 反向切回也同样平滑。必须在 UpdateRemoteServer **之前**算 oldDisplay,否则 GetServerTrafficUsed
+	// 走的就是新 source 分支了,oldDisplay 取不到旧值。
+	newSource := strings.TrimSpace(req.TrafficSource)
+	if newSource == "" {
+		newSource = oldServer.TrafficSource
+	}
+	sourceChanged := newSource != "" && newSource != oldServer.TrafficSource
+	var oldDisplayForMigration int64
+	if sourceChanged {
+		oldRaw, _ := h.repo.GetServerTrafficUsed(ctx, req.ID)
+		oldDisplayForMigration = oldRaw + oldServer.TrafficUsedOffset
+	}
+
+	if err := h.repo.UpdateRemoteServer(ctx, req.ID, req.Name, req.Domain, req.TrafficLimit, req.TrafficResetDay, req.ConnectionMode, req.XrayMode, req.TrafficStatsMode, req.TrafficSource); err != nil {
 		msg := "更新服务器失败"
 		if err == storage.ErrRemoteServerNotFound {
 			msg = "服务器不存在"
@@ -653,6 +678,20 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 			Message: msg,
 		})
 		return
+	}
+
+	// 切换 xray→system 时,把 xray 流量的当前累计 + daily snapshot 历史完整搬到 system 维度:
+	//   - cycle 起点 = xray inbound 累计 → 切换瞬间 GetServerTrafficUsed(system) == 切换前 xray raw → 显示数值无变化
+	//   - daily snapshot 按 node_traffic_snapshots 每日聚合 → 服务器视图 today/week/month 立即可用
+	// 反向(system→xray)不需要迁移 — node_traffic_snapshots 一直在被 daily snapshot job 拍,xray baseline 现成可用。
+	if sourceChanged && oldServer.TrafficSource == "xray" && newSource == "system" {
+		if err := h.repo.MigrateXraySnapshotsToSystem(ctx, req.ID); err != nil {
+			log.Printf("[Remote Server] Migrate xray snapshots to system failed for server %d: %v", req.ID, err)
+			// 不阻断 update — 切换基本功能仍然可用,只是 today/week/month baseline 缺失;
+			// 主控启动 backfill goroutine 之后会自动补
+		} else {
+			log.Printf("[Remote Server] Migrated xray snapshots to system for server %d on source switch", req.ID)
+		}
 	}
 
 	// 更新拉取配置（如果提供）
@@ -705,12 +744,25 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		}
 	}
 
-	// 更新已用流量偏移量
+	// 更新已用流量偏移量。优先级:
+	//   1. 用户在 dialog 显式填了"已用流量" → 按用户输入算 offset
+	//   2. 没填但 traffic_source 变了 → 自动迁移,把旧 source 显示值"搬"到新 source 起点
+	//      (oldDisplay 在 UpdateRemoteServer 之前抓的,此时 source 已切到新值,GetServerTrafficUsed 走新分支)
+	//   3. 都不满足 → 不动 offset
 	if req.TrafficUsed != nil {
 		aggregated, _ := h.repo.GetServerTrafficUsed(ctx, req.ID)
 		offset := *req.TrafficUsed - aggregated
 		if err := h.repo.UpdateRemoteServerTrafficOffset(ctx, req.ID, offset); err != nil {
 			log.Printf("[Remote Server] Failed to update traffic offset for server %d: %v", req.ID, err)
+		}
+	} else if sourceChanged {
+		newRaw, _ := h.repo.GetServerTrafficUsed(ctx, req.ID)
+		offset := oldDisplayForMigration - newRaw
+		if err := h.repo.UpdateRemoteServerTrafficOffset(ctx, req.ID, offset); err != nil {
+			log.Printf("[Remote Server] Auto-migrate traffic offset on source switch failed for server %d: %v", req.ID, err)
+		} else {
+			log.Printf("[Remote Server] Auto-migrated traffic offset for server %d on source switch %s→%s: oldDisplay=%d, newRaw=%d, newOffset=%d",
+				req.ID, oldServer.TrafficSource, newSource, oldDisplayForMigration, newRaw, offset)
 		}
 	}
 

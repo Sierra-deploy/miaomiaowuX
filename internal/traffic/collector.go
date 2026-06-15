@@ -458,6 +458,11 @@ func (c *Collector) CreateDailySnapshots(ctx context.Context) error {
 		if err := c.repo.CreateUserTrafficSnapshots(ctx, rs.ID, date); err != nil {
 			log.Printf("[Traffic Collector] Failed to create user snapshot for server %s: %v", rs.Name, err)
 		}
+		// Server system traffic baseline — server 视图 traffic_source='system' 模式下今日/本周/本月按钮算增量用。
+		// 即便该 server 当前 source='xray' 也照拍 — 用户后续切到 system 时,已有 baseline 可用。
+		if err := c.repo.CreateServerSystemTrafficSnapshot(ctx, rs.ID, date); err != nil {
+			log.Printf("[Traffic Collector] Failed to create server system snapshot for server %s: %v", rs.Name, err)
+		}
 	}
 
 	log.Printf("[Traffic Collector] Created daily snapshots for %d servers", len(remoteServers))

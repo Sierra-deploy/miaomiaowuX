@@ -1029,6 +1029,10 @@ func main() {
 	go trafficCollector.StartSpeedCollection(collectorCtx)
 	// 启动每日快照和清理任务
 	go startDailySnapshotTask(collectorCtx, trafficHandler, trafficCollector)
+	// 一次性补:上一轮已切到 traffic_source='system' 但 daily snapshot baseline 缺失的 server。
+	// 行数 < 7 视为"切换时漏迁移"(覆盖本周维度);ON CONFLICT 覆盖,重启重跑也安全。
+	// 新装的 system server 跑 7 天后自然有 ≥7 行,不会被误触发。
+	go backfillSystemSnapshotsForSwitchedServers(collectorCtx, repo)
 	// 启动流量超限检查（每 2 分钟）
 	trafficEnforcer := handler.NewTrafficLimitEnforcer(repo, remoteManageHandler, limiterPusher)
 	go trafficEnforcer.Start(collectorCtx, time.Duration(systemConfig.TrafficCheckInterval)*time.Second)
@@ -1178,6 +1182,64 @@ func waitForShutdown(srv *http.Server, cancels ...context.CancelFunc) {
 		logger.Error("优雅关闭失败", "error", err)
 	} else {
 		logger.Info("服务器已安全关闭")
+	}
+}
+
+// backfillSystemSnapshotsForSwitchedServers 一次性修复上一轮 source 切换产生的两个 bug:
+//   1. daily snapshot baseline 缺失 → today/week/month 三个时间按钮显示同一固定值
+//   2. **更严重**:offset 锁在"oldDisplay - 小 system_raw"≈ xray total → 之后 cycle 被 SET 成 xray total
+//      又没动 offset → traffic_used = cycle + offset = 2 × xray total **翻倍**
+//
+// MigrateXraySnapshotsToSystem 现在同时 reset offset = 0,所以本函数对全部 system source server 跑一次
+// 即可修复以上两 bug。**用 system_settings 表里的 marker 控制只跑一次** — 跑完写 marker,后续启动检测到
+// marker 直接跳过。这样用户手动校准的 traffic_used(走 dialog "已用流量"字段触发 handler 的 offset 调整)
+// 不会被后续启动的 backfill 反复冲掉。
+//
+// 启动后 30s 延迟跑,避开启动峰值;失败只 log,不阻塞主控。
+const backfillSystemTrafficOffsetResyncMarker = "system_traffic_offset_resync_v1_done"
+
+func backfillSystemSnapshotsForSwitchedServers(ctx context.Context, repo *storage.TrafficRepository) {
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(30 * time.Second):
+	}
+
+	scanCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+
+	// marker 检查 — 已跑过就跳过,保护用户手动校准不被覆盖
+	if val, err := repo.GetSystemSetting(scanCtx, backfillSystemTrafficOffsetResyncMarker); err == nil && val != "" {
+		log.Printf("[Backfill SystemSnap] one-time resync already done at %s, skip", val)
+		return
+	}
+
+	servers, err := repo.ListRemoteServers(scanCtx)
+	if err != nil {
+		log.Printf("[Backfill SystemSnap] list remote servers failed: %v", err)
+		return
+	}
+
+	migrated := 0
+	for _, s := range servers {
+		if s.TrafficSource != "system" {
+			continue
+		}
+		if err := repo.MigrateXraySnapshotsToSystem(scanCtx, s.ID); err != nil {
+			log.Printf("[Backfill SystemSnap] migrate server %d (%s) failed: %v", s.ID, s.Name, err)
+			continue
+		}
+		migrated++
+		log.Printf("[Backfill SystemSnap] server %d (%s) migrated xray history → system, offset reset to 0",
+			s.ID, s.Name)
+	}
+	if migrated > 0 {
+		log.Printf("[Backfill SystemSnap] one-time resync done: migrated %d server(s)", migrated)
+	}
+
+	// 写 marker — 即便没 migrate 任何 server(全是 xray source)也写,避免每次启动重复扫
+	if err := repo.SetSystemSetting(scanCtx, backfillSystemTrafficOffsetResyncMarker, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		log.Printf("[Backfill SystemSnap] write marker failed: %v", err)
 	}
 }
 

@@ -97,6 +97,9 @@ type WSTrafficPayload struct {
 	Stats       *traffic.XrayStats  `json:"stats,omitempty"`
 	OnlineUsers map[string][]string `json:"online_users,omitempty"`
 	UserSpeeds  map[string]int64    `json:"user_speeds,omitempty"`
+	// System 系统级网卡累计 RX/TX,跟 HTTP path 的 RemoteTrafficRequest.System 同构。
+	// 用于 server.traffic_source='system' 时累加 system_*_cycle;nil = 老 agent 不上报,跳过。
+	System *RemoteSystemTraffic `json:"system,omitempty"`
 }
 
 // WSLimiterConfigPayload 表示限速配置下发消息 (Master -> Agent)
@@ -1007,6 +1010,16 @@ func (h *RemoteWSHandler) handleTraffic(wsConn *RemoteWSConnection, payload json
 	if err := h.collector.ProcessRemoteMetrics(ctx, wsConn.ServerID, trafficPayload.Stats, xrayBootTime); err != nil {
 		log.Printf("[Remote WS] Failed to process traffic from server %s: %v", wsConn.ServerName, err)
 		return
+	}
+
+	// 系统级网卡累计 — 同 HTTP path 的 RemoteTrafficHandler 处理。WS path 之前漏了这段,
+	// 导致 source=system 的 server 在 WS 连接模式下 system_*_cycle 永远不动 → traffic_used 静止。
+	// 失败只 log 不阻塞(跟 HTTP path 一致);老 agent payload.System==nil → 自动跳过。
+	if trafficPayload.System != nil {
+		if err := h.repo.UpsertRemoteServerSystemTraffic(ctx, wsConn.ServerID,
+			trafficPayload.System.RxTotal, trafficPayload.System.TxTotal, trafficPayload.System.BootTimeUnix); err != nil {
+			log.Printf("[Remote WS] Failed to upsert system traffic for server %s: %v", wsConn.ServerName, err)
+		}
 	}
 
 	if len(trafficPayload.UserSpeeds) > 0 {

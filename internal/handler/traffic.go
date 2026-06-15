@@ -48,6 +48,8 @@ func (h *TrafficHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleNodeSnapshots(w, r)
 	case path == "user-snapshots":
 		h.handleUserSnapshots(w, r)
+	case path == "server-system-snapshots":
+		h.handleServerSystemSnapshots(w, r)
 	case path == "user-nodes":
 		h.handleUserNodes(w, r)
 	case path == "node-users":
@@ -824,6 +826,16 @@ func NewRemoteTrafficHandler(repo *storage.TrafficRepository, collector *traffic
 // RemoteTrafficRequest 表示来自远程服务器的流量报告
 type RemoteTrafficRequest struct {
 	Stats *traffic.XrayStats `json:"stats,omitempty"`
+	// System 系统级网卡累计 RX/TX(来自 agent /proc/net/dev),用于 server.traffic_source='system' 路径。
+	// nil = 老 agent 不支持上报,server 视图自动回退 xray 数据源。
+	System *RemoteSystemTraffic `json:"system,omitempty"`
+}
+
+// RemoteSystemTraffic 内嵌于 RemoteTrafficRequest,跟 agent 端 sendTrafficData / sendTrafficHTTP 的字段对齐。
+type RemoteSystemTraffic struct {
+	RxTotal      int64 `json:"rx_total"`
+	TxTotal      int64 `json:"tx_total"`
+	BootTimeUnix int64 `json:"boot_time_unix"`
 }
 
 // 处理来自远程服务器的 POST 请求
@@ -912,6 +924,15 @@ func (h *RemoteTrafficHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// 系统级网卡累计:把 delta 累加到 server.system_*_cycle(用于 traffic_source='system')。
+	// 老 agent 不上报 → req.System == nil → 跳过,server 视图自动回退 xray 路径。
+	// 失败只 log 不阻塞 traffic 流程 — system 数据不可用顶多让 server 视图显示偏小,不致命。
+	if req.System != nil {
+		if err := h.repo.UpsertRemoteServerSystemTraffic(ctx, serverID, req.System.RxTotal, req.System.TxTotal, req.System.BootTimeUnix); err != nil {
+			log.Printf("[Remote Traffic] Failed to upsert system traffic for %s: %v", remoteServer.Name, err)
+		}
+	}
+
 	// 在 traffic 上报响应里捎带最新的 config 更新(HTTP-mode agent 没有持久连接,
 	// 走 traffic POST 的 response 把变化推回去,agent 收到后调 handleConfigUpdate 应用)。
 	configUpdates := map[string]string{}
@@ -961,6 +982,27 @@ func (h *TrafficHandler) handleUserSnapshots(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	snapshots, err := h.repo.GetUserTrafficSnapshots(r.Context(), date)
+	if err != nil {
+		h.writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "snapshots": snapshots})
+}
+
+// handleServerSystemSnapshots 返回每个 server 在 <= date 的最新一份 system_rx_cycle / system_tx_cycle baseline。
+// 前端 server 视图 traffic_source='system' 模式下用 (当前 cycle - baseline) 算今日/本周/本月增量,
+// 跟 node-snapshots / user-snapshots 用于 xray path 的语义平行。
+func (h *TrafficHandler) handleServerSystemSnapshots(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	date := r.URL.Query().Get("date")
+	if date == "" {
+		h.writeJSON(w, http.StatusBadRequest, map[string]interface{}{"success": false, "error": "date is required"})
+		return
+	}
+	snapshots, err := h.repo.GetServerSystemTrafficSnapshots(r.Context(), date)
 	if err != nil {
 		h.writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"success": false, "error": err.Error()})
 		return
