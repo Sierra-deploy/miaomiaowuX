@@ -2,18 +2,10 @@
 # 妙妙屋X - Xray 服务器管理与订阅拼车系统
 
 <div align="center">
-  <img height="200px" src="https://raw.githubusercontent.com/iluobei/miaomiaowuX/refs/heads/main/miaomiaowux-frontend/public/images/logo.webp" />
+  <img height="200px" src="https://raw.githubusercontent.com/iluobei/miaomiaowuX/refs/heads/main/screenshots/mmwx_light.webp" />
 </div>
 
 妙妙屋X 是 [妙妙屋](https://github.com/iluobei/miaomiaowu) 的增强版本，在原有 Clash 订阅管理基础上，新增 Xray 多服务器管理、远程节点部署、流量监控、证书管理等功能。支持主控/子服务器架构，通过 [mmw-agent](https://github.com/iluobei/mmw-agent) 实现远程服务器的统一管理。
-
-## 仓库结构说明
-
-本仓库为 **后端源码 + 编译/发布脚本**。前端源码已迁至独立私有仓库,仅在发布 Release 与 Docker 镜像构建时由 GitHub Actions 拉取并编译。
-
-- 普通用户：直接使用 [GitHub Release](https://github.com/iluobei/miaomiaowuX/releases) 二进制或 [GHCR Docker 镜像](https://github.com/iluobei/miaomiaowuX/pkgs/container/miaomiaowux)，无需任何源码即可运行。
-- 后端贡献者：本仓库 clone 后,后端开发完整可用;若要 build 出完整二进制(含前端),需 `export SKIP_FRONTEND=1`(沿用现有 `internal/web/dist`)或获取私有前端 repo 的访问权限。
-- 前端反馈：欢迎在 [Issues](https://github.com/iluobei/miaomiaowuX/issues) 提 bug 报告或功能请求。
 
 ## 功能特性
 
