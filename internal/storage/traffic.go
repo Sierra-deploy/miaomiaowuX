@@ -816,6 +816,9 @@ type NodeTrafficSnapshot struct {
 	ID       int64  `json:"id"`
 	ServerID int64  `json:"server_id"`
 	Tag      string `json:"tag"`
+	// Type 区分 'inbound' / 'outbound',前端按 type='inbound' 过滤减 server 视图 baseline,
+	// 避免老 schema 无 type 时 sum(inbound+outbound snap) 大于 sum(inbound live) → 减出负数 clamp 0。
+	Type     string `json:"type"`
 	Date     string `json:"date"`
 	Uplink   int64  `json:"uplink"`
 	Downlink int64  `json:"downlink"`
@@ -2203,6 +2206,28 @@ CREATE INDEX IF NOT EXISTS idx_node_traffic_snapshots_date ON node_traffic_snaps
 `
 	if _, err := r.db.Exec(nodeTrafficSnapshotsSchema); err != nil {
 		return fmt.Errorf("migrate node_traffic_snapshots: %w", err)
+	}
+
+	// 老库快照表无 type 列 → 前端 serverOverviewList 无法过滤,sum(inbound+outbound snap) 远大于
+	// sum(inbound live) → 减出负数 clamp 0 → 全部 server 今日/本周流量显示 0(已在 mmw.2ha.me 实证)。
+	// 兜底:ADD COLUMN type DEFAULT 'inbound' + 用 node_traffic 当前 (server_id, tag, type) 映射 backfill。
+	// 已删除节点对应的历史 snapshot 行保持默认值 — server 视图也展示不到这些 tag,影响可忽略。
+	if err := r.ensureTableColumn("node_traffic_snapshots", "type", "TEXT NOT NULL DEFAULT 'inbound'"); err != nil {
+		return fmt.Errorf("ensure node_traffic_snapshots.type column: %w", err)
+	}
+	const backfillNodeSnapshotType = `
+UPDATE node_traffic_snapshots AS s
+SET type = (
+    SELECT nt.type FROM node_traffic nt
+    WHERE nt.server_id = s.server_id AND nt.tag = s.tag
+    LIMIT 1
+)
+WHERE EXISTS (
+    SELECT 1 FROM node_traffic nt
+    WHERE nt.server_id = s.server_id AND nt.tag = s.tag AND nt.type = 'outbound'
+)`
+	if _, err := r.db.Exec(backfillNodeSnapshotType); err != nil {
+		return fmt.Errorf("backfill node_traffic_snapshots.type: %w", err)
 	}
 
 	const userTrafficSnapshotsSchema = `
@@ -11030,10 +11055,13 @@ func (r *TrafficRepository) DeleteDNSProvider(ctx context.Context, id int64) err
 }
 
 func (r *TrafficRepository) CreateNodeTrafficSnapshots(ctx context.Context, serverID int64, date string) error {
+	// 写入时把 node_traffic.type 一起带上,前端 serverOverviewList 才能用 type='inbound' 过滤,
+	// 避免历史 bug:仅靠 (server_id, tag, date) 唯一约束,inbound/outbound 同 tag 时后写入覆盖前面;
+	// 实际生产中 tag 命名不重叠,所以保留旧 UNIQUE 即可,只补 type 列足以让前端对称减法。
 	const stmt = `
-INSERT INTO node_traffic_snapshots (server_id, tag, date, uplink, downlink)
-SELECT server_id, tag, ?, uplink, downlink FROM node_traffic WHERE server_id = ?
-ON CONFLICT(server_id, tag, date) DO UPDATE SET uplink=excluded.uplink, downlink=excluded.downlink`
+INSERT INTO node_traffic_snapshots (server_id, tag, type, date, uplink, downlink)
+SELECT server_id, tag, type, ?, uplink, downlink FROM node_traffic WHERE server_id = ?
+ON CONFLICT(server_id, tag, date) DO UPDATE SET type=excluded.type, uplink=excluded.uplink, downlink=excluded.downlink`
 	_, err := r.db.ExecContext(ctx, stmt, date, serverID)
 	return err
 }
@@ -11053,7 +11081,7 @@ ON CONFLICT(server_id, username, date) DO UPDATE SET uplink=excluded.uplink, dow
 // 实现:每组(server_id, tag)按 date DESC 取最大值;旧逻辑 = 时严格 0 行匹配的事故消失。
 func (r *TrafficRepository) GetNodeTrafficSnapshots(ctx context.Context, date string) ([]NodeTrafficSnapshot, error) {
 	const query = `
-SELECT s.id, s.server_id, s.tag, s.date, s.uplink, s.downlink
+SELECT s.id, s.server_id, s.tag, s.type, s.date, s.uplink, s.downlink
 FROM node_traffic_snapshots s
 JOIN (
     SELECT server_id, tag, MAX(date) AS max_date
@@ -11069,7 +11097,7 @@ JOIN (
 	var result []NodeTrafficSnapshot
 	for rows.Next() {
 		var s NodeTrafficSnapshot
-		if err := rows.Scan(&s.ID, &s.ServerID, &s.Tag, &s.Date, &s.Uplink, &s.Downlink); err != nil {
+		if err := rows.Scan(&s.ID, &s.ServerID, &s.Tag, &s.Type, &s.Date, &s.Uplink, &s.Downlink); err != nil {
 			return nil, err
 		}
 		result = append(result, s)
