@@ -1,12 +1,15 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"time"
+
+	"miaomiaowux/internal/probe"
 )
 
 // TCPingRequest 表示 TCP ping 请求
@@ -14,6 +17,10 @@ type TCPingRequest struct {
 	Host    string `json:"host"`
 	Port    int    `json:"port"`
 	Timeout int    `json:"timeout"` // 超时时间，单位毫秒，默认5000
+	// Protocol 节点协议名(小写,如 "hysteria2" / "vless")。
+	// 设了 UDP 协议(hysteria/hysteria2/hy2/tuic)时走 udping 路径,否则走原 TCP DialTimeout。
+	// 不传(空)兼容老前端 — 走 TCP 路径,保持向后兼容。
+	Protocol string `json:"protocol,omitempty"`
 }
 
 // TCPingResponse 表示 TCP ping 响应
@@ -66,29 +73,45 @@ func NewTCPingHandler() http.Handler {
 		address := net.JoinHostPort(req.Host, fmt.Sprintf("%d", req.Port))
 		timeoutDuration := time.Duration(timeout) * time.Millisecond
 
-		log.Printf("[TCPing] Testing %s with timeout %dms", address, timeout)
+		log.Printf("[TCPing] Testing %s with timeout %dms (protocol=%q)", address, timeout, req.Protocol)
 
-		start := time.Now()
-		conn, err := net.DialTimeout("tcp", address, timeoutDuration)
-		latency := float64(time.Since(start).Microseconds()) / 1000.0
-
-		resp := TCPingResponse{}
-
-		if err != nil {
-			log.Printf("[TCPing] Connection failed: %s - %v", address, err)
-			resp.Success = false
-			resp.Error = err.Error()
-		} else {
-			conn.Close()
-			log.Printf("[TCPing] Connection succeeded: %s - %.2fms", address, latency)
-			resp.Success = true
-			resp.Latency = latency
-		}
+		resp := pingOne(r.Context(), req, timeoutDuration)
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(resp)
 	})
+}
+
+// pingOne 是单次探测的公共路径,根据 req.Protocol 自动选 TCP / UDP 探测。
+// 单节点 handler + 批量 handler 共用,保证语义一致。
+func pingOne(ctx context.Context, req TCPingRequest, timeout time.Duration) TCPingResponse {
+	address := net.JoinHostPort(req.Host, fmt.Sprintf("%d", req.Port))
+
+	// QUIC-based UDP 协议:走 udping(发 QUIC VN trigger 等响应)。
+	// TCP DialTimeout 对 hysteria/hysteria2/hy2/tuic 端口永远 fail(没 TCP 套接字)— 这是历史 bug。
+	if probe.IsUDPProtocol(req.Protocol) {
+		rtt, err := probe.UDPProbe(ctx, req.Host, req.Port, req.Protocol, timeout)
+		if err != nil {
+			log.Printf("[UDPing] %s (%s) failed: %v", address, req.Protocol, err)
+			return TCPingResponse{Success: false, Error: err.Error()}
+		}
+		latency := float64(rtt.Microseconds()) / 1000.0
+		log.Printf("[UDPing] %s (%s) succeeded: %.2fms", address, req.Protocol, latency)
+		return TCPingResponse{Success: true, Latency: latency}
+	}
+
+	// TCP 路径(向后兼容 — protocol 不传或非 UDP 协议都走这里)
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp", address, timeout)
+	latency := float64(time.Since(start).Microseconds()) / 1000.0
+	if err != nil {
+		log.Printf("[TCPing] %s failed: %v", address, err)
+		return TCPingResponse{Success: false, Error: err.Error()}
+	}
+	conn.Close()
+	log.Printf("[TCPing] %s succeeded: %.2fms", address, latency)
+	return TCPingResponse{Success: true, Latency: latency}
 }
 
 // 创建批处理 TCP ping 处理程序
@@ -125,17 +148,18 @@ func NewTCPingBatchHandler() http.Handler {
 
 		results := make([]TCPingResponse, len(requests))
 		done := make(chan struct{}, len(requests))
+		ctx := r.Context()
 
 		for i, req := range requests {
-			go func(idx int, r TCPingRequest) {
+			go func(idx int, item TCPingRequest) {
 				defer func() { done <- struct{}{} }()
 
-				if r.Host == "" || r.Port <= 0 || r.Port > 65535 {
+				if item.Host == "" || item.Port <= 0 || item.Port > 65535 {
 					results[idx] = TCPingResponse{Success: false, Error: "invalid host or port"}
 					return
 				}
 
-				timeout := r.Timeout
+				timeout := item.Timeout
 				if timeout <= 0 {
 					timeout = 5000
 				}
@@ -143,19 +167,9 @@ func NewTCPingBatchHandler() http.Handler {
 					timeout = 30000
 				}
 
-				address := net.JoinHostPort(r.Host, fmt.Sprintf("%d", r.Port))
-				timeoutDuration := time.Duration(timeout) * time.Millisecond
-
-				start := time.Now()
-				conn, err := net.DialTimeout("tcp", address, timeoutDuration)
-				latency := float64(time.Since(start).Microseconds()) / 1000.0
-
-				if err != nil {
-					results[idx] = TCPingResponse{Success: false, Error: err.Error()}
-				} else {
-					conn.Close()
-					results[idx] = TCPingResponse{Success: true, Latency: latency}
-				}
+				// 跟单节点路径共用 pingOne — UDP/TCP 协议感知一致;批量请求里
+				// hy2/tuic 节点也能走 udping(每个 goroutine 独立 UDP socket,无端口竞争)。
+				results[idx] = pingOne(ctx, item, time.Duration(timeout)*time.Millisecond)
 			}(i, req)
 		}
 
