@@ -73,6 +73,17 @@ func (h *AgentVersionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	if latestErr != "" {
 		resp["latest_error"] = latestErr
 	}
+	// agent 不可达 → 返回 502,前端 react-query 视为 error 不写 data 缓存,
+	// server.status 翻回 connected 后组件重新挂载时不会消费 stale "?" cache,自动 refetch。
+	// 区分两类失败:
+	//   - current 空 + currentErr 非空 → agent 不可达(或转发失败)= 502 BadGateway
+	//   - current 空 + currentErr 空   → agent 可达但旧版未上报版本 = 200(保留 "?" 显示让升级提示生效)
+	if current == "" && currentErr != "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadGateway)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
 	respondJSON(w, http.StatusOK, resp)
 }
 
