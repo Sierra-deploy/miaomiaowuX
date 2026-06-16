@@ -687,8 +687,14 @@ func (p *URIProducer) encodeHysteria2(proxy Proxy) (string, error) {
 
 	params := url.Values{}
 
-	// SNI
-	if sni := GetString(proxy, "servername"); sni != "" {
+	// SNI:mihomo / clash.meta 主流命名是 "sni"(跟前端 TS substore 读取同款字段一致),
+	// 部分上游 Clash 配置(如老 ClashX / sing-box 转换)用 "servername" — 都做兜底,
+	// 避免只读 servername 漏掉 mihomo clash_config 里的 sni 字段(历史 bug)。
+	sni := GetString(proxy, "sni")
+	if sni == "" {
+		sni = GetString(proxy, "servername")
+	}
+	if sni != "" {
 		params.Set("sni", sni)
 	}
 
@@ -746,9 +752,32 @@ func (p *URIProducer) encodeHysteria2(proxy Proxy) (string, error) {
 		}
 	}
 
+	// 密码部分用 percentEncodeAll(等价 JS encodeURIComponent)严格按 RFC 3986 unreserved 转义。
+	// 注意:Go 标准库 url.PathEscape 不转义 @ $ 等 path 合法字符;url.User().String() 也只
+	// 按 RFC 3986 userinfo 转义保留字符(@:/),保留 sub-delims($!*()等)。两者都跟前端 TS 的
+	// encodeURIComponent 不一致 — TS substore 用 encodeURIComponent 把所有非 unreserved 全部转义,
+	// 客户端期望的 URI(跟"复制 URI"按钮的输出对齐)需要 % 编码所有特殊字符,所以走自己的 helper。
 	uri := fmt.Sprintf("hysteria2://%s@%s:%d?%s#%s",
-		url.PathEscape(password), server, port, params.Encode(), url.PathEscape(name))
+		percentEncodeAll(password), server, port, params.Encode(), url.PathEscape(name))
 	return uri, nil
+}
+
+// percentEncodeAll 等价 JavaScript encodeURIComponent:严格按 RFC 3986 unreserved 转义。
+// unreserved = ALPHA / DIGIT / "-" / "_" / "." / "~",其它字节全部 percent-encode(%XX 大写)。
+// 用于 URI userinfo / fragment / query 等位置需要跟前端 encodeURIComponent 行为一致的场景。
+func percentEncodeAll(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') ||
+			c == '-' || c == '_' || c == '.' || c == '~' {
+			b.WriteByte(c)
+			continue
+		}
+		fmt.Fprintf(&b, "%%%02X", c)
+	}
+	return b.String()
 }
 
 // encodeHysteria encodes Hysteria proxy to hysteria:// URI (completely rewritten to match frontend)
