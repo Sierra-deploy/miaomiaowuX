@@ -30,8 +30,8 @@ get_latest_nginx_version() {
     NGINX_VERSION=$(curl -s https://nginx.org/en/download.html | grep -oP 'nginx-\K[0-9]+\.[0-9]+\.[0-9]+(?=\.tar\.gz">nginx)' | head -1)
 
     if [ -z "$NGINX_VERSION" ]; then
-        print_warning "无法自动获取最新版本，使用默认版本 1.29.3"
-        NGINX_VERSION="1.29.3"
+        print_warning "无法自动获取最新版本，使用默认版本 1.31.1"
+        NGINX_VERSION="1.31.1"
     else
         print_info "检测到最新稳定版本: nginx-${NGINX_VERSION}"
     fi
