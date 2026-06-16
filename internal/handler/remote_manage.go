@@ -1644,6 +1644,36 @@ func (h *RemoteManageHandler) HandleNginxConfigFiles(w http.ResponseWriter, r *h
 	w.Write(result)
 }
 
+// HandleNginxServersList 转发到 agent 的 /api/child/nginx/servers-list,
+// 让前端在新建 vless+wss 入站前能拿到目标服务器 nginx servers/ 目录里现有域名,
+// 用于检测同域名旧 conf 被静默覆盖的风险(reality 或老 wss 配置)。
+// 老 agent 没这个 endpoint 时返回 502 透传 — 前端兜底为"暂无冲突",保持向后兼容。
+func (h *RemoteManageHandler) HandleNginxServersList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		remoteWriteError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	serverID := r.URL.Query().Get("server_id")
+	if serverID == "" {
+		remoteWriteError(w, http.StatusBadRequest, "server_id required")
+		return
+	}
+	id, err := strconv.ParseInt(serverID, 10, 64)
+	if err != nil {
+		remoteWriteError(w, http.StatusBadRequest, "invalid server_id")
+		return
+	}
+
+	result, err := h.forwardToRemoteServer(r.Context(), id, r.Method, "/api/child/nginx/servers-list", nil)
+	if err != nil {
+		remoteWriteError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	w.Write(result)
+}
+
 // getRemoteServerPort 提取或确定远程服务器的端口
 // 现在，我们假设子服务器在配置中指定的同一端口上运行
 func (h *RemoteManageHandler) getRemoteServerPort(server *storage.RemoteServer) string {
