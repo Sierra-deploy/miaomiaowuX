@@ -820,6 +820,17 @@ type UserTraffic struct {
 	LastDownlink  int64     `json:"last_downlink"`
 	CycleStart    time.Time `json:"cycle_start"`
 	UpdatedAt     time.Time `json:"updated_at"`
+	// 方案 K — 3 档窗口平均瞬时速率 (Bytes/sec)。语义是「最新值快照」,跟 last_*/total_* 累计字段不同。
+	// agent 1s ringbuffer 计算后上报;老 agent 不上报 → 字段保持 0。
+	UpBps1s    int64      `json:"up_bps_1s"`
+	DownBps1s  int64      `json:"down_bps_1s"`
+	UpBps5s    int64      `json:"up_bps_5s"`
+	DownBps5s  int64      `json:"down_bps_5s"`
+	UpBps30s   int64      `json:"up_bps_30s"`
+	DownBps30s int64      `json:"down_bps_30s"`
+	// RatesUpdatedAt 速率字段的最后写入时间;API/前端可据此判断 stale(超过 N 秒 → 速率失效返 0)。
+	// 用指针:NULL 表示从未上报过(老 agent)。
+	RatesUpdatedAt *time.Time `json:"rates_updated_at,omitempty"`
 }
 
 // TrafficSnapshot 代表每日流量快照。
@@ -2192,6 +2203,27 @@ CREATE INDEX IF NOT EXISTS idx_user_traffic_username ON user_traffic(username);
 `
 	if _, err := r.db.Exec(userTrafficSchema); err != nil {
 		return fmt.Errorf("migrate user_traffic: %w", err)
+	}
+
+	// 方案 K — agent 端 1s ringbuffer 算出的 3 档 per-user 瞬时速率 (Bytes/sec)。语义是「最新值快照」,
+	// 不像 last_uplink/total_uplink 是累计值。老 agent 不上报时保持 0,rates_updated_at 用于 stale 检测
+	// (前端 / API 可判断:超过 N 秒未更新则认为速率失效,返 0)。
+	rateCols := [][2]string{
+		{"up_bps_1s", "INTEGER NOT NULL DEFAULT 0"},
+		{"down_bps_1s", "INTEGER NOT NULL DEFAULT 0"},
+		{"up_bps_5s", "INTEGER NOT NULL DEFAULT 0"},
+		{"down_bps_5s", "INTEGER NOT NULL DEFAULT 0"},
+		{"up_bps_30s", "INTEGER NOT NULL DEFAULT 0"},
+		{"down_bps_30s", "INTEGER NOT NULL DEFAULT 0"},
+		{"rates_updated_at", "TIMESTAMP"},
+	}
+	for _, col := range rateCols {
+		if err := r.ensureTableColumn("user_traffic", col[0], col[1]); err != nil {
+			return fmt.Errorf("migrate user_traffic add %s: %w", col[0], err)
+		}
+		if err := r.ensureTableColumn("user_email_traffic", col[0], col[1]); err != nil {
+			return fmt.Errorf("migrate user_email_traffic add %s: %w", col[0], err)
+		}
 	}
 
 	// user_email_traffic 跟 user_traffic 字段完全对齐,只是 key 换成 email — 保留 Xray stats 的
@@ -10294,7 +10326,10 @@ func (r *TrafficRepository) GetUserTrafficByServer(ctx context.Context, serverID
 		return nil, errors.New("traffic repository not initialized")
 	}
 
-	const query = `SELECT id, server_id, username, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at FROM user_traffic WHERE server_id = ? ORDER BY username`
+	// 新增 6 个 bps 字段 + rates_updated_at;rates_updated_at 用 NULLABLE,老 agent 无值时 Scan 给 nil
+	const query = `SELECT id, server_id, username, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at,
+		up_bps_1s, down_bps_1s, up_bps_5s, down_bps_5s, up_bps_30s, down_bps_30s, rates_updated_at
+		FROM user_traffic WHERE server_id = ? ORDER BY username`
 	rows, err := r.db.QueryContext(ctx, query, serverID)
 	if err != nil {
 		return nil, fmt.Errorf("query user traffic: %w", err)
@@ -10304,7 +10339,8 @@ func (r *TrafficRepository) GetUserTrafficByServer(ctx context.Context, serverID
 	var results []UserTraffic
 	for rows.Next() {
 		var t UserTraffic
-		if err := rows.Scan(&t.ID, &t.ServerID, &t.Username, &t.Uplink, &t.Downlink, &t.TotalUplink, &t.TotalDownlink, &t.LastUplink, &t.LastDownlink, &t.CycleStart, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.ServerID, &t.Username, &t.Uplink, &t.Downlink, &t.TotalUplink, &t.TotalDownlink, &t.LastUplink, &t.LastDownlink, &t.CycleStart, &t.UpdatedAt,
+			&t.UpBps1s, &t.DownBps1s, &t.UpBps5s, &t.DownBps5s, &t.UpBps30s, &t.DownBps30s, &t.RatesUpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan user traffic: %w", err)
 		}
 		results = append(results, t)
@@ -10319,7 +10355,9 @@ func (r *TrafficRepository) GetAllUserTraffic(ctx context.Context) ([]UserTraffi
 		return nil, errors.New("traffic repository not initialized")
 	}
 
-	const query = `SELECT id, server_id, username, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at FROM user_traffic ORDER BY username, server_id`
+	const query = `SELECT id, server_id, username, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at,
+		up_bps_1s, down_bps_1s, up_bps_5s, down_bps_5s, up_bps_30s, down_bps_30s, rates_updated_at
+		FROM user_traffic ORDER BY username, server_id`
 	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("query all user traffic: %w", err)
@@ -10329,7 +10367,8 @@ func (r *TrafficRepository) GetAllUserTraffic(ctx context.Context) ([]UserTraffi
 	var results []UserTraffic
 	for rows.Next() {
 		var t UserTraffic
-		if err := rows.Scan(&t.ID, &t.ServerID, &t.Username, &t.Uplink, &t.Downlink, &t.TotalUplink, &t.TotalDownlink, &t.LastUplink, &t.LastDownlink, &t.CycleStart, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.ServerID, &t.Username, &t.Uplink, &t.Downlink, &t.TotalUplink, &t.TotalDownlink, &t.LastUplink, &t.LastDownlink, &t.CycleStart, &t.UpdatedAt,
+			&t.UpBps1s, &t.DownBps1s, &t.UpBps5s, &t.DownBps5s, &t.UpBps30s, &t.DownBps30s, &t.RatesUpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan user traffic: %w", err)
 		}
 		results = append(results, t)
@@ -10348,7 +10387,9 @@ func (r *TrafficRepository) GetUserTrafficByUsername(ctx context.Context, userna
 		return nil, errors.New("username is required")
 	}
 
-	const query = `SELECT id, server_id, username, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at FROM user_traffic WHERE username = ? ORDER BY server_id`
+	const query = `SELECT id, server_id, username, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at,
+		up_bps_1s, down_bps_1s, up_bps_5s, down_bps_5s, up_bps_30s, down_bps_30s, rates_updated_at
+		FROM user_traffic WHERE username = ? ORDER BY server_id`
 	rows, err := r.db.QueryContext(ctx, query, username)
 	if err != nil {
 		return nil, fmt.Errorf("query user traffic by username: %w", err)
@@ -10358,13 +10399,73 @@ func (r *TrafficRepository) GetUserTrafficByUsername(ctx context.Context, userna
 	var results []UserTraffic
 	for rows.Next() {
 		var t UserTraffic
-		if err := rows.Scan(&t.ID, &t.ServerID, &t.Username, &t.Uplink, &t.Downlink, &t.TotalUplink, &t.TotalDownlink, &t.LastUplink, &t.LastDownlink, &t.CycleStart, &t.UpdatedAt); err != nil {
+		if err := rows.Scan(&t.ID, &t.ServerID, &t.Username, &t.Uplink, &t.Downlink, &t.TotalUplink, &t.TotalDownlink, &t.LastUplink, &t.LastDownlink, &t.CycleStart, &t.UpdatedAt,
+			&t.UpBps1s, &t.DownBps1s, &t.UpBps5s, &t.DownBps5s, &t.UpBps30s, &t.DownBps30s, &t.RatesUpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan user traffic: %w", err)
 		}
 		results = append(results, t)
 	}
 
 	return results, nil
+}
+
+// UserRateSample 表示 agent 上报的一份「最新瞬时速率快照」(方案 K)。
+// 三档窗口平均速率均为 Bytes/sec。
+type UserRateSample struct {
+	Username   string
+	UpBps1s    int64
+	DownBps1s  int64
+	UpBps5s    int64
+	DownBps5s  int64
+	UpBps30s   int64
+	DownBps30s int64
+}
+
+// UpsertUserTrafficRates 把 agent 上报的「最新瞬时速率」写入 user_traffic 表的 6 个速率字段 + rates_updated_at。
+// 跟 UpsertUserTraffic(cumulative delta 落库)解耦,因为速率字段语义是「最新值覆盖」,跟累计字段毫不相干。
+// 行不存在时插入空骨架(uplink=downlink=0),让前端能读到速率字段(用户可能仅启用速率上报、还没出累计);
+// 行存在时只更新速率 6 字段 + rates_updated_at,绝不动 uplink/downlink/total_*/last_* 等累计字段。
+func (r *TrafficRepository) UpsertUserTrafficRates(ctx context.Context, serverID int64, samples []UserRateSample) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if len(samples) == 0 {
+		return nil
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	// 单 statement 完成 upsert:不存在 → 插空骨架带速率;存在 → 仅更新速率字段
+	const stmt = `INSERT INTO user_traffic (
+		server_id, username,
+		up_bps_1s, down_bps_1s, up_bps_5s, down_bps_5s, up_bps_30s, down_bps_30s,
+		rates_updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+	ON CONFLICT(server_id, username) DO UPDATE SET
+		up_bps_1s = excluded.up_bps_1s,
+		down_bps_1s = excluded.down_bps_1s,
+		up_bps_5s = excluded.up_bps_5s,
+		down_bps_5s = excluded.down_bps_5s,
+		up_bps_30s = excluded.up_bps_30s,
+		down_bps_30s = excluded.down_bps_30s,
+		rates_updated_at = CURRENT_TIMESTAMP`
+	for _, s := range samples {
+		if s.Username == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, stmt,
+			serverID, s.Username,
+			s.UpBps1s, s.DownBps1s, s.UpBps5s, s.DownBps5s, s.UpBps30s, s.DownBps30s); err != nil {
+			return fmt.Errorf("upsert user rate %s: %w", s.Username, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit user rates: %w", err)
+	}
+	return nil
 }
 
 // 重置用户在所有服务器上的当前周期流量。
