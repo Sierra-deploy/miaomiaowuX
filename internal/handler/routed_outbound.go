@@ -206,6 +206,19 @@ func (h *RoutedOutboundHandler) create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// === Step 1.5: vless+reality 出站 → 把伪装 SNI 加进父 inbound 的 sniffing.excludeDomains ===
+	// reality outbound 连远端时用 serverName 字段做伪装(实际是公开域如 microsoft.com),
+	// 父 inbound 默认开 sniffing 会把这个伪装域嗅探成「真实目标」,routing 按 domain 分流时
+	// 会用错误的域去匹配,流量绕错路。把伪装 SNI 加进 excludeDomains 让 sniffing 跳过即可。
+	// soft-fail:老 agent 不支持新 action / inbound 不存在等场景下,只记日志不阻塞 outbound 创建。
+	if snis := extractRealitySNIs(req.Outbound); len(snis) > 0 {
+		if err := addInboundSniffingExcludes(ctx, h.remoteManage, serverID, parent.InboundTag, snis); err != nil {
+			log.Printf("[RoutedCreate] soft-fail: add reality SNI %v to inbound %q sniffing.excludeDomains: %v", snis, parent.InboundTag, err)
+		} else {
+			log.Printf("[RoutedCreate] added reality SNI %v to inbound %q sniffing.excludeDomains", snis, parent.InboundTag)
+		}
+	}
+
 	// === Step 2: 加 outbound ===
 	addOutBody, _ := json.Marshal(map[string]interface{}{"action": "add", "outbound": outboundCopy})
 	if _, err := h.remoteManage.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/outbounds", addOutBody); err != nil {
@@ -552,6 +565,78 @@ func addClientToInbound(ctx context.Context, rm *RemoteManageHandler, serverID i
 	})
 	if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/inbounds", body); err != nil {
 		return fmt.Errorf("add-client: %w", err)
+	}
+	return nil
+}
+
+// extractRealitySNIs 从 outbound JSON 抽出 reality 出站的 SNI(serverName)列表。
+// 返回非空切片 = outbound 是 vless+reality 且有效 SNI;返回 nil = 协议不匹配或字段缺失。
+//
+// 处理边界:
+//   - serverName 可以是 string(单值)或 []string(数组),xray 文档两种都支持
+//   - 兼容 serverNames 复数命名(xray 历史曾用过此字段名)
+//   - 数组里的非 string 元素 / 空字符串自动跳过
+func extractRealitySNIs(outbound map[string]interface{}) []string {
+	if outbound == nil {
+		return nil
+	}
+	proto, _ := outbound["protocol"].(string)
+	if strings.ToLower(proto) != "vless" {
+		return nil
+	}
+	stream, _ := outbound["streamSettings"].(map[string]interface{})
+	if stream == nil {
+		return nil
+	}
+	if sec, _ := stream["security"].(string); strings.ToLower(sec) != "reality" {
+		return nil
+	}
+	reality, _ := stream["realitySettings"].(map[string]interface{})
+	if reality == nil {
+		return nil
+	}
+	collect := func(v interface{}) []string {
+		switch x := v.(type) {
+		case string:
+			s := strings.TrimSpace(x)
+			if s != "" {
+				return []string{s}
+			}
+		case []interface{}:
+			out := make([]string, 0, len(x))
+			for _, item := range x {
+				if s, ok := item.(string); ok {
+					s = strings.TrimSpace(s)
+					if s != "" {
+						out = append(out, s)
+					}
+				}
+			}
+			return out
+		}
+		return nil
+	}
+	// 优先 serverName(主流),其次 serverNames(历史命名兼容)
+	if snis := collect(reality["serverName"]); len(snis) > 0 {
+		return snis
+	}
+	return collect(reality["serverNames"])
+}
+
+// addInboundSniffingExcludes 调 agent 的 add-sniffing-exclude action,把若干域名幂等追加到
+// inbound.sniffing.excludeDomains。agent 端去重 + soft 初始化 sniffing 字段。
+// 老 agent 不识别该 action → 400 错误;调用方应 soft-fail(log + continue)避免阻塞主流程。
+func addInboundSniffingExcludes(ctx context.Context, rm *RemoteManageHandler, serverID int64, inboundTag string, domains []string) error {
+	if len(domains) == 0 {
+		return nil
+	}
+	body, _ := json.Marshal(map[string]interface{}{
+		"action":  "add-sniffing-exclude",
+		"tag":     inboundTag,
+		"domains": domains,
+	})
+	if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/inbounds", body); err != nil {
+		return fmt.Errorf("add-sniffing-exclude: %w", err)
 	}
 	return nil
 }
