@@ -2314,6 +2314,23 @@ WHERE EXISTS (
 		return fmt.Errorf("backfill node_traffic_snapshots.type: %w", err)
 	}
 
+	// 历史 bug:UNIQUE(server_id, tag, date) 没含 type → 同 (server, tag, date) 但不同 type
+	// (一个 tag 同时是 inbound 和 outbound,常见于 routed 节点)的两行 INSERT 时,后者 ON CONFLICT
+	// UPDATE 覆盖前者,snapshot 表只剩一行,字段值是「后插入那条 type 的数值」。
+	// 前端按 type 分别查 baseline 时,某 type 的 baseline 拿到对手 type 的数值(uplink/downlink 错位),
+	// downlink 被错位 baseline 减成 0 → 「下行 0」假象。
+	// 修复:rebuild table 把 UNIQUE 改成 (server_id, tag, type, date)。
+	// 检测方式:PRAGMA index_list 找 UNIQUE index,看 index_info 是否包含 type 列。
+	needsRebuild, err := r.nodeTrafficSnapshotsNeedsRebuild()
+	if err != nil {
+		log.Printf("[Migrate] check node_traffic_snapshots unique: %v", err)
+	} else if needsRebuild {
+		log.Printf("[Migrate] node_traffic_snapshots UNIQUE missing type column, rebuilding table")
+		if err := r.rebuildNodeTrafficSnapshots(); err != nil {
+			return fmt.Errorf("rebuild node_traffic_snapshots: %w", err)
+		}
+	}
+
 	const userTrafficSnapshotsSchema = `
 CREATE TABLE IF NOT EXISTS user_traffic_snapshots (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -3039,6 +3056,101 @@ func (r *TrafficRepository) ensureNodeColumn(name, definition string) error {
 		return fmt.Errorf("add column %s: %w", name, err)
 	}
 
+	return nil
+}
+
+// nodeTrafficSnapshotsNeedsRebuild 检测 node_traffic_snapshots 的 UNIQUE 约束是否漏 type 列。
+// 用 PRAGMA index_list 找所有 UNIQUE index,逐个用 index_info 查列名集合;
+// 任一 UNIQUE 同时包含 server_id+tag+date 但**不**包含 type → 旧 schema bug,需要 rebuild。
+func (r *TrafficRepository) nodeTrafficSnapshotsNeedsRebuild() (bool, error) {
+	rows, err := r.db.Query(`PRAGMA index_list(node_traffic_snapshots)`)
+	if err != nil {
+		return false, fmt.Errorf("index_list: %w", err)
+	}
+	defer rows.Close()
+	type idxInfo struct {
+		name   string
+		unique int
+	}
+	var indexes []idxInfo
+	for rows.Next() {
+		var seq int
+		var name, origin string
+		var uniq, partial int
+		if err := rows.Scan(&seq, &name, &uniq, &origin, &partial); err != nil {
+			return false, fmt.Errorf("scan index_list: %w", err)
+		}
+		if uniq == 1 {
+			indexes = append(indexes, idxInfo{name: name, unique: uniq})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	for _, idx := range indexes {
+		cols, err := r.db.Query(fmt.Sprintf(`PRAGMA index_info(%q)`, idx.name))
+		if err != nil {
+			return false, fmt.Errorf("index_info %s: %w", idx.name, err)
+		}
+		colSet := make(map[string]bool)
+		for cols.Next() {
+			var seqno, cid int
+			var colName string
+			if err := cols.Scan(&seqno, &cid, &colName); err != nil {
+				cols.Close()
+				return false, fmt.Errorf("scan index_info: %w", err)
+			}
+			colSet[strings.ToLower(colName)] = true
+		}
+		cols.Close()
+		// 旧 UNIQUE 形状:含 server_id + tag + date 但不含 type
+		if colSet["server_id"] && colSet["tag"] && colSet["date"] && !colSet["type"] {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// rebuildNodeTrafficSnapshots 重建表把 UNIQUE 改为 (server_id, tag, type, date)。
+// 流程:RENAME 旧表 → CREATE 新表 → COPY 数据 → DROP 旧表 → CREATE INDEX。
+// 全程单事务,失败回滚。COPY 时用 GROUP BY (server_id, tag, type, date) 去重保住任意一份
+// (历史 bug 期间多 type 行已被覆盖,COPY 时若有残留重复直接 max() 聚合,以最大值为准最接近真实)。
+func (r *TrafficRepository) rebuildNodeTrafficSnapshots() error {
+	tx, err := r.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmts := []string{
+		`ALTER TABLE node_traffic_snapshots RENAME TO node_traffic_snapshots_old`,
+		`CREATE TABLE node_traffic_snapshots (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			server_id INTEGER NOT NULL,
+			tag TEXT NOT NULL,
+			type TEXT NOT NULL DEFAULT 'inbound',
+			date TEXT NOT NULL,
+			uplink INTEGER NOT NULL DEFAULT 0,
+			downlink INTEGER NOT NULL DEFAULT 0,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			UNIQUE(server_id, tag, type, date)
+		)`,
+		`INSERT INTO node_traffic_snapshots(server_id, tag, type, date, uplink, downlink, created_at)
+			SELECT server_id, tag, COALESCE(type, 'inbound'), date, MAX(uplink), MAX(downlink), MAX(created_at)
+			FROM node_traffic_snapshots_old
+			GROUP BY server_id, tag, COALESCE(type, 'inbound'), date`,
+		`DROP TABLE node_traffic_snapshots_old`,
+		`CREATE INDEX IF NOT EXISTS idx_node_traffic_snapshots_date ON node_traffic_snapshots(date)`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("rebuild step (%s): %w", strings.SplitN(s, " ", 3)[1], err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit rebuild: %w", err)
+	}
+	log.Printf("[Migrate] node_traffic_snapshots rebuilt with UNIQUE(server_id, tag, type, date)")
 	return nil
 }
 
@@ -11339,13 +11451,12 @@ func (r *TrafficRepository) DeleteDNSProvider(ctx context.Context, id int64) err
 }
 
 func (r *TrafficRepository) CreateNodeTrafficSnapshots(ctx context.Context, serverID int64, date string) error {
-	// 写入时把 node_traffic.type 一起带上,前端 serverOverviewList 才能用 type='inbound' 过滤,
-	// 避免历史 bug:仅靠 (server_id, tag, date) 唯一约束,inbound/outbound 同 tag 时后写入覆盖前面;
-	// 实际生产中 tag 命名不重叠,所以保留旧 UNIQUE 即可,只补 type 列足以让前端对称减法。
+	// UNIQUE 已包含 type 列(rebuild 后),同 (server, tag, date) 不同 type 各自独立行,
+	// 不再互相覆盖。ON CONFLICT 也带 type,行存在时按 type 维度独立更新。
 	const stmt = `
 INSERT INTO node_traffic_snapshots (server_id, tag, type, date, uplink, downlink)
 SELECT server_id, tag, type, ?, uplink, downlink FROM node_traffic WHERE server_id = ?
-ON CONFLICT(server_id, tag, date) DO UPDATE SET type=excluded.type, uplink=excluded.uplink, downlink=excluded.downlink`
+ON CONFLICT(server_id, tag, type, date) DO UPDATE SET uplink=excluded.uplink, downlink=excluded.downlink`
 	_, err := r.db.ExecContext(ctx, stmt, date, serverID)
 	return err
 }

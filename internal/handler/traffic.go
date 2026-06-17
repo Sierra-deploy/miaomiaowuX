@@ -488,16 +488,10 @@ func (h *TrafficHandler) handleServers(w http.ResponseWriter, r *http.Request) {
 		userByServer[t.ServerID] = append(userByServer[t.ServerID], t)
 	}
 
-	// 建立服务器 ID → 名称 / 流量统计规则映射
+	// 建立服务器 ID → 名称映射
 	serverNameMap := make(map[int64]string)
-	serverStatsModeMap := make(map[int64]string)
 	for _, server := range servers {
 		serverNameMap[server.ID] = server.Name
-		mode := server.TrafficStatsMode
-		if mode != "upload" && mode != "download" {
-			mode = "both"
-		}
-		serverStatsModeMap[server.ID] = mode
 	}
 
 	// 收集所有出现过的 server_id
@@ -517,25 +511,12 @@ func (h *TrafficHandler) handleServers(w http.ResponseWriter, r *http.Request) {
 			name = fmt.Sprintf("未知服务器-%d", sid)
 		}
 		nodeTraffic := nodeByServer[sid]
-		mode := serverStatsModeMap[sid]
-		if mode == "" {
-			mode = "both"
-		}
+		// 节点流量始终上下行双向显示,**不再**应用 server.traffic_stats_mode。
+		// 原 mode swap 逻辑误把 server 级计费规则(upload/download)套到节点字段上,
+		// 让 upload mode server 上所有节点的 downlink 被错误清零(包括 routed 出站节点)。
+		// server 视图的「used」计算独立 — 走 storage.GetServerTrafficUsed(),那条路径才正确处理 mode。
 		var inbounds, outbounds []storage.NodeTraffic
 		for _, t := range nodeTraffic {
-			// 应用服务器层 traffic_stats_mode 到节点 inbound/outbound 流量:
-			// 仅上行/仅下行模式下把对侧字段置 0,前端 `(uplink+downlink)` 计算自动遵循规则。
-			// 用户流量(下方 userByServer)保持原样,按套餐 traffic_mode 走。
-			switch mode {
-			case "upload":
-				t.Downlink = 0
-				t.LastDownlink = 0
-				t.TotalDownlink = 0
-			case "download":
-				t.Uplink = 0
-				t.LastUplink = 0
-				t.TotalUplink = 0
-			}
 			if t.Type == "inbound" {
 				inbounds = append(inbounds, t)
 			} else {
