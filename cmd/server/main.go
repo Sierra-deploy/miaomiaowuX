@@ -22,6 +22,7 @@ import (
 	"miaomiaowux/internal/notify"
 	"miaomiaowux/internal/patches"
 	"miaomiaowux/internal/child"
+	"miaomiaowux/internal/ddns"
 	"miaomiaowux/internal/event"
 	"miaomiaowux/internal/handler"
 	mcpserver "miaomiaowux/internal/mcp"
@@ -437,6 +438,17 @@ func main() {
 	remoteWSHandler.SetXrayConfigSyncCallback(remoteManageHandler.SyncXrayConfigOnReconnect)
 	xrayServerHandler.SetRemoteManager(remoteManageHandler)
 	xrayServerHandler.SetWSHandler(remoteWSHandler)
+
+	// DDNS 管理器:agent 心跳触发 IPChanged 时同步 pull_address 域名的 A/AAAA 记录到新 IP。
+	// reconciler 跑后台 5min ticker 兜底失败重试(IPChanged 已消费 → 后续心跳 IP 不变就不会再触发,
+	// 没 reconciler 的话 DDNS 失败就永远卡住)。
+	ddnsManager := ddns.NewManager(repo)
+	go ddnsManager.StartReconciler(context.Background())
+	remoteWSHandler.SetDDNSManager(ddnsManager)
+	xrayServerHandler.SetDDNSManager(ddnsManager)
+	// 状态查询(前端 Tooltip 用) + 手动同步(前端"立即重试"按钮),都走子路径 /api/admin/servers/{id}/ddns-*
+	ddnsAdminHandler := handler.NewDDNSAdminHandler(repo, ddnsManager)
+	mux.Handle("/api/admin/servers/", auth.RequireAdmin(tokenStore, userRepo, ddnsAdminHandler))
 
 	// 一次性老格式凭据 email 迁移(ae60947 漏回填存量)。
 	// 启动延迟 60s — 等 agent WS 重连。失败的行下次启动重试,全部成功才写 done 标记。

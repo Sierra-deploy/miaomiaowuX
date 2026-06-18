@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"miaomiaowux/internal/agentlog"
+	"miaomiaowux/internal/ddns"
 	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/securechan"
 	"miaomiaowux/internal/storage"
@@ -294,6 +295,14 @@ type RemoteWSHandler struct {
 	// cooldown 期内其它 IP 直接拒绝 — 防止互踩 reconnect 风暴打满 SQLite 单写连接,
 	// 拖垮其它无关 server 的心跳更新导致它们被误标 offline / fallback_to_pull。
 	tokenConflicts sync.Map // map[string]*tokenConflictRecord
+	// ddnsManager 心跳检测到 IP 漂移时触发 DNS provider API 更新域名 A/AAAA 记录。
+	// 用 setter 注入避免循环依赖(ddns 包不能依赖 handler 包)。
+	ddnsManager *ddns.Manager
+}
+
+// SetDDNSManager 注入 DDNS 管理器,main.go 启动时调一次。
+func (h *RemoteWSHandler) SetDDNSManager(m *ddns.Manager) {
+	h.ddnsManager = m
 }
 
 // tokenConflictRecord 单 token 复用冲突状态:winnerIP 是当前被允许连接的 agent IP,
@@ -907,6 +916,10 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 				log.Printf("[Remote WS] auth: refreshed %d node(s) clash.server → %s for %s", n, newHost, latest.Name)
 			}
 		}
+		// DDNS:agent 换 IP 后把新 IP 同步到 pull_address 域名的 A/AAAA 记录
+		if h.ddnsManager != nil && latest.DDNSEnabled {
+			go h.ddnsManager.Trigger(context.Background(), latest)
+		}
 	}
 	// 同步 WARP 安装状态 — 跟 IP 字段分开 update 是为了不破坏 UpdateRemoteServerHeartbeat 签名
 	if err := h.repo.UpdateRemoteServerWarpInstalled(updateCtx, authPayload.Token, authPayload.WarpInstalled); err != nil {
@@ -1120,6 +1133,10 @@ func (h *RemoteWSHandler) handleHeartbeat(wsConn *RemoteWSConnection, payload js
 			} else if n > 0 {
 				log.Printf("[Remote WS] heartbeat: refreshed %d node(s) clash.server → %s for %s", n, newHost, hbResult.Server.Name)
 			}
+		}
+		// DDNS:同步新 IP 到域名 A/AAAA 记录
+		if h.ddnsManager != nil && hbResult.Server.DDNSEnabled {
+			go h.ddnsManager.Trigger(context.Background(), hbResult.Server)
 		}
 	}
 	// 心跳里也带 warp_installed,跟踪 agent 主动 install/remove 后的状态变化

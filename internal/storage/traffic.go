@@ -777,6 +777,12 @@ type RemoteServer struct {
 	SystemLastSeenTx       int64 `json:"system_last_seen_tx"`
 	SystemBootTimeUnix     int64 `json:"system_boot_time_unix"`
 	SystemTrafficUpdatedAt *time.Time `json:"system_traffic_updated_at,omitempty"`
+	// DDNS 自动同步:agent 心跳上报 IP 变化时,主控自动调 DNS provider API 更新 pull_address 域名的 A/AAAA 记录
+	DDNSEnabled        bool       `json:"ddns_enabled"`
+	DDNSProviderID     int64      `json:"ddns_provider_id"`               // 0=自动(按证书),>0=显式指定 dns_providers.id
+	DDNSLastSyncedAt   *time.Time `json:"ddns_last_synced_at,omitempty"`
+	DDNSLastError      string     `json:"ddns_last_error,omitempty"`
+	DDNSPending        bool       `json:"ddns_pending"`                   // 正在同步中
 	IsFederated           bool       `json:"is_federated"`       // 是否为接入的"分享服务器"(联邦)，非持久化字段
 	FederationPrefix      string     `json:"federation_prefix"`  // 分享服务器上新增入站的 tag 前缀，非持久化字段
 	CreatedAt             time.Time  `json:"created_at"`
@@ -2097,6 +2103,25 @@ CREATE INDEX IF NOT EXISTS idx_remote_servers_status ON remote_servers(status);
 		return err
 	}
 	if err := r.ensureRemoteServerColumn("system_traffic_updated_at", "TIMESTAMP"); err != nil {
+		return err
+	}
+
+	// DDNS 自动同步:agent 上报 IP 变化时,通过 DNS provider API 把 pull_address 域名的 A/AAAA 记录指到新 IP
+	// ddns_provider_id=0 → 自动模式(用 FindCertificateForDomain 找匹配的通配符证书,取其 dns_provider_id)
+	// ddns_provider_id>0 → 显式指定 DNS provider
+	if err := r.ensureRemoteServerColumn("ddns_enabled", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureRemoteServerColumn("ddns_provider_id", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureRemoteServerColumn("ddns_last_synced_at", "TIMESTAMP"); err != nil {
+		return err
+	}
+	if err := r.ensureRemoteServerColumn("ddns_last_error", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := r.ensureRemoteServerColumn("ddns_pending", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 
@@ -8810,6 +8835,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		COALESCE(traffic_stats_mode, 'both'),
 		COALESCE(traffic_source, 'xray'),
 		COALESCE(warp_installed, 0),
+		COALESCE(ddns_enabled, 0), COALESCE(ddns_provider_id, 0), ddns_last_synced_at, COALESCE(ddns_last_error, ''), COALESCE(ddns_pending, 0),
 		EXISTS(SELECT 1 FROM federated_servers fs WHERE fs.server_id = remote_servers.id),
 		COALESCE((SELECT prefix FROM federated_servers fs WHERE fs.server_id = remote_servers.id), ''),
 		created_at, updated_at
@@ -8828,6 +8854,8 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		var agentTokenExpiresAt, lastAgentTokenRefresh sql.NullTime
 		var fallbackToPull, xrayRunning, warpInstalledInt int
 		var timeOffsetSeconds int64
+		var ddnsEnabledInt, ddnsPendingInt int
+		var ddnsLastSyncedAt sql.NullTime
 		if err := rows.Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.Domain,
 			&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 			&tokenExpiresAt, &lastTokenRefresh,
@@ -8845,10 +8873,16 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 			&server.TrafficStatsMode,
 			&server.TrafficSource,
 			&warpInstalledInt,
+			&ddnsEnabledInt, &server.DDNSProviderID, &ddnsLastSyncedAt, &server.DDNSLastError, &ddnsPendingInt,
 			&server.IsFederated,
 			&server.FederationPrefix,
 			&server.CreatedAt, &server.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan remote server: %w", err)
+		}
+		server.DDNSEnabled = ddnsEnabledInt != 0
+		server.DDNSPending = ddnsPendingInt != 0
+		if ddnsLastSyncedAt.Valid {
+			server.DDNSLastSyncedAt = &ddnsLastSyncedAt.Time
 		}
 		if lastHeartbeat.Valid {
 			server.LastHeartbeat = &lastHeartbeat.Time
@@ -8924,6 +8958,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		COALESCE(traffic_stats_mode, 'both'),
 		COALESCE(traffic_source, 'xray'),
 		COALESCE(warp_installed, 0),
+		COALESCE(ddns_enabled, 0), COALESCE(ddns_provider_id, 0), ddns_last_synced_at, COALESCE(ddns_last_error, ''), COALESCE(ddns_pending, 0),
 		created_at, updated_at
 		FROM remote_servers WHERE id = ?`
 
@@ -8932,6 +8967,8 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 	var bootTime, xrayBootTime sql.NullString
 	var agentTokenExpiresAt, lastAgentTokenRefresh sql.NullTime
 	var xrayRunningInt, warpInstalledInt int
+	var ddnsEnabledInt, ddnsPendingInt int
+	var ddnsLastSyncedAt sql.NullTime
 	err := r.db.QueryRowContext(ctx, query, id).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.Domain,
 		&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 		&tokenExpiresAt, &lastTokenRefresh,
@@ -8948,6 +8985,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		&server.TrafficStatsMode,
 		&server.TrafficSource,
 		&warpInstalledInt,
+		&ddnsEnabledInt, &server.DDNSProviderID, &ddnsLastSyncedAt, &server.DDNSLastError, &ddnsPendingInt,
 		&server.CreatedAt, &server.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -8958,6 +8996,11 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 
 	server.XrayRunning = xrayRunningInt != 0
 	server.WarpInstalled = warpInstalledInt != 0
+	server.DDNSEnabled = ddnsEnabledInt != 0
+	server.DDNSPending = ddnsPendingInt != 0
+	if ddnsLastSyncedAt.Valid {
+		server.DDNSLastSyncedAt = &ddnsLastSyncedAt.Time
+	}
 	if lastHeartbeat.Valid {
 		server.LastHeartbeat = &lastHeartbeat.Time
 	}
@@ -9000,6 +9043,7 @@ func (r *TrafficRepository) GetRemoteServerByToken(ctx context.Context, token st
 		COALESCE(use_443, 0), COALESCE(steal_mode, 'tunnel'),
 		COALESCE(site_type, ''), COALESCE(site_value, ''),
 		COALESCE(xray_mode, 'external'),
+		COALESCE(ddns_enabled, 0), COALESCE(ddns_provider_id, 0), ddns_last_synced_at, COALESCE(ddns_last_error, ''), COALESCE(ddns_pending, 0),
 		created_at, updated_at
 		FROM remote_servers WHERE token = ?`
 
@@ -9007,6 +9051,8 @@ func (r *TrafficRepository) GetRemoteServerByToken(ctx context.Context, token st
 	var lastHeartbeat, tokenExpiresAt, lastTokenRefresh, lastPullAt sql.NullTime
 	var bootTime, xrayBootTime sql.NullString
 	var agentTokenExpiresAt, lastAgentTokenRefresh sql.NullTime
+	var ddnsEnabledInt, ddnsPendingInt int
+	var ddnsLastSyncedAt sql.NullTime
 	err := r.db.QueryRowContext(ctx, query, token).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.Domain,
 		&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 		&tokenExpiresAt, &lastTokenRefresh,
@@ -9015,6 +9061,7 @@ func (r *TrafficRepository) GetRemoteServerByToken(ctx context.Context, token st
 		&server.Use443, &server.StealMode,
 		&server.SiteType, &server.SiteValue,
 		&server.XrayMode,
+		&ddnsEnabledInt, &server.DDNSProviderID, &ddnsLastSyncedAt, &server.DDNSLastError, &ddnsPendingInt,
 		&server.CreatedAt, &server.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -9043,6 +9090,11 @@ func (r *TrafficRepository) GetRemoteServerByToken(ctx context.Context, token st
 	if lastAgentTokenRefresh.Valid {
 		server.LastAgentTokenRefresh = &lastAgentTokenRefresh.Time
 	}
+	server.DDNSEnabled = ddnsEnabledInt != 0
+	server.DDNSPending = ddnsPendingInt != 0
+	if ddnsLastSyncedAt.Valid {
+		server.DDNSLastSyncedAt = &ddnsLastSyncedAt.Time
+	}
 	return &server, nil
 }
 
@@ -9066,6 +9118,7 @@ func (r *TrafficRepository) GetRemoteServerByName(ctx context.Context, name stri
 		COALESCE(use_443, 0), COALESCE(steal_mode, 'tunnel'),
 		COALESCE(site_type, ''), COALESCE(site_value, ''),
 		COALESCE(xray_mode, 'external'),
+		COALESCE(ddns_enabled, 0), COALESCE(ddns_provider_id, 0), ddns_last_synced_at, COALESCE(ddns_last_error, ''), COALESCE(ddns_pending, 0),
 		created_at, updated_at
 		FROM remote_servers WHERE name = ?`
 
@@ -9073,6 +9126,8 @@ func (r *TrafficRepository) GetRemoteServerByName(ctx context.Context, name stri
 	var lastHeartbeat, tokenExpiresAt, lastTokenRefresh, lastPullAt sql.NullTime
 	var bootTime, xrayBootTime sql.NullString
 	var agentTokenExpiresAt, lastAgentTokenRefresh sql.NullTime
+	var ddnsEnabledInt, ddnsPendingInt int
+	var ddnsLastSyncedAt sql.NullTime
 	err := r.db.QueryRowContext(ctx, query, name).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.Domain,
 		&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 		&tokenExpiresAt, &lastTokenRefresh,
@@ -9082,12 +9137,18 @@ func (r *TrafficRepository) GetRemoteServerByName(ctx context.Context, name stri
 		&server.Use443, &server.StealMode,
 		&server.SiteType, &server.SiteValue,
 		&server.XrayMode,
+		&ddnsEnabledInt, &server.DDNSProviderID, &ddnsLastSyncedAt, &server.DDNSLastError, &ddnsPendingInt,
 		&server.CreatedAt, &server.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrRemoteServerNotFound
 		}
 		return nil, fmt.Errorf("get remote server by name: %w", err)
+	}
+	server.DDNSEnabled = ddnsEnabledInt != 0
+	server.DDNSPending = ddnsPendingInt != 0
+	if ddnsLastSyncedAt.Valid {
+		server.DDNSLastSyncedAt = &ddnsLastSyncedAt.Time
 	}
 
 	if lastHeartbeat.Valid {
@@ -9145,7 +9206,7 @@ func (r *TrafficRepository) CreateRemoteServer(ctx context.Context, server *Remo
 	// 将令牌有效期设置为从现在起 7 天
 	tokenExpiresAt := time.Now().Add(7 * 24 * time.Hour)
 
-	const stmt = `INSERT INTO remote_servers (name, token, status, ip_address, ip_address_v6, domain, token_expires_at, last_token_refresh, connection_mode, listen_port, pull_address, pull_port, pull_token, use_443, steal_mode, site_type, site_value, xray_mode, traffic_limit, traffic_used_offset, traffic_reset_day, traffic_stats_mode, traffic_source, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+	const stmt = `INSERT INTO remote_servers (name, token, status, ip_address, ip_address_v6, domain, token_expires_at, last_token_refresh, connection_mode, listen_port, pull_address, pull_port, pull_token, use_443, steal_mode, site_type, site_value, xray_mode, traffic_limit, traffic_used_offset, traffic_reset_day, traffic_stats_mode, traffic_source, ddns_enabled, ddns_provider_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
 
 	stealMode := server.StealMode
 	if stealMode == "" {
@@ -9165,7 +9226,11 @@ func (r *TrafficRepository) CreateRemoteServer(ctx context.Context, server *Remo
 	if trafficSource != "system" {
 		trafficSource = "xray"
 	}
-	result, err := r.db.ExecContext(ctx, stmt, server.Name, server.Token, server.Status, server.IPAddress, server.IPAddressV6, server.Domain, tokenExpiresAt, server.ConnectionMode, server.ListenPort, server.PullAddress, server.PullPort, server.PullToken, server.Use443, stealMode, server.SiteType, server.SiteValue, xrayMode, server.TrafficLimit, server.TrafficUsedOffset, server.TrafficResetDay, statsMode, trafficSource)
+	ddnsEnabledInt := 0
+	if server.DDNSEnabled {
+		ddnsEnabledInt = 1
+	}
+	result, err := r.db.ExecContext(ctx, stmt, server.Name, server.Token, server.Status, server.IPAddress, server.IPAddressV6, server.Domain, tokenExpiresAt, server.ConnectionMode, server.ListenPort, server.PullAddress, server.PullPort, server.PullToken, server.Use443, stealMode, server.SiteType, server.SiteValue, xrayMode, server.TrafficLimit, server.TrafficUsedOffset, server.TrafficResetDay, statsMode, trafficSource, ddnsEnabledInt, server.DDNSProviderID)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return ErrRemoteServerExists
@@ -10988,6 +11053,128 @@ func (r *TrafficRepository) GetCertificateByDomain(ctx context.Context, domain s
 	}
 
 	return &cert, nil
+}
+
+// FindCertificateForDomain 找一张能覆盖该 FQDN 的 valid 证书,用于 DDNS 推断 DNS provider:
+//   - 精确匹配 domain == fqdn
+//   - 通配符匹配 *.parent,其中 parent 是 fqdn 去掉最左 label 的部分(host.example.com → example.com)
+//
+// 返回找到的第一张(优先精确,其次通配符),没有则 ErrCertificateNotFound。
+// 证书签发时已经选好 dns_provider_id,这里只需把它读出来给 DDNS 用。
+func (r *TrafficRepository) FindCertificateForDomain(ctx context.Context, fqdn string) (*Certificate, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	fqdn = strings.TrimSpace(strings.ToLower(fqdn))
+	if fqdn == "" {
+		return nil, ErrCertificateNotFound
+	}
+
+	// 候选 domain:精确 + 各层级通配符(host.a.b.com → *.a.b.com / *.b.com)
+	parts := strings.Split(fqdn, ".")
+	candidates := []string{fqdn}
+	for i := 1; i < len(parts)-1; i++ {
+		candidates = append(candidates, "*."+strings.Join(parts[i:], "."))
+	}
+
+	placeholders := strings.Repeat("?,", len(candidates))
+	placeholders = placeholders[:len(placeholders)-1]
+	args := make([]interface{}, len(candidates))
+	for i, c := range candidates {
+		args[i] = c
+	}
+
+	query := `SELECT id, domain, email, provider, cert_path, key_path, cert_pem, key_pem,
+		       status, expiry_date, issue_date, auto_renew, challenge_mode, webroot_path,
+		       remote_server_id, message, dns_provider_id, deploy_target, deploy_cert_path, deploy_key_path, auto_deploy,
+		       created_at, updated_at
+		FROM certificates
+		WHERE status = 'valid' AND domain IN (` + placeholders + `)
+		ORDER BY CASE WHEN domain = ? THEN 0 ELSE 1 END, id DESC
+		LIMIT 1`
+	args = append(args, fqdn) // 第一个 ORDER BY 的精确匹配参数
+
+	row := r.db.QueryRowContext(ctx, query, args...)
+	cert, err := scanCertificate(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrCertificateNotFound
+		}
+		return nil, fmt.Errorf("find certificate for domain: %w", err)
+	}
+	return &cert, nil
+}
+
+// MarkDDNSPending 在 DDNS goroutine 启动时标记,UI 可显示"正在同步"
+func (r *TrafficRepository) MarkDDNSPending(ctx context.Context, serverID int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	_, err := r.db.ExecContext(ctx, `UPDATE remote_servers SET ddns_pending = 1, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, serverID)
+	return err
+}
+
+// UpdateRemoteServerDDNSStatus 记录 DDNS 同步结果:
+// 成功(errMsg=""):清 pending,更新 last_synced_at,清 last_error
+// 失败(errMsg 非空):清 pending,写 last_error,last_synced_at 不动(保留上次成功时间)
+func (r *TrafficRepository) UpdateRemoteServerDDNSStatus(ctx context.Context, serverID int64, errMsg string) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if errMsg == "" {
+		_, err := r.db.ExecContext(ctx, `UPDATE remote_servers SET ddns_pending = 0, ddns_last_synced_at = CURRENT_TIMESTAMP, ddns_last_error = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, serverID)
+		return err
+	}
+	_, err := r.db.ExecContext(ctx, `UPDATE remote_servers SET ddns_pending = 0, ddns_last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, errMsg, serverID)
+	return err
+}
+
+// UpdateRemoteServerDDNSConfig 更新 DDNS 配置(enabled + provider_id),由 server 创建/编辑路径调用。
+// 关闭(enabled=false)时同时清掉 last_error,避免下次开启时仍带旧错误。
+func (r *TrafficRepository) UpdateRemoteServerDDNSConfig(ctx context.Context, serverID int64, enabled bool, providerID int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	enabledInt := 0
+	if enabled {
+		enabledInt = 1
+	}
+	if !enabled {
+		_, err := r.db.ExecContext(ctx, `UPDATE remote_servers SET ddns_enabled = ?, ddns_provider_id = ?, ddns_last_error = '', updated_at = CURRENT_TIMESTAMP WHERE id = ?`, enabledInt, providerID, serverID)
+		return err
+	}
+	_, err := r.db.ExecContext(ctx, `UPDATE remote_servers SET ddns_enabled = ?, ddns_provider_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, enabledInt, providerID, serverID)
+	return err
+}
+
+// ListDDNSRetryCandidates reconciler 用:扫所有 enabled + 上次失败 + 在线 的 server。
+// 离线 server 没新 IP 上来,重试也没意义。
+func (r *TrafficRepository) ListDDNSRetryCandidates(ctx context.Context) ([]RemoteServer, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT id FROM remote_servers WHERE ddns_enabled = 1 AND ddns_last_error <> '' AND status = 'connected'`)
+	if err != nil {
+		return nil, fmt.Errorf("list ddns retry candidates: %w", err)
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	servers := make([]RemoteServer, 0, len(ids))
+	for _, id := range ids {
+		s, err := r.GetRemoteServer(ctx, id)
+		if err != nil {
+			continue
+		}
+		servers = append(servers, *s)
+	}
+	return servers, nil
 }
 
 // 创建新的证书记录。

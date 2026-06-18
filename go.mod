@@ -3,12 +3,19 @@ module miaomiaowux
 go 1.26
 
 require (
+	github.com/alibabacloud-go/darabonba-openapi/v2 v2.1.16
+	github.com/alibabacloud-go/tea v1.4.0
 	github.com/dop251/goja v0.0.0-20260311135729-065cd970411c
+	github.com/go-acme/alidns-20150109/v4 v4.7.0
 	github.com/go-acme/lego/v4 v4.35.2
+	github.com/go-acme/tencentclouddnspod v1.3.24
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
 	github.com/mark3labs/mcp-go v0.54.0
+	github.com/nrdcg/dnspod-go v0.4.0
+	github.com/nrdcg/namesilo v0.5.0
 	github.com/pquerna/otp v1.5.0
+	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.83
 	github.com/xtls/xray-core v1.260327.0
 	golang.org/x/crypto v0.50.0
 	golang.org/x/net v0.53.0
@@ -19,9 +26,7 @@ require (
 
 require (
 	github.com/alibabacloud-go/alibabacloud-gateway-spi v0.0.5 // indirect
-	github.com/alibabacloud-go/darabonba-openapi/v2 v2.1.16 // indirect
 	github.com/alibabacloud-go/debug v1.0.1 // indirect
-	github.com/alibabacloud-go/tea v1.4.0 // indirect
 	github.com/alibabacloud-go/tea-utils/v2 v2.0.9 // indirect
 	github.com/aliyun/credentials-go v1.4.7 // indirect
 	github.com/andybalholm/brotli v1.0.6 // indirect
@@ -32,8 +37,6 @@ require (
 	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/dlclark/regexp2 v1.11.4 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/go-acme/alidns-20150109/v4 v4.7.0 // indirect
-	github.com/go-acme/tencentclouddnspod v1.3.24 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
 	github.com/go-sourcemap/sourcemap v2.1.3+incompatible // indirect
 	github.com/google/btree v1.1.2 // indirect
@@ -49,8 +52,6 @@ require (
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/ncruces/go-strftime v0.1.9 // indirect
-	github.com/nrdcg/dnspod-go v0.4.0 // indirect
-	github.com/nrdcg/namesilo v0.5.0 // indirect
 	github.com/pires/go-proxyproto v0.11.0 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/refraction-networking/utls v1.8.3-0.20260301010127-aa6edf4b11af // indirect
@@ -59,7 +60,6 @@ require (
 	github.com/sagernet/sing-shadowsocks v0.2.7 // indirect
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2 // indirect
 	github.com/spf13/cast v1.7.1 // indirect
-	github.com/tencentcloud/tencentcloud-sdk-go/tencentcloud/common v1.3.83 // indirect
 	github.com/tjfoc/gmsm v1.4.1 // indirect
 	github.com/vishvananda/netlink v1.3.1 // indirect
 	github.com/vishvananda/netns v0.0.5 // indirect

@@ -302,6 +302,10 @@ func (h *XrayServerHandler) RemoteHeartbeat(w http.ResponseWriter, r *http.Reque
 				log.Printf("[RemoteHeartbeat] refreshed %d node(s) clash.server → %s for %s", n, newHost, result.Server.Name)
 			}
 		}
+		// DDNS:把新 IP 同步到 pull_address 域名的 A/AAAA 记录
+		if h.ddnsManager != nil && result.Server.DDNSEnabled {
+			go h.ddnsManager.Trigger(context.Background(), result.Server)
+		}
 	}
 
 	// 首次连接或 Xray 重启时推送限速配置（非 WebSocket 模式的补偿）
