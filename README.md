@@ -158,6 +158,28 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.2.8 (2026-06-18)
+- Update README.md
+- 🌈tunnel管理支持端口转发
+- 🌈优化出站管理的显示
+- 🌈服务器流量支持系统维度
+- 🌈添加服务器支持通过dns添加域名与动态DNS
+- 🛠️ fix:docker切换到nginx官方镜像
+- 🛠️ fix:hy2协议订阅节点缺少sni参数
+- 🛠️ fix:hy2等协议使用udping测试
+- 🛠️ fix:ipv6机器更新agent失败
+- 🛠️ fix:socks5节点入站绑定节点失败
+- 🛠️ fix:telegram规则命名冲突
+- 🛠️ fix:vless reality出站缺少sniffing.exclude配置
+- 🛠️ fix:今日和本周改为0点开始统计
+- 🛠️ fix:前端版本号不同步
+- 🛠️ fix:多余文件删除
+- 🛠️ fix:恢复新机器后旧机器重连报错
+- 🛠️ fix:服务器上报IP优先级>服务器地址
+- 🛠️ fix:用户网速计算周期不准确
+- 🛠️ fix:移除配置模板中的冗余配置
+- 🛠️ fix:系统的流量统计规则影响到节点流量显示
+- 🛠️ fix:配置漂移时显示配置对比
 ### v0.2.7 (2026-06-14)
 - 迁移前端代码到单独的仓库
 - 🌈docker镜像内置nginx(beta)
