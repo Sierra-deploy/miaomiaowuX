@@ -3352,11 +3352,12 @@ func (h *RemoteManageHandler) HandleSyncInboundsToNodes(w http.ResponseWriter, r
 }
 
 // chooseClashServerHost 给一台 remote server 选合适的 clash_config.server 值。
-// 优先级:Domain → PullAddress (非空 + 不是私有 IP) → IPAddress。
+// 优先级:Domain → PullAddress (仅当不是 IP) → IPAddress。
 //
-// 之所以把 PullAddress 排在 IPAddress 前:用户在"服务器地址"表单字段填的域名/公网地址其实存在 pull_address
-// 列里,如果跳过它直接拿 heartbeat 上报的 IPAddress,域名就用不上,而 IP 又是动态的(NAT/重启会变)。
-// PullAddress 是私有 IP(10/172.16/192.168/127)时不用 — 通常是用户配的内网测试地址,clash 客户端连不上。
+// 关键规则:PullAddress 是 IP 字符串(v4/v6)→ 跳过,fall to IPAddress。
+// 因为 IPAddress 由 agent 心跳实时上报,IP 漂移自动跟随;而 PullAddress 是用户表单写入的静态字符串,
+// 漂了不会自己更新,如果用作 clash.server 会让节点指向旧 IP。
+// 反过来 PullAddress 是域名/反代地址时保留 — 域名是稳定的,用户特意填的就是要走它。
 func chooseClashServerHost(server *storage.RemoteServer) string {
 	if server == nil {
 		return ""
@@ -3364,10 +3365,8 @@ func chooseClashServerHost(server *storage.RemoteServer) string {
 	if d := strings.TrimSpace(server.Domain); d != "" {
 		return d
 	}
-	if p := strings.TrimSpace(server.PullAddress); p != "" {
-		if ip := net.ParseIP(p); ip == nil || (!ip.IsPrivate() && !ip.IsLoopback() && !ip.IsLinkLocalUnicast()) {
-			return p
-		}
+	if p := strings.TrimSpace(server.PullAddress); p != "" && net.ParseIP(p) == nil {
+		return p
 	}
 	return strings.TrimSpace(server.IPAddress)
 }

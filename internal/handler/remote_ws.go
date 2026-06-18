@@ -895,8 +895,18 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 	// auth 时拿到 PublicIPv6 立刻写,**不等首次 heartbeat**(避免 ~10s 窗口期 master 仍不知 v6,
 	// 此时若 v4 已经不通,反向请求会失败但有 v6 可用的事实却没被利用)。
 	v6 := strings.TrimSpace(authPayload.PublicIPv6)
-	if err := h.repo.UpdateRemoteServerHeartbeat(updateCtx, authPayload.Token, ip, v6); err != nil {
+	ipChanged, latest, err := h.repo.UpdateRemoteServerHeartbeat(updateCtx, authPayload.Token, ip, v6)
+	if err != nil {
 		log.Printf("[Remote WS] Failed to update server status for %s: %v", server.Name, err)
+	} else if ipChanged && latest != nil {
+		// agent 换 IP 后,把已存在节点的 clash_config.server 也跟着刷成新的 effective host
+		if newHost := chooseClashServerHost(latest); newHost != "" {
+			if n, e := h.repo.RefreshNodesServerAddress(updateCtx, latest.Name, newHost); e != nil {
+				log.Printf("[Remote WS] auth: refresh nodes server address for %s failed: %v", latest.Name, e)
+			} else if n > 0 {
+				log.Printf("[Remote WS] auth: refreshed %d node(s) clash.server → %s for %s", n, newHost, latest.Name)
+			}
+		}
 	}
 	// 同步 WARP 安装状态 — 跟 IP 字段分开 update 是为了不破坏 UpdateRemoteServerHeartbeat 签名
 	if err := h.repo.UpdateRemoteServerWarpInstalled(updateCtx, authPayload.Token, authPayload.WarpInstalled); err != nil {
@@ -1100,8 +1110,17 @@ func (h *RemoteWSHandler) handleHeartbeat(wsConn *RemoteWSConnection, payload js
 		update.TimeOffsetSeconds = &offset
 	}
 
-	if _, err := h.repo.UpdateRemoteServerHeartbeatWithRestart(ctx, update); err != nil {
+	if hbResult, err := h.repo.UpdateRemoteServerHeartbeatWithRestart(ctx, update); err != nil {
 		log.Printf("[Remote WS] Failed to update heartbeat for server %s: %v", wsConn.ServerName, err)
+	} else if hbResult != nil && hbResult.IPChanged && hbResult.Server != nil {
+		// agent 换 IP 后,把已存在节点的 clash_config.server 跟着刷成新的 effective host
+		if newHost := chooseClashServerHost(hbResult.Server); newHost != "" {
+			if n, e := h.repo.RefreshNodesServerAddress(ctx, hbResult.Server.Name, newHost); e != nil {
+				log.Printf("[Remote WS] heartbeat: refresh nodes server address for %s failed: %v", hbResult.Server.Name, e)
+			} else if n > 0 {
+				log.Printf("[Remote WS] heartbeat: refreshed %d node(s) clash.server → %s for %s", n, newHost, hbResult.Server.Name)
+			}
+		}
 	}
 	// 心跳里也带 warp_installed,跟踪 agent 主动 install/remove 后的状态变化
 	if err := h.repo.UpdateRemoteServerWarpInstalled(ctx, wsConn.Token, hbPayload.WarpInstalled); err != nil {

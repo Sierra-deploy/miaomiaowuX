@@ -2299,7 +2299,17 @@ CREATE INDEX IF NOT EXISTS idx_node_traffic_snapshots_date ON node_traffic_snaps
 	if err := r.ensureTableColumn("node_traffic_snapshots", "type", "TEXT NOT NULL DEFAULT 'inbound'"); err != nil {
 		return fmt.Errorf("ensure node_traffic_snapshots.type column: %w", err)
 	}
-	const backfillNodeSnapshotType = `
+
+	// backfill 与 rebuild 必须配套:
+	// - 老 UNIQUE(server_id, tag, date) 下,(server,tag,date) 只能有一行 → UPDATE type 安全
+	// - 新 UNIQUE(server_id, tag, type, date) 下,inbound/outbound 两行可共存 → 再跑 backfill
+	//   会把 inbound 行 type 改成 outbound,撞上已存在的 outbound 行 → UNIQUE 冲突,启动失败
+	// 所以:只在「即将 rebuild」时跑 backfill,且必须在 rebuild 之前(rebuild 会把 type 搬到新表)
+	needsRebuild, err := r.nodeTrafficSnapshotsNeedsRebuild()
+	if err != nil {
+		log.Printf("[Migrate] check node_traffic_snapshots unique: %v", err)
+	} else if needsRebuild {
+		const backfillNodeSnapshotType = `
 UPDATE node_traffic_snapshots AS s
 SET type = (
     SELECT nt.type FROM node_traffic nt
@@ -2310,21 +2320,16 @@ WHERE EXISTS (
     SELECT 1 FROM node_traffic nt
     WHERE nt.server_id = s.server_id AND nt.tag = s.tag AND nt.type = 'outbound'
 )`
-	if _, err := r.db.Exec(backfillNodeSnapshotType); err != nil {
-		return fmt.Errorf("backfill node_traffic_snapshots.type: %w", err)
-	}
+		if _, err := r.db.Exec(backfillNodeSnapshotType); err != nil {
+			return fmt.Errorf("backfill node_traffic_snapshots.type: %w", err)
+		}
 
-	// 历史 bug:UNIQUE(server_id, tag, date) 没含 type → 同 (server, tag, date) 但不同 type
-	// (一个 tag 同时是 inbound 和 outbound,常见于 routed 节点)的两行 INSERT 时,后者 ON CONFLICT
-	// UPDATE 覆盖前者,snapshot 表只剩一行,字段值是「后插入那条 type 的数值」。
-	// 前端按 type 分别查 baseline 时,某 type 的 baseline 拿到对手 type 的数值(uplink/downlink 错位),
-	// downlink 被错位 baseline 减成 0 → 「下行 0」假象。
-	// 修复:rebuild table 把 UNIQUE 改成 (server_id, tag, type, date)。
-	// 检测方式:PRAGMA index_list 找 UNIQUE index,看 index_info 是否包含 type 列。
-	needsRebuild, err := r.nodeTrafficSnapshotsNeedsRebuild()
-	if err != nil {
-		log.Printf("[Migrate] check node_traffic_snapshots unique: %v", err)
-	} else if needsRebuild {
+		// 历史 bug:UNIQUE(server_id, tag, date) 没含 type → 同 (server, tag, date) 但不同 type
+		// (一个 tag 同时是 inbound 和 outbound,常见于 routed 节点)的两行 INSERT 时,后者 ON CONFLICT
+		// UPDATE 覆盖前者,snapshot 表只剩一行,字段值是「后插入那条 type 的数值」。
+		// 前端按 type 分别查 baseline 时,某 type 的 baseline 拿到对手 type 的数值(uplink/downlink 错位),
+		// downlink 被错位 baseline 减成 0 → 「下行 0」假象。
+		// 修复:rebuild table 把 UNIQUE 改成 (server_id, tag, type, date)。
 		log.Printf("[Migrate] node_traffic_snapshots UNIQUE missing type column, rebuilding table")
 		if err := r.rebuildNodeTrafficSnapshots(); err != nil {
 			return fmt.Errorf("rebuild node_traffic_snapshots: %w", err)
@@ -9200,6 +9205,12 @@ type HeartbeatResult struct {
 	XrayBootCount    int
 	TokenExpiresSoon bool
 	TokenExpiresAt   *time.Time
+	// IPChanged:本次心跳让 ip_address 或 ip_address_v6 字段发生变化。调用方据此触发 RefreshNodesServerAddress
+	// 同步已存在节点的 clash_config.server,避免小鸡换 IP 后旧节点配置还是旧 IP。
+	IPChanged bool
+	// Server:UPDATE 后的最新 RemoteServer(IP/PullAddress 已应用 update)。
+	// IPChanged=true 时非 nil;调用方拿它喂给 chooseClashServerHost 算最新的 effective host。
+	Server *RemoteServer
 }
 
 // UpdateRemoteServerWarpInstalled 单独同步 warp_installed 字段(auth/heartbeat 上报后调)。
@@ -9225,14 +9236,22 @@ func (r *TrafficRepository) UpdateRemoteServerWarpInstalled(ctx context.Context,
 
 // 更新远程服务器的检测信号和状态。
 // ipAddressV6 为空时保留 db 现有值(老 agent 兼容)。
-func (r *TrafficRepository) UpdateRemoteServerHeartbeat(ctx context.Context, token string, ipAddress string, ipAddressV6 string) error {
+// 返回 (ipChanged, latestServer, err):IP 漂移时 ipChanged=true + latestServer 是 UPDATE 后状态,
+// 调用方据此触发 RefreshNodesServerAddress 同步节点 clash_config.server。
+func (r *TrafficRepository) UpdateRemoteServerHeartbeat(ctx context.Context, token string, ipAddress string, ipAddressV6 string) (bool, *RemoteServer, error) {
 	if r == nil || r.db == nil {
-		return errors.New("traffic repository not initialized")
+		return false, nil, errors.New("traffic repository not initialized")
 	}
 
 	token = strings.TrimSpace(token)
 	if token == "" {
-		return errors.New("remote server token is required")
+		return false, nil, errors.New("remote server token is required")
+	}
+
+	// 拿 UPDATE 前的 server 状态,用于 IP 漂移检测
+	server, err := r.GetRemoteServerByToken(ctx, token)
+	if err != nil {
+		return false, nil, err
 	}
 
 	// 空 ipAddress / ipAddressV6 都不覆盖 db 旧值 — 老 agent + v4-only / v6-only 网络抖动场景下,
@@ -9245,21 +9264,33 @@ func (r *TrafficRepository) UpdateRemoteServerHeartbeat(ctx context.Context, tok
 		updated_at = CURRENT_TIMESTAMP
 		WHERE token = ?`
 
-	result, err := r.db.ExecContext(ctx, stmt, RemoteServerStatusConnected, ipAddress, ipAddressV6, token)
+	res, err := r.db.ExecContext(ctx, stmt, RemoteServerStatusConnected, ipAddress, ipAddressV6, token)
 	if err != nil {
-		return fmt.Errorf("update remote server heartbeat: %w", err)
+		return false, nil, fmt.Errorf("update remote server heartbeat: %w", err)
 	}
 
-	affected, err := result.RowsAffected()
+	affected, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("get rows affected: %w", err)
+		return false, nil, fmt.Errorf("get rows affected: %w", err)
 	}
 
 	if affected == 0 {
-		return ErrRemoteServerNotFound
+		return false, nil, ErrRemoteServerNotFound
 	}
 
-	return nil
+	v4Changed := ipAddress != "" && ipAddress != server.IPAddress
+	v6Changed := ipAddressV6 != "" && ipAddressV6 != server.IPAddressV6
+	if v4Changed || v6Changed {
+		latest := *server
+		if v4Changed {
+			latest.IPAddress = ipAddress
+		}
+		if v6Changed {
+			latest.IPAddressV6 = ipAddressV6
+		}
+		return true, &latest, nil
+	}
+	return false, nil, nil
 }
 
 // MarkRemoteServerOfflineByID 立即把指定服务器标记为离线(不等 60s 心跳超时)。
@@ -9404,6 +9435,24 @@ func (r *TrafficRepository) UpdateRemoteServerHeartbeatWithRestart(ctx context.C
 		token)
 	if err != nil {
 		return nil, fmt.Errorf("update remote server heartbeat: %w", err)
+	}
+
+	// 检测 IP 漂移并把 UPDATE 后的最新 server 塞进 result,
+	// 由 handler 层据此触发 RefreshNodesServerAddress 同步已存在节点的 clash_config.server。
+	// COALESCE(NULLIF) 模式下:update.IP 为空时 DB 不动 → 视为「未变化」;非空且跟旧值不同才算「漂移」
+	v4Changed := update.IPAddress != "" && update.IPAddress != server.IPAddress
+	v6Changed := update.IPAddressV6 != "" && update.IPAddressV6 != server.IPAddressV6
+	if v4Changed || v6Changed {
+		latest := *server
+		if v4Changed {
+			latest.IPAddress = update.IPAddress
+		}
+		if v6Changed {
+			latest.IPAddressV6 = update.IPAddressV6
+		}
+		latest.PullAddress = pullAddress
+		result.IPChanged = true
+		result.Server = &latest
 	}
 
 	return result, nil

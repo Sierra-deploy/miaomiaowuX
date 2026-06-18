@@ -293,6 +293,17 @@ func (h *XrayServerHandler) RemoteHeartbeat(w http.ResponseWriter, r *http.Reque
 		SendServerOnlineNotification(ctx, result.ServerName, clientIP)
 	}
 
+	// agent IP 漂移 → 同步刷新已存在节点的 clash_config.server,避免节点继续指向旧 IP
+	if result.IPChanged && result.Server != nil {
+		if newHost := chooseClashServerHost(result.Server); newHost != "" {
+			if n, e := h.repo.RefreshNodesServerAddress(ctx, result.Server.Name, newHost); e != nil {
+				log.Printf("[RemoteHeartbeat] refresh nodes server address for %s failed: %v", result.Server.Name, e)
+			} else if n > 0 {
+				log.Printf("[RemoteHeartbeat] refreshed %d node(s) clash.server → %s for %s", n, newHost, result.Server.Name)
+			}
+		}
+	}
+
 	// 首次连接或 Xray 重启时推送限速配置（非 WebSocket 模式的补偿）
 	if result.ServerID > 0 && h.limiterPusher != nil {
 		if result.PreviousStatus != "connected" || result.XrayRestarted {
