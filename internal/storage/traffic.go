@@ -2665,6 +2665,13 @@ CREATE TABLE IF NOT EXISTS traffic_threshold_notified (
 		return fmt.Errorf("migrate user_traffic email merge: %w", err)
 	}
 
+	// 一次性清理:扫 xray snapshot 表把已废弃 marktag(如 fix_openai)的 routing.rules 移除 + 重算 hash,
+	// 跟 agent 端 removeDeprecatedRoutingRules 双端对齐,避免 agent 升级重启上报新 config 时
+	// hash 不一致触发"配置漂移待恢复"提示。函数本身幂等,失败不阻塞启动。
+	if err := r.MigrateRemoveDeprecatedRulesFromSnapshots(context.Background()); err != nil {
+		log.Printf("[Migrate] remove deprecated routing rules from snapshots: %v", err)
+	}
+
 	return nil
 }
 

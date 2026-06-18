@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -287,4 +288,144 @@ func (r *TrafficRepository) ListXraySnapshots(ctx context.Context, serverID int6
 		out = append(out, s)
 	}
 	return out, rows.Err()
+}
+
+// deprecatedRoutingMarktags — 已废弃需要从 snapshot 中清理的路由规则 marktag 白名单。
+// 跟 agent 端 removeDeprecatedRoutingRules 的 deprecated map 保持一致。
+var deprecatedRoutingMarktags = map[string]bool{
+	"fix_openai": true, // mmw-agent 8a9f8c9 移除,geosite:openai → direct
+}
+
+// MigrateRemoveDeprecatedRulesFromSnapshots 一次性扫 server_xray_config_snapshots,
+// 把 status IN ('current', 'pending_recovery') 行的 config_json 解析后,
+// 删除 marktag 在 deprecatedRoutingMarktags 里的 routing.rules,重新 marshal + 重算 hash 写回。
+// 配合 agent 端 removeDeprecatedRoutingRules — agent 重启上报新 config 时,
+// 这里 current 的 hash 已经是同款清理后的版本,hash 对齐 → 不触发 WritePendingXrayRecovery。
+//
+// 幂等:再次执行扫描时,所有 current 都已无 deprecated marktag → kept 数等于原数 → 跳过 update。
+func (r *TrafficRepository) MigrateRemoveDeprecatedRulesFromSnapshots(ctx context.Context) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, server_id, config_json FROM server_xray_config_snapshots WHERE status IN (?, ?)`,
+		XraySnapshotStatusCurrent, XraySnapshotStatusPendingRecovery)
+	if err != nil {
+		return fmt.Errorf("query snapshots: %w", err)
+	}
+	type todoItem struct {
+		id         int64
+		serverID   int64
+		configJSON string
+	}
+	var todos []todoItem
+	for rows.Next() {
+		var it todoItem
+		if err := rows.Scan(&it.id, &it.serverID, &it.configJSON); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan: %w", err)
+		}
+		todos = append(todos, it)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	cleaned := 0
+	for _, it := range todos {
+		newJSON, removed, err := stripDeprecatedRoutingRules(it.configJSON)
+		if err != nil {
+			// 单个 snapshot 解析失败不阻塞整体 migration,只记日志后继续
+			fmt.Printf("[Migrate] snapshot id=%d server=%d strip failed: %v\n", it.id, it.serverID, err)
+			continue
+		}
+		if removed == 0 {
+			continue
+		}
+		newHash := HashXrayConfig(newJSON)
+		if _, err := r.db.ExecContext(ctx,
+			`UPDATE server_xray_config_snapshots SET config_json = ?, config_hash = ? WHERE id = ?`,
+			newJSON, newHash, it.id); err != nil {
+			fmt.Printf("[Migrate] snapshot id=%d update failed: %v\n", it.id, err)
+			continue
+		}
+		cleaned++
+	}
+	if cleaned > 0 {
+		fmt.Printf("[Migrate] removed deprecated routing rules from %d xray snapshot(s)\n", cleaned)
+	}
+
+	// 加分项:扫一遍所有 server,如果同一 server 的 pending_recovery 跟 current 的 hash 现在相等了
+	// (都被清理成同款),pending 已经没意义 → 直接删掉,避免 UI "待恢复"banner 残留。
+	dupRows, err := r.db.QueryContext(ctx, `
+		SELECT p.id
+		  FROM server_xray_config_snapshots p
+		  JOIN server_xray_config_snapshots c
+		    ON c.server_id = p.server_id AND c.status = ? AND c.config_hash = p.config_hash
+		 WHERE p.status = ?`,
+		XraySnapshotStatusCurrent, XraySnapshotStatusPendingRecovery)
+	if err != nil {
+		return fmt.Errorf("query equal-hash pending: %w", err)
+	}
+	defer dupRows.Close()
+	var dupIDs []int64
+	for dupRows.Next() {
+		var id int64
+		if err := dupRows.Scan(&id); err != nil {
+			return fmt.Errorf("scan dup id: %w", err)
+		}
+		dupIDs = append(dupIDs, id)
+	}
+	if err := dupRows.Err(); err != nil {
+		return err
+	}
+	for _, id := range dupIDs {
+		if _, err := r.db.ExecContext(ctx, `DELETE FROM server_xray_config_snapshots WHERE id = ?`, id); err != nil {
+			fmt.Printf("[Migrate] delete equal-hash pending id=%d failed: %v\n", id, err)
+		}
+	}
+	if len(dupIDs) > 0 {
+		fmt.Printf("[Migrate] dropped %d redundant pending_recovery (hash matches current after cleanup)\n", len(dupIDs))
+	}
+	return nil
+}
+
+// stripDeprecatedRoutingRules 解析 config JSON,移除 routing.rules 中所有 marktag 在白名单里的项,
+// 返回新 JSON(2 空格缩进,跟 agent 端 MarshalIndent 一致)+ 被移除条数 + 错误。
+// 0 条移除时返回原 JSON 不变,调用方据此决定是否 update。
+func stripDeprecatedRoutingRules(configJSON string) (string, int, error) {
+	var cfg map[string]interface{}
+	if err := json.Unmarshal([]byte(configJSON), &cfg); err != nil {
+		return configJSON, 0, fmt.Errorf("unmarshal: %w", err)
+	}
+	routing, _ := cfg["routing"].(map[string]interface{})
+	if routing == nil {
+		return configJSON, 0, nil
+	}
+	rules, _ := routing["rules"].([]interface{})
+	if len(rules) == 0 {
+		return configJSON, 0, nil
+	}
+	kept := make([]interface{}, 0, len(rules))
+	removed := 0
+	for _, r := range rules {
+		rule, _ := r.(map[string]interface{})
+		if rule != nil {
+			if tag, _ := rule["marktag"].(string); deprecatedRoutingMarktags[tag] {
+				removed++
+				continue
+			}
+		}
+		kept = append(kept, r)
+	}
+	if removed == 0 {
+		return configJSON, 0, nil
+	}
+	routing["rules"] = kept
+	newJSON, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return configJSON, 0, fmt.Errorf("marshal: %w", err)
+	}
+	return string(newJSON), removed, nil
 }
