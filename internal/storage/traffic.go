@@ -2230,30 +2230,10 @@ CREATE INDEX IF NOT EXISTS idx_user_traffic_username ON user_traffic(username);
 		return fmt.Errorf("migrate user_traffic: %w", err)
 	}
 
-	// 方案 K — agent 端 1s ringbuffer 算出的 3 档 per-user 瞬时速率 (Bytes/sec)。语义是「最新值快照」,
-	// 不像 last_uplink/total_uplink 是累计值。老 agent 不上报时保持 0,rates_updated_at 用于 stale 检测
-	// (前端 / API 可判断:超过 N 秒未更新则认为速率失效,返 0)。
-	rateCols := [][2]string{
-		{"up_bps_1s", "INTEGER NOT NULL DEFAULT 0"},
-		{"down_bps_1s", "INTEGER NOT NULL DEFAULT 0"},
-		{"up_bps_5s", "INTEGER NOT NULL DEFAULT 0"},
-		{"down_bps_5s", "INTEGER NOT NULL DEFAULT 0"},
-		{"up_bps_30s", "INTEGER NOT NULL DEFAULT 0"},
-		{"down_bps_30s", "INTEGER NOT NULL DEFAULT 0"},
-		{"rates_updated_at", "TIMESTAMP"},
-	}
-	for _, col := range rateCols {
-		if err := r.ensureTableColumn("user_traffic", col[0], col[1]); err != nil {
-			return fmt.Errorf("migrate user_traffic add %s: %w", col[0], err)
-		}
-		if err := r.ensureTableColumn("user_email_traffic", col[0], col[1]); err != nil {
-			return fmt.Errorf("migrate user_email_traffic add %s: %w", col[0], err)
-		}
-	}
-
 	// user_email_traffic 跟 user_traffic 字段完全对齐,只是 key 换成 email — 保留 Xray stats 的
 	// per-client 维度。collector 同一次循环里同时 UPSERT user_traffic(按 username 聚合,套餐扣减
 	// 等热路径继续走它)和 user_email_traffic(per-email,前端 drilldown 等细粒度场景用)。
+	// 必须在下面 rateCols 给本表加列之前建表,否则全新安装首启会报 no such table。
 	const userEmailTrafficSchema = `
 CREATE TABLE IF NOT EXISTS user_email_traffic (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2275,6 +2255,27 @@ CREATE INDEX IF NOT EXISTS idx_user_email_traffic_email ON user_email_traffic(em
 `
 	if _, err := r.db.Exec(userEmailTrafficSchema); err != nil {
 		return fmt.Errorf("migrate user_email_traffic: %w", err)
+	}
+
+	// 方案 K — agent 端 1s ringbuffer 算出的 3 档 per-user 瞬时速率 (Bytes/sec)。语义是「最新值快照」,
+	// 不像 last_uplink/total_uplink 是累计值。老 agent 不上报时保持 0,rates_updated_at 用于 stale 检测
+	// (前端 / API 可判断:超过 N 秒未更新则认为速率失效,返 0)。
+	rateCols := [][2]string{
+		{"up_bps_1s", "INTEGER NOT NULL DEFAULT 0"},
+		{"down_bps_1s", "INTEGER NOT NULL DEFAULT 0"},
+		{"up_bps_5s", "INTEGER NOT NULL DEFAULT 0"},
+		{"down_bps_5s", "INTEGER NOT NULL DEFAULT 0"},
+		{"up_bps_30s", "INTEGER NOT NULL DEFAULT 0"},
+		{"down_bps_30s", "INTEGER NOT NULL DEFAULT 0"},
+		{"rates_updated_at", "TIMESTAMP"},
+	}
+	for _, col := range rateCols {
+		if err := r.ensureTableColumn("user_traffic", col[0], col[1]); err != nil {
+			return fmt.Errorf("migrate user_traffic add %s: %w", col[0], err)
+		}
+		if err := r.ensureTableColumn("user_email_traffic", col[0], col[1]); err != nil {
+			return fmt.Errorf("migrate user_email_traffic add %s: %w", col[0], err)
+		}
 	}
 
 	// 流量快照表 - 存储每日流量快照以了解历史趋势
