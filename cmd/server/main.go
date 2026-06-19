@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"syscall"
 	"time"
+	_ "time/tzdata" // 嵌入时区库,LoadLocation 不依赖系统 zoneinfo(纠正缺 /etc/localtime 的机器)
 
 	"miaomiaowux/internal/agentlog"
 	"miaomiaowux/internal/auth"
@@ -63,9 +64,37 @@ func loadConfig(path string) (*ServerConfig, error) {
 	return &config, nil
 }
 
+// initTimezone 兜底进程时区。Go 按 TZ 环境变量、其次 /etc/localtime 解析 time.Local;
+// 部分精简 VPS / 容器的 /etc/localtime 缺失或损坏时会静默回退 UTC,导致按本地 HH:MM 调度的
+// 「每日流量通知」等功能整体偏移(主机是 CST 时差 8 小时),日志时间戳也会错。
+// 这里仅在 time.Local 落到 UTC 且用户未显式设置 TZ 时,用 /etc/timezone 纠正。
+func initTimezone() {
+	if zone := time.Now().Location().String(); zone != "UTC" && zone != "" {
+		logger.Info("本地时区", "zone", zone)
+		return
+	}
+	// 已落到 UTC。用户显式设了 TZ(含 TZ=UTC)就尊重其选择,不再纠正。
+	if _, explicit := os.LookupEnv("TZ"); explicit {
+		logger.Info("本地时区", "zone", "UTC", "source", "TZ")
+		return
+	}
+	// TZ 未设且 time.Local=UTC,极可能是 /etc/localtime 缺失,用 /etc/timezone 兜底。
+	if data, err := os.ReadFile("/etc/timezone"); err == nil {
+		if name := strings.TrimSpace(string(data)); name != "" && name != "UTC" {
+			if loc, err := time.LoadLocation(name); err == nil {
+				time.Local = loc
+				logger.Info("本地时区已按 /etc/timezone 纠正", "zone", name)
+				return
+			}
+		}
+	}
+	logger.Warn("无法确定本地时区,按 UTC 运行;每日通知等按本地时间的功能会偏移,请设置环境变量 TZ(如 TZ=Asia/Shanghai)")
+}
+
 func main() {
 	// 初始化logger
 	logger.Init()
+	initTimezone()
 	logger.Info("喵喵屋服务器启动中", "version", version.Version)
 
 	// 启动日志清理任务（每天凌晨3点清理7天前的日志）

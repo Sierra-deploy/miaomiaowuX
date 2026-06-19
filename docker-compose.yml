@@ -16,6 +16,8 @@ services:
     volumes:
       - ./data:/app/data
       - ./rule_templates:/app/rule_templates
+      # 让容器继承宿主时区,否则进程按 UTC 运行,「每日流量通知」等按本地时间的功能会差 8 小时
+      - /etc/localtime:/etc/localtime:ro
 
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:12889/"]
