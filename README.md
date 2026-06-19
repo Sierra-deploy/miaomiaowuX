@@ -158,6 +158,10 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.2.9 (2026-06-19)
+- 🛠️ fix:hy2 parser 缺少 urldecode
+- 🛠️ fix:migrate顺序不对导致全新启动失败
+- 🛠️ fix:tg通知没有同步系统时区
 ### v0.2.8 (2026-06-18)
 - Update README.md
 - 🌈tunnel管理支持端口转发
