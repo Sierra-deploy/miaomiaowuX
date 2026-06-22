@@ -147,6 +147,12 @@ func validateSecurityPayload(p *securitySettingsResponse) string {
 			return fmt.Sprintf("%s must be > 0", name)
 		}
 	}
+	// Turnstile sitekey 合法值是 24 位定长(真 key 0x... / 测试 key 1x|2x|3x...)。
+	// 这里拦明显非法的短值,主要防浏览器密码管理器把用户名("admin")自动填进 sitekey 文本框、
+	// 再被 onBlur 静默存盘 → enabled=true → 用非法 sitekey 渲染 widget 把管理员锁在登录页外。
+	if sk := strings.TrimSpace(p.TurnstileSiteKey); sk != "" && len(sk) < 20 {
+		return "turnstile_site_key 格式不正确(疑似浏览器自动填充误填);如未使用人机验证请留空"
+	}
 	return ""
 }
 
