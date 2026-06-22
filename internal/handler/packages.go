@@ -880,8 +880,29 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 // 抽自 ServeHTTP,供 web /api/admin/packages/assign 与 TGBOT 注册/兑换共用,确保两条路都生效。
 func (h *PackageAssignHandler) AssignAndProvision(ctx context.Context, username string, packageID int64, startDate, endDate time.Time, isReset bool, resetDay int) ([]string, error) {
 	var warnings []string
+
+	// "套餐未变"的纯续期 / 改到期路径:用户当前就绑着这个 package,client 早已下发到各节点入站,
+	// 调整到期时间(以及 reset 设置)只是 DB 变更 —— 到期由 TrafficLimitEnforcer 在 PackageEndDate
+	// 过后统一摘除 client,有效期内不按日期动 xray。因此这里无需重新下发 client。
+	// 跳过重下发还能避免 GetUserInboundConfig 与 agent 实际 client 漂移时,generateCredential 生成
+	// "同 email(username__tag)不同 uuid" 的重复 client(agent matchClientCredential 按 uuid 判重不按 email)。
+	// 注意:用户套餐到期后 enforcer 会清空 package_id,故"过期后续费"是 prev.PackageID(0)≠packageID,
+	// 仍走下面的重新下发分支,client 会被正常加回。
+	samePackage := false
+	if prev, perr := h.repo.GetUser(ctx, username); perr == nil && prev.PackageID == packageID {
+		samePackage = true
+	}
+
 	if err := h.repo.AssignPackageToUser(ctx, username, packageID, startDate, endDate, isReset, resetDay); err != nil {
 		return nil, err
+	}
+
+	if samePackage {
+		// 只推一次 limiter 配置,让 agent 内存 limiter 跟 DB(reset_day / is_active 等)对齐;不碰 xray client。
+		if h.pusher != nil {
+			go h.pusher.PushToAllServersForUser(context.Background(), username)
+		}
+		return warnings, nil
 	}
 
 	// 获取套餐关联的节点，为每个节点的入站添加用户凭据
@@ -1193,6 +1214,18 @@ func addUserToInbound(ctx context.Context, rm *RemoteManageHandler, repo *storag
 		json.Unmarshal([]byte(existing.CredentialJSON), &credential)
 		credJSON = existing.CredentialJSON
 	}
+	// 兜底:DB 无记录,但 agent 该 inbound 已有同 email(username__tag)的 client → 复用它,
+	// 绝不再生成新 uuid 新增重复 —— xray 对同 email 会以 "User already exists" 拒绝 restart,
+	// 重复 client 也正是「同 email 不同 uuid」bug 的来源。复用后写回 DB,让主控与 agent 重新对齐。
+	if credential == nil {
+		if reuse := extractClientByEmail(settings, user.Username+"__"+inboundTag); reuse != nil {
+			credential = reuse
+			if b, err := json.Marshal(reuse); err == nil {
+				credJSON = string(b)
+			}
+			log.Printf("[addUserToInbound] reuse existing client by email %s__%s on server=%d (skip new credential)", user.Username, inboundTag, serverID)
+		}
+	}
 	if credential == nil {
 		// shadowsocks 需要 settings.method 决定 key 长度(SS2022 各档不同)
 		var method string
@@ -1243,6 +1276,31 @@ func addUserToInbound(ctx context.Context, rm *RemoteManageHandler, repo *storag
 		})
 	}
 
+	return nil
+}
+
+// extractClientByEmail 在 inbound.settings 的 clients / users / accounts 数组里按 email 找现存 client,
+// 命中返回其副本(浅拷贝),没有则 nil。用于"加 client 前先按 email 查、有就复用"的去重兜底。
+func extractClientByEmail(settings map[string]interface{}, email string) map[string]interface{} {
+	if settings == nil || email == "" {
+		return nil
+	}
+	for _, key := range []string{"clients", "users", "accounts"} {
+		arr, _ := settings[key].([]interface{})
+		for _, c := range arr {
+			cm, _ := c.(map[string]interface{})
+			if cm == nil {
+				continue
+			}
+			if e, _ := cm["email"].(string); e == email {
+				cp := make(map[string]interface{}, len(cm))
+				for k, v := range cm {
+					cp[k] = v
+				}
+				return cp
+			}
+		}
+	}
 	return nil
 }
 

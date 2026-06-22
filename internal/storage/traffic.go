@@ -10153,25 +10153,72 @@ func (r *TrafficRepository) DeleteRemoteServer(ctx context.Context, id int64) er
 		return errors.New("remote server id is required")
 	}
 
-	const stmt = `DELETE FROM remote_servers WHERE id = ?`
+	// nodes / user_subaccounts 按服务器**名字**(nodes.original_server)关联,先取出来。
+	var name string
+	switch err := r.db.QueryRowContext(ctx, `SELECT name FROM remote_servers WHERE id = ?`, id).Scan(&name); err {
+	case nil:
+		// ok
+	case sql.ErrNoRows:
+		return ErrRemoteServerNotFound
+	default:
+		return fmt.Errorf("lookup remote server: %w", err)
+	}
 
-	result, err := r.db.ExecContext(ctx, stmt, id)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin delete-server tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck // commit 成功后 rollback 为 no-op
+
+	// 1) 用户子账户:按 routed_node_id 关联,经 nodes.original_server 反查该服务器的(routed)节点。必须在删 nodes 之前。
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM user_subaccounts WHERE routed_node_id IN (SELECT id FROM nodes WHERE original_server = ?)`, name); err != nil {
+		return fmt.Errorf("delete user_subaccounts: %w", err)
+	}
+	// 2) 该服务器入站同步出来的所有节点(普通 + routed),按 original_server 名字。
+	if _, err := tx.ExecContext(ctx, `DELETE FROM nodes WHERE original_server = ?`, name); err != nil {
+		return fmt.Errorf("delete nodes: %w", err)
+	}
+	// 3) server_id 关联的数据:活跃运营(凭据/出站/xray 快照/批量记录/到期通知 flag)+ 历史流量统计。
+	//    服务器删除后这些全是孤儿,一并清掉。表名为内部常量,非用户输入,无注入风险。
+	//    注:证书(certificates.remote_server_id)按用户要求保留不动;dns_providers / custom_rules 为全局可复用资源,不在此列。
+	for _, table := range []string{
+		// 活跃运营配置
+		"user_inbound_configs",
+		"user_outbounds",
+		"server_xray_config_snapshots",
+		"batch_inbounds",
+		"batch_outbounds",
+		"traffic_threshold_notified",
+		// 历史流量统计
+		"node_traffic",
+		"user_traffic",
+		"user_email_traffic",
+		"traffic_snapshots",
+		"node_traffic_snapshots",
+		"user_traffic_snapshots",
+		"server_system_traffic_snapshots",
+	} {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE server_id = ?`, table), id); err != nil {
+			return fmt.Errorf("delete %s: %w", table, err)
+		}
+	}
+	// 4) 服务器行本身。
+	res, err := tx.ExecContext(ctx, `DELETE FROM remote_servers WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("delete remote server: %w", err)
 	}
 
-	// 清理联邦(分享接入)标记,避免孤立记录
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit delete-server tx: %w", err)
+	}
+
+	// 联邦(分享接入)标记是独立表,best-effort 清理,避免孤立记录。
 	_ = r.DeleteFederatedServer(ctx, id)
 
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("get rows affected: %w", err)
-	}
-
-	if affected == 0 {
+	if affected, _ := res.RowsAffected(); affected == 0 {
 		return ErrRemoteServerNotFound
 	}
-
 	return nil
 }
 

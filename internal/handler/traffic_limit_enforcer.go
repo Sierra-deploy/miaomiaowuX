@@ -81,10 +81,17 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 		if user.PackageEndDate != nil && now.After(*user.PackageEndDate) {
 			log.Printf("[TrafficLimitEnforcer] User %s package expired at %s, removing from inbounds and clearing package",
 				user.Username, user.PackageEndDate.Format("2006-01-02"))
-			e.removeUserFromAllInbounds(ctx, user.Username)
+			removed := e.removeUserFromAllInbounds(ctx, user.Username)
 			// 用户私有路由出站(routed_owner='user'):父 inbound 来自套餐分配的节点,
 			// 套餐到期后失去访问权,所以一并 suspend(凭据保留供续费恢复)。
 			suspendUserPrivateRouted(ctx, e.remoteManage, e.repo, user.Username)
+			if !removed {
+				// agent 摘除未确认成功(多半离线):保留 user_inbound_configs 与套餐绑定,下个周期重试。
+				// 不在此清 DB —— 否则 agent 残留孤儿 client 而 DB 无行,既造成「同 email 不同 uuid」漂移,
+				// 过期用户还因孤儿 client 继续有访问权。也暂不发到期通知,避免每周期反复打扰。
+				log.Printf("[TrafficLimitEnforcer] User %s expiry removal incomplete (agent unreachable?), keep configs & retry next cycle", user.Username)
+				continue
+			}
 			if err := e.repo.DeleteUserInboundConfigs(ctx, user.Username); err != nil {
 				log.Printf("[TrafficLimitEnforcer] Failed to delete inbound configs for %s: %v", user.Username, err)
 			}
@@ -184,18 +191,27 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 	}
 }
 
-func (e *TrafficLimitEnforcer) removeUserFromAllInbounds(ctx context.Context, username string) {
+// removeUserFromAllInbounds 从该用户所有 inbound 摘除 client。
+// 返回 true = 可安全清理 DB:所有 client 要么摘除成功,要么对应 inbound 本就不存在(不可能留孤儿)。
+// 返回 false = 至少一个 inbound 摘除失败且 client 可能仍残留(典型:agent 离线)——调用方应保留
+// user_inbound_configs 与套餐绑定,下个周期重试,避免「agent 有孤儿 client 但 DB 无行」的漂移
+// (该漂移会让续费/再分配时生成同 email 新 uuid 的重复凭据,且过期用户因孤儿 client 仍能连)。
+// 注:over-limit 摘除调用处忽略返回值即可(它不清 user_inbound_configs)。
+func (e *TrafficLimitEnforcer) removeUserFromAllInbounds(ctx context.Context, username string) bool {
 	configs, err := e.repo.GetUserInboundConfigs(ctx, username)
 	if err != nil {
 		log.Printf("[TrafficLimitEnforcer] Failed to get inbound configs for %s: %v", username, err)
-		return
+		return false
 	}
+	safe := true
 	for _, cfg := range configs {
-		if err := removeUserFromInbound(ctx, e.remoteManage, cfg); err != nil {
+		if err := removeUserFromInbound(ctx, e.remoteManage, cfg); err != nil && !isInboundNotFoundErr(err) {
 			log.Printf("[TrafficLimitEnforcer] Failed to remove %s from %s on server %d: %v",
 				username, cfg.InboundTag, cfg.ServerID, err)
+			safe = false
 		}
 	}
+	return safe
 }
 
 func (e *TrafficLimitEnforcer) restoreUserToInbounds(ctx context.Context, user storage.User) {

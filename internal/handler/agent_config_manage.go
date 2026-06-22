@@ -648,6 +648,11 @@ func (h *XrayServerHandler) DeleteRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		return
 	}
 
+	// 删后清掉该 server 的 inbound 内存缓存,避免残留(否则同 id 复用时会读到旧 inbound 数据)。
+	if h.remoteManager != nil && h.remoteManager.inboundCache != nil {
+		h.remoteManager.inboundCache.Invalidate(req.ID)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(RemoteServerResponse{
 		Success: true,

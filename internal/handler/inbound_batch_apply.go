@@ -31,6 +31,22 @@ func collectInboundClientAddItem(ctx context.Context, cache *InboundCache, repo 
 		return nil, false, nil
 	}
 
+	// 兜底:DB 无记录,但 agent 该 inbound 可能已有同 email 的 client(user_inbound_configs 与 agent 漂移)。
+	// 直接查内存缓存的 ib.Settings(快照含完整 clients,零额外往返),命中即复用既有凭据(uuid/password),
+	// 绝不新增同 email 不同 uuid 的重复 —— xray 对同 email 会以 "User already exists" 拒绝 restart。
+	// 命中后照常进 batch(agent 端 add-client 按 id 幂等 no-op)+ 写回 user_inbound_configs 让 DB 与 agent 重新对齐。
+	if reuse := extractClientByEmail(ib.Settings, user.Username+"__"+inboundTag); reuse != nil {
+		reuseJSON, _ := json.Marshal(reuse)
+		return &InboundClientAddItem{
+			Username:       user.Username,
+			ServerID:       serverID,
+			InboundTag:     inboundTag,
+			Protocol:       ib.Protocol,
+			Credential:     reuse,
+			CredentialJSON: string(reuseJSON),
+		}, true, nil
+	}
+
 	// shadowsocks 需要 method 决定 key 长度
 	var method string
 	if ib.Settings != nil {
