@@ -703,6 +703,8 @@ func (r *TrafficRepository) RefreshNodesServerAddress(ctx context.Context, serve
 	if serverName == "" || newAddr == "" {
 		return 0, nil
 	}
+	// 只刷 v4/域名节点:clash server 不含 ':'(host-only 字段,v4 与域名都不含冒号);
+	// 含 ':' 的是 IPv6 节点,由 RefreshNodesServerAddressV6 单独按 v6 地址刷新,不在此被污染。
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE nodes
 		SET clash_config = json_set(clash_config, '$.server', ?),
@@ -710,10 +712,40 @@ func (r *TrafficRepository) RefreshNodesServerAddress(ctx context.Context, serve
 		WHERE original_server = ?
 		  AND clash_config IS NOT NULL
 		  AND json_valid(clash_config) = 1
+		  AND IFNULL(json_extract(clash_config, '$.server'), '') NOT LIKE '%:%'
 		  AND IFNULL(json_extract(clash_config, '$.server'), '') != ?
 	`, newAddr, serverName, newAddr)
 	if err != nil {
 		return 0, fmt.Errorf("refresh node server address: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	return affected, nil
+}
+
+// RefreshNodesServerAddressV6 把指定服务器下「IPv6 节点」(clash server 含 ':')的 server 字段
+// 批量替换为 newV6。与 RefreshNodesServerAddress 互补:前者只动 v4/域名节点,本函数只动 v6 节点。
+// IP 漂移时两者分别用各自的新地址调用,保证 v4/v6 双节点不串。
+func (r *TrafficRepository) RefreshNodesServerAddressV6(ctx context.Context, serverName, newV6 string) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	serverName = strings.TrimSpace(serverName)
+	newV6 = strings.TrimSpace(newV6)
+	if serverName == "" || newV6 == "" {
+		return 0, nil
+	}
+	res, err := r.db.ExecContext(ctx, `
+		UPDATE nodes
+		SET clash_config = json_set(clash_config, '$.server', ?),
+		    updated_at = CURRENT_TIMESTAMP
+		WHERE original_server = ?
+		  AND clash_config IS NOT NULL
+		  AND json_valid(clash_config) = 1
+		  AND IFNULL(json_extract(clash_config, '$.server'), '') LIKE '%:%'
+		  AND IFNULL(json_extract(clash_config, '$.server'), '') != ?
+	`, newV6, serverName, newV6)
+	if err != nil {
+		return 0, fmt.Errorf("refresh node server address v6: %w", err)
 	}
 	affected, _ := res.RowsAffected()
 	return affected, nil
@@ -762,7 +794,10 @@ func (r *TrafficRepository) UpdateNodesByServerName(ctx context.Context, oldName
 }
 
 // 按服务器名称和入站标签更新节点配置。
-func (r *TrafficRepository) UpdateNodeByInboundTag(ctx context.Context, serverName, inboundTag, clashConfig string) error {
+// family 限定只更新某一 IP 版本的节点(clash server 含 ':' 即 IPv6):
+//   "" → 全部(向后兼容);"v4" → 只更新 v4/域名节点;"v6" → 只更新 IPv6 节点。
+// v4/v6 双节点共享同一 inbound_tag,编辑入站时需各自用对应 server 的配置分别更新,避免互相覆盖。
+func (r *TrafficRepository) UpdateNodeByInboundTag(ctx context.Context, serverName, inboundTag, clashConfig, family string) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
 	}
@@ -773,11 +808,18 @@ func (r *TrafficRepository) UpdateNodeByInboundTag(ctx context.Context, serverNa
 		return errors.New("server name and inbound tag are required")
 	}
 
-	_, err := r.db.ExecContext(ctx, `
+	query := `
 		UPDATE nodes
 		SET clash_config = ?, parsed_config = ?, updated_at = CURRENT_TIMESTAMP
-		WHERE original_server = ? AND inbound_tag = ?`,
-		clashConfig, clashConfig, serverName, inboundTag)
+		WHERE original_server = ? AND inbound_tag = ?`
+	switch family {
+	case "v4":
+		query += ` AND IFNULL(json_extract(clash_config, '$.server'), '') NOT LIKE '%:%'`
+	case "v6":
+		query += ` AND IFNULL(json_extract(clash_config, '$.server'), '') LIKE '%:%'`
+	}
+
+	_, err := r.db.ExecContext(ctx, query, clashConfig, clashConfig, serverName, inboundTag)
 	if err != nil {
 		return fmt.Errorf("update node by inbound tag: %w", err)
 	}

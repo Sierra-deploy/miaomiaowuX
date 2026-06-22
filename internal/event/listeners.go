@@ -89,73 +89,146 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 		return
 	}
 
-	// 检查是否已存在（按名称）
-	exists, _ := l.repo.CheckNodeNameExists(ctx, nodeName, sysOwner, 0)
-	if exists {
-		log.Printf("[NodeSync] Node already exists: %s", nodeName)
-		return
-	}
-
-	// 检查是否已存在（按 server + protocol + port）— admin 自己之前同步过的同 server 节点
-	existingNodes, _ := l.repo.ListNodes(ctx, sysOwner)
-	for _, n := range existingNodes {
-		if n.OriginalServer == server.Name {
-			var config map[string]any
-			if err := json.Unmarshal([]byte(n.ClashConfig), &config); err == nil {
-				if proto, ok := config["type"].(string); ok {
-					if port, ok := config["port"].(float64); ok {
-						if proto == event.Protocol && int(port) == event.Port {
-							log.Printf("[NodeSync] Node with same server/protocol/port already exists: %s", n.NodeName)
-							return
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// 用实际节点名称覆盖 Clash 配置中的 name 字段
+	// 解析 clash 配置 — inboundToClash 已用 chooseClashServerHost 把 server 填成 v4 host
+	// (Domain → PullAddress → IPv4)。
 	var clashMap map[string]any
-	if json.Unmarshal([]byte(clashConfig), &clashMap) == nil {
-		clashMap["name"] = nodeName
-		if updated, err := json.Marshal(clashMap); err == nil {
-			clashConfig = string(updated)
-		}
-	}
-
-	// 创建节点
-	node := storage.Node{
-		Username:       sysOwner,
-		NodeName:       nodeName,
-		Protocol:       event.Protocol,
-		ClashConfig:    clashConfig,
-		ParsedConfig:   clashConfig,
-		Enabled:        true,
-		Tag:            fmt.Sprintf("远程:%s", server.Name),
-		OriginalServer: server.Name,
-		InboundTag:     event.Tag,
-	}
-
-	created, err := l.repo.CreateNode(ctx, node)
-	if err != nil {
-		log.Printf("[NodeSync] Failed to create node: %v", err)
+	if err := json.Unmarshal([]byte(clashConfig), &clashMap); err != nil {
+		log.Printf("[NodeSync] Failed to parse clash config: %v", err)
 		return
 	}
-	log.Printf("[NodeSync] Created node: %s", nodeName)
-	// 新建节点放到节点排序表最前面 — 用户在节点管理拖过顺序后,如果直接 append 新 ID 会被甩到底部,不直观。
-	if settings, err := l.repo.GetUserSettings(ctx, sysOwner); err == nil {
-		// 去重一下,避免节点 ID 已经在数组里时把它又塞前面造成重复
-		filtered := make([]int64, 0, len(settings.NodeOrder)+1)
-		filtered = append(filtered, created.ID)
-		for _, id := range settings.NodeOrder {
-			if id != created.ID {
-				filtered = append(filtered, id)
-			}
+	v4Host, _ := clashMap["server"].(string)
+	v6Host := strings.TrimSpace(server.IPAddressV6)
+
+	// 按 ip_version 决定要建哪些节点(name + 该节点 clash server 用的 host)
+	type nodePlan struct {
+		name string
+		host string
+	}
+	var plans []nodePlan
+	switch event.IPVersion {
+	case "v6":
+		// 勾 v6:强制用 IPv6 字面地址,忽略 Domain/PullAddress
+		if v6Host == "" {
+			log.Printf("[NodeSync] server %s 无 IPv6,ip_version=v6 跳过创建", server.Name)
+			return
 		}
-		settings.NodeOrder = filtered
-		if err := l.repo.UpsertUserSettings(ctx, settings); err != nil {
-			log.Printf("[NodeSync] prepend new node to node_order failed: %v", err)
+		plans = []nodePlan{{nodeName, v6Host}}
+	case "both":
+		plans = []nodePlan{{nodeName, v4Host}}
+		if v6Host != "" {
+			plans = append(plans, nodePlan{nodeName + "(v6)", v6Host})
+		} else {
+			log.Printf("[NodeSync] server %s 无 IPv6,both 退化为仅 v4", server.Name)
 		}
+	default: // "" / "v4" —— 现状行为
+		plans = []nodePlan{{nodeName, v4Host}}
+	}
+
+	// admin 已同步过的同 server 节点(按 server-host + protocol + port 去重)
+	existingNodes, _ := l.repo.ListNodes(ctx, sysOwner)
+
+	for _, p := range plans {
+		// 按名去重(v6 节点名带 "(v6)" 后缀,与 v4 不冲突)
+		if exists, _ := l.repo.CheckNodeNameExists(ctx, p.name, sysOwner, 0); exists {
+			log.Printf("[NodeSync] Node already exists: %s", p.name)
+			continue
+		}
+		// 按 server-host + protocol + port 去重 —— 带上 host,避免「both」时 v4/v6 同 proto+port 互相误杀
+		if nodeWithHostProtoPortExists(existingNodes, server.Name, p.host, event.Protocol, event.Port) {
+			log.Printf("[NodeSync] Node with same host/protocol/port exists, skip: %s @ %s", p.name, p.host)
+			continue
+		}
+
+		cfg, err := cloneClashWithServer(clashMap, p.name, p.host)
+		if err != nil {
+			log.Printf("[NodeSync] Failed to build clash config for %s: %v", p.name, err)
+			continue
+		}
+		node := storage.Node{
+			Username:       sysOwner,
+			NodeName:       p.name,
+			Protocol:       event.Protocol,
+			ClashConfig:    cfg,
+			ParsedConfig:   cfg,
+			Enabled:        true,
+			Tag:            fmt.Sprintf("远程:%s", server.Name),
+			OriginalServer: server.Name,
+			InboundTag:     event.Tag,
+		}
+		created, err := l.repo.CreateNode(ctx, node)
+		if err != nil {
+			log.Printf("[NodeSync] Failed to create node %s: %v", p.name, err)
+			continue
+		}
+		log.Printf("[NodeSync] Created node: %s", p.name)
+		l.prependNodeOrder(ctx, sysOwner, created.ID)
+	}
+}
+
+// cloneClashWithServer 浅拷贝 clash proxy map,覆盖顶层 name 与 server,返回 JSON。
+// clash proxy 是扁平对象(server/name/port/type/uuid... 均顶层),浅拷贝足够 —— 只改顶层键,
+// 不触碰 ws-opts/reality-opts 等嵌套结构,两节点共享嵌套引用也安全。
+func cloneClashWithServer(clashMap map[string]any, name, serverHost string) (string, error) {
+	cp := make(map[string]any, len(clashMap))
+	for k, v := range clashMap {
+		cp[k] = v
+	}
+	cp["name"] = name
+	cp["server"] = serverHost
+	b, err := json.Marshal(cp)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// nodeWithHostProtoPortExists 判断 existing 中是否已有 同 server名 + 同 clash server host + 同协议 + 同端口 的节点。
+func nodeWithHostProtoPortExists(existing []storage.Node, serverName, host, protocol string, port int) bool {
+	for _, n := range existing {
+		if n.OriginalServer != serverName {
+			continue
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal([]byte(n.ClashConfig), &cfg); err != nil {
+			continue
+		}
+		if h, _ := cfg["server"].(string); h != host {
+			continue
+		}
+		if proto, _ := cfg["type"].(string); !protocolEquivalent(proto, protocol) {
+			continue
+		}
+		var p int
+		switch v := cfg["port"].(type) {
+		case float64:
+			p = int(v)
+		case int:
+			p = v
+		}
+		if p == port {
+			return true
+		}
+	}
+	return false
+}
+
+// prependNodeOrder 把新节点 ID 放到用户节点排序表最前面(去重)——
+// 用户拖过顺序后直接 append 会把新节点甩到底部,不直观。
+func (l *NodeSyncListener) prependNodeOrder(ctx context.Context, owner string, nodeID int64) {
+	settings, err := l.repo.GetUserSettings(ctx, owner)
+	if err != nil {
+		return
+	}
+	filtered := make([]int64, 0, len(settings.NodeOrder)+1)
+	filtered = append(filtered, nodeID)
+	for _, id := range settings.NodeOrder {
+		if id != nodeID {
+			filtered = append(filtered, id)
+		}
+	}
+	settings.NodeOrder = filtered
+	if err := l.repo.UpsertUserSettings(ctx, settings); err != nil {
+		log.Printf("[NodeSync] prepend new node to node_order failed: %v", err)
 	}
 }
 
@@ -344,10 +417,24 @@ func (l *NodeSyncListener) handleUpdated(ctx context.Context, event InboundEvent
 		return
 	}
 
-	// 更新匹配的节点
-	if err := l.repo.UpdateNodeByInboundTag(ctx, server.Name, event.Tag, clashConfig); err != nil {
-		log.Printf("[NodeSync] Failed to update node: %v", err)
-	} else {
-		log.Printf("[NodeSync] Updated node for inbound: %s/%s", server.Name, event.Tag)
+	// v4/域名节点:用 base 配置(server = chooseClashServerHost)更新。
+	// 订阅生成时 proxy 名取 node_name 列(subscription.go:988),clash_config 内的 name 仅内部用,无需特意保留。
+	if err := l.repo.UpdateNodeByInboundTag(ctx, server.Name, event.Tag, clashConfig, "v4"); err != nil {
+		log.Printf("[NodeSync] Failed to update v4 node: %v", err)
 	}
+
+	// IPv6 节点:同一 inbound_tag 下若存在 v6 节点,用相同入站配置但 server 改回 v6 字面地址更新,
+	// 避免被 base(v4)配置覆盖回 v4。server 无 v6 时无 v6 节点,跳过。
+	if v6Host := strings.TrimSpace(server.IPAddressV6); v6Host != "" {
+		var m map[string]any
+		if json.Unmarshal([]byte(clashConfig), &m) == nil {
+			name, _ := m["name"].(string)
+			if v6cfg, cerr := cloneClashWithServer(m, name, v6Host); cerr == nil {
+				if err := l.repo.UpdateNodeByInboundTag(ctx, server.Name, event.Tag, v6cfg, "v6"); err != nil {
+					log.Printf("[NodeSync] Failed to update v6 node: %v", err)
+				}
+			}
+		}
+	}
+	log.Printf("[NodeSync] Updated node(s) for inbound: %s/%s", server.Name, event.Tag)
 }

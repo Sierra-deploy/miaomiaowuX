@@ -302,6 +302,14 @@ func (h *XrayServerHandler) RemoteHeartbeat(w http.ResponseWriter, r *http.Reque
 				log.Printf("[RemoteHeartbeat] refreshed %d node(s) clash.server → %s for %s", n, newHost, result.Server.Name)
 			}
 		}
+		// v6 节点单独刷成新的 IPv6 地址(RefreshNodesServerAddress 只动 v4/域名节点)
+		if v6 := strings.TrimSpace(result.Server.IPAddressV6); v6 != "" {
+			if n, e := h.repo.RefreshNodesServerAddressV6(ctx, result.Server.Name, v6); e != nil {
+				log.Printf("[RemoteHeartbeat] refresh v6 nodes for %s failed: %v", result.Server.Name, e)
+			} else if n > 0 {
+				log.Printf("[RemoteHeartbeat] refreshed %d v6 node(s) clash.server → %s for %s", n, v6, result.Server.Name)
+			}
+		}
 		// DDNS:把新 IP 同步到 pull_address 域名的 A/AAAA 记录
 		if h.ddnsManager != nil && result.Server.DDNSEnabled {
 			go h.ddnsManager.Trigger(context.Background(), result.Server)

@@ -1968,6 +1968,13 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 						port, _ := inbound["port"].(float64)
 						customNodeName, _ := inboundReq["node_name"].(string)
 						forwardNodeID, _ := inboundReq["forward_node_id"].(float64) // tunnel「转发已有节点」时携带源节点 ID
+						// ip_version: ""/v4(默认) | v6 | both —— 决定生成节点 clash server 用 v4/v6/双节点
+						ipVersion, _ := inboundReq["ip_version"].(string)
+						switch ipVersion {
+						case "v4", "v6", "both":
+						default:
+							ipVersion = "" // 非法值降级为默认 v4
+						}
 
 						h.cleanupTunnelRouteForReality(r.Context(), id, inbound)
 
@@ -1985,6 +1992,7 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 							Inbound:       inboundAny,
 							NodeName:      customNodeName,
 							ForwardNodeID: int64(forwardNodeID),
+							IPVersion:     ipVersion,
 						})
 					}
 					// VLESS+WS 入站添加成功 → 异步聚合渲染该 server 全部 WSS location 下发 nginx
@@ -2841,6 +2849,14 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 		log.Printf("[Remote Manage] Refresh node server address failed for %s: %v", server.Name, err)
 	} else if refreshed > 0 {
 		log.Printf("[Remote Manage] Refreshed %d node(s) server address → %s for %s", refreshed, serverHost, server.Name)
+	}
+	// v6 节点单独校正到当前 IPv6 地址(RefreshNodesServerAddress 只动 v4/域名节点)
+	if v6 := strings.TrimSpace(server.IPAddressV6); v6 != "" {
+		if refreshed, err := h.repo.RefreshNodesServerAddressV6(ctx, server.Name, v6); err != nil {
+			log.Printf("[Remote Manage] Refresh v6 node server address failed for %s: %v", server.Name, err)
+		} else if refreshed > 0 {
+			log.Printf("[Remote Manage] Refreshed %d v6 node(s) server address → %s for %s", refreshed, v6, server.Name)
+		}
 	}
 
 	// 路由出站节点识别:扫所有 inbound 的 clients[],建立 凭据值 → email 映射;

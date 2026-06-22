@@ -916,6 +916,14 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 				log.Printf("[Remote WS] auth: refreshed %d node(s) clash.server → %s for %s", n, newHost, latest.Name)
 			}
 		}
+		// v6 节点单独刷新(只动 clash server 含 ':' 的节点)
+		if v6 := strings.TrimSpace(latest.IPAddressV6); v6 != "" {
+			if n, e := h.repo.RefreshNodesServerAddressV6(updateCtx, latest.Name, v6); e != nil {
+				log.Printf("[Remote WS] auth: refresh v6 nodes for %s failed: %v", latest.Name, e)
+			} else if n > 0 {
+				log.Printf("[Remote WS] auth: refreshed %d v6 node(s) clash.server → %s for %s", n, v6, latest.Name)
+			}
+		}
 		// DDNS:agent 换 IP 后把新 IP 同步到 pull_address 域名的 A/AAAA 记录
 		if h.ddnsManager != nil && latest.DDNSEnabled {
 			go h.ddnsManager.Trigger(context.Background(), latest)
@@ -1132,6 +1140,14 @@ func (h *RemoteWSHandler) handleHeartbeat(wsConn *RemoteWSConnection, payload js
 				log.Printf("[Remote WS] heartbeat: refresh nodes server address for %s failed: %v", hbResult.Server.Name, e)
 			} else if n > 0 {
 				log.Printf("[Remote WS] heartbeat: refreshed %d node(s) clash.server → %s for %s", n, newHost, hbResult.Server.Name)
+			}
+		}
+		// v6 节点单独刷新(只动 clash server 含 ':' 的节点)
+		if v6 := strings.TrimSpace(hbResult.Server.IPAddressV6); v6 != "" {
+			if n, e := h.repo.RefreshNodesServerAddressV6(ctx, hbResult.Server.Name, v6); e != nil {
+				log.Printf("[Remote WS] heartbeat: refresh v6 nodes for %s failed: %v", hbResult.Server.Name, e)
+			} else if n > 0 {
+				log.Printf("[Remote WS] heartbeat: refreshed %d v6 node(s) clash.server → %s for %s", n, v6, hbResult.Server.Name)
 			}
 		}
 		// DDNS:同步新 IP 到域名 A/AAAA 记录
