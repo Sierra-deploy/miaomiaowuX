@@ -11,6 +11,7 @@ import (
 	"net"
 	stdhttp "net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -223,6 +224,9 @@ func (h *XrayServerHandler) ListRemoteServers(w stdhttp.ResponseWriter, r *stdht
 			}
 		}
 
+		// 列表不再明文回传令牌(Encrypted/WsConnected 已在上面用原始 server.Token 算好)。
+		// 前端需要时走 reveal-token 按单台显式获取。
+		maskServerSecrets(&extended.RemoteServer)
 		extendedServers = append(extendedServers, extended)
 	}
 
@@ -230,6 +234,47 @@ func (h *XrayServerHandler) ListRemoteServers(w stdhttp.ResponseWriter, r *stdht
 	json.NewEncoder(w).Encode(RemoteServersListResponse{
 		Success: true,
 		Servers: extendedServers,
+	})
+}
+
+// maskServerSecrets 清空响应里的令牌字段。列表/详情接口不再明文回传 token,
+// 需要时由前端走 /api/admin/remote-servers/reveal-token 按单台显式获取(T2#6 token 脱敏)。
+func maskServerSecrets(s *storage.RemoteServer) {
+	if s == nil {
+		return
+	}
+	s.Token = ""
+	s.PullToken = ""
+	s.AgentToken = ""
+}
+
+// RevealServerToken 按需返回单台服务器的令牌(管理员鉴权)。前端仅在用户点击
+// "复制安装命令 / 复制 Token" 时调用,避免 token 随列表轮询批量外泄到浏览器历史/日志/屏幕。
+func (h *XrayServerHandler) RevealServerToken(w stdhttp.ResponseWriter, r *stdhttp.Request) {
+	if r.Method != "GET" {
+		stdhttp.Error(w, "Method not allowed", stdhttp.StatusMethodNotAllowed)
+		return
+	}
+	id, err := strconv.ParseInt(r.URL.Query().Get("server_id"), 10, 64)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(stdhttp.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "invalid server_id"})
+		return
+	}
+	server, err := h.repo.GetRemoteServer(r.Context(), id)
+	if err != nil || server == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(stdhttp.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "server not found"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"success":     true,
+		"token":       server.Token,
+		"pull_token":  server.PullToken,
+		"agent_token": server.AgentToken,
 	})
 }
 

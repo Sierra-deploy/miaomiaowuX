@@ -406,6 +406,7 @@ func main() {
 	// 远程服务器管理端点（仅限管理员）
 	mux.Handle("/api/admin/remote-servers", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.ListRemoteServers)))
 	mux.Handle("/api/admin/remote-servers/create", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.CreateRemoteServer)))
+	mux.Handle("/api/admin/remote-servers/reveal-token", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.RevealServerToken)))
 	// 接入分享服务器(消费方)
 	mux.Handle("/api/admin/remote-servers/add-shared", auth.RequireAdmin(tokenStore, userRepo, handler.NewAddSharedServerHandler(repo)))
 	mux.Handle("/api/admin/remote-servers/update", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.UpdateRemoteServer)))
