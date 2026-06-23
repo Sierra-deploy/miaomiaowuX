@@ -197,12 +197,22 @@ func (h *nodesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		idSegment := strings.TrimSuffix(path, "/config")
 		h.handleUpdateConfig(w, r, idSegment)
-	case path != "" && path != "batch" && path != "fetch-subscription" && !strings.HasSuffix(path, "/server") && !strings.HasSuffix(path, "/restore-server") && !strings.HasSuffix(path, "/config") && !strings.HasSuffix(path, "/related-inbounds") && (r.Method == http.MethodPut || r.Method == http.MethodPatch):
+	case strings.HasSuffix(path, "/relay") && r.Method == http.MethodPut:
+		if denyNonAdmin() {
+			return
+		}
+		h.handleSetRelay(w, r, strings.TrimSuffix(path, "/relay"))
+	case strings.HasSuffix(path, "/relay") && r.Method == http.MethodDelete:
+		if denyNonAdmin() {
+			return
+		}
+		h.handleCancelRelay(w, r, strings.TrimSuffix(path, "/relay"))
+	case path != "" && path != "batch" && path != "fetch-subscription" && !strings.HasSuffix(path, "/server") && !strings.HasSuffix(path, "/restore-server") && !strings.HasSuffix(path, "/config") && !strings.HasSuffix(path, "/relay") && !strings.HasSuffix(path, "/related-inbounds") && (r.Method == http.MethodPut || r.Method == http.MethodPatch):
 		if denyNonAdmin() {
 			return
 		}
 		h.handleUpdate(w, r, path)
-	case path != "" && path != "batch" && path != "fetch-subscription" && !strings.HasSuffix(path, "/related-inbounds") && r.Method == http.MethodDelete:
+	case path != "" && path != "batch" && path != "fetch-subscription" && !strings.HasSuffix(path, "/relay") && !strings.HasSuffix(path, "/related-inbounds") && r.Method == http.MethodDelete:
 		if denyNonAdmin() {
 			return
 		}
@@ -521,10 +531,15 @@ func (h *nodesHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 		ChainProxyNodeID: req.ChainProxyNodeID,
 	}
 
-	// 防绕过:节点 server 指向已注册的 remote_server → 计入 license 配额
+	// 防绕过:节点 server 指向已注册的 remote_server → 计入 license 配额(按原始 server 判,故在挂中转前)
 	if rejectMsg, ok := h.enforceLicenseIfNodeHostMatchesServer(r.Context(), &node); !ok {
 		writeJSONError(w, http.StatusForbidden, rejectMsg)
 		return
+	}
+
+	// 中转:license 校验后再挂 —— clash/parsed 的 server/port 换成中转地址,原服务器地址/端口记到 relay_orig_*。
+	if rs := strings.TrimSpace(req.RelayServer); rs != "" {
+		applyRelayToNode(&node, rs, req.RelayPort)
 	}
 
 	created, err := h.repo.CreateNode(r.Context(), node)
@@ -565,6 +580,7 @@ func (h *nodesHandler) handleBatchCreate(w http.ResponseWriter, r *http.Request)
 	// 同 handleCreate:批量导入也是用户手动添加 physical 节点,不占 license 配额。
 
 	nodes := make([]storage.Node, 0, len(req.Nodes))
+	relayReqs := make([]nodeRequest, 0, len(req.Nodes)) // 与 nodes 对齐,保留每个节点的中转意图
 	for _, n := range req.Nodes {
 		// 允许 Clash 订阅节点没有 RawURL，但必须有 NodeName 和 ClashConfig
 		if n.NodeName == "" || n.ClashConfig == "" {
@@ -581,6 +597,7 @@ func (h *nodesHandler) handleBatchCreate(w http.ResponseWriter, r *http.Request)
 			Tag:          n.Tag,
 			InboundTag:   n.InboundTag,
 		})
+		relayReqs = append(relayReqs, n)
 	}
 
 	if len(nodes) == 0 {
@@ -588,11 +605,18 @@ func (h *nodesHandler) handleBatchCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// 防绕过:批量里如果有 server 指向已注册 remote_server 的节点,每个都按 license 配额逐一检查。
+	// 防绕过:批量里如果有 server 指向已注册 remote_server 的节点,每个都按 license 配额逐一检查(按原始 server,故在挂中转前)。
 	for i := range nodes {
 		if rejectMsg, ok := h.enforceLicenseIfNodeHostMatchesServer(r.Context(), &nodes[i]); !ok {
 			writeJSONError(w, http.StatusForbidden, rejectMsg)
 			return
+		}
+	}
+
+	// 中转:license 校验后,给填了中转的节点挂中转(与单个创建/编辑端点同一份 applyRelayToNode 逻辑)。
+	for i := range nodes {
+		if rs := strings.TrimSpace(relayReqs[i].RelayServer); rs != "" {
+			applyRelayToNode(&nodes[i], rs, relayReqs[i].RelayPort)
 		}
 	}
 
@@ -915,6 +939,172 @@ func (h *nodesHandler) handleRestoreServer(w http.ResponseWriter, r *http.Reques
 	respondJSON(w, http.StatusOK, map[string]any{
 		"node": convertNode(updated),
 	})
+}
+
+// clashConfigServerPort 从 clash/parsed JSON 串里读出 server + port。ok=false 表示解析失败或缺 server。
+func clashConfigServerPort(cfgJSON string) (server string, port int, ok bool) {
+	var m map[string]any
+	if json.Unmarshal([]byte(cfgJSON), &m) != nil {
+		return "", 0, false
+	}
+	server, _ = m["server"].(string)
+	switch v := m["port"].(type) {
+	case float64:
+		port = int(v)
+	case int:
+		port = v
+	}
+	if server == "" {
+		return "", 0, false
+	}
+	return server, port, true
+}
+
+// setClashConfigServerPort 把 clash/parsed JSON 串的 server/port 改成给定值,返回新串。
+// 解析失败则原样返回(不破坏配置);port<=0 时只改 server、不动 port。
+func setClashConfigServerPort(cfgJSON, server string, port int) string {
+	var m map[string]any
+	if json.Unmarshal([]byte(cfgJSON), &m) != nil {
+		return cfgJSON
+	}
+	m["server"] = server
+	if port > 0 {
+		m["port"] = port
+	}
+	b, err := json.Marshal(m)
+	if err != nil {
+		return cfgJSON
+	}
+	return string(b)
+}
+
+// applyRelayToNode 给节点挂中转:首次设置时把当前 clash 的 server/port 记为「原服务器」(relay_orig_*),
+// 再把 clash + parsed 的 server/port 都改成中转地址。已配置中转时再次调用=改中转目标,不重记原值。
+// relayPort<=0 时沿用节点当前 clash 端口(满足「端口默认填节点端口」)。
+func applyRelayToNode(n *storage.Node, relayServer string, relayPort int) {
+	if strings.TrimSpace(n.RelayOrigServer) == "" {
+		if s, p, ok := clashConfigServerPort(n.ClashConfig); ok {
+			n.RelayOrigServer = s
+			n.RelayOrigPort = p
+		}
+	}
+	if relayPort <= 0 {
+		if _, p, ok := clashConfigServerPort(n.ClashConfig); ok {
+			relayPort = p
+		}
+	}
+	n.ClashConfig = setClashConfigServerPort(n.ClashConfig, relayServer, relayPort)
+	n.ParsedConfig = setClashConfigServerPort(n.ParsedConfig, relayServer, relayPort)
+}
+
+// cancelRelayOnNode 取消中转:把 clash + parsed 的 server/port 还原为 relay_orig_*,再清空这两列。
+func cancelRelayOnNode(n *storage.Node) {
+	if strings.TrimSpace(n.RelayOrigServer) == "" {
+		return
+	}
+	n.ClashConfig = setClashConfigServerPort(n.ClashConfig, n.RelayOrigServer, n.RelayOrigPort)
+	n.ParsedConfig = setClashConfigServerPort(n.ParsedConfig, n.RelayOrigServer, n.RelayOrigPort)
+	n.RelayOrigServer = ""
+	n.RelayOrigPort = 0
+}
+
+// handleSetRelay 设置/修改节点中转:PUT /api/admin/nodes/{id}/relay  {relay_server, relay_port}
+func (h *nodesHandler) handleSetRelay(w http.ResponseWriter, r *http.Request, idSegment string) {
+	username := auth.UsernameFromContext(r.Context())
+	if username == "" {
+		writeError(w, http.StatusUnauthorized, errors.New("用户未认证"))
+		return
+	}
+	id, err := strconv.ParseInt(idSegment, 10, 64)
+	if err != nil || id <= 0 {
+		writeBadRequest(w, "无效的节点标识")
+		return
+	}
+	existing, err := h.fetchNodeForAccess(r.Context(), id, username, userIsAdmin(r.Context(), h.repo, username))
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, storage.ErrNodeNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err)
+		return
+	}
+	var req struct {
+		RelayServer string `json:"relay_server"`
+		RelayPort   int    `json:"relay_port"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeBadRequest(w, "请求格式不正确")
+		return
+	}
+	req.RelayServer = strings.TrimSpace(req.RelayServer)
+	if req.RelayServer == "" {
+		writeBadRequest(w, "中转服务器地址不能为空")
+		return
+	}
+	if req.RelayPort < 0 || req.RelayPort > 65535 {
+		writeBadRequest(w, "中转端口不合法")
+		return
+	}
+
+	applyRelayToNode(&existing, req.RelayServer, req.RelayPort)
+
+	updated, err := h.repo.UpdateNode(r.Context(), existing)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, storage.ErrNodeNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err)
+		return
+	}
+	if updated.ClashConfig != "" {
+		_ = h.yamlSyncManager.SyncNode(updated.NodeName, updated.NodeName, updated.ClashConfig)
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"node": convertNode(updated)})
+}
+
+// handleCancelRelay 取消节点中转:DELETE /api/admin/nodes/{id}/relay。clash server/port 还原为原服务器。
+func (h *nodesHandler) handleCancelRelay(w http.ResponseWriter, r *http.Request, idSegment string) {
+	username := auth.UsernameFromContext(r.Context())
+	if username == "" {
+		writeError(w, http.StatusUnauthorized, errors.New("用户未认证"))
+		return
+	}
+	id, err := strconv.ParseInt(idSegment, 10, 64)
+	if err != nil || id <= 0 {
+		writeBadRequest(w, "无效的节点标识")
+		return
+	}
+	existing, err := h.fetchNodeForAccess(r.Context(), id, username, userIsAdmin(r.Context(), h.repo, username))
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, storage.ErrNodeNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err)
+		return
+	}
+	if strings.TrimSpace(existing.RelayOrigServer) == "" {
+		writeBadRequest(w, "该节点未配置中转")
+		return
+	}
+
+	cancelRelayOnNode(&existing)
+
+	updated, err := h.repo.UpdateNode(r.Context(), existing)
+	if err != nil {
+		status := http.StatusBadRequest
+		if errors.Is(err, storage.ErrNodeNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err)
+		return
+	}
+	if updated.ClashConfig != "" {
+		_ = h.yamlSyncManager.SyncNode(updated.NodeName, updated.NodeName, updated.ClashConfig)
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"node": convertNode(updated)})
 }
 
 func (h *nodesHandler) handleUpdateConfig(w http.ResponseWriter, r *http.Request, idSegment string) {
@@ -1433,6 +1623,9 @@ type nodeRequest struct {
 	InboundTag          string          `json:"inbound_tag"`
 	ChainProxyNodeID    *int64          `json:"-"`
 	RawChainProxyNodeID json.RawMessage `json:"chain_proxy_node_id"`
+	// 中转(relay):创建时若填写中转服务器,后端把 clash/parsed 的 server/port 换成中转地址,原值记到 relay_orig_*。
+	RelayServer         string          `json:"relay_server"`
+	RelayPort           int             `json:"relay_port"`
 }
 
 func (r *nodeRequest) hasChainProxyNodeID() bool {
@@ -1475,6 +1668,10 @@ type nodeDTO struct {
 	// Multiplier 仅在普通用户视角(其绑定套餐内有 NodeMultipliers 配置)下注入。admin 视角省略字段
 	// (一个节点可能在多个套餐里有不同倍率,无法单值显示);== 1 时也省略,前端按"未设置"对待。
 	Multiplier         float64   `json:"multiplier,omitempty"`
+	// 中转(relay):relay_orig_server 非空表示该节点已配置中转 —— clash server/port 是中转地址,
+	// 这两个字段是被中转替换掉的原服务器地址/端口,前端在「服务器地址」下方显示 + 用于编辑/取消中转。
+	RelayOrigServer    string    `json:"relay_orig_server,omitempty"`
+	RelayOrigPort      int       `json:"relay_orig_port,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 }
@@ -1499,6 +1696,8 @@ func convertNode(node storage.Node) nodeDTO {
 		RoutedOutboundTag: node.RoutedOutboundTag,
 		RoutedOwner:       node.RoutedOwner,
 		CreatedBy:         node.Username, // nodes 表里 username = 创建/拥有者
+		RelayOrigServer:   node.RelayOrigServer,
+		RelayOrigPort:     node.RelayOrigPort,
 		CreatedAt:         node.CreatedAt,
 		UpdatedAt:         node.UpdatedAt,
 	}

@@ -26,6 +26,10 @@ type InboundEvent struct {
 	//   "v6"      → 强制用 server.IPAddressV6 字面地址（忽略 Domain）
 	//   "both"    → 同时生成 v4 节点 + v6 节点（v6 节点名加 "(v6)" 后缀）
 	IPVersion string
+	// 中转(relay)：非空时生成的节点 clash server/port 用中转地址，原服务器地址/端口记到节点
+	// relay_orig_*（供列表展示 + 取消中转还原）。设了中转则忽略 IPVersion（中转是单一地址）。
+	RelayServer string
+	RelayPort   int
 }
 
 // Listener 事件监听器接口

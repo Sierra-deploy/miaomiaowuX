@@ -452,6 +452,8 @@ type Node struct {
 	ParentNodeID      *int64 // routed 节点指向其父物理节点
 	RoutedOutboundTag string // routed 节点专用:绑定的 outbound tag(空 = 非 routed 节点);常用查询展示
 	RoutedOwner       string // routed 节点专用:'shared'(默认,admin 创建,进入套餐池) | 'user'(用户私有路由出站)
+	RelayOrigServer   string // 中转:配置中转后记录的原服务器地址(空=未配置中转);此时 clash server 为中转地址
+	RelayOrigPort     int    // 中转:原服务器端口
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 }
@@ -1349,6 +1351,15 @@ CREATE INDEX IF NOT EXISTS idx_nodes_enabled ON nodes(enabled);
 	}
 	// routed_owner: 'shared' (默认, 管理员创建, 进入套餐池) | 'user' (普通用户私有路由出站)
 	if err := r.ensureNodeColumn("routed_owner", "TEXT NOT NULL DEFAULT 'shared'"); err != nil {
+		return err
+	}
+
+	// 中转(relay):节点配置中转后,clash server/port 指向中转地址,这两列记原服务器地址/端口,
+	// 用于列表展示「原服务器」+ 取消中转时还原。relay_orig_server 非空 ⟺ 该节点已配置中转。
+	if err := r.ensureNodeColumn("relay_orig_server", "TEXT"); err != nil {
+		return err
+	}
+	if err := r.ensureNodeColumn("relay_orig_port", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 

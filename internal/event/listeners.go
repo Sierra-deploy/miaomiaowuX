@@ -99,29 +99,43 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 	v4Host, _ := clashMap["server"].(string)
 	v6Host := strings.TrimSpace(server.IPAddressV6)
 
-	// 按 ip_version 决定要建哪些节点(name + 该节点 clash server 用的 host)
+	// 按 ip_version / 中转 决定要建哪些节点(name + clash server host + 可选 port 覆盖 + 中转原值)
 	type nodePlan struct {
-		name string
-		host string
+		name          string
+		host          string
+		port          int    // >0 覆盖 clash port(中转用);0=沿用原 port
+		relayOrigHost string // 非空=中转节点,记原服务器 host 到 relay_orig_server
+		relayOrigPort int
 	}
 	var plans []nodePlan
-	switch event.IPVersion {
-	case "v6":
-		// 勾 v6:强制用 IPv6 字面地址,忽略 Domain/PullAddress
-		if v6Host == "" {
-			log.Printf("[NodeSync] server %s 无 IPv6,ip_version=v6 跳过创建", server.Name)
-			return
+	if relayHost := strings.TrimSpace(event.RelayServer); relayHost != "" {
+		// 中转:单节点,clash server/port=中转地址;原服务器=v4Host + 原 clash 端口记到 relay_orig_*。
+		// 中转优先,忽略 ip_version(中转是单一地址,不分 v4/v6)。
+		origPort := clashPortOf(clashMap)
+		relayPort := event.RelayPort
+		if relayPort <= 0 {
+			relayPort = origPort // 端口默认填节点端口
 		}
-		plans = []nodePlan{{nodeName, v6Host}}
-	case "both":
-		plans = []nodePlan{{nodeName, v4Host}}
-		if v6Host != "" {
-			plans = append(plans, nodePlan{nodeName + "(v6)", v6Host})
-		} else {
-			log.Printf("[NodeSync] server %s 无 IPv6,both 退化为仅 v4", server.Name)
+		plans = []nodePlan{{name: nodeName, host: relayHost, port: relayPort, relayOrigHost: v4Host, relayOrigPort: origPort}}
+	} else {
+		switch event.IPVersion {
+		case "v6":
+			// 勾 v6:强制用 IPv6 字面地址,忽略 Domain/PullAddress
+			if v6Host == "" {
+				log.Printf("[NodeSync] server %s 无 IPv6,ip_version=v6 跳过创建", server.Name)
+				return
+			}
+			plans = []nodePlan{{name: nodeName, host: v6Host}}
+		case "both":
+			plans = []nodePlan{{name: nodeName, host: v4Host}}
+			if v6Host != "" {
+				plans = append(plans, nodePlan{name: nodeName + "(v6)", host: v6Host})
+			} else {
+				log.Printf("[NodeSync] server %s 无 IPv6,both 退化为仅 v4", server.Name)
+			}
+		default: // "" / "v4" —— 现状行为
+			plans = []nodePlan{{name: nodeName, host: v4Host}}
 		}
-	default: // "" / "v4" —— 现状行为
-		plans = []nodePlan{{nodeName, v4Host}}
 	}
 
 	// admin 已同步过的同 server 节点(按 server-host + protocol + port 去重)
@@ -139,7 +153,7 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 			continue
 		}
 
-		cfg, err := cloneClashWithServer(clashMap, p.name, p.host)
+		cfg, err := cloneClashWithServerPort(clashMap, p.name, p.host, p.port)
 		if err != nil {
 			log.Printf("[NodeSync] Failed to build clash config for %s: %v", p.name, err)
 			continue
@@ -155,6 +169,10 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 			OriginalServer: server.Name,
 			InboundTag:     event.Tag,
 		}
+		if p.relayOrigHost != "" {
+			node.RelayOrigServer = p.relayOrigHost
+			node.RelayOrigPort = p.relayOrigPort
+		}
 		created, err := l.repo.CreateNode(ctx, node)
 		if err != nil {
 			log.Printf("[NodeSync] Failed to create node %s: %v", p.name, err)
@@ -169,17 +187,36 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 // clash proxy 是扁平对象(server/name/port/type/uuid... 均顶层),浅拷贝足够 —— 只改顶层键,
 // 不触碰 ws-opts/reality-opts 等嵌套结构,两节点共享嵌套引用也安全。
 func cloneClashWithServer(clashMap map[string]any, name, serverHost string) (string, error) {
+	return cloneClashWithServerPort(clashMap, name, serverHost, 0)
+}
+
+// cloneClashWithServerPort 同 cloneClashWithServer,额外在 port>0 时覆盖顶层 port(中转用)。
+func cloneClashWithServerPort(clashMap map[string]any, name, serverHost string, port int) (string, error) {
 	cp := make(map[string]any, len(clashMap))
 	for k, v := range clashMap {
 		cp[k] = v
 	}
 	cp["name"] = name
 	cp["server"] = serverHost
+	if port > 0 {
+		cp["port"] = port
+	}
 	b, err := json.Marshal(cp)
 	if err != nil {
 		return "", err
 	}
 	return string(b), nil
+}
+
+// clashPortOf 从 clash proxy map 读出顶层 port(float64/int 兼容),取不到返回 0。
+func clashPortOf(m map[string]any) int {
+	switch v := m["port"].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	}
+	return 0
 }
 
 // nodeWithHostProtoPortExists 判断 existing 中是否已有 同 server名 + 同 clash server host + 同协议 + 同端口 的节点。

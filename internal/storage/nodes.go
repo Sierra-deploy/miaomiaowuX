@@ -92,7 +92,7 @@ func (r *TrafficRepository) ListNodes(ctx context.Context, username string) ([]N
 		return nil, errors.New("username is required")
 	}
 
-	rows, err := r.db.QueryContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(tags, '[]'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), created_at, updated_at FROM nodes WHERE username = ? ORDER BY created_at DESC`, username)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(tags, '[]'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), COALESCE(relay_orig_server, ''), COALESCE(relay_orig_port, 0), created_at, updated_at FROM nodes WHERE username = ? ORDER BY created_at DESC`, username)
 	if err != nil {
 		return nil, fmt.Errorf("list nodes: %w", err)
 	}
@@ -103,7 +103,7 @@ func (r *TrafficRepository) ListNodes(ctx context.Context, username string) ([]N
 		var node Node
 		var enabled int
 		var tagsJSON string
-		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &tagsJSON, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.CreatedAt, &node.UpdatedAt); err != nil {
+		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &tagsJSON, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.RelayOrigServer, &node.RelayOrigPort, &node.CreatedAt, &node.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		node.Enabled = enabled != 0
@@ -173,7 +173,7 @@ func (r *TrafficRepository) ListSharedRoutedByParentIDs(ctx context.Context, par
 		placeholders[i] = "?"
 		args[i] = id
 	}
-	query := `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(tags, '[]'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), created_at, updated_at FROM nodes WHERE node_type = 'routed' AND COALESCE(routed_owner, 'shared') = 'shared' AND parent_node_id IN (` + strings.Join(placeholders, ",") + `) ORDER BY created_at DESC`
+	query := `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(tags, '[]'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), COALESCE(relay_orig_server, ''), COALESCE(relay_orig_port, 0), created_at, updated_at FROM nodes WHERE node_type = 'routed' AND COALESCE(routed_owner, 'shared') = 'shared' AND parent_node_id IN (` + strings.Join(placeholders, ",") + `) ORDER BY created_at DESC`
 	rows, err := r.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list shared routed by parents: %w", err)
@@ -184,7 +184,7 @@ func (r *TrafficRepository) ListSharedRoutedByParentIDs(ctx context.Context, par
 		var node Node
 		var enabled int
 		var tagsJSON string
-		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &tagsJSON, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.CreatedAt, &node.UpdatedAt); err != nil {
+		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &tagsJSON, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.RelayOrigServer, &node.RelayOrigPort, &node.CreatedAt, &node.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		node.Enabled = enabled != 0
@@ -203,7 +203,7 @@ func (r *TrafficRepository) ListAllNodes(ctx context.Context) ([]Node, error) {
 		return nil, errors.New("traffic repository not initialized")
 	}
 
-	rows, err := r.db.QueryContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(tags, '[]'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), created_at, updated_at FROM nodes ORDER BY created_at DESC`)
+	rows, err := r.db.QueryContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(tags, '[]'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), COALESCE(relay_orig_server, ''), COALESCE(relay_orig_port, 0), created_at, updated_at FROM nodes ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list all nodes: %w", err)
 	}
@@ -214,7 +214,7 @@ func (r *TrafficRepository) ListAllNodes(ctx context.Context) ([]Node, error) {
 		var node Node
 		var enabled int
 		var tagsJSON string
-		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &tagsJSON, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.CreatedAt, &node.UpdatedAt); err != nil {
+		if err := rows.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &tagsJSON, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.RelayOrigServer, &node.RelayOrigPort, &node.CreatedAt, &node.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan node: %w", err)
 		}
 		node.Enabled = enabled != 0
@@ -247,8 +247,8 @@ func (r *TrafficRepository) GetNode(ctx context.Context, id int64, username stri
 
 	var enabled int
 	var tagsJSON string
-	row := r.db.QueryRowContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(tags, '[]'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), created_at, updated_at FROM nodes WHERE id = ? AND username = ? LIMIT 1`, id, username)
-	if err := row.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &tagsJSON, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.CreatedAt, &node.UpdatedAt); err != nil {
+	row := r.db.QueryRowContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(tags, '[]'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), COALESCE(relay_orig_server, ''), COALESCE(relay_orig_port, 0), created_at, updated_at FROM nodes WHERE id = ? AND username = ? LIMIT 1`, id, username)
+	if err := row.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &tagsJSON, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.RelayOrigServer, &node.RelayOrigPort, &node.CreatedAt, &node.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return node, ErrNodeNotFound
 		}
@@ -274,8 +274,8 @@ func (r *TrafficRepository) GetNodeByID(ctx context.Context, id int64) (Node, er
 
 	var enabled int
 	var tagsJSON string
-	row := r.db.QueryRowContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(tags, '[]'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), created_at, updated_at FROM nodes WHERE id = ? LIMIT 1`, id)
-	if err := row.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &tagsJSON, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.CreatedAt, &node.UpdatedAt); err != nil {
+	row := r.db.QueryRowContext(ctx, `SELECT id, username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, COALESCE(tag, 'personal'), COALESCE(tags, '[]'), COALESCE(original_server, ''), COALESCE(original_domain, ''), COALESCE(inbound_tag, ''), chain_proxy_node_id, COALESCE(node_type, 'physical'), parent_node_id, COALESCE(routed_outbound_tag, ''), COALESCE(routed_owner, 'shared'), COALESCE(relay_orig_server, ''), COALESCE(relay_orig_port, 0), created_at, updated_at FROM nodes WHERE id = ? LIMIT 1`, id)
+	if err := row.Scan(&node.ID, &node.Username, &node.RawURL, &node.NodeName, &node.Protocol, &node.ParsedConfig, &node.ClashConfig, &enabled, &node.Tag, &tagsJSON, &node.OriginalServer, &node.OriginalDomain, &node.InboundTag, &node.ChainProxyNodeID, &node.NodeType, &node.ParentNodeID, &node.RoutedOutboundTag, &node.RoutedOwner, &node.RelayOrigServer, &node.RelayOrigPort, &node.CreatedAt, &node.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return node, ErrNodeNotFound
 		}
@@ -328,7 +328,7 @@ func (r *TrafficRepository) CreateNode(ctx context.Context, node Node) (Node, er
 		enabled = 1
 	}
 
-	res, err := r.db.ExecContext(ctx, `INSERT INTO nodes (username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, tag, tags, original_server, original_domain, inbound_tag, chain_proxy_node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, node.Username, node.RawURL, node.NodeName, node.Protocol, node.ParsedConfig, node.ClashConfig, enabled, node.Tag, tagsJSON, node.OriginalServer, node.OriginalDomain, node.InboundTag, node.ChainProxyNodeID)
+	res, err := r.db.ExecContext(ctx, `INSERT INTO nodes (username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, tag, tags, original_server, original_domain, inbound_tag, chain_proxy_node_id, relay_orig_server, relay_orig_port) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, node.Username, node.RawURL, node.NodeName, node.Protocol, node.ParsedConfig, node.ClashConfig, enabled, node.Tag, tagsJSON, node.OriginalServer, node.OriginalDomain, node.InboundTag, node.ChainProxyNodeID, node.RelayOrigServer, node.RelayOrigPort)
 	if err != nil {
 		return Node{}, fmt.Errorf("create node: %w", err)
 	}
@@ -381,7 +381,7 @@ func (r *TrafficRepository) UpdateNode(ctx context.Context, node Node) (Node, er
 		enabled = 1
 	}
 
-	res, err := r.db.ExecContext(ctx, `UPDATE nodes SET raw_url = ?, node_name = ?, protocol = ?, parsed_config = ?, clash_config = ?, enabled = ?, tag = ?, tags = ?, original_server = ?, original_domain = ?, inbound_tag = ?, chain_proxy_node_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND username = ?`, node.RawURL, node.NodeName, node.Protocol, node.ParsedConfig, node.ClashConfig, enabled, node.Tag, tagsJSON, node.OriginalServer, node.OriginalDomain, node.InboundTag, node.ChainProxyNodeID, node.ID, node.Username)
+	res, err := r.db.ExecContext(ctx, `UPDATE nodes SET raw_url = ?, node_name = ?, protocol = ?, parsed_config = ?, clash_config = ?, enabled = ?, tag = ?, tags = ?, original_server = ?, original_domain = ?, inbound_tag = ?, chain_proxy_node_id = ?, relay_orig_server = ?, relay_orig_port = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND username = ?`, node.RawURL, node.NodeName, node.Protocol, node.ParsedConfig, node.ClashConfig, enabled, node.Tag, tagsJSON, node.OriginalServer, node.OriginalDomain, node.InboundTag, node.ChainProxyNodeID, node.RelayOrigServer, node.RelayOrigPort, node.ID, node.Username)
 	if err != nil {
 		return Node{}, fmt.Errorf("update node: %w", err)
 	}
@@ -573,7 +573,7 @@ func (r *TrafficRepository) BatchCreateNodes(ctx context.Context, nodes []Node) 
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.PrepareContext(ctx, `INSERT INTO nodes (username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, tag, tags, original_server, original_domain, inbound_tag, chain_proxy_node_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO nodes (username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, tag, tags, original_server, original_domain, inbound_tag, chain_proxy_node_id, relay_orig_server, relay_orig_port) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return nil, fmt.Errorf("prepare insert node: %w", err)
 	}
@@ -615,7 +615,7 @@ func (r *TrafficRepository) BatchCreateNodes(ctx context.Context, nodes []Node) 
 			enabled = 1
 		}
 
-		res, err := stmt.ExecContext(ctx, node.Username, node.RawURL, node.NodeName, node.Protocol, node.ParsedConfig, node.ClashConfig, enabled, node.Tag, tagsJSON, node.OriginalServer, node.OriginalDomain, node.InboundTag, node.ChainProxyNodeID)
+		res, err := stmt.ExecContext(ctx, node.Username, node.RawURL, node.NodeName, node.Protocol, node.ParsedConfig, node.ClashConfig, enabled, node.Tag, tagsJSON, node.OriginalServer, node.OriginalDomain, node.InboundTag, node.ChainProxyNodeID, node.RelayOrigServer, node.RelayOrigPort)
 		if err != nil {
 			return nil, fmt.Errorf("insert node %d: %w", idx+1, err)
 		}
@@ -712,6 +712,7 @@ func (r *TrafficRepository) RefreshNodesServerAddress(ctx context.Context, serve
 		WHERE original_server = ?
 		  AND clash_config IS NOT NULL
 		  AND json_valid(clash_config) = 1
+		  AND IFNULL(relay_orig_server, '') = ''
 		  AND IFNULL(json_extract(clash_config, '$.server'), '') NOT LIKE '%:%'
 		  AND IFNULL(json_extract(clash_config, '$.server'), '') != ?
 	`, newAddr, serverName, newAddr)
@@ -741,6 +742,7 @@ func (r *TrafficRepository) RefreshNodesServerAddressV6(ctx context.Context, ser
 		WHERE original_server = ?
 		  AND clash_config IS NOT NULL
 		  AND json_valid(clash_config) = 1
+		  AND IFNULL(relay_orig_server, '') = ''
 		  AND IFNULL(json_extract(clash_config, '$.server'), '') LIKE '%:%'
 		  AND IFNULL(json_extract(clash_config, '$.server'), '') != ?
 	`, newV6, serverName, newV6)

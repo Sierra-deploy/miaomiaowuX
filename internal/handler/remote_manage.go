@@ -1940,6 +1940,26 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
+	// 中转(relay):relay_server/relay_port 是前端 wizard 挂在 inbound 上的带外字段,agent/xray 不需要 ——
+	// 转发前从 body 里剥掉,仅用于建节点时把 clash server/port 换成中转地址(经 InboundEvent 传给 NodeSyncListener)。
+	var relayServer string
+	var relayPort int
+	if r.Method == http.MethodPost && inboundReq != nil {
+		if inbound, ok := inboundReq["inbound"].(map[string]interface{}); ok {
+			if rs, _ := inbound["relay_server"].(string); strings.TrimSpace(rs) != "" {
+				relayServer = strings.TrimSpace(rs)
+				if rp, ok := inbound["relay_port"].(float64); ok {
+					relayPort = int(rp)
+				}
+				delete(inbound, "relay_server")
+				delete(inbound, "relay_port")
+				if nb, mErr := json.Marshal(inboundReq); mErr == nil {
+					body = nb
+				}
+			}
+		}
+	}
+
 	result, err := h.forwardToRemoteServer(r.Context(), id, r.Method, "/api/child/inbounds", body)
 	if err != nil {
 		remoteWriteError(w, http.StatusBadGateway, err.Error())
@@ -1993,6 +2013,8 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 							NodeName:      customNodeName,
 							ForwardNodeID: int64(forwardNodeID),
 							IPVersion:     ipVersion,
+							RelayServer:   relayServer,
+							RelayPort:     relayPort,
 						})
 					}
 					// VLESS+WS 入站添加成功 → 异步聚合渲染该 server 全部 WSS location 下发 nginx
