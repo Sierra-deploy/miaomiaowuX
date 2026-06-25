@@ -982,8 +982,10 @@ func main() {
 
 		isTempSub := strings.HasPrefix(path, "t/") && len(path) == 10
 
-		// 暴力探测封禁检查（临时订阅排除，不受封禁拦截)
-		if !isTempSub && bruteForceProtector.IsBlocked(clientIP, r.URL.Path) {
+		// 暴力探测封禁检查：仅对 /x/ 短链探测路径生效(失败计数也只来自 /x/ 与临时订阅)。
+		// SPA 路由(/nodes、/users 等单段 alphanumeric)、静态资源、临时订阅一律放行,
+		// 否则被封 IP 连前端 UI 都无法加载(SPA 路由与短码长得一样,不能一并拦截)。
+		if strings.HasPrefix(path, "x/") && bruteForceProtector.IsBlocked(clientIP, r.URL.Path) {
 			http.NotFound(w, r)
 			return
 		}
