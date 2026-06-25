@@ -1314,6 +1314,14 @@ func (h *nodesHandler) handleClearAll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 清空前先逐个清理 agent 侧残留(以该节点为出口的出站/路由、routed outbound、inbound clients),
+	// 否则只删 DB 会在 agent 端留下孤儿出站/路由/入站(handleDelete/handleBatchDelete 走 cleanupRemoteForNode,清空之前漏了)。
+	if nodes, err := h.repo.ListNodes(r.Context(), username); err == nil {
+		for i := range nodes {
+			h.cleanupRemoteForNode(r.Context(), &nodes[i])
+		}
+	}
+
 	if err := h.repo.DeleteAllUserNodes(r.Context(), username); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -1401,7 +1409,14 @@ func (h *nodesHandler) handleBatchDelete(w http.ResponseWriter, r *http.Request)
 // 设计:本 helper 替代各调用方手抄 if-else 的旧模式,降低单删/批删行为分歧风险(批删之前漏判 routed)。
 // RoutedAdminEmail 不在 storage.Node 上(只在 RoutedNodeDetail),helper 内 routed 分支自动 fetch detail。
 func (h *nodesHandler) cleanupRemoteForNode(ctx context.Context, node *storage.Node) {
-	if node == nil || node.OriginalServer == "" {
+	if node == nil {
+		return
+	}
+	// 先清「以该节点为出口的出站」—— 这些 outbound + routing rule 可能在任意服务器上,与本节点的 OriginalServer 无关,
+	// 故放在 OriginalServer 守卫之前(外部/手动节点也可能被别的节点当落地出口)。
+	h.cleanupOutboundsTargetingNode(ctx, node)
+
+	if node.OriginalServer == "" {
 		return
 	}
 	if node.NodeType == "routed" && node.RoutedOutboundTag != "" {
@@ -1472,6 +1487,137 @@ func (h *nodesHandler) deleteRemoteRoutedOutbound(ctx context.Context, serverNam
 			}
 		}
 	}
+}
+
+// outboundTargetsAddr 判断一个 xray outbound 的目标地址是否落在 addrSet 且端口为 port。
+// 兼容 vless/vmess(settings.vnext[])与 trojan/ss/anytls/...(settings.servers[])两种结构。
+func outboundTargetsAddr(ob map[string]any, addrSet map[string]bool, port int) bool {
+	settings, _ := ob["settings"].(map[string]any)
+	if settings == nil {
+		return false
+	}
+	check := func(arrKey string) bool {
+		arr, _ := settings[arrKey].([]interface{})
+		for _, e := range arr {
+			em, _ := e.(map[string]any)
+			if em == nil {
+				continue
+			}
+			addr, _ := em["address"].(string)
+			if !addrSet[addr] {
+				continue
+			}
+			p := 0
+			switch v := em["port"].(type) {
+			case float64:
+				p = int(v)
+			case int:
+				p = v
+			}
+			if p == port {
+				return true
+			}
+		}
+		return false
+	}
+	return check("vnext") || check("servers")
+}
+
+// cleanupOutboundsTargetingNode 删节点 B 时,扫所有 connected 服务器的 xray outbounds,
+// 凡目标地址 == B 的地址(B.clash server / B 所属 server 的 ip·域名·pull_address)且端口 == B 端口,
+// 视为「以 B 为出口的出站」(landing/user/routed 三种来源统一覆盖)→ 删该 outbound + 引用其 tag 的 routing rule。
+func (h *nodesHandler) cleanupOutboundsTargetingNode(ctx context.Context, node *storage.Node) {
+	if h.remoteManage == nil || node == nil {
+		return
+	}
+	var clash map[string]any
+	if json.Unmarshal([]byte(node.ClashConfig), &clash) != nil {
+		return
+	}
+	bPort := 0
+	switch v := clash["port"].(type) {
+	case float64:
+		bPort = int(v)
+	case int:
+		bPort = v
+	}
+	if bPort == 0 {
+		return
+	}
+	addrSet := map[string]bool{}
+	if s, _ := clash["server"].(string); strings.TrimSpace(s) != "" {
+		addrSet[s] = true
+	}
+	if node.OriginalServer != "" {
+		if srv, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer); err == nil && srv != nil {
+			for _, a := range []string{srv.IPAddress, srv.Domain, srv.PullAddress} {
+				if a = strings.TrimSpace(a); a != "" {
+					addrSet[a] = true
+				}
+			}
+		}
+	}
+	if len(addrSet) == 0 {
+		return
+	}
+
+	servers, err := h.repo.ListRemoteServers(ctx)
+	if err != nil {
+		return
+	}
+	for _, srv := range servers {
+		if srv.Status != storage.RemoteServerStatusConnected {
+			continue // 离线服务器跳过,避免卡住;残留待其重连后另行处理
+		}
+		raw, err := h.remoteManage.forwardToRemoteServer(ctx, srv.ID, "GET", "/api/child/outbounds", nil)
+		if err != nil {
+			continue
+		}
+		var resp struct {
+			Success   bool             `json:"success"`
+			Outbounds []map[string]any `json:"outbounds"`
+		}
+		if json.Unmarshal(raw, &resp) != nil {
+			continue
+		}
+		for _, ob := range resp.Outbounds {
+			tag, _ := ob["tag"].(string)
+			if tag == "" || !outboundTargetsAddr(ob, addrSet, bPort) {
+				continue
+			}
+			h.removeOutboundAndRules(ctx, srv.ID, srv.Name, tag)
+		}
+	}
+}
+
+// removeOutboundAndRules 删指定 server 上的 outbound(by tag)+ 所有引用该 outboundTag 的 routing rule
+// (逆序删避免 index 漂移,复用 deleteRemoteRoutedOutbound 同款范式)+ best-effort 删 user_outbounds 行。
+func (h *nodesHandler) removeOutboundAndRules(ctx context.Context, serverID int64, serverName, tag string) {
+	if raw, err := h.remoteManage.forwardToRemoteServer(ctx, serverID, "GET", "/api/child/routing", nil); err == nil {
+		var resp struct {
+			Success bool                   `json:"success"`
+			Routing map[string]interface{} `json:"routing"`
+		}
+		if json.Unmarshal(raw, &resp) == nil && resp.Routing != nil {
+			rules, _ := resp.Routing["rules"].([]interface{})
+			for i := len(rules) - 1; i >= 0; i-- {
+				rmap, _ := rules[i].(map[string]interface{})
+				if t, _ := rmap["outboundTag"].(string); t == tag {
+					body, _ := json.Marshal(map[string]interface{}{"action": "remove_rule", "index": i})
+					if _, err := h.remoteManage.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/routing", body); err != nil {
+						log.Printf("[Nodes] cleanup outbound-target: remove rule (server=%s tag=%s idx=%d) failed: %v", serverName, tag, i, err)
+					}
+				}
+			}
+		}
+	}
+	rmOut, _ := json.Marshal(map[string]string{"action": "remove", "tag": tag})
+	if _, err := h.remoteManage.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/outbounds", rmOut); err != nil {
+		log.Printf("[Nodes] cleanup outbound-target: remove outbound (server=%s tag=%s) failed: %v", serverName, tag, err)
+	} else {
+		log.Printf("[Nodes] cleanup outbound-target: removed outbound+rules %s on %s (targets deleted node)", tag, serverName)
+	}
+	_ = h.repo.DeleteUserOutboundByServerTag(ctx, serverID, tag)
 }
 
 func (h *nodesHandler) deleteRemoteInbound(ctx context.Context, serverName, inboundTag string) {

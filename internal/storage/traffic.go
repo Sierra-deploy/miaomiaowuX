@@ -7954,6 +7954,13 @@ func (r *TrafficRepository) DeleteUserOutboundsByUsername(ctx context.Context, u
 	return err
 }
 
+// DeleteUserOutboundByServerTag 按 (server_id, outbound_tag) 删 user_outbounds 行(不限 username)。
+// 删节点时级联清理「以该节点为出口的出站」用 —— landing/routed 出站不在此表,删不到也无妨(best-effort)。
+func (r *TrafficRepository) DeleteUserOutboundByServerTag(ctx context.Context, serverID int64, outboundTag string) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM user_outbounds WHERE server_id = ? AND outbound_tag = ?`, serverID, outboundTag)
+	return err
+}
+
 // UserSubaccount 记录一个 mmwx 用户在某 routed 节点上的 xray client 凭据。
 // is_active=0 表示已下线(凭据保留供续费恢复),=1 表示已下发到 inbound + routing rule.user。
 type UserSubaccount struct {
