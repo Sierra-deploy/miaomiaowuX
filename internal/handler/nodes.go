@@ -18,6 +18,7 @@ import (
 	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
 
+	"github.com/MMWOrg/mmwX-plugins/proxyparser"
 	"gopkg.in/yaml.v3"
 )
 
@@ -176,6 +177,8 @@ func (h *nodesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleBatchCreate(w, r)
 	case path == "fetch-subscription" && r.Method == http.MethodPost:
 		h.handleFetchSubscription(w, r)
+	case path == "parse-uris" && r.Method == http.MethodPost:
+		h.handleParseURIs(w, r)
 	case strings.HasSuffix(path, "/related-inbounds") && r.Method == http.MethodGet:
 		idSegment := strings.TrimSuffix(path, "/related-inbounds")
 		h.handleGetRelatedInbounds(w, r, idSegment)
@@ -1719,8 +1722,9 @@ func (h *nodesHandler) handleFetchSubscription(w http.ResponseWriter, r *http.Re
 	}
 
 	var req struct {
-		URL       string `json:"url"`
-		UserAgent string `json:"user_agent"`
+		URL               string `json:"url"`
+		UserAgent         string `json:"user_agent"`
+		ForceNodeSkipCert bool   `json:"force_node_skip_cert"` // 是否给每个导入节点强制写 skip-cert-verify（默认 false，不污染）
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1795,6 +1799,11 @@ func (h *nodesHandler) handleFetchSubscription(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// 预处理(base64 / v2ray URI 列表 → 经 proxyparser 统一解析为 proxies YAML)
+	if pre, perr := preprocessSubscriptionContent(body); perr == nil {
+		body = pre
+	}
+
 	// 解析YAML
 	var clashConfig struct {
 		Proxies []map[string]any `yaml:"proxies"`
@@ -1828,6 +1837,9 @@ func (h *nodesHandler) handleFetchSubscription(w http.ResponseWriter, r *http.Re
 	for _, proxy := range clashConfig.Proxies {
 		convertNilToEmptyStringInMap(proxy)
 		decodeProxyURLFields(proxy)
+		if req.ForceNodeSkipCert {
+			proxy["skip-cert-verify"] = true
+		}
 	}
 
 	// 从 Content-Disposition 头中提取订阅名称作为建议的标签
@@ -1847,6 +1859,44 @@ func (h *nodesHandler) handleFetchSubscription(w http.ResponseWriter, r *http.Re
 		"proxies":       clashConfig.Proxies,
 		"count":         len(clashConfig.Proxies),
 		"suggested_tag": suggestedTag,
+	})
+}
+
+// handleParseURIs 解析前端粘贴的多行 URI / base64 文本，返回 clash 节点（经 proxyparser 统一解析）。
+// 前端把含 :// 的行发到这里（Surge INI 行仍由前端本地解析）。
+func (h *nodesHandler) handleParseURIs(w http.ResponseWriter, r *http.Request) {
+	username := auth.UsernameFromContext(r.Context())
+	if username == "" {
+		writeError(w, http.StatusUnauthorized, errors.New("用户未认证"))
+		return
+	}
+	var req struct {
+		Content           string `json:"content"`
+		ForceNodeSkipCert bool   `json:"force_node_skip_cert"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeBadRequest(w, "请求格式不正确")
+		return
+	}
+	if strings.TrimSpace(req.Content) == "" {
+		writeBadRequest(w, "内容不能为空")
+		return
+	}
+	proxies, err := proxyparser.ParseSubscription(req.Content)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("解析失败: "+err.Error()))
+		return
+	}
+	for _, proxy := range proxies {
+		convertNilToEmptyStringInMap(proxy)
+		decodeProxyURLFields(proxy)
+		if req.ForceNodeSkipCert {
+			proxy["skip-cert-verify"] = true
+		}
+	}
+	respondJSON(w, http.StatusOK, map[string]any{
+		"proxies": proxies,
+		"count":   len(proxies),
 	})
 }
 

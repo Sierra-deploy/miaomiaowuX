@@ -19,7 +19,7 @@ import (
 	"miaomiaowux/internal/auth"
 	"miaomiaowux/internal/scriptengine"
 	"miaomiaowux/internal/storage"
-	"miaomiaowux/internal/substore"
+	"github.com/MMWOrg/mmwX-plugins/proxyparser/substore"
 
 	"gopkg.in/yaml.v3"
 )

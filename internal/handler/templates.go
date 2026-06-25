@@ -11,7 +11,7 @@ import (
 
 	"miaomiaowux/internal/auth"
 	"miaomiaowux/internal/storage"
-	"miaomiaowux/internal/substore"
+	"github.com/MMWOrg/mmwX-plugins/proxyparser/substore"
 )
 
 type templateRequest struct {

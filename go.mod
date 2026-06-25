@@ -3,6 +3,7 @@ module miaomiaowux
 go 1.26
 
 require (
+	github.com/MMWOrg/mmwX-plugins/proxyparser v0.1.2
 	github.com/alibabacloud-go/darabonba-openapi/v2 v2.1.16
 	github.com/alibabacloud-go/tea v1.4.0
 	github.com/dop251/goja v0.0.0-20260311135729-065cd970411c

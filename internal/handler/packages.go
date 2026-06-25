@@ -17,7 +17,7 @@ import (
 
 	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
-	"miaomiaowux/internal/substore"
+	"github.com/MMWOrg/mmwX-plugins/proxyparser/substore"
 
 	"github.com/google/uuid"
 )
