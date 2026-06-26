@@ -163,6 +163,9 @@ func main() {
 		logger.Info("会话加载完成", "count", len(sessions))
 	}
 
+	// 周期清理内存中过期 token(防 tokens map 因未被 Lookup 的过期项缓慢泄漏)
+	go tokenStore.StartCleanup(ctx, 10*time.Minute)
+
 	// 从数据库中清理过期会话
 	if err := repo.CleanupExpiredSessions(ctx); err != nil {
 		logger.Warn("清理过期会话失败", "error", err)

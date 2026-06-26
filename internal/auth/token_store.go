@@ -85,6 +85,34 @@ func (s *TokenStore) Validate(token string) bool {
 	return ok
 }
 
+// StartCleanup 周期扫描删除过期 token。
+// 必要性:tokens map 平时只在 Lookup 命中过期 / Revoke 时删,过期后不再被 Lookup 的 token
+// (登出未 Revoke、客户端换新 token)会永久驻留 → 长期运行缓慢泄漏。阻塞调用,需 go 启动。
+func (s *TokenStore) StartCleanup(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.cleanupExpired()
+		}
+	}
+}
+
+// cleanupExpired 删除所有已过期的 token(单独抽出便于测试)。
+func (s *TokenStore) cleanupExpired() {
+	now := time.Now()
+	s.mu.Lock()
+	for token, sess := range s.tokens {
+		if now.After(sess.expiry) {
+			delete(s.tokens, token)
+		}
+	}
+	s.mu.Unlock()
+}
+
 func (s *TokenStore) Revoke(token string) {
 	token = strings.TrimSpace(token)
 	if token == "" {

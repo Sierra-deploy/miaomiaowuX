@@ -1374,6 +1374,29 @@ func (h *RemoteWSHandler) CleanupStaleConnections(timeout time.Duration) {
 		}
 		return true
 	})
+
+	// 顺带清理过期的 auth 失败 / token 冲突记录(平时只在成功时删,持续失败/冲突的源会累积)
+	now := time.Now()
+	h.authFailIPs.Range(func(key, value interface{}) bool {
+		rec := value.(*ipFailRecord)
+		rec.mu.Lock()
+		stale := now.After(rec.rejectUntil) && now.Sub(rec.lastFailAt) > wsFailLogWindow
+		rec.mu.Unlock()
+		if stale {
+			h.authFailIPs.Delete(key)
+		}
+		return true
+	})
+	h.tokenConflicts.Range(func(key, value interface{}) bool {
+		rec := value.(*tokenConflictRecord)
+		rec.mu.Lock()
+		stale := now.After(rec.rejectUntil)
+		rec.mu.Unlock()
+		if stale {
+			h.tokenConflicts.Delete(key)
+		}
+		return true
+	})
 }
 
 // 启动一个 goroutine，定期清理过时的连接
