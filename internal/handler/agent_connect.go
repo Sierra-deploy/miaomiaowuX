@@ -682,8 +682,7 @@ command="/usr/local/bin/mmw-agent"
 command_args="-c /etc/mmw-agent/config.yaml"
 command_background="yes"
 pidfile="/run/mmw-agent.pid"
-output_log="/var/log/mmw-agent.log"
-error_log="/var/log/mmw-agent.log"
+# 日志由 agent 自身写文件并轮转(/var/log/mmw-agent/mmw-agent.log),不再用 output_log 重复落地(避免无轮转爆盘)
 depend() { need net; }
 EOF
     chmod +x /etc/init.d/mmw-agent
@@ -692,8 +691,9 @@ else
     cat > /usr/local/bin/mmw-agent-supervisor.sh << 'EOF'
 #!/bin/sh
 while true; do
-    /usr/local/bin/mmw-agent -c /etc/mmw-agent/config.yaml >> /var/log/mmw-agent.log 2>&1
-    echo "[supervisor] mmw-agent exited, restarting in 5s..." >> /var/log/mmw-agent.log
+    # 日志由 agent 自身写文件并轮转(/var/log/mmw-agent/mmw-agent.log);这里输出走 stdout(由 rc.local 的 nohup 接管)
+    /usr/local/bin/mmw-agent -c /etc/mmw-agent/config.yaml
+    echo "[supervisor] mmw-agent exited, restarting in 5s..."
     sleep 5
 done
 EOF

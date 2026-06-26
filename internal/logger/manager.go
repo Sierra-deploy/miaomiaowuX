@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -82,6 +83,57 @@ func (m *LogManager) CleanupOldLogs() error {
 		Info("清理过期日志完成", "count", cleanedCount)
 	}
 
+	return nil
+}
+
+// EnforceMaxFiles 兜底巡检：保留 BaseDir 下以 prefix 开头的最新 keep 个文件，其余按修改时间从旧到新删除。
+// 主轮转由 lumberjack 负责，本方法应对进程重启遗留 / lumberjack 未触发等边角情况。
+func (m *LogManager) EnforceMaxFiles(prefix string, keep int) error {
+	entries, err := os.ReadDir(m.BaseDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("读取日志目录失败: %w", err)
+	}
+
+	type fileWithTime struct {
+		name    string
+		modTime time.Time
+	}
+	var files []fileWithTime
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+		files = append(files, fileWithTime{name: entry.Name(), modTime: info.ModTime()})
+	}
+
+	if len(files) <= keep {
+		return nil
+	}
+
+	// 按修改时间降序（最新在前），保留前 keep 个，删除其余
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].modTime.After(files[j].modTime)
+	})
+
+	cleanedCount := 0
+	for _, f := range files[keep:] {
+		path := filepath.Join(m.BaseDir, f.name)
+		if err := os.Remove(path); err != nil {
+			Debug("删除超额日志失败", "file", f.name, "error", err)
+		} else {
+			cleanedCount++
+		}
+	}
+	if cleanedCount > 0 {
+		Info("清理超额日志完成", "prefix", prefix, "count", cleanedCount, "kept", keep)
+	}
 	return nil
 }
 

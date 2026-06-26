@@ -1441,20 +1441,26 @@ func syncSubscribeFilesToDatabase(repo *storage.TrafficRepository, subscribeDir 
 func startLogCleanup() {
 	logManager := logger.NewLogManager("data/logs")
 
-	// 启动时立即清理一次
-	if err := logManager.CleanupOldLogs(); err != nil {
-		logger.Error("[日志清理] 启动时清理失败", "error", err)
+	// 一轮清理：debug 日志(log_*, 7天) + lumberjack 主日志(mmwx*, 兜底保留最新2个)
+	runCleanup := func() {
+		if err := logManager.CleanupOldLogs(); err != nil {
+			logger.Error("[日志清理] 清理 debug 日志失败", "error", err)
+		}
+		if err := logManager.EnforceMaxFiles("mmwx", 2); err != nil {
+			logger.Error("[日志清理] 清理主日志失败", "error", err)
+		}
 	}
 
-	// 每天凌晨3点清理
-	ticker := time.NewTicker(24 * time.Hour)
+	// 启动时立即清理一次
+	runCleanup()
+
+	// 兜底巡检(主轮转由 lumberjack 负责,这里 10 分钟扫一次)
+	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 
-	logger.Info("[日志清理] 定时清理任务已启动", "interval", "24小时", "max_age", "7天")
+	logger.Info("[日志清理] 定时清理任务已启动", "interval", "10分钟", "debug_max_age", "7天", "main_keep", 2)
 
 	for range ticker.C {
-		if err := logManager.CleanupOldLogs(); err != nil {
-			logger.Error("[日志清理] 定时清理失败", "error", err)
-		}
+		runCleanup()
 	}
 }

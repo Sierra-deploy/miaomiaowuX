@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 // Logger 封装slog，支持debug文件输出
@@ -19,12 +21,22 @@ type Logger struct {
 var (
 	defaultLogger *Logger
 	once          sync.Once
+	// 主日志文件写入器（lumberjack 大小轮转：单文件 50MB，最多保留 2 个文件即当前+1备份，超出删最旧）
+	fileWriter *lumberjack.Logger
 )
 
-// 初始化全局logger
+// 初始化全局logger — 日志真实落地到 data/logs/mmwx.log（同时保留 stdout 供 journalctl/容器查看）
 func Init() *Logger {
 	once.Do(func() {
-		handler := newTextHandler(os.Stdout, slog.LevelInfo)
+		_ = os.MkdirAll("data/logs", 0755)
+		fileWriter = &lumberjack.Logger{
+			Filename:   "data/logs/mmwx.log",
+			MaxSize:    50, // MB
+			MaxBackups: 1,  // 当前文件 + 1 个备份 = 最多 2 个文件
+			MaxAge:     0,  // 不按时间删，只看大小/数量
+			Compress:   false,
+		}
+		handler := newTextHandler(io.MultiWriter(os.Stdout, fileWriter), slog.LevelInfo)
 		defaultLogger = &Logger{
 			Logger: slog.New(handler),
 		}
@@ -89,9 +101,12 @@ func (l *Logger) EnableDebugLog(filePath string) error {
 
 	l.debugFile = f
 
-	// 同时输出到控制台和文件
-	multiWriter := io.MultiWriter(os.Stdout, f)
-	handler := newTextHandler(multiWriter, slog.LevelDebug)
+	// 同时输出到控制台、主日志文件和临时 debug 文件
+	writers := []io.Writer{os.Stdout, f}
+	if fileWriter != nil {
+		writers = append(writers, fileWriter)
+	}
+	handler := newTextHandler(io.MultiWriter(writers...), slog.LevelDebug)
 	l.Logger = slog.New(handler)
 
 	l.Info("Debug日志已开启", "file", filePath)
@@ -115,8 +130,12 @@ func (l *Logger) DisableDebugLog() string {
 	l.debugFile.Close()
 	l.debugFile = nil
 
-	// 恢复仅控制台输出
-	handler := newTextHandler(os.Stdout, slog.LevelInfo)
+	// 恢复到控制台 + 主日志文件输出
+	var w io.Writer = os.Stdout
+	if fileWriter != nil {
+		w = io.MultiWriter(os.Stdout, fileWriter)
+	}
+	handler := newTextHandler(w, slog.LevelInfo)
 	l.Logger = slog.New(handler)
 
 	return filePath
