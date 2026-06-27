@@ -384,10 +384,13 @@ func (h *PackageSubscribeHandler) convertFormat(r *http.Request, yamlData []byte
 		return sub.convertClashToSurge(config, proxies)
 	}
 
-	factory := substore.GetDefaultFactory()
-	producer, err := factory.GetProducer(clientType)
-	if err != nil {
-		return nil, err
+	// shadowrocket / clash-to-shadowrocket 显式取对应 producer(工厂里两者都注册成 "shadowrocket");其余走工厂。
+	producer := shadowrocketProducerFor(clientType)
+	if producer == nil {
+		producer, err = substore.GetDefaultFactory().GetProducer(clientType)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	systemConfig, _ := h.repo.GetSystemConfig(r.Context())

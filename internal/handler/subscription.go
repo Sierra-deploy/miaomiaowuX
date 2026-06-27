@@ -630,7 +630,7 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 
 		// 根据客户端类型设置内容类型和扩展名
 		switch clientType {
-		case "surge", "surgemac", "loon", "qx", "surfboard", "shadowrocket", "clash-to-surge", "clash-to-loon", "clash-to-loon-kelee":
+		case "surge", "surgemac", "loon", "qx", "surfboard", "shadowrocket", "clash-to-shadowrocket", "clash-to-surge", "clash-to-loon", "clash-to-loon-kelee":
 			// 基于文本的格式
 			contentType = "text/plain; charset=utf-8"
 			ext = ".txt"
@@ -707,30 +707,6 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 					if rootMap.Content[i].Value == "rule-providers" {
 						ruleProvidersIdx = i
 						break
-					}
-				}
-
-				// clash-to-shadowrocket: 将 rule-providers 中 format: mrs 改为 yaml，url .mrs 改为 .yaml
-				// (Shadowrocket 不支持 clash 的 mrs 二进制规则集格式)
-				if clientType == "clash-to-shadowrocket" && ruleProvidersIdx >= 0 {
-					providersNode := rootMap.Content[ruleProvidersIdx+1]
-					if providersNode.Kind == yaml.MappingNode {
-						for j := 1; j < len(providersNode.Content); j += 2 {
-							providerValue := providersNode.Content[j]
-							if providerValue.Kind != yaml.MappingNode {
-								continue
-							}
-							for k := 0; k < len(providerValue.Content); k += 2 {
-								key := providerValue.Content[k].Value
-								val := providerValue.Content[k+1]
-								if key == "format" && val.Value == "mrs" {
-									val.Value = "yaml"
-								}
-								if key == "url" && strings.HasSuffix(val.Value, ".mrs") {
-									val.Value = strings.TrimSuffix(val.Value, ".mrs") + ".yaml"
-								}
-							}
-						}
 					}
 				}
 
@@ -1403,6 +1379,22 @@ func (h *SubscriptionHandler) runPostFetchScript(ctx context.Context, script str
 }
 
 // ConvertSubscription 将 YAML 订阅文件转换为指定的客户端格式
+// shadowrocketProducerFor 返回 shadowrocket 系列要用的 producer:
+//   - "shadowrocket"          → ShadowrocketProducer(节点转换)
+//   - "clash-to-shadowrocket" → ShadowrocketTemplateProducer(完整 clash→shadowrocket 配置)
+// 二者在工厂里都以 "shadowrocket" 注册(template 覆盖了 plain),无法按类型区分,故显式实例化。
+// 其它类型返回 nil,交由调用方走工厂。
+func shadowrocketProducerFor(clientType string) substore.Producer {
+	switch clientType {
+	case "shadowrocket":
+		return substore.NewShadowrocketProducer()
+	case "clash-to-shadowrocket":
+		return substore.NewShadowrocketTemplateProducer()
+	default:
+		return nil
+	}
+}
+
 func (h *SubscriptionHandler) convertSubscription(ctx context.Context, yamlData []byte, clientType string) ([]byte, error) {
 	// 使用 yaml.Node 解析, 解决值前导零的问题
 	var rootNode yaml.Node
@@ -1459,12 +1451,14 @@ func (h *SubscriptionHandler) convertSubscription(ctx context.Context, yamlData 
 		return []byte(result), nil
 	}
 
-	factory := substore.GetDefaultFactory()
-
-	// 根据客户端类型获取Producer
-	producer, err := factory.GetProducer(clientType)
-	if err != nil {
-		return nil, fmt.Errorf("unsupported client type '%s': %w", clientType, err)
+	// shadowrocket / clash-to-shadowrocket 显式取对应 producer(工厂里两者都注册成 "shadowrocket",
+	// template 覆盖了 plain,只能显式实例化);其余类型走工厂。
+	producer := shadowrocketProducerFor(clientType)
+	if producer == nil {
+		producer, err = substore.GetDefaultFactory().GetProducer(clientType)
+		if err != nil {
+			return nil, fmt.Errorf("unsupported client type '%s': %w", clientType, err)
+		}
 	}
 
 	// 调用Produce方法生成转换后的节点, 传入完整配置供需要的 Producer 使用（如 Stash）
