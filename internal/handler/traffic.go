@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -78,6 +79,8 @@ func (h *TrafficHandler) handleUserNodes(w http.ResponseWriter, r *http.Request)
 	}
 
 	ctx := r.Context()
+	date := strings.TrimSpace(r.URL.Query().Get("date"))
+	baseUp, baseDown := h.emailBaseline(ctx, date)
 
 	// 1. routed 子账号 email → routed_node_id(只算 is_active)
 	subaccounts, err := h.repo.ListUserSubaccounts(ctx, username)
@@ -173,6 +176,7 @@ func (h *TrafficHandler) handleUserNodes(w http.ResponseWriter, r *http.Request)
 	}
 
 	for _, uet := range allEmailTraffic {
+		uet = subEmailBaseline(uet, baseUp, baseDown)
 		// 优先 routed 路径:email 命中本 user 的子账号
 		if rid, ok := emailToRoutedNodeID[uet.Email]; ok {
 			if n, ok := routedNodeByID[rid]; ok {
@@ -248,6 +252,8 @@ func (h *TrafficHandler) handleNodeUsers(w http.ResponseWriter, r *http.Request)
 	}
 
 	ctx := r.Context()
+	date := strings.TrimSpace(r.URL.Query().Get("date"))
+	baseUp, baseDown := h.emailBaseline(ctx, date)
 
 	node, err := h.repo.GetNodeByID(ctx, nodeID)
 	if err != nil {
@@ -347,32 +353,29 @@ func (h *TrafficHandler) handleNodeUsers(w http.ResponseWriter, r *http.Request)
 		LastDownlink int64  `json:"last_downlink"`
 	}
 	byUser := make(map[string]*item)
-	// 节点视角的用户流量字段语义:用 xray 当前 cumulative(LastUplink/LastDownlink)而非
-	// cycle delta 累加值(Uplink/Downlink)。原因:
-	// - collector 的 cycle delta 算法依赖"xray 重启检测",user_email_traffic 跟 node_traffic
-	//   的重启检测**不同步**(stats.User 跟 stats.Outbound 两个 map 重置时机不一致),
-	//   长期累积后 user_email_traffic.uplink 会超过节点真实流量(本案例:节点 209 MB / 用户 591 MB)。
-	// - LastUplink/LastDownlink 直接来自 xray 当前 cumulative,跟节点流量(同样基于 cumulative)对齐,
-	//   永远不会出现"用户流量 > 节点总流量"的矛盾。
-	// - 用户感知上略输 cycle 重置语义,但准确性优先 — 数据一致 > 语义精细。
+	// 字段语义:Uplink/Downlink 用 cycle-delta(uet.Uplink/Downlink)— 跟对称的 user-nodes 接口一致,
+	// 且 collector 的 XrayRestartDetector 已正确累加 xray 重启前的流量。LastUplink/LastDownlink 仍保留
+	// cumulative 原值供参考。(旧实现曾故意用 cumulative 避免"用户>节点",但导致两个详情接口口径不一致
+	// 且重启后丢失之前流量,已改回 cycle-delta。)
 	addUser := func(username string, uet storage.UserEmailTraffic) {
 		if existing, ok := byUser[username]; ok {
-			existing.Uplink += uet.LastUplink
-			existing.Downlink += uet.LastDownlink
+			existing.Uplink += uet.Uplink
+			existing.Downlink += uet.Downlink
 			existing.LastUplink += uet.LastUplink
 			existing.LastDownlink += uet.LastDownlink
 			return
 		}
 		byUser[username] = &item{
 			Username:     username,
-			Uplink:       uet.LastUplink,
-			Downlink:     uet.LastDownlink,
+			Uplink:       uet.Uplink,
+			Downlink:     uet.Downlink,
 			LastUplink:   uet.LastUplink,
 			LastDownlink: uet.LastDownlink,
 		}
 	}
 
 	for _, uet := range allEmailTraffic {
+		uet = subEmailBaseline(uet, baseUp, baseDown)
 		if isRouted {
 			if username, ok := routedEmailToUsername[uet.Email]; ok {
 				addUser(username, uet)
@@ -421,6 +424,52 @@ func (h *TrafficHandler) handleNodeUsers(w http.ResponseWriter, r *http.Request)
 	})
 
 	h.writeJSON(w, http.StatusOK, map[string]any{"success": true, "items": out})
+}
+
+// emailBaseline 加载 <= date 的 email 级 baseline,key = "<server_id>|<email>"。
+// date 为空(未选时间范围)→ 返回 nil,subEmailBaseline 不做减法,详情显示全周期 cycle-delta。
+func (h *TrafficHandler) emailBaseline(ctx context.Context, date string) (up, down map[string]int64) {
+	if date == "" {
+		return nil, nil
+	}
+	snaps, err := h.repo.GetUserEmailTrafficSnapshots(ctx, date)
+	if err != nil {
+		log.Printf("[Traffic API] email baseline load failed: %v", err)
+		return nil, nil
+	}
+	up = make(map[string]int64, len(snaps))
+	down = make(map[string]int64, len(snaps))
+	for _, s := range snaps {
+		k := strconv.FormatInt(s.ServerID, 10) + "|" + s.Email
+		up[k] = s.Uplink
+		down[k] = s.Downlink
+	}
+	return up, down
+}
+
+// subEmailBaseline 把 uet 的 cycle-delta(Uplink/Downlink)减去 date 时的 baseline → "自 date 起的增量"。
+// clamp 到 0 防 baseline > 当前(快照后 xray 重置等)。Last* 是 cumulative 参考值,不减。
+// up == nil(date 为空)直接原样返回。
+func subEmailBaseline(uet storage.UserEmailTraffic, up, down map[string]int64) storage.UserEmailTraffic {
+	if up == nil {
+		return uet
+	}
+	k := strconv.FormatInt(uet.ServerID, 10) + "|" + uet.Email
+	if b, ok := up[k]; ok {
+		if uet.Uplink > b {
+			uet.Uplink -= b
+		} else {
+			uet.Uplink = 0
+		}
+	}
+	if b, ok := down[k]; ok {
+		if uet.Downlink > b {
+			uet.Downlink -= b
+		} else {
+			uet.Downlink = 0
+		}
+	}
+	return uet
 }
 
 // ServerTrafficResponse 表示服务器的流量数据

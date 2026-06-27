@@ -2390,6 +2390,27 @@ CREATE INDEX IF NOT EXISTS idx_user_traffic_snapshots_date ON user_traffic_snaps
 		return fmt.Errorf("migrate user_traffic_snapshots: %w", err)
 	}
 
+	// 用户-邮箱级流量快照 — 与 user_email_traffic 同粒度(server_id, email,其中 email=<username>__<inbound_tag>)。
+	// 节点详情(node-users)/用户详情(user-nodes)按时间范围算"用户在某节点的增量"时,减这张表的 baseline。
+	// user_traffic_snapshots 只到 username 级、且口径是 user_traffic 表,粒度和源都对不上详情(详情走 user_email_traffic),
+	// 所以单独建一张 email 级快照表。存 cycle-delta(uplink/downlink),跟 user_email_traffic 一致。
+	const userEmailTrafficSnapshotsSchema = `
+CREATE TABLE IF NOT EXISTS user_email_traffic_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER NOT NULL,
+    email TEXT NOT NULL,
+    date TEXT NOT NULL,
+    uplink INTEGER NOT NULL DEFAULT 0,
+    downlink INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(server_id, email, date)
+);
+CREATE INDEX IF NOT EXISTS idx_user_email_traffic_snapshots_date ON user_email_traffic_snapshots(date);
+`
+	if _, err := r.db.Exec(userEmailTrafficSnapshotsSchema); err != nil {
+		return fmt.Errorf("migrate user_email_traffic_snapshots: %w", err)
+	}
+
 	// 服务器系统级流量快照 — daily snapshot 之 system 维度。
 	// 每天 00:00 跟 node_traffic_snapshots / user_traffic_snapshots 一起拍,记下"此刻的 rx_cycle / tx_cycle"。
 	// 前端服务器视图 traffic_source='system' 模式下用 (当前 cycle - 该日 baseline) 算今日/本周/本月增量,
@@ -11779,6 +11800,17 @@ ON CONFLICT(server_id, username, date) DO UPDATE SET uplink=excluded.uplink, dow
 	return err
 }
 
+// CreateUserEmailTrafficSnapshots 把当前 user_email_traffic 的 cycle-delta(uplink/downlink)拍进 email 级快照表。
+// 与 CreateUserTrafficSnapshots 同模式,只是粒度到 (server_id, email)。同日多次跑按 ON CONFLICT 覆盖。
+func (r *TrafficRepository) CreateUserEmailTrafficSnapshots(ctx context.Context, serverID int64, date string) error {
+	const stmt = `
+INSERT INTO user_email_traffic_snapshots (server_id, email, date, uplink, downlink)
+SELECT server_id, email, ?, uplink, downlink FROM user_email_traffic WHERE server_id = ?
+ON CONFLICT(server_id, email, date) DO UPDATE SET uplink=excluded.uplink, downlink=excluded.downlink`
+	_, err := r.db.ExecContext(ctx, stmt, date, serverID)
+	return err
+}
+
 // GetNodeTrafficSnapshots 返回每个 (server_id, tag) **小于等于** date 的最新一份快照。
 // 改 = 为 <=:cron 漏跑某一天 / 用户切换 timeRange 落到没快照的日期时,自动 fallback 到上一份
 // 有数据的快照,前端"当前累计 - baseline"就能正确算出"自该日期以来的增量"。
@@ -11829,6 +11861,43 @@ JOIN (
 	for rows.Next() {
 		var s UserTrafficSnapshot
 		if err := rows.Scan(&s.ID, &s.ServerID, &s.Username, &s.Date, &s.Uplink, &s.Downlink); err != nil {
+			return nil, err
+		}
+		result = append(result, s)
+	}
+	return result, rows.Err()
+}
+
+// UserEmailTrafficSnapshot 是 user_email_traffic_snapshots 的一行(email 级 cycle-delta baseline)。
+type UserEmailTrafficSnapshot struct {
+	ServerID int64  `json:"server_id"`
+	Email    string `json:"email"`
+	Date     string `json:"date"`
+	Uplink   int64  `json:"uplink"`
+	Downlink int64  `json:"downlink"`
+}
+
+// GetUserEmailTrafficSnapshots 同 GetUserTrafficSnapshots 语义,但按 (server_id, email) 维度。
+// date <= ? + GROUP BY MAX(date) fallback:某天没拍到自动回退上一份,详情减法不会因找不到 baseline 而崩。
+func (r *TrafficRepository) GetUserEmailTrafficSnapshots(ctx context.Context, date string) ([]UserEmailTrafficSnapshot, error) {
+	const query = `
+SELECT s.server_id, s.email, s.date, s.uplink, s.downlink
+FROM user_email_traffic_snapshots s
+JOIN (
+    SELECT server_id, email, MAX(date) AS max_date
+    FROM user_email_traffic_snapshots
+    WHERE date <= ?
+    GROUP BY server_id, email
+) latest ON s.server_id = latest.server_id AND s.email = latest.email AND s.date = latest.max_date`
+	rows, err := r.db.QueryContext(ctx, query, date)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []UserEmailTrafficSnapshot
+	for rows.Next() {
+		var s UserEmailTrafficSnapshot
+		if err := rows.Scan(&s.ServerID, &s.Email, &s.Date, &s.Uplink, &s.Downlink); err != nil {
 			return nil, err
 		}
 		result = append(result, s)

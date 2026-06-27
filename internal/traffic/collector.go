@@ -533,6 +533,10 @@ func (c *Collector) CreateDailySnapshots(ctx context.Context) error {
 		if err := c.repo.CreateUserTrafficSnapshots(ctx, rs.ID, date); err != nil {
 			log.Printf("[Traffic Collector] Failed to create user snapshot for server %s: %v", rs.Name, err)
 		}
+		// email 级快照 — 节点详情/用户详情按时间范围算"用户在某节点的增量"时减它的 baseline。
+		if err := c.repo.CreateUserEmailTrafficSnapshots(ctx, rs.ID, date); err != nil {
+			log.Printf("[Traffic Collector] Failed to create user-email snapshot for server %s: %v", rs.Name, err)
+		}
 		// Server system traffic baseline — server 视图 traffic_source='system' 模式下今日/本周/本月按钮算增量用。
 		// 即便该 server 当前 source='xray' 也照拍 — 用户后续切到 system 时,已有 baseline 可用。
 		if err := c.repo.CreateServerSystemTrafficSnapshot(ctx, rs.ID, date); err != nil {
