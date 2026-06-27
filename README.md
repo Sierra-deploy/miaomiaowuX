@@ -158,6 +158,21 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.3.0 (2026-06-27)
+- ♻️ refactor: 节点解析/订阅转换迁移到 proxyparser 共享模块
+- 🌈专家模式支持中转服务器端口配置
+- 🌈创建节点支持选择多IP
+- 🌈增加agent签名验证，防篡改
+- 🌈增加备份加密
+- 🛠️ fix:主动探测主控域名与浏览器域名不一致的情况
+- 🛠️ fix:优化内存占用
+- 🛠️ fix:删除节点级联解除出站
+- 🛠️ fix:增加流量子账户快照
+- 🛠️ fix:日志没有生成文件与自动清理
+- 🛠️ fix:某些场景误封ip的问题
+- 🛠️ fix:添加服务ddns开关样式错误
+- 🛠️ fix:重复添加用户凭据
+- 🛠️ fix:验证码配置误报
 ### v0.2.9 (2026-06-19)
 - 🛠️ fix:hy2 parser 缺少 urldecode
 - 🛠️ fix:migrate顺序不对导致全新启动失败
