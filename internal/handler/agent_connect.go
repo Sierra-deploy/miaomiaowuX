@@ -729,14 +729,14 @@ case $ARCH in
         ;;
 esac
 
-# 镜像链 — 顺序尝试,任一成功即停。
-# 必要性:GitHub Release binary 重定向到 objects.githubusercontent.com(只有 A 记录,无 AAAA),
-# 纯 v6 机器直连 github 会 "network is unreachable" → 安装失败。
-# ghproxy / gh-proxy 是 v4+v6 双栈反代,放在前面让 v6-only 机器优先命中。
+# 镜像链 — 顺序尝试,任一成功即停。GitHub 优先,失败再自动降级到 CDN 代理。
+# 注:GitHub Release binary 重定向到 objects.githubusercontent.com(只有 A 记录,无 AAAA),
+# 纯 v6 机器直连 github 会 "network is unreachable" → 会快速失败(近乎即时,非超时)后降级到
+# ghproxy / gh-proxy(v4+v6 双栈反代)。
 MIRRORS=(
-    "https://mirror.ghproxy.com/https://github.com/iluobei/mmw-agent/releases/latest/download/mmw-agent-linux-${ARCH_NAME}"
-    "https://gh-proxy.com/https://github.com/iluobei/mmw-agent/releases/latest/download/mmw-agent-linux-${ARCH_NAME}"
     "https://github.com/iluobei/mmw-agent/releases/latest/download/mmw-agent-linux-${ARCH_NAME}"
+    "https://gh-proxy.com/https://github.com/iluobei/mmw-agent/releases/latest/download/mmw-agent-linux-${ARCH_NAME}"
+    "https://mirror.ghproxy.com/https://github.com/iluobei/mmw-agent/releases/latest/download/mmw-agent-linux-${ARCH_NAME}"
 )
 
 # Download binary — 优先用 curl(更普遍),没有就用 wget;两者都没就按发行版包管理器装一个,
