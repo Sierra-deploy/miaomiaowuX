@@ -15,15 +15,16 @@ import (
 	"miaomiaowux/internal/storage"
 )
 
-// 服务器上下线通知去抖动 — 同一 server 短时间内 online/offline 频繁切换(国际线路抖动 / 心跳延迟卡阈值)
-// 会 spam 用户 telegram。这里维护 per-server 上次通知时间,窗口内的同 server online/offline 都被吞掉。
-// online/offline 共用同一 key:抖动场景里用户只需要知道"这台 server 不稳",不在乎中间过程,
-// 看到 UI 实时状态即可。窗口外的下一次状态变化会照常通知,所以"真离线很久后回来"不会漏。
+// 服务器上下线通知去抖动 — 同一 server 同一状态短时间内频繁触发(国际线路抖动 / 心跳延迟卡阈值 /
+// 多条代码路径重复上报)会 spam 用户 telegram。这里维护 per-(事件类型, server) 上次通知时间,
+// 窗口内重复的"同 server + 同事件"(连续 online 或连续 offline)被吞掉。
+// 关键:online 与 offline 各自独立 throttle —— 一次真实的"离线 → 恢复"两条都会照常发。
+// (此前 online/offline 共用同一 key,离线先发后,窗口内的上线通知被连带吞掉 → 用户"只有离线没有上线"。)
 //
 // 默认 5 分钟,可用 MMWX_SERVER_NOTIFY_THROTTLE_SECONDS 覆盖;<=0 → 禁用 throttle。
 var (
 	serverNotifyMu       sync.Mutex
-	serverNotifyLastSent = make(map[string]time.Time)
+	serverNotifyLastSent = make(map[string]time.Time) // key = 事件类型|serverName
 )
 
 func serverNotifyThrottleInterval() time.Duration {
@@ -38,19 +39,21 @@ func serverNotifyThrottleInterval() time.Duration {
 	return 5 * time.Minute
 }
 
-// shouldThrottleServerNotify 检查同一 server 距上次通知是否在 throttle 窗口内。
+// shouldThrottleServerNotify 检查同一 server + 同一事件距上次通知是否在 throttle 窗口内。
+// 按 (event, serverName) 分别记账:online 与 offline 互不影响,所以离线后窗口内的上线不会被吞。
 // true = 跳过本次;false = 通过,顺手记录当前时间。
-func shouldThrottleServerNotify(serverName string) bool {
+func shouldThrottleServerNotify(serverName string, event notify.EventType) bool {
 	interval := serverNotifyThrottleInterval()
 	if interval <= 0 {
 		return false
 	}
+	key := string(event) + "|" + serverName
 	serverNotifyMu.Lock()
 	defer serverNotifyMu.Unlock()
-	if last, ok := serverNotifyLastSent[serverName]; ok && time.Since(last) < interval {
+	if last, ok := serverNotifyLastSent[key]; ok && time.Since(last) < interval {
 		return true
 	}
-	serverNotifyLastSent[serverName] = time.Now()
+	serverNotifyLastSent[key] = time.Now()
 	return false
 }
 
@@ -371,7 +374,7 @@ func checkTrafficThreshold(ctx context.Context, repo *storage.TrafficRepository,
 // 短消息发 telegram 通常 100-500ms,阻塞 caller 一两秒是可接受的代价。
 // 想异步不想阻塞的 caller 自己包一层 go func(){...}() 即可。
 func SendServerOnlineNotification(ctx context.Context, serverName, ip string) {
-	if shouldThrottleServerNotify(serverName) {
+	if shouldThrottleServerNotify(serverName, notify.EventServerOnline) {
 		log.Printf("[Notify] server=%q online suppressed by throttle (within %s window)", serverName, serverNotifyThrottleInterval())
 		return
 	}
@@ -382,7 +385,7 @@ func SendServerOnlineNotification(ctx context.Context, serverName, ip string) {
 }
 
 func SendServerOfflineNotification(ctx context.Context, serverName, ip string) {
-	if shouldThrottleServerNotify(serverName) {
+	if shouldThrottleServerNotify(serverName, notify.EventServerOffline) {
 		log.Printf("[Notify] server=%q offline suppressed by throttle (within %s window)", serverName, serverNotifyThrottleInterval())
 		return
 	}
