@@ -73,6 +73,10 @@ type WSAuthPayload struct {
 	// WarpInstalled agent 本机是否已注册 Cloudflare WARP(成功跑过 EnsureRegistered 且 warp.json 存在)。
 	// 老 agent 不发 = false → server 卡片 W badge 不显示,完全向后兼容。
 	WarpInstalled bool `json:"warp_installed,omitempty"`
+	// AgentVersion agent 自身版本号(随 auth 上报)。master 据此显示版本/判断可升级,
+	// 不再反向 HTTP 拉 /api/child/system/info —— 端口隐身(HidePortOnWS)关闭入站后仍可拿到。
+	// 老 agent 不发该字段 = 空串 → fallback 反向 HTTP(向后兼容)。
+	AgentVersion string `json:"agent_version,omitempty"`
 }
 
 // AgentCapabilities 描述 agent 端支持的扩展能力位。
@@ -231,6 +235,8 @@ type RemoteWSConnection struct {
 	// 留作 cleanup 时离线通知用 — agent 换 IP 重连时,DB.ip_address 已被新 conn 改成新 IP,
 	// 但旧 conn 自己记得旧 IP,用 wsConn.IPAddress 才能让"离线通知=旧 IP, 上线通知=新 IP"。
 	IPAddress string
+	// AgentVersion auth 上报的 agent 版本号;版本展示/升级前后对比走这里,不依赖反向 HTTP 端口。
+	AgentVersion string
 }
 
 // upgradeWindows 记录每台 server 的"升级抑制窗口"截止时间。
@@ -890,6 +896,7 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 		Conn:         conn,
 		LastPing:     time.Now(),
 		Capabilities: authPayload.Capabilities,
+		AgentVersion: authPayload.AgentVersion,
 		IPAddress:    ip,
 	}
 	if preAuthConn != nil && preAuthConn.session != nil {

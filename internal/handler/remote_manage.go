@@ -1002,6 +1002,13 @@ func (m *markerWriter) Write(p []byte) (int, error) {
 // probeAgentVersion GET 一次 system-info 取 agent_version,失败返回空字符串。
 // 5s 超时 — 我们只想瞄一眼,不希望卡这条主流程。
 func (h *RemoteManageHandler) probeAgentVersion(parent context.Context, serverID int64) string {
+	// WS-first:auth 上报的版本优先(端口隐身后反向 HTTP 不可达)。
+	// 升级后 agent 重连会带新版本覆盖 wsConn.AgentVersion,所以升级后再 probe 仍准。
+	if h.wsHandler != nil {
+		if conn, ok := h.wsHandler.GetConnectionByServerID(serverID); ok && conn.AgentVersion != "" {
+			return conn.AgentVersion
+		}
+	}
 	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	body, err := h.forwardToRemoteServer(ctx, serverID, http.MethodGet, "/api/child/system/info", nil)

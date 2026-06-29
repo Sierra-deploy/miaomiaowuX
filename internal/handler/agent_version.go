@@ -90,6 +90,13 @@ func (h *AgentVersionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 // fetchAgentCurrent 取目标 agent 的版本号。
 // 旧 agent 不返回 agent_version 字段 → 空字符串,前端按"未知版本/需要升级"处理。
 func (h *AgentVersionHandler) fetchAgentCurrent(ctx context.Context, serverID int64) (string, string) {
+	// WS-first:新 agent 经 auth 上报了 agent_version 就直接用,不反向拉。
+	// 端口隐身(HidePortOnWS)关闭入站后反向 HTTP 不可达;旧 agent 不上报则 fallback 反向 HTTP。
+	if h.rm.wsHandler != nil {
+		if conn, ok := h.rm.wsHandler.GetConnectionByServerID(serverID); ok && conn.AgentVersion != "" {
+			return conn.AgentVersion, ""
+		}
+	}
 	// 5s 超时即可,system-info 本来就是轻量 endpoint
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
