@@ -540,6 +540,12 @@ func (r *TrafficRepository) DeleteNodeByID(ctx context.Context, id int64) error 
 	// 清除引用了该节点作为中转节点的 chain_proxy_node_id
 	_, _ = r.db.ExecContext(ctx, `UPDATE nodes SET chain_proxy_node_id = NULL WHERE chain_proxy_node_id = ?`, id)
 
+	// 级联清理该节点(若为 routed 节点)的用户子账号凭据,避免留下孤儿:
+	// 否则 user-nodes/node-users 详情会因 routed 节点已删而把这些子账号的流量丢弃,
+	// 且 SQLite 外键未开启(无 ON DELETE CASCADE 生效)。物理节点 id 不会匹配任何
+	// 子账号的 routed_node_id,对物理节点删除是 no-op。
+	_, _ = r.db.ExecContext(ctx, `DELETE FROM user_subaccounts WHERE routed_node_id = ?`, id)
+
 	// 如果没有其他节点使用相同的 raw_url，则清除外部订阅
 	if rawURL != "" && username != "" {
 		var count int

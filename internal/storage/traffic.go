@@ -4847,6 +4847,18 @@ func (r *TrafficRepository) DeleteUser(ctx context.Context, username string) err
 		return fmt.Errorf("delete user nodes: %w", err)
 	}
 
+	// 删除用户的 xray 子账号凭据(routed 子账号 + 普通入站),避免删用户后留下孤儿。
+	// SQLite 外键未开启,这些关联表不会自动级联,旧实现漏删导致 user_subaccounts /
+	// user_inbound_configs 残留(username 已不存在),污染流量详情反查。
+	_, err = tx.ExecContext(ctx, `DELETE FROM user_subaccounts WHERE username = ?`, username)
+	if err != nil {
+		return fmt.Errorf("delete user subaccounts: %w", err)
+	}
+	_, err = tx.ExecContext(ctx, `DELETE FROM user_inbound_configs WHERE username = ?`, username)
+	if err != nil {
+		return fmt.Errorf("delete user inbound configs: %w", err)
+	}
+
 	// 删除用户的外部订阅
 	_, err = tx.ExecContext(ctx, `DELETE FROM external_subscriptions WHERE username = ?`, username)
 	if err != nil {
