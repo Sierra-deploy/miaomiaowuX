@@ -209,7 +209,10 @@ func (p *LimiterConfigPusher) BuildLimiterConfigForServer(ctx context.Context, s
 			speedBytes = uint64(speedMbps * 1000000 / 8)
 		}
 		tagUsers[c.InboundTag] = append(tagUsers[c.InboundTag], WSUserLimitInfo{
-			Email:       user.Username,
+			// email 必须与 generateCredential 写进 xray inbound 的 client email 一致 —— 强制 <username>__<inboundTag>
+			// (自动子账户格式)。此前这里用纯 username,导致限速器按 username 记账、xray 流量走子账户 email,
+			// agent GetUserBucket 用连接 email 查不到限速记录 → 套餐/固定限速对自动子账户全部失效。
+			Email:       user.Username + "__" + c.InboundTag,
 			SpeedLimit:  speedBytes,
 			DeviceLimit: deviceLimit,
 		})
