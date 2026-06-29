@@ -158,6 +158,11 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.3.1 (2026-06-29)
+- 🛠️ fix:shadowrocket无法获取节点
+- 🛠️ fix:上线通知发送失败
+- 🛠️ fix:节点删除后流量信息一起删除
+- 🛠️ fix:限速配置下发的子账户错误
 ### v0.3.0 (2026-06-27)
 - ♻️ refactor: 节点解析/订阅转换迁移到 proxyparser 共享模块
 - 🌈专家模式支持中转服务器端口配置
