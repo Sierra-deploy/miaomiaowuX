@@ -430,6 +430,14 @@ func (h *MigrateHandler) ImportMmw(w http.ResponseWriter, r *http.Request) {
 		report.Warnings = append(report.Warnings, fmt.Sprintf("分配 created_by=%s 失败: %v", admin, err))
 	}
 
+	// 2.5 妙妙屋备份可能带入它自己的 admin → 系统出现多个管理员。
+	//     只保留本实例第一个用户,其余 admin 一律降级为普通用户。
+	if demoted, err := h.repo.DemoteExtraAdmins(r.Context()); err != nil {
+		report.Warnings = append(report.Warnings, fmt.Sprintf("降级多余管理员失败: %v", err))
+	} else if demoted > 0 {
+		log.Printf("[Migrate] demoted %d extra admin(s) to user", demoted)
+	}
+
 	// 3. 拷贝 subscribes/ 目录里的 yaml 文件到 mmwx subscribes/
 	copied, skipped := 0, []string{}
 	if subsDir := strings.TrimSpace(req.SubscribesDir); subsDir != "" {

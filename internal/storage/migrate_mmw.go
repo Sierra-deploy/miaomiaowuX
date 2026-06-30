@@ -413,3 +413,26 @@ func (r *TrafficRepository) AssignOwnershipForMmwImported(ctx context.Context, a
 	}
 	return nil
 }
+
+// DemoteExtraAdmins 把除"第一个用户"外的所有管理员降级为普通用户。
+// 妙妙屋迁移用 INSERT OR IGNORE 把 mmw 的用户(含它自己的 admin)原样带入,
+// 会让 mmwx 出现多个 role='admin' 的管理员。这里只保留本实例最早创建的那个用户
+// (按 rowid 升序取第一个 —— 导入的用户带原始 created_at,可能早于本机 admin,
+// 只有 rowid/插入顺序能可靠定位本实例最初创建的管理员),其余 admin 一律改普通用户。
+// 返回被降级的用户数。
+func (r *TrafficRepository) DemoteExtraAdmins(ctx context.Context) (int, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE users SET role = ?, updated_at = CURRENT_TIMESTAMP
+		   WHERE role = ?
+		     AND rowid <> (SELECT rowid FROM users ORDER BY rowid ASC LIMIT 1)`,
+		RoleUser, RoleAdmin,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("demote extra admins: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
