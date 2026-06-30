@@ -751,7 +751,9 @@ func NewUserLimitsHandler(repo *storage.TrafficRepository, pusher *LimiterConfig
 		}
 
 		if pusher != nil {
-			go pusher.PushToAllServersForUser(r.Context(), body.Username)
+			// 必须用 Background:goroutine 异步执行,handler 一返回 r.Context() 就被 net/http cancel,
+			// 会让下发里的 DB 查询 context canceled → 限速静默不下发(用户管理限速失效的根因)。
+			go pusher.PushToAllServersForUser(context.Background(), body.Username)
 		}
 
 		w.Header().Set("Content-Type", "application/json")

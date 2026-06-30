@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -72,7 +73,9 @@ func NewUserNodeLimitsHandler(repo *storage.TrafficRepository, pusher *LimiterCo
 		}
 
 		if pusher != nil {
-			go pusher.PushToAllServersForUser(r.Context(), username)
+			// Background 而非 r.Context():goroutine 异步,handler 返回后 r.Context() 即被 net/http cancel,
+			// 否则下发的 DB 查询会 context canceled → 限速静默不下发。
+			go pusher.PushToAllServersForUser(context.Background(), username)
 		}
 
 		w.Header().Set("Content-Type", "application/json")

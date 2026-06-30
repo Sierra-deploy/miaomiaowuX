@@ -359,6 +359,12 @@ func (p *LimiterConfigPusher) PushToAllServersForPackage(ctx context.Context, pa
 		for _, c := range configs {
 			serverIDs[c.ServerID] = true
 		}
+		// 同 PushToAllServersForUser:补上该用户 routed 子账号所在 server,避免 routed-only 用户漏推。
+		if subIDs, err := p.repo.ListServerIDsForUserSubaccounts(ctx, u.Username); err == nil {
+			for _, id := range subIDs {
+				serverIDs[id] = true
+			}
+		}
 	}
 
 	for sid := range serverIDs {
@@ -379,6 +385,13 @@ func (p *LimiterConfigPusher) PushToAllServersForUser(ctx context.Context, usern
 	serverIDs := make(map[int64]bool)
 	for _, c := range configs {
 		serverIDs[c.ServerID] = true
+	}
+	// 只有 routed 子账号、没有物理 inbound 的用户,上面查不到 server —— 补上子账号所在 server,
+	// 否则这些用户在用户管理/套餐里设的限速对该 server 永不下发。
+	if subIDs, err := p.repo.ListServerIDsForUserSubaccounts(ctx, username); err == nil {
+		for _, id := range subIDs {
+			serverIDs[id] = true
+		}
 	}
 
 	for sid := range serverIDs {

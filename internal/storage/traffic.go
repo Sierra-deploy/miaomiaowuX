@@ -8312,6 +8312,32 @@ func (r *TrafficRepository) ListActiveSubaccountsByServerName(ctx context.Contex
 	return out, rows.Err()
 }
 
+// ListServerIDsForUserSubaccounts 返回该用户所有 active routed 子账号所在的 remote_server id。
+// 限速下发收集服务器时,主账号走 user_inbound_configs(物理),子账号在 user_subaccounts ——
+// 只有 routed 子账号、没有物理 inbound 的用户,光查 inbound_configs 会漏掉这些 server。
+func (r *TrafficRepository) ListServerIDsForUserSubaccounts(ctx context.Context, username string) ([]int64, error) {
+	rows, err := r.db.QueryContext(ctx, `
+		SELECT DISTINCT rs.id
+		FROM user_subaccounts sa
+		INNER JOIN nodes n ON sa.routed_node_id = n.id
+		INNER JOIN remote_servers rs ON rs.name = n.original_server
+		WHERE sa.is_active = 1 AND sa.username = ? AND n.node_type = 'routed'
+	`, username)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // InboundNodeRef:一个 (inbound_tag → node) 映射条目,供限速下发反查 per-node 覆盖用。
 // ParentID = 0 表示物理节点;> 0 表示 routed 子节点,继承父物理节点的 per-node 覆盖。
 type InboundNodeRef struct {
