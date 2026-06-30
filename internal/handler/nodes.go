@@ -19,6 +19,7 @@ import (
 	"miaomiaowux/internal/storage"
 
 	"github.com/MMWOrg/mmwX-plugins/proxyparser"
+	"github.com/MMWOrg/mmwX-plugins/proxyparser/substore"
 	"gopkg.in/yaml.v3"
 )
 
@@ -283,39 +284,10 @@ func (h *nodesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 普通用户:自己导入的节点 + 绑定套餐内的节点(只读)。
-	nodes, err := h.repo.ListNodes(r.Context(), username)
+	nodes, err := collectUserVisibleNodes(r.Context(), h.repo, username)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
-	}
-	seen := make(map[int64]bool, len(nodes))
-	for _, n := range nodes {
-		seen[n.ID] = true
-	}
-	if user, uerr := h.repo.GetUser(r.Context(), username); uerr == nil && user.PackageID > 0 {
-		if pkg, perr := h.repo.GetPackage(r.Context(), user.PackageID); perr == nil && pkg != nil {
-			for _, nid := range pkg.Nodes {
-				if seen[nid] {
-					continue
-				}
-				if pn, nerr := h.repo.GetNodeByID(r.Context(), nid); nerr == nil {
-					nodes = append(nodes, pn)
-					seen[nid] = true
-				}
-			}
-			// 追加套餐内父节点派生出的 shared routed 子节点(admin 通过"添加路由出站"批量分配的)。
-			// 套餐字段 Nodes 只存父物理节点 ID,但 admin 在出站管理里给父节点派生的 routed_owner='shared'
-			// 子节点应当随套餐一起对用户可见;遗漏会导致用户看不到自己实际能用的路由出站节点。
-			if children, cerr := h.repo.ListSharedRoutedByParentIDs(r.Context(), pkg.Nodes); cerr == nil {
-				for _, cn := range children {
-					if seen[cn.ID] {
-						continue
-					}
-					nodes = append(nodes, cn)
-					seen[cn.ID] = true
-				}
-			}
-		}
 	}
 
 	// 安全:把每个节点的 clash_config 里 admin uuid/password 等凭据替换为本用户的凭据。
@@ -365,7 +337,7 @@ func (h *nodesHandler) enforceLicenseIfNodeHostMatchesServer(ctx context.Context
 	if strings.TrimSpace(configJSON) == "" {
 		configJSON = node.ParsedConfig
 	}
-	srv, err := h.remoteManage.MatchRemoteServerByNodeHost(ctx, configJSON)
+	srv, err := h.remoteManage.MatchRemoteServerByNodeHost(ctx, configJSON, node.RelayOrigServer)
 	if err != nil || srv == nil {
 		return "", true
 	}
@@ -424,6 +396,43 @@ func buildUserCredMapForCreator(ctx context.Context, repo *storage.TrafficReposi
 //   - routed 节点:buildRoutedProxyForUser 用 user_subaccounts 凭据重建(没子账号即 drop)
 // 替换/重建失败的节点保留 admin 凭据 → 这种情况是数据异常(凭据没建好),为了不让用户彻底看不到节点,
 // 退而求其次返回原样;但更典型场景(用户从未绑过该节点)已经被 ListNodes 的 username 过滤掉了。
+// collectUserVisibleNodes 收集某用户可见的节点:自己导入的 + 套餐 pkg.Nodes + 套餐内 shared routed 子节点(去重)。
+// 与 handleList 普通用户路径口径一致;不做凭据替换(调用方按需 substituteNodesForUser)。
+func collectUserVisibleNodes(ctx context.Context, repo *storage.TrafficRepository, username string) ([]storage.Node, error) {
+	nodes, err := repo.ListNodes(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[int64]bool, len(nodes))
+	for _, n := range nodes {
+		seen[n.ID] = true
+	}
+	if user, uerr := repo.GetUser(ctx, username); uerr == nil && user.PackageID > 0 {
+		if pkg, perr := repo.GetPackage(ctx, user.PackageID); perr == nil && pkg != nil {
+			for _, nid := range pkg.Nodes {
+				if seen[nid] {
+					continue
+				}
+				if pn, nerr := repo.GetNodeByID(ctx, nid); nerr == nil {
+					nodes = append(nodes, pn)
+					seen[nid] = true
+				}
+			}
+			// 套餐内父节点派生的 shared routed 子节点也随套餐对用户可见(见 handleList 同段注释)。
+			if children, cerr := repo.ListSharedRoutedByParentIDs(ctx, pkg.Nodes); cerr == nil {
+				for _, cn := range children {
+					if seen[cn.ID] {
+						continue
+					}
+					nodes = append(nodes, cn)
+					seen[cn.ID] = true
+				}
+			}
+		}
+	}
+	return nodes, nil
+}
+
 func substituteNodesForUser(ctx context.Context, repo *storage.TrafficRepository, username string, nodes []storage.Node) []storage.Node {
 	if len(nodes) == 0 {
 		return nodes
@@ -851,7 +860,7 @@ func (h *nodesHandler) handleUpdateServer(w http.ResponseWriter, r *http.Request
 	// 这里复用 MatchRemoteServerByNodeHost 同一份匹配规则,不走 license 校验路径
 	// (改地址不算"新增节点"占用配额)。
 	if h.remoteManage != nil {
-		if srv, _ := h.remoteManage.MatchRemoteServerByNodeHost(r.Context(), existing.ClashConfig); srv != nil {
+		if srv, _ := h.remoteManage.MatchRemoteServerByNodeHost(r.Context(), existing.ClashConfig, existing.RelayOrigServer); srv != nil {
 			existing.OriginalServer = srv.Name
 		} else {
 			existing.OriginalServer = ""
@@ -1836,6 +1845,63 @@ type nodeDTO struct {
 	RelayOrigPort      int       `json:"relay_orig_port,omitempty"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
+}
+
+// NewNodeURIsHandler GET /api/admin/node-uris(admin):返回 每个用户 × 其可见节点 的成品分享 URI。
+// 凭据用各用户子账户填充(substituteNodesForUser),URI 由后端 substore.URIProducer 生成 —— 不走前端。
+func NewNodeURIsHandler(repo *storage.TrafficRepository) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		ctx := r.Context()
+		users, err := repo.ListUsers(ctx, 10000)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		type uriItem struct {
+			Username string `json:"username"`
+			NodeID   int64  `json:"node_id"`
+			NodeName string `json:"node_name"`
+			Protocol string `json:"protocol"`
+			NodeType string `json:"node_type"`
+			URI      string `json:"uri"`
+		}
+		prod := substore.NewURIProducer()
+		items := make([]uriItem, 0)
+		for _, u := range users {
+			nodes, nerr := collectUserVisibleNodes(ctx, repo, u.Username)
+			if nerr != nil {
+				continue
+			}
+			// 注入该用户凭据;routed 无 active 子账号的节点会被过滤掉(只留用户有权的)。
+			nodes = substituteNodesForUser(ctx, repo, u.Username, nodes)
+			for _, n := range nodes {
+				if strings.TrimSpace(n.ClashConfig) == "" {
+					continue
+				}
+				var m map[string]any
+				if json.Unmarshal([]byte(n.ClashConfig), &m) != nil {
+					continue
+				}
+				uri, perr := prod.ProduceOne(substore.Proxy(m))
+				if perr != nil || strings.TrimSpace(uri) == "" {
+					continue
+				}
+				items = append(items, uriItem{
+					Username: u.Username,
+					NodeID:   n.ID,
+					NodeName: n.NodeName,
+					Protocol: n.Protocol,
+					NodeType: n.NodeType,
+					URI:      uri,
+				})
+			}
+		}
+		respondJSON(w, http.StatusOK, map[string]any{"items": items})
+	})
 }
 
 func convertNode(node storage.Node) nodeDTO {

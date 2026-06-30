@@ -3192,17 +3192,21 @@ func normalizeProtocol(s string) string {
 // MatchRemoteServerByNodeHost 给定一个 clash 配置(JSON),如果它的 server 字段命中
 // 任一已注册 remote_server 的 IPAddress/Domain/PullAddress,返回那台 server。
 // 用于"导入节点时识别它是否指向 mmwx 已管理的 server",从而走 license 配额检查 + 自动 claim。
-// 找不到返回 (nil, nil)。
-func (h *RemoteManageHandler) MatchRemoteServerByNodeHost(ctx context.Context, clashConfigJSON string) (*storage.RemoteServer, error) {
-	if strings.TrimSpace(clashConfigJSON) == "" {
-		return nil, nil
+// overrideHost 非空时用它替代 clash.server 匹配 —— 中转节点 clash.server 是中转地址,必须用
+// 原始源站地址(relay_orig_server)才能匹配到真实 server。找不到返回 (nil, nil)。
+func (h *RemoteManageHandler) MatchRemoteServerByNodeHost(ctx context.Context, clashConfigJSON string, overrideHost string) (*storage.RemoteServer, error) {
+	srv := strings.TrimSpace(overrideHost)
+	if srv == "" {
+		if strings.TrimSpace(clashConfigJSON) == "" {
+			return nil, nil
+		}
+		var cfg map[string]any
+		if err := json.Unmarshal([]byte(clashConfigJSON), &cfg); err != nil {
+			return nil, nil
+		}
+		s, _ := cfg["server"].(string)
+		srv = strings.TrimSpace(s)
 	}
-	var cfg map[string]any
-	if err := json.Unmarshal([]byte(clashConfigJSON), &cfg); err != nil {
-		return nil, nil
-	}
-	srv, _ := cfg["server"].(string)
-	srv = strings.TrimSpace(srv)
 	if srv == "" {
 		return nil, nil
 	}
