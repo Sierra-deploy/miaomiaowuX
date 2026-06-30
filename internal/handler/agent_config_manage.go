@@ -438,7 +438,7 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		trafficLimit = 0
 	}
 	trafficStatsMode := strings.TrimSpace(req.TrafficStatsMode)
-	if trafficStatsMode != "upload" && trafficStatsMode != "download" {
+	if trafficStatsMode != "upload" && trafficStatsMode != "download" && trafficStatsMode != "max" {
 		trafficStatsMode = "both"
 	}
 	// 新建 server 默认 system — VPS 计费口径,跟 UI 默认保持一致。

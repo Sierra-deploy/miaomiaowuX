@@ -6833,22 +6833,33 @@ func (r *TrafficRepository) GetServerTrafficUsed(ctx context.Context, serverID i
 			return sysTx, nil
 		case "download":
 			return sysRx, nil
+		case "max": // 上下行取最大
+			if sysRx > sysTx {
+				return sysRx, nil
+			}
+			return sysTx, nil
 		default:
 			return sysRx + sysTx, nil
 		}
 	}
 
 	// source = "xray" — 保持原行为(走 node_traffic 聚合)
-	expr := "uplink + downlink"
+	var query string
 	switch mode {
 	case "upload":
-		expr = "uplink"
+		query = `SELECT COALESCE(SUM(uplink), 0) FROM node_traffic WHERE server_id = ?`
 	case "download":
-		expr = "downlink"
+		query = `SELECT COALESCE(SUM(downlink), 0) FROM node_traffic WHERE server_id = ?`
+	case "max":
+		// 上下行各自求和后取最大值
+		query = `SELECT CASE WHEN COALESCE(SUM(uplink),0) > COALESCE(SUM(downlink),0)
+		                     THEN COALESCE(SUM(uplink),0) ELSE COALESCE(SUM(downlink),0) END
+		         FROM node_traffic WHERE server_id = ?`
+	default:
+		query = `SELECT COALESCE(SUM(uplink + downlink), 0) FROM node_traffic WHERE server_id = ?`
 	}
 
 	var total int64
-	query := fmt.Sprintf(`SELECT COALESCE(SUM(%s), 0) FROM node_traffic WHERE server_id = ?`, expr)
 	err := r.db.QueryRowContext(ctx, query, serverID).Scan(&total)
 	if err != nil {
 		return 0, fmt.Errorf("get server traffic used: %w", err)
@@ -10083,7 +10094,7 @@ func (r *TrafficRepository) UpdateRemoteServer(ctx context.Context, id int64, na
 		setClauses = append(setClauses, "xray_mode = ?")
 		args = append(args, xrayMode)
 	}
-	if mode := strings.TrimSpace(trafficStatsMode); mode == "both" || mode == "upload" || mode == "download" {
+	if mode := strings.TrimSpace(trafficStatsMode); mode == "both" || mode == "upload" || mode == "download" || mode == "max" {
 		setClauses = append(setClauses, "traffic_stats_mode = ?")
 		args = append(args, mode)
 	}
