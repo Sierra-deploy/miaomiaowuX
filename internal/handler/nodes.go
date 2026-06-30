@@ -326,6 +326,13 @@ func (h *nodesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 
 	// 节点级倍率:根据用户绑定套餐查 multiplier(routed 子节点用 parent 回退),仅当 != 1 时写入响应
 	dto := convertNodes(nodes)
+	// 安全:普通用户视角绝不暴露中转节点的真实源站地址。clash/parsed 的 server/port 已是中转地址,
+	// relay_orig_*(被中转替换掉的真实地址)只供 admin 管理/取消中转。剥离后前端 relay_orig_server
+	// 为空 → 不显示"原服务器"行,只显示中转地址。
+	for i := range dto {
+		dto[i].RelayOrigServer = ""
+		dto[i].RelayOrigPort = 0
+	}
 	if user, uerr := h.repo.GetUser(r.Context(), username); uerr == nil && user.PackageID > 0 {
 		if pkg, perr := h.repo.GetPackage(r.Context(), user.PackageID); perr == nil && pkg != nil && len(pkg.NodeMultipliers) > 0 {
 			for i, n := range nodes {
