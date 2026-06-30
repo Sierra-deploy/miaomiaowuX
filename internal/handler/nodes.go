@@ -211,9 +211,8 @@ func (h *nodesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.handleCancelRelay(w, r, strings.TrimSuffix(path, "/relay"))
 	case path != "" && path != "batch" && path != "fetch-subscription" && !strings.HasSuffix(path, "/server") && !strings.HasSuffix(path, "/restore-server") && !strings.HasSuffix(path, "/config") && !strings.HasSuffix(path, "/relay") && !strings.HasSuffix(path, "/related-inbounds") && (r.Method == http.MethodPut || r.Method == http.MethodPatch):
-		if denyNonAdmin() {
-			return
-		}
+		// 普通用户也放行:handleUpdate 内部按归属限制 —— fetchNodeForAccess 只取本人节点(套餐/admin
+		// 节点取不到 → 404),且普通用户被强制为"只能改名称"。归属自己的节点(含自建路由出站)可改名。
 		h.handleUpdate(w, r, path)
 	case path != "" && path != "batch" && path != "fetch-subscription" && !strings.HasSuffix(path, "/relay") && !strings.HasSuffix(path, "/related-inbounds") && r.Method == http.MethodDelete:
 		if denyNonAdmin() {
@@ -654,7 +653,8 @@ func (h *nodesHandler) handleUpdate(w http.ResponseWriter, r *http.Request, idSe
 		return
 	}
 
-	existing, err := h.fetchNodeForAccess(r.Context(), id, username, userIsAdmin(r.Context(), h.repo, username))
+	isAdmin := userIsAdmin(r.Context(), h.repo, username)
+	existing, err := h.fetchNodeForAccess(r.Context(), id, username, isAdmin)
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, storage.ErrNodeNotFound) {
@@ -673,6 +673,12 @@ func (h *nodesHandler) handleUpdate(w http.ResponseWriter, r *http.Request, idSe
 		return
 	}
 	req.parseChainProxyNodeID()
+
+	// 普通用户:只能改自己节点的「名称」。归属已由 fetchNodeForAccess 限制为本人节点(套餐/admin
+	// 节点取不到 → 404)。强制只保留 NodeName、其余字段沿用原节点,防止越权改配置/协议/标签/启用状态。
+	if !isAdmin {
+		req = nodeRequest{NodeName: req.NodeName, Enabled: existing.Enabled}
+	}
 
 	// 如果节点名称被修改，需要校验新名称
 	if req.NodeName != "" && req.NodeName != oldNodeName {

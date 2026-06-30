@@ -147,9 +147,12 @@ func (r *TrafficRepository) CountLicensedNodes(ctx context.Context) (int64, erro
 		return 0, errors.New("traffic repository not initialized")
 	}
 	var count int64
+	// 许可证节点计数:所有路由出站节点都计入 —— routed_owner='shared'(admin 分配)和 'user'(普通用户自建)
+	// 都消耗 server 出站资源,都该受 max_nodes 限制(之前漏算了 'user',普通用户的路由出站不受限,已修正)。
+	// 再加已注册到 remote_server 的物理节点(original_server 非空)。
 	if err := r.db.QueryRowContext(ctx, `
 		SELECT COUNT(1) FROM nodes
-		WHERE (node_type = 'routed'   AND COALESCE(routed_owner, 'shared') = 'shared')
+		WHERE node_type = 'routed'
 		   OR (node_type = 'physical' AND COALESCE(original_server, '') != '')
 	`).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count licensed nodes: %w", err)

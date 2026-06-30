@@ -322,6 +322,11 @@ func main() {
 	// 在remoteManageHandler之后注册的节点处理程序（见下文）
 	mux.Handle("/api/admin/sync-external-subscriptions", auth.RequireAdmin(tokenStore, userRepo, handler.NewSyncExternalSubscriptionsHandler(repo, subscribeDir)))
 	mux.Handle("/api/admin/sync-external-subscription", auth.RequireAdmin(tokenStore, userRepo, handler.NewSyncSingleExternalSubscriptionHandler(repo, subscribeDir)))
+	// 同步 handler 本身按 context username 限定范围(syncExternalSubscriptionsManual 只同步本人订阅),
+	// 普通用户也应能同步自己导入的外部订阅。新增 user 路由(RequireToken)避免普通用户撞 RequireAdmin 的 403;
+	// admin 路由保留兼容旧前端。
+	mux.Handle("/api/user/sync-external-subscriptions", auth.RequireToken(tokenStore, userRepo, handler.NewSyncExternalSubscriptionsHandler(repo, subscribeDir)))
+	mux.Handle("/api/user/sync-external-subscription", auth.RequireToken(tokenStore, userRepo, handler.NewSyncSingleExternalSubscriptionHandler(repo, subscribeDir)))
 	mux.Handle("/api/admin/rules/latest", auth.RequireAdmin(tokenStore, userRepo, handler.NewRuleMetadataHandler(subscribeDir, repo)))
 	mux.Handle("/api/admin/custom-rules", auth.RequireToken(tokenStore, userRepo, handler.NewCustomRulesHandler(repo)))
 	mux.Handle("/api/admin/custom-rules/", auth.RequireToken(tokenStore, userRepo, handler.NewCustomRuleHandler(repo)))
