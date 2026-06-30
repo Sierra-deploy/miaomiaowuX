@@ -98,7 +98,7 @@ func (m *Manager) SetUsageReporter(r UsageReporter) {
 }
 
 
-const DefaultServerURL = "https://license.miaomiaowu.net"
+const DefaultServerURL = "https://license.miaomiaowux.com"
 
 func NewManager(settings SettingsStore, machineID string) *Manager {
 	return &Manager{
