@@ -540,6 +540,8 @@ func main() {
 	// 注册节点处理程序（需要remoteManageHandler进行远程入站清理）
 	mux.Handle("/api/admin/nodes", auth.RequireToken(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler, licenseManager)))
 	mux.Handle("/api/admin/nodes/", auth.RequireToken(tokenStore, userRepo, handler.NewNodesHandler(repo, subscribeDir, remoteManageHandler, licenseManager)))
+	// URI 管理:每个用户 × 其可见节点 的成品分享 URI(后端 substore 生成),仅管理员可用
+	mux.Handle("/api/admin/node-uris", auth.RequireAdmin(tokenStore, userRepo, handler.NewNodeURIsHandler(repo)))
 
 	// 路由出站(routed node)管理:给物理节点挂多个虚拟出站节点
 	routedOutboundHandler := handler.NewRoutedOutboundHandler(repo, remoteManageHandler)
