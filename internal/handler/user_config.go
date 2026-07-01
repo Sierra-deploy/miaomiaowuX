@@ -24,10 +24,10 @@ type userConfigRequest struct {
 	AppendSubInfo           bool    `json:"append_sub_info"`
 	CustomRulesEnabled      bool    `json:"custom_rules_enabled"`
 	EnableShortLink         bool    `json:"enable_short_link"`
-	UseNewTemplateSystem    *bool   `json:"use_new_template_system"` // nil表示不提供，默认true
-	EnableProxyProvider     bool    `json:"enable_proxy_provider"`
-	NodeOrder               []int64 `json:"node_order"` // 节点显示顺序（节点 ID 数组）
-	ProxyGroupsSourceURL    string  `json:"proxy_groups_source_url"`
+	UseNewTemplateSystem    *bool    `json:"use_new_template_system"` // nil表示不提供，默认true
+	EnableProxyProvider     bool     `json:"enable_proxy_provider"`
+	NodeOrder               *[]int64 `json:"node_order"` // 指针:nil=未提供(如系统设置页)→保留原值,非nil=覆盖。防止其它设置页误清节点顺序
+	ProxyGroupsSourceURL    string   `json:"proxy_groups_source_url"`
 	ClientCompatibilityMode bool    `json:"client_compatibility_mode"` // 自动过滤客户端不兼容的节点
 }
 
@@ -248,6 +248,16 @@ func handleUpdateUserConfig(w http.ResponseWriter, r *http.Request, repo *storag
 		return
 	}
 
+	// node_order 用指针区分"未提供"与"显式清空":系统设置页等不管节点顺序的调用不会带 node_order,
+	// payload.NodeOrder==nil 时必须保留已存顺序,否则整行 upsert 会把它清空 → 节点管理页乱序(与旁边
+	// system_config "先读全量再改" 同理)。非 nil(节点管理页拖拽排序)才覆盖。
+	nodeOrder := []int64{}
+	if payload.NodeOrder != nil {
+		nodeOrder = *payload.NodeOrder
+	} else if existing, err := repo.GetUserSettings(r.Context(), username); err == nil {
+		nodeOrder = existing.NodeOrder
+	}
+
 	settings := storage.UserSettings{
 		Username:             username,
 		ForceSyncExternal:    payload.ForceSyncExternal,
@@ -262,7 +272,7 @@ func handleUpdateUserConfig(w http.ResponseWriter, r *http.Request, repo *storag
 		EnableShortLink:      payload.EnableShortLink,
 		UseNewTemplateSystem: useNewTemplateSystem,
 		EnableProxyProvider:  payload.EnableProxyProvider,
-		NodeOrder:            payload.NodeOrder,
+		NodeOrder:            nodeOrder,
 	}
 
 	if err := repo.UpsertUserSettings(r.Context(), settings); err != nil {
