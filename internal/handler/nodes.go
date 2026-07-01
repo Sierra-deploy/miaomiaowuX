@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"miaomiaowux/internal/auth"
@@ -1389,9 +1390,13 @@ func (h *nodesHandler) handleBatchDelete(w http.ResponseWriter, r *http.Request)
 		nodes = append(nodes, node)
 	}
 
-	// 远程闭环(routed → outbound+rule+client;physical → inbound,WSS 兜底刷 nginx)
+	// 远程闭环。先「整批一次」清理各服务器上以这些节点为落地出口的出站(每台服务器只 GET 一次 outbounds
+	// + 并发 + 短超时),避免旧实现「每节点 × 每服务器」的 O(N×M) 串行远程调用 —— 那会让批量删外部节点
+	// 撞上 N×M×(HTTP 30s 兜底)= 几分钟并超时失败。再逐节点清各自 OriginalServer 上的 inbound/routed
+	// 出站(外部节点 OriginalServer 为空,自动跳过,基本不发远程请求)。
+	h.cleanupOutboundsTargetingNodes(r.Context(), nodes)
 	for i := range nodes {
-		h.cleanupRemoteForNode(r.Context(), &nodes[i])
+		h.cleanupRemoteInboundForNode(r.Context(), &nodes[i])
 	}
 
 	// 从数据库中删除节点(按权限)
@@ -1437,8 +1442,13 @@ func (h *nodesHandler) cleanupRemoteForNode(ctx context.Context, node *storage.N
 	// 先清「以该节点为出口的出站」—— 这些 outbound + routing rule 可能在任意服务器上,与本节点的 OriginalServer 无关,
 	// 故放在 OriginalServer 守卫之前(外部/手动节点也可能被别的节点当落地出口)。
 	h.cleanupOutboundsTargetingNode(ctx, node)
+	h.cleanupRemoteInboundForNode(ctx, node)
+}
 
-	if node.OriginalServer == "" {
+// cleanupRemoteInboundForNode 清节点自身在其 OriginalServer 上的 inbound / routed 出站。
+// 外部/手动导入节点没有 OriginalServer,直接返回(不发远程请求)。
+func (h *nodesHandler) cleanupRemoteInboundForNode(ctx context.Context, node *storage.Node) {
+	if node == nil || node.OriginalServer == "" {
 		return
 	}
 	if node.NodeType == "routed" && node.RoutedOutboundTag != "" {
@@ -1549,37 +1559,67 @@ func outboundTargetsAddr(ob map[string]any, addrSet map[string]bool, port int) b
 // 凡目标地址 == B 的地址(B.clash server / B 所属 server 的 ip·域名·pull_address)且端口 == B 端口,
 // 视为「以 B 为出口的出站」(landing/user/routed 三种来源统一覆盖)→ 删该 outbound + 引用其 tag 的 routing rule。
 func (h *nodesHandler) cleanupOutboundsTargetingNode(ctx context.Context, node *storage.Node) {
-	if h.remoteManage == nil || node == nil {
+	if node == nil {
 		return
 	}
-	var clash map[string]any
-	if json.Unmarshal([]byte(node.ClashConfig), &clash) != nil {
+	// 委托批量版:单删也享受「每台服务器只 GET 一次 + 并发 + 短超时」,避免单节点也要串行卡所有服务器。
+	h.cleanupOutboundsTargetingNodes(ctx, []storage.Node{*node})
+}
+
+// outboundTarget 一个待删节点的落地地址集 + 端口,用于比对 agent 出站是否指向它。
+type outboundTarget struct {
+	addrSet map[string]bool
+	port    int
+}
+
+// cleanupOutboundsTargetingNodes 批量清理「以这些节点为落地出口」的 agent 出站 + 引用它们的 routing rule。
+//
+// 关键:一台服务器的出站列表在整批删除期间不变,故对每台 connected 服务器**只 GET 一次** outbounds,
+// 在内存里比对**所有**待删节点。相比旧的「每节点都遍历所有服务器」,远程调用从 O(N节点×M服务器) 降到 O(M服务器)。
+// 每台并发 + 短超时:单台慢/不可达(WS RPC 超时→HTTP 兜底)不再拖垮整批(旧实现下 N×M×30s = 几分钟并超时失败)。
+// 尽力而为:超时/失败即跳过,残留的失效出站无害(指向已删地址),后续可手动或重连时清理。
+func (h *nodesHandler) cleanupOutboundsTargetingNodes(ctx context.Context, nodes []storage.Node) {
+	if h.remoteManage == nil || len(nodes) == 0 {
 		return
 	}
-	bPort := 0
-	switch v := clash["port"].(type) {
-	case float64:
-		bPort = int(v)
-	case int:
-		bPort = v
-	}
-	if bPort == 0 {
-		return
-	}
-	addrSet := map[string]bool{}
-	if s, _ := clash["server"].(string); strings.TrimSpace(s) != "" {
-		addrSet[s] = true
-	}
-	if node.OriginalServer != "" {
-		if srv, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer); err == nil && srv != nil {
-			for _, a := range []string{srv.IPAddress, srv.Domain, srv.PullAddress} {
-				if a = strings.TrimSpace(a); a != "" {
-					addrSet[a] = true
+
+	// 为每个节点算出 (addrSet, port);addrSet 空或 port==0 的节点无从比对,跳过。
+	targets := make([]outboundTarget, 0, len(nodes))
+	for i := range nodes {
+		node := &nodes[i]
+		var clash map[string]any
+		if json.Unmarshal([]byte(node.ClashConfig), &clash) != nil {
+			continue
+		}
+		port := 0
+		switch v := clash["port"].(type) {
+		case float64:
+			port = int(v)
+		case int:
+			port = v
+		}
+		if port == 0 {
+			continue
+		}
+		addrSet := map[string]bool{}
+		if s, _ := clash["server"].(string); strings.TrimSpace(s) != "" {
+			addrSet[s] = true
+		}
+		if node.OriginalServer != "" {
+			if srv, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer); err == nil && srv != nil {
+				for _, a := range []string{srv.IPAddress, srv.Domain, srv.PullAddress} {
+					if a = strings.TrimSpace(a); a != "" {
+						addrSet[a] = true
+					}
 				}
 			}
 		}
+		if len(addrSet) == 0 {
+			continue
+		}
+		targets = append(targets, outboundTarget{addrSet: addrSet, port: port})
 	}
-	if len(addrSet) == 0 {
+	if len(targets) == 0 {
 		return
 	}
 
@@ -1587,29 +1627,50 @@ func (h *nodesHandler) cleanupOutboundsTargetingNode(ctx context.Context, node *
 	if err != nil {
 		return
 	}
-	for _, srv := range servers {
+
+	// 每台 connected 服务器只 GET 一次 outbounds,并发(上限 8)+ 短超时(尽力而为)。
+	const scanTimeout = 8 * time.Second
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i := range servers {
+		srv := servers[i]
 		if srv.Status != storage.RemoteServerStatusConnected {
-			continue // 离线服务器跳过,避免卡住;残留待其重连后另行处理
+			continue // 离线服务器跳过,残留待其重连后另行处理
 		}
-		raw, err := h.remoteManage.forwardToRemoteServer(ctx, srv.ID, "GET", "/api/child/outbounds", nil)
-		if err != nil {
-			continue
-		}
-		var resp struct {
-			Success   bool             `json:"success"`
-			Outbounds []map[string]any `json:"outbounds"`
-		}
-		if json.Unmarshal(raw, &resp) != nil {
-			continue
-		}
-		for _, ob := range resp.Outbounds {
-			tag, _ := ob["tag"].(string)
-			if tag == "" || !outboundTargetsAddr(ob, addrSet, bPort) {
-				continue
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(srv storage.RemoteServer) {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			sctx, cancel := context.WithTimeout(ctx, scanTimeout)
+			raw, err := h.remoteManage.forwardToRemoteServer(sctx, srv.ID, "GET", "/api/child/outbounds", nil)
+			cancel()
+			if err != nil {
+				return
 			}
-			h.removeOutboundAndRules(ctx, srv.ID, srv.Name, tag)
-		}
+			var resp struct {
+				Success   bool             `json:"success"`
+				Outbounds []map[string]any `json:"outbounds"`
+			}
+			if json.Unmarshal(raw, &resp) != nil {
+				return
+			}
+			for _, ob := range resp.Outbounds {
+				tag, _ := ob["tag"].(string)
+				if tag == "" {
+					continue
+				}
+				for _, t := range targets {
+					if outboundTargetsAddr(ob, t.addrSet, t.port) {
+						h.removeOutboundAndRules(ctx, srv.ID, srv.Name, tag)
+						break // 该出站已命中并删除,不再比对其它 target
+					}
+				}
+			}
+		}(srv)
 	}
+	wg.Wait()
 }
 
 // removeOutboundAndRules 删指定 server 上的 outbound(by tag)+ 所有引用该 outboundTag 的 routing rule
