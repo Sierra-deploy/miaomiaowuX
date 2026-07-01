@@ -189,6 +189,30 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 			e.repo.UpdateUserOverLimit(ctx, user.Username, false)
 		}
 	}
+
+	// 服务器按 traffic_reset_day 自动重置流量:逻辑同手动"重置流量"(offset = -当前用量)。
+	// 触发时刻固定当天 08:05 之后,避开时区在 00:00 附近的跨天误判;只影响服务器,不动用户套餐重置。
+	isAfter0805 := now.Hour() > 8 || (now.Hour() == 8 && now.Minute() >= 5)
+	if isAfter0805 {
+		if servers, sErr := e.repo.ListRemoteServers(ctx); sErr == nil {
+			for _, s := range servers {
+				if s.IsFederated {
+					continue // 联邦分享的服务器流量归拥有方管,本机不重置
+				}
+				if !shouldResetThisMonth(now, true, s.TrafficResetDay, s.LastTrafficResetAt) {
+					continue
+				}
+				if rErr := e.repo.ResetRemoteServerTrafficCycle(ctx, s.ID); rErr != nil {
+					log.Printf("[TrafficLimitEnforcer] reset server %d(%s) traffic failed: %v", s.ID, s.Name, rErr)
+					continue
+				}
+				_ = e.repo.UpdateRemoteServerLastTrafficResetAt(ctx, s.ID, now)
+				log.Printf("[TrafficLimitEnforcer] server %d(%s) monthly traffic reset (day=%d)", s.ID, s.Name, s.TrafficResetDay)
+			}
+		} else {
+			log.Printf("[TrafficLimitEnforcer] list servers for reset failed: %v", sErr)
+		}
+	}
 }
 
 // removeUserFromAllInbounds 从该用户所有 inbound 摘除 client。

@@ -785,6 +785,8 @@ type RemoteServer struct {
 	DDNSLastSyncedAt   *time.Time `json:"ddns_last_synced_at,omitempty"`
 	DDNSLastError      string     `json:"ddns_last_error,omitempty"`
 	DDNSPending        bool       `json:"ddns_pending"`                   // 正在同步中
+	// LastTrafficResetAt 最近一次按 traffic_reset_day 自动重置服务器流量的时间(防同月反复重置)
+	LastTrafficResetAt *time.Time `json:"last_traffic_reset_at,omitempty"`
 	IsFederated           bool       `json:"is_federated"`       // 是否为接入的"分享服务器"(联邦)，非持久化字段
 	FederationPrefix      string     `json:"federation_prefix"`  // 分享服务器上新增入站的 tag 前缀，非持久化字段
 	CreatedAt             time.Time  `json:"created_at"`
@@ -2133,6 +2135,10 @@ CREATE INDEX IF NOT EXISTS idx_remote_servers_status ON remote_servers(status);
 		return err
 	}
 	if err := r.ensureRemoteServerColumn("ddns_pending", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// 服务器按 traffic_reset_day 自动重置流量时,记录上次重置时间(防同月反复)
+	if err := r.ensureRemoteServerColumn("last_traffic_reset_at", "TIMESTAMP"); err != nil {
 		return err
 	}
 
@@ -8932,6 +8938,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		COALESCE(traffic_source, 'xray'),
 		COALESCE(warp_installed, 0),
 		COALESCE(ddns_enabled, 0), COALESCE(ddns_provider_id, 0), ddns_last_synced_at, COALESCE(ddns_last_error, ''), COALESCE(ddns_pending, 0),
+		last_traffic_reset_at,
 		EXISTS(SELECT 1 FROM federated_servers fs WHERE fs.server_id = remote_servers.id),
 		COALESCE((SELECT prefix FROM federated_servers fs WHERE fs.server_id = remote_servers.id), ''),
 		created_at, updated_at
@@ -8952,6 +8959,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		var timeOffsetSeconds int64
 		var ddnsEnabledInt, ddnsPendingInt int
 		var ddnsLastSyncedAt sql.NullTime
+		var lastTrafficResetAt sql.NullTime
 		if err := rows.Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.Domain,
 			&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 			&tokenExpiresAt, &lastTokenRefresh,
@@ -8970,6 +8978,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 			&server.TrafficSource,
 			&warpInstalledInt,
 			&ddnsEnabledInt, &server.DDNSProviderID, &ddnsLastSyncedAt, &server.DDNSLastError, &ddnsPendingInt,
+			&lastTrafficResetAt,
 			&server.IsFederated,
 			&server.FederationPrefix,
 			&server.CreatedAt, &server.UpdatedAt); err != nil {
@@ -8979,6 +8988,9 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		server.DDNSPending = ddnsPendingInt != 0
 		if ddnsLastSyncedAt.Valid {
 			server.DDNSLastSyncedAt = &ddnsLastSyncedAt.Time
+		}
+		if lastTrafficResetAt.Valid {
+			server.LastTrafficResetAt = &lastTrafficResetAt.Time
 		}
 		if lastHeartbeat.Valid {
 			server.LastHeartbeat = &lastHeartbeat.Time
@@ -9055,6 +9067,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		COALESCE(traffic_source, 'xray'),
 		COALESCE(warp_installed, 0),
 		COALESCE(ddns_enabled, 0), COALESCE(ddns_provider_id, 0), ddns_last_synced_at, COALESCE(ddns_last_error, ''), COALESCE(ddns_pending, 0),
+		last_traffic_reset_at,
 		created_at, updated_at
 		FROM remote_servers WHERE id = ?`
 
@@ -9065,6 +9078,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 	var xrayRunningInt, warpInstalledInt int
 	var ddnsEnabledInt, ddnsPendingInt int
 	var ddnsLastSyncedAt sql.NullTime
+	var lastTrafficResetAt sql.NullTime
 	err := r.db.QueryRowContext(ctx, query, id).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.Domain,
 		&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 		&tokenExpiresAt, &lastTokenRefresh,
@@ -9082,6 +9096,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		&server.TrafficSource,
 		&warpInstalledInt,
 		&ddnsEnabledInt, &server.DDNSProviderID, &ddnsLastSyncedAt, &server.DDNSLastError, &ddnsPendingInt,
+		&lastTrafficResetAt,
 		&server.CreatedAt, &server.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -9096,6 +9111,9 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 	server.DDNSPending = ddnsPendingInt != 0
 	if ddnsLastSyncedAt.Valid {
 		server.DDNSLastSyncedAt = &ddnsLastSyncedAt.Time
+	}
+	if lastTrafficResetAt.Valid {
+		server.LastTrafficResetAt = &lastTrafficResetAt.Time
 	}
 	if lastHeartbeat.Valid {
 		server.LastHeartbeat = &lastHeartbeat.Time
@@ -10871,6 +10889,37 @@ func (r *TrafficRepository) UpdateUserLastResetAt(ctx context.Context, username 
 		return fmt.Errorf("update user last_reset_at: %w", err)
 	}
 	return nil
+}
+
+// UpdateRemoteServerLastTrafficResetAt 记录服务器最近一次按 traffic_reset_day 自动重置流量的时间。
+// enforcer 用它判定"本月是否已重置过",避免每轮 CheckAll(默认 2 分钟)反复 reset。
+func (r *TrafficRepository) UpdateRemoteServerLastTrafficResetAt(ctx context.Context, id int64, t time.Time) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if id <= 0 {
+		return errors.New("remote server id is required")
+	}
+	const stmt = `UPDATE remote_servers SET last_traffic_reset_at = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+	_, err := r.db.ExecContext(ctx, stmt, t, id)
+	if err != nil {
+		return fmt.Errorf("update remote server last_traffic_reset_at: %w", err)
+	}
+	return nil
+}
+
+// ResetRemoteServerTrafficCycle 把服务器"已用流量"逻辑归零 —— 与手动"重置流量"按钮同一套算法:
+// offset = 0 - 当前聚合用量。对 system / xray 两种 source 统一(GetServerTrafficUsed 内部按 source 分流),
+// 只改 traffic_used_offset,不清 system_cycle / node_traffic(物理累计保留,后续增量继续从 0 涨)。
+func (r *TrafficRepository) ResetRemoteServerTrafficCycle(ctx context.Context, serverID int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	aggregated, err := r.GetServerTrafficUsed(ctx, serverID)
+	if err != nil {
+		return fmt.Errorf("get server traffic used: %w", err)
+	}
+	return r.UpdateRemoteServerTrafficOffset(ctx, serverID, -aggregated)
 }
 
 // ==================== 流量快照 CRUD ====================
