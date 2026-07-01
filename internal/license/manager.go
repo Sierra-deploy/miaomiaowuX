@@ -308,6 +308,15 @@ func (m *Manager) heartbeat(ctx context.Context) {
 }
 
 func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce string) {
+	// 非 2xx(尤其 429 限流 / 5xx / 502 等)是"临时故障",不是"服务器明确否决"。
+	// 直接 return:不更新 status、不 HardRevoked,交给 IsValid 的 24h grace 容忍。
+	// 否则 license 服务器一抖动(限流/重启/网关波动)就会把本机 PRO 功能全灭。
+	// 真正的"许可证无效"(unbind/revoked/wrong machine_id)license 服务器一律用 200 + valid:false 返回,
+	// 会正常走到下面的 HardRevoked 分支,不受此拦截影响。
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("[license] non-200 from server: %d (treated as transient, grace in effect)", resp.StatusCode)
+		return
+	}
 	var result struct {
 		Valid      bool            `json:"valid"`
 		Error      string          `json:"error,omitempty"`
