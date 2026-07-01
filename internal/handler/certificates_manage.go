@@ -40,10 +40,16 @@ type CertificateHandler struct {
 	wsHandler           *RemoteWSHandler
 	acmeClient          *acme.Client
 	onMasterURLChanged  func(ctx context.Context, newURL string)
+	remoteManage        *RemoteManageHandler // 联邦(分享)服务器证书下发时,复用其 ForwardToAgent 走拥有方主控
 }
 
 func (h *CertificateHandler) SetOnMasterURLChanged(fn func(ctx context.Context, newURL string)) {
 	h.onMasterURLChanged = fn
+}
+
+// SetRemoteManage 注入 RemoteManageHandler,用于把证书下发转发到联邦(分享)服务器的拥有方主控。
+func (h *CertificateHandler) SetRemoteManage(rm *RemoteManageHandler) {
+	h.remoteManage = rm
 }
 
 // 创建一个新的CertificateHandler。
@@ -876,6 +882,21 @@ func (h *CertificateHandler) deployRemoteCertificate(cert *storage.Certificate, 
 
 // 通过 WS 或 HTTP 将证书发送到特定的远程服务器。
 func (h *CertificateHandler) deployToRemoteServer(server *storage.RemoteServer, payload WSCertDeployPayload) {
+	// 联邦(分享)服务器:agent 归拥有方主控管,消费方既无直连也无该 agent 的 WS,
+	// 必须经 ForwardToAgent → 拥有方 /api/federation/manage → 拥有方 WS RPC → agent 下发。
+	// 不能像下面那样按 server.Token 试 WS 再直连 agent IP(都不可达 → context deadline exceeded)。
+	if server.IsFederated && h.remoteManage != nil {
+		body, _ := json.Marshal(payload)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if _, err := h.remoteManage.ForwardToAgent(ctx, server.ID, http.MethodPost, "/api/child/cert/deploy", body); err != nil {
+			log.Printf("[Certificate] Federation cert_deploy failed for %s: %v", server.Name, err)
+		} else {
+			log.Printf("[Certificate] Sent cert_deploy via federation to %s for %s", server.Name, payload.Domain)
+		}
+		return
+	}
+
 	if h.wsHandler != nil && h.wsHandler.IsConnected(server.Token) {
 		if err := h.wsHandler.SendCertDeploy(server.Token, payload); err == nil {
 			log.Printf("[Certificate] Sent cert_deploy via WS to %s for %s", server.Name, payload.Domain)
@@ -911,6 +932,19 @@ func (h *CertificateHandler) DeployCertToServerSync(ctx context.Context, server 
 		CertPath: certPath,
 		KeyPath:  keyPath,
 		Reload:   "none",
+	}
+
+	// 0) 联邦(分享)服务器:走拥有方主控转发(消费方无直连/WS)。拥有方 agent 落到同样的确定路径,
+	// 成功即返回该路径;失败透传错误(doFederationRequest 对 owner 非 2xx 会返回 err)。
+	if server.IsFederated && h.remoteManage != nil {
+		body, _ := json.Marshal(payload)
+		fctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+		if _, err := h.remoteManage.ForwardToAgent(fctx, server.ID, http.MethodPost, "/api/child/cert/deploy", body); err != nil {
+			return "", "", err
+		}
+		log.Printf("[Certificate] Sync cert_deploy via federation to %s for %s", server.Name, payload.Domain)
+		return certPath, keyPath, nil
 	}
 
 	// 1) 优先 WS
