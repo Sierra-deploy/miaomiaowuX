@@ -91,6 +91,7 @@ type RemoteServerCreateRequest struct {
 	XrayMode          string `json:"xray_mode"`           // "external" 或 "embedded"，默认 "external"
 	TrafficStatsMode  string `json:"traffic_stats_mode"`  // "both"(默认) | "upload" | "download" — 节点流量统计方向
 	TrafficSource     string `json:"traffic_source"`      // "xray"(默认,聚合 node_traffic) | "system"(用 agent 上报系统级网卡累计)
+	IPv6Enabled       *bool  `json:"ipv6_enabled"`        // 指针:nil=默认启用;false=创建时即关闭 v6
 	// DDNS 自动同步:开启时 PullAddress 必须是域名,agent 上报新 IP 时自动更新 A/AAAA 记录。
 	// DDNSProviderID=0 → 自动模式(按 PullAddress 找匹配的通配符证书,取证书的 dns_provider_id);>0 → 显式指定
 	DDNSEnabled    bool  `json:"ddns_enabled"`
@@ -152,6 +153,7 @@ type RemoteServerUpdateRequest struct {
 	XrayMode         string `json:"xray_mode"`
 	TrafficStatsMode string `json:"traffic_stats_mode"` // both | upload | download
 	TrafficSource    string `json:"traffic_source"`     // xray | system
+	IPv6Enabled      *bool  `json:"ipv6_enabled"`       // 指针:nil=不改;false=关闭(服务管理不显示 v6、加节点不可选 v6)
 	// DDNS 同 Create
 	DDNSEnabled    bool  `json:"ddns_enabled"`
 	DDNSProviderID int64 `json:"ddns_provider_id"`
@@ -499,6 +501,7 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		TrafficResetDay:   resetDay,
 		TrafficStatsMode:  trafficStatsMode,
 		TrafficSource:     trafficSource,
+		IPv6Enabled:       req.IPv6Enabled == nil || *req.IPv6Enabled, // 默认启用;仅显式 false 才关闭
 		DDNSEnabled:       req.DDNSEnabled,
 		DDNSProviderID:    req.DDNSProviderID,
 	}
@@ -761,7 +764,7 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		oldDisplayForMigration = oldRaw + oldServer.TrafficUsedOffset
 	}
 
-	if err := h.repo.UpdateRemoteServer(ctx, req.ID, req.Name, req.Domain, req.TrafficLimit, req.TrafficResetDay, req.ConnectionMode, req.XrayMode, req.TrafficStatsMode, req.TrafficSource); err != nil {
+	if err := h.repo.UpdateRemoteServer(ctx, req.ID, req.Name, req.Domain, req.TrafficLimit, req.TrafficResetDay, req.ConnectionMode, req.XrayMode, req.TrafficStatsMode, req.TrafficSource, req.IPv6Enabled); err != nil {
 		msg := "更新服务器失败"
 		if err == storage.ErrRemoteServerNotFound {
 			msg = "服务器不存在"
