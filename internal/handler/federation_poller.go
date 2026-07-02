@@ -117,8 +117,9 @@ func applyFederationInfo(ctx context.Context, repo *storage.TrafficRepository, s
 
 	// 拥有方报告 connected 时刷新心跳/状态;联邦消费侧也补上离线→在线的 TG 通知
 	if st, _ := info["status"].(string); st == "connected" {
-		prev, name, ip, _ := repo.UpdateRemoteServerLastActivity(ctx, serverID)
-		if prev == storage.RemoteServerStatusOffline && name != "" {
+		prev, name, ip, prevNotified, _ := repo.UpdateRemoteServerLastActivity(ctx, serverID)
+		// 与容忍阈值一致:只有下线通知已发过(离线满阈值)才补发上线通知;阈值内恢复保持静默。
+		if prev == storage.RemoteServerStatusOffline && name != "" && prevNotified {
 			SendServerOnlineNotification(ctx, name, ip)
 		}
 	}

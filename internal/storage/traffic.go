@@ -725,6 +725,9 @@ type RemoteServer struct {
 	// 与 ip_address_v6 是否为空解耦 —— 因为 agent 上报空 v6 时后端 COALESCE 会保留旧地址,
 	// 单靠"地址是否为空"无法表达"用户主动关闭了 v6"。
 	IPv6Enabled          bool       `json:"ipv6_enabled"`
+	// OfflineNotified 当前离线周期是否已发过下线通知。配合 offline_since 做"容忍阈值"防抖:
+	// 离线满阈值秒才发下线通知(offline_notified 置 1);重连时只有 offline_notified=1 才补发上线通知。
+	OfflineNotified      bool       `json:"offline_notified"`
 	// WarpInstalled agent 已注册 Cloudflare WARP(warp.json 存在 + device_id 非空)。
 	// agent 在 auth + heartbeat 时上报;master 用来在 server 卡片渲染空心 W 图标 badge。
 	WarpInstalled        bool       `json:"warp_installed"`
@@ -2052,6 +2055,13 @@ CREATE INDEX IF NOT EXISTS idx_remote_servers_status ON remote_servers(status);
 	}
 	// IPv6 启用开关(管理员控制)。默认 1(启用)保持历史行为:已有服务器不受影响。
 	if err := r.ensureRemoteServerColumn("ipv6_enabled", "INTEGER NOT NULL DEFAULT 1"); err != nil {
+		return err
+	}
+	// 上下线通知容忍阈值防抖:offline_since=检测到离线的时刻;offline_notified=本次离线周期是否已发下线通知。
+	if err := r.ensureRemoteServerColumn("offline_since", "TIMESTAMP"); err != nil {
+		return err
+	}
+	if err := r.ensureRemoteServerColumn("offline_notified", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	// WARP 安装状态 — agent 在 auth/heartbeat 时上报,master 用于 server 卡片 W badge 显示
@@ -8845,6 +8855,35 @@ func (r *TrafficRepository) SetSystemSetting(ctx context.Context, key, value str
 	return nil
 }
 
+// serverNotifyToleranceKey 上下线通知容忍阈值(秒)在 system_settings 里的 key。
+const serverNotifyToleranceKey = "notify_server_tolerance_seconds"
+
+// GetServerNotifyToleranceSeconds 读服务器上下线通知的容忍阈值(秒):离线满该秒数才发下线通知,
+// 阈值内又上线则一条都不发(压抖动 + 主控升级重启误报)。未设置→默认 120(开);显式 "0"→0(关闭,即时通知)。
+func (r *TrafficRepository) GetServerNotifyToleranceSeconds(ctx context.Context) int {
+	const def = 120
+	if r == nil || r.db == nil {
+		return def
+	}
+	v, err := r.GetSystemSetting(ctx, serverNotifyToleranceKey)
+	if err != nil || strings.TrimSpace(v) == "" {
+		return def
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n < 0 {
+		return def
+	}
+	return n
+}
+
+// SetServerNotifyToleranceSeconds 写容忍阈值(秒),<0 归 0。
+func (r *TrafficRepository) SetServerNotifyToleranceSeconds(ctx context.Context, seconds int) error {
+	if seconds < 0 {
+		seconds = 0
+	}
+	return r.SetSystemSetting(ctx, serverNotifyToleranceKey, strconv.Itoa(seconds))
+}
+
 func (r *TrafficRepository) CountRemoteServers(ctx context.Context) (int64, error) {
 	if r == nil || r.db == nil {
 		return 0, errors.New("traffic repository not initialized")
@@ -8928,7 +8967,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		return nil, errors.New("traffic repository not initialized")
 	}
 
-	const query = `SELECT id, name, token, status, last_heartbeat, COALESCE(ip_address, ''), COALESCE(ip_address_v6, ''), COALESCE(ipv6_enabled, 1), COALESCE(domain, ''),
+	const query = `SELECT id, name, token, status, last_heartbeat, COALESCE(ip_address, ''), COALESCE(ip_address_v6, ''), COALESCE(ipv6_enabled, 1), COALESCE(offline_notified, 0), COALESCE(domain, ''),
 		boot_time, xray_boot_time, COALESCE(boot_count, 0), COALESCE(xray_boot_count, 0),
 		token_expires_at, last_token_refresh,
 		COALESCE(connection_mode, 'push'), COALESCE(pull_address, ''), COALESCE(pull_port, 0), COALESCE(pull_token, ''), last_pull_at,
@@ -8968,7 +9007,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		var ddnsEnabledInt, ddnsPendingInt int
 		var ddnsLastSyncedAt sql.NullTime
 		var lastTrafficResetAt sql.NullTime
-		if err := rows.Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.IPv6Enabled, &server.Domain,
+		if err := rows.Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.IPv6Enabled, &server.OfflineNotified, &server.Domain,
 			&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 			&tokenExpiresAt, &lastTokenRefresh,
 			&server.ConnectionMode, &server.PullAddress, &server.PullPort, &server.PullToken, &lastPullAt,
@@ -9058,7 +9097,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		return nil, errors.New("remote server id is required")
 	}
 
-	const query = `SELECT id, name, token, status, last_heartbeat, COALESCE(ip_address, ''), COALESCE(ip_address_v6, ''), COALESCE(ipv6_enabled, 1), COALESCE(domain, ''),
+	const query = `SELECT id, name, token, status, last_heartbeat, COALESCE(ip_address, ''), COALESCE(ip_address_v6, ''), COALESCE(ipv6_enabled, 1), COALESCE(offline_notified, 0), COALESCE(domain, ''),
 		boot_time, xray_boot_time, COALESCE(boot_count, 0), COALESCE(xray_boot_count, 0),
 		token_expires_at, last_token_refresh,
 		COALESCE(connection_mode, 'push'), COALESCE(pull_address, ''), COALESCE(pull_port, 0), COALESCE(pull_token, ''), last_pull_at,
@@ -9087,7 +9126,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 	var ddnsEnabledInt, ddnsPendingInt int
 	var ddnsLastSyncedAt sql.NullTime
 	var lastTrafficResetAt sql.NullTime
-	err := r.db.QueryRowContext(ctx, query, id).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.IPv6Enabled, &server.Domain,
+	err := r.db.QueryRowContext(ctx, query, id).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.IPv6Enabled, &server.OfflineNotified, &server.Domain,
 		&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 		&tokenExpiresAt, &lastTokenRefresh,
 		&server.ConnectionMode, &server.PullAddress, &server.PullPort, &server.PullToken, &lastPullAt,
@@ -9157,7 +9196,7 @@ func (r *TrafficRepository) GetRemoteServerByToken(ctx context.Context, token st
 		return nil, errors.New("remote server token is required")
 	}
 
-	const query = `SELECT id, name, token, status, last_heartbeat, COALESCE(ip_address, ''), COALESCE(ip_address_v6, ''), COALESCE(ipv6_enabled, 1), COALESCE(domain, ''),
+	const query = `SELECT id, name, token, status, last_heartbeat, COALESCE(ip_address, ''), COALESCE(ip_address_v6, ''), COALESCE(ipv6_enabled, 1), COALESCE(offline_notified, 0), COALESCE(domain, ''),
 		boot_time, xray_boot_time, COALESCE(boot_count, 0), COALESCE(xray_boot_count, 0),
 		token_expires_at, last_token_refresh,
 		COALESCE(connection_mode, 'push'), COALESCE(pull_address, ''), COALESCE(pull_port, 0), COALESCE(pull_token, ''), last_pull_at,
@@ -9175,7 +9214,7 @@ func (r *TrafficRepository) GetRemoteServerByToken(ctx context.Context, token st
 	var agentTokenExpiresAt, lastAgentTokenRefresh sql.NullTime
 	var ddnsEnabledInt, ddnsPendingInt int
 	var ddnsLastSyncedAt sql.NullTime
-	err := r.db.QueryRowContext(ctx, query, token).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.IPv6Enabled, &server.Domain,
+	err := r.db.QueryRowContext(ctx, query, token).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.IPv6Enabled, &server.OfflineNotified, &server.Domain,
 		&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 		&tokenExpiresAt, &lastTokenRefresh,
 		&server.ConnectionMode, &server.PullAddress, &server.PullPort, &server.PullToken, &lastPullAt,
@@ -9231,7 +9270,7 @@ func (r *TrafficRepository) GetRemoteServerByName(ctx context.Context, name stri
 		return nil, errors.New("remote server name is required")
 	}
 
-	const query = `SELECT id, name, token, status, last_heartbeat, COALESCE(ip_address, ''), COALESCE(ip_address_v6, ''), COALESCE(ipv6_enabled, 1), COALESCE(domain, ''),
+	const query = `SELECT id, name, token, status, last_heartbeat, COALESCE(ip_address, ''), COALESCE(ip_address_v6, ''), COALESCE(ipv6_enabled, 1), COALESCE(offline_notified, 0), COALESCE(domain, ''),
 		boot_time, xray_boot_time, COALESCE(boot_count, 0), COALESCE(xray_boot_count, 0),
 		token_expires_at, last_token_refresh,
 		COALESCE(connection_mode, 'push'), COALESCE(pull_address, ''), COALESCE(pull_port, 0), COALESCE(pull_token, ''), last_pull_at,
@@ -9250,7 +9289,7 @@ func (r *TrafficRepository) GetRemoteServerByName(ctx context.Context, name stri
 	var agentTokenExpiresAt, lastAgentTokenRefresh sql.NullTime
 	var ddnsEnabledInt, ddnsPendingInt int
 	var ddnsLastSyncedAt sql.NullTime
-	err := r.db.QueryRowContext(ctx, query, name).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.IPv6Enabled, &server.Domain,
+	err := r.db.QueryRowContext(ctx, query, name).Scan(&server.ID, &server.Name, &server.Token, &server.Status, &lastHeartbeat, &server.IPAddress, &server.IPAddressV6, &server.IPv6Enabled, &server.OfflineNotified, &server.Domain,
 		&bootTime, &xrayBootTime, &server.BootCount, &server.XrayBootCount,
 		&tokenExpiresAt, &lastTokenRefresh,
 		&server.ConnectionMode, &server.PullAddress, &server.PullPort, &server.PullToken, &lastPullAt,
@@ -9448,6 +9487,8 @@ func (r *TrafficRepository) UpdateRemoteServerHeartbeat(ctx context.Context, tok
 		last_heartbeat = CURRENT_TIMESTAMP,
 		ip_address = COALESCE(NULLIF(?, ''), ip_address),
 		ip_address_v6 = COALESCE(NULLIF(?, ''), ip_address_v6),
+		offline_since = NULL,
+		offline_notified = 0,
 		updated_at = CURRENT_TIMESTAMP
 		WHERE token = ?`
 
@@ -9497,7 +9538,7 @@ func (r *TrafficRepository) MarkRemoteServerOfflineByID(ctx context.Context, ser
 		return prevStatus, name, ip, nil
 	}
 	_, err := r.db.ExecContext(ctx,
-		`UPDATE remote_servers SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = ?`,
+		`UPDATE remote_servers SET status = ?, offline_since = CURRENT_TIMESTAMP, offline_notified = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = ?`,
 		RemoteServerStatusOffline, serverID, RemoteServerStatusConnected,
 	)
 	if err != nil {
@@ -9508,30 +9549,32 @@ func (r *TrafficRepository) MarkRemoteServerOfflineByID(ctx context.Context, ser
 
 // UpdateRemoteServerLastActivity 通过服务器 ID 更新 last_heartbeat。
 // 当收到流量数据时会调用此方法，从而无需单独的心跳。
-// 返回 (prevStatus, serverName, ipAddress, err);调用方可比对 prev 决定要不要发上线通知。
-func (r *TrafficRepository) UpdateRemoteServerLastActivity(ctx context.Context, serverID int64) (string, string, string, error) {
+// 返回 (prevStatus, serverName, ipAddress, prevOfflineNotified, err);调用方比对 prev 决定要不要发上线通知
+// (容忍阈值下:只有 prevOfflineNotified=1,即下线通知已发过,恢复时才补发上线通知)。
+func (r *TrafficRepository) UpdateRemoteServerLastActivity(ctx context.Context, serverID int64) (string, string, string, bool, error) {
 	if r == nil || r.db == nil {
-		return "", "", "", errors.New("traffic repository not initialized")
+		return "", "", "", false, errors.New("traffic repository not initialized")
 	}
 
 	// 首先检查当前状态以记录状态更改
 	var currentStatus, serverName, ipAddress string
-	checkStmt := `SELECT name, status, COALESCE(ip_address, '') FROM remote_servers WHERE id = ?`
-	if err := r.db.QueryRowContext(ctx, checkStmt, serverID).Scan(&serverName, &currentStatus, &ipAddress); err == nil {
+	var prevOfflineNotified bool
+	checkStmt := `SELECT name, status, COALESCE(ip_address, ''), COALESCE(offline_notified, 0) FROM remote_servers WHERE id = ?`
+	if err := r.db.QueryRowContext(ctx, checkStmt, serverID).Scan(&serverName, &currentStatus, &ipAddress, &prevOfflineNotified); err == nil {
 		if currentStatus == RemoteServerStatusOffline {
 			log.Printf("[Online Detection] Server %s (ID=%d) status changing: OFFLINE -> CONNECTED (received traffic data)",
 				serverName, serverID)
 		}
 	}
 
-	const stmt = `UPDATE remote_servers SET status = ?, last_heartbeat = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+	const stmt = `UPDATE remote_servers SET status = ?, last_heartbeat = CURRENT_TIMESTAMP, offline_since = NULL, offline_notified = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
 
 	_, err := r.db.ExecContext(ctx, stmt, RemoteServerStatusConnected, serverID)
 	if err != nil {
-		return currentStatus, serverName, ipAddress, fmt.Errorf("update remote server last activity: %w", err)
+		return currentStatus, serverName, ipAddress, prevOfflineNotified, fmt.Errorf("update remote server last activity: %w", err)
 	}
 
-	return currentStatus, serverName, ipAddress, nil
+	return currentStatus, serverName, ipAddress, prevOfflineNotified, nil
 }
 
 // UpdateRemoteServerHeartbeatWithRestart 通过重新启动检测来更新心跳。
@@ -9605,6 +9648,8 @@ func (r *TrafficRepository) UpdateRemoteServerHeartbeatWithRestart(ctx context.C
 		listen_port = ?,
 		pull_address = ?,
 		time_offset_seconds = ?,
+		offline_since = NULL,
+		offline_notified = 0,
 		updated_at = CURRENT_TIMESTAMP
 		WHERE token = ?`
 
@@ -10392,7 +10437,7 @@ func (r *TrafficRepository) MarkOfflineRemoteServers(ctx context.Context, timeou
 	}
 
 	// 现在执行更新
-	const stmt = `UPDATE remote_servers SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE status = ? AND last_heartbeat < ?`
+	const stmt = `UPDATE remote_servers SET status = ?, offline_since = CURRENT_TIMESTAMP, offline_notified = 0, updated_at = CURRENT_TIMESTAMP WHERE status = ? AND last_heartbeat < ?`
 
 	result, err := r.db.ExecContext(ctx, stmt, RemoteServerStatusOffline, RemoteServerStatusConnected, cutoff)
 	if err != nil {
@@ -10408,6 +10453,49 @@ func (r *TrafficRepository) MarkOfflineRemoteServers(ctx context.Context, timeou
 	}
 
 	return offlineServers, nil
+}
+
+// TakeOfflineServersToNotify 取出"离线已满容忍阈值 tolerance、且本次离线周期尚未发过下线通知"的服务器,
+// 原子地把它们标记为 offline_notified=1 并返回(供 collector 发下线通知)。
+// 这是"容忍阈值"防抖的核心:离线后要持续离线满 tolerance 才通知 —— 阈值内又上线的(抖动/主控重启后 agent
+// 快速重连)其 offline_since 已被清空,永远走不到这里,故一条通知都不发。tolerance<=0 时 cutoff=now,
+// 相当于"下一轮 collector tick 即发"(接近即时)。
+func (r *TrafficRepository) TakeOfflineServersToNotify(ctx context.Context, tolerance time.Duration) ([]OfflineServerInfo, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	if tolerance < 0 {
+		tolerance = 0
+	}
+	cutoff := time.Now().UTC().Add(-tolerance)
+
+	const q = `SELECT id, name, COALESCE(ip_address, '') FROM remote_servers
+		WHERE status = ? AND offline_notified = 0 AND offline_since IS NOT NULL AND offline_since <= ?`
+	rows, err := r.db.QueryContext(ctx, q, RemoteServerStatusOffline, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("query offline servers to notify: %w", err)
+	}
+	var list []OfflineServerInfo
+	for rows.Next() {
+		var s OfflineServerInfo
+		if err := rows.Scan(&s.ID, &s.Name, &s.IP); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan offline server to notify: %w", err)
+		}
+		list = append(list, s)
+	}
+	rows.Close()
+	if len(list) == 0 {
+		return nil, nil
+	}
+
+	// 标记为已通知,避免下轮重复发。用同一 cutoff + 同一 WHERE,只会命中上面选出的那批。
+	const upd = `UPDATE remote_servers SET offline_notified = 1, updated_at = CURRENT_TIMESTAMP
+		WHERE status = ? AND offline_notified = 0 AND offline_since IS NOT NULL AND offline_since <= ?`
+	if _, err := r.db.ExecContext(ctx, upd, RemoteServerStatusOffline, cutoff); err != nil {
+		return nil, fmt.Errorf("mark offline_notified: %w", err)
+	}
+	return list, nil
 }
 
 // ==================== 节点流量 CRUD ====================

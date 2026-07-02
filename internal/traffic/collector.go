@@ -185,13 +185,19 @@ func offlineThreshold() time.Duration {
 
 // 收集所有活动服务器的流量
 func (c *Collector) collectAll(ctx context.Context) {
-	// 首先，检查并标记离线远程服务器(阈值由 offlineThreshold 控制,默认 90s)
-	offlineServers, err := c.repo.MarkOfflineRemoteServers(ctx, offlineThreshold())
-	if err != nil {
+	// 首先，检查并标记离线远程服务器(阈值由 offlineThreshold 控制,默认 90s)。
+	// 注意:MarkOffline 只改状态 + 记 offline_since,**不在这里直接发通知**。
+	if _, err := c.repo.MarkOfflineRemoteServers(ctx, offlineThreshold()); err != nil {
 		log.Printf("[Traffic Collector] Failed to mark offline servers: %v", err)
 	}
-	if c.OnServerOffline != nil {
-		for _, s := range offlineServers {
+	// 下线通知走"容忍阈值"防抖:离线持续满 tolerance 秒(且本周期没通知过)才发。阈值内又上线的
+	// (抖动 / 主控升级重启后 agent 快速重连)其 offline_since 已被重连清空,永远走不到这里 → 一条不发。
+	// 这是覆盖"主控重启刷通知"的关键:重启后 offline_since 从检测时刻重新计时,agent 阈值内重连即静默。
+	tolerance := time.Duration(c.repo.GetServerNotifyToleranceSeconds(ctx)) * time.Second
+	if toNotify, err := c.repo.TakeOfflineServersToNotify(ctx, tolerance); err != nil {
+		log.Printf("[Traffic Collector] Failed to take offline servers to notify: %v", err)
+	} else if c.OnServerOffline != nil {
+		for _, s := range toNotify {
 			c.OnServerOffline(ctx, s.Name, s.IP)
 		}
 	}
@@ -624,7 +630,7 @@ func (c *Collector) CollectFromRemoteServer(ctx context.Context, server storage.
 	// 跟 remote_ws.go:904 同款,更新 last_heartbeat,让 MarkOfflineRemoteServers 看到活跃。
 	// 之前 pull 路径漏调这一步 → fallback 期间 last_heartbeat 不更新 → 60s 阈值仍标 OFFLINE。
 	// 注意 stats==nil 也算心跳(无流量但 agent 在线),所以放在 nil 检查之前。
-	if _, _, _, err := c.repo.UpdateRemoteServerLastActivity(ctx, server.ID); err != nil {
+	if _, _, _, _, err := c.repo.UpdateRemoteServerLastActivity(ctx, server.ID); err != nil {
 		log.Printf("[Traffic Collector] Failed to update last activity for server %s after pull: %v", server.Name, err)
 	}
 

@@ -33,6 +33,8 @@ type notifyConfigResponse struct {
 	NotifyAgentLongOffline        bool `json:"notify_agent_long_offline"`
 	NotifyAgentLongOfflineMinutes int  `json:"notify_agent_long_offline_minutes"`
 	NotifyDeviceLimitExceeded     bool `json:"notify_device_limit_exceeded"`
+	// 服务器上下线通知容忍阈值(秒):离线满该秒数才发下线通知,阈值内又上线则不发(压抖动+主控重启误报)。0=关闭。
+	NotifyServerToleranceSeconds int `json:"notify_server_tolerance_seconds"`
 }
 
 type notifyConfigRequest struct {
@@ -58,6 +60,8 @@ type notifyConfigRequest struct {
 	NotifyAgentLongOffline        bool `json:"notify_agent_long_offline"`
 	NotifyAgentLongOfflineMinutes int  `json:"notify_agent_long_offline_minutes"`
 	NotifyDeviceLimitExceeded     bool `json:"notify_device_limit_exceeded"`
+	// 指针:nil=不改;非 nil=写入(0 合法,表示关闭容忍)。
+	NotifyServerToleranceSeconds *int `json:"notify_server_tolerance_seconds"`
 }
 
 type NotifyConfigHandler struct {
@@ -120,6 +124,7 @@ func (h *NotifyConfigHandler) handleGet(w http.ResponseWriter, r *http.Request) 
 		NotifyAgentLongOffline:        sysCfg.NotifyAgentLongOffline,
 		NotifyAgentLongOfflineMinutes: sysCfg.NotifyAgentLongOfflineMinutes,
 		NotifyDeviceLimitExceeded:     sysCfg.NotifyDeviceLimitExceeded,
+		NotifyServerToleranceSeconds:  h.repo.GetServerNotifyToleranceSeconds(r.Context()),
 	})
 }
 
@@ -175,6 +180,15 @@ func (h *NotifyConfigHandler) handleUpdate(w http.ResponseWriter, r *http.Reques
 	if err := h.repo.UpdateSystemConfig(r.Context(), sysCfg); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+
+	// 上下线通知容忍阈值单独存在 system_settings(与其它 notify 开关的 system_config 列解耦)。
+	// 指针非 nil 才写(0 合法=关闭)。
+	if req.NotifyServerToleranceSeconds != nil {
+		if err := h.repo.SetServerNotifyToleranceSeconds(r.Context(), *req.NotifyServerToleranceSeconds); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
 	}
 
 	if n := GetNotifier(); n != nil {

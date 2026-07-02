@@ -685,18 +685,13 @@ func (h *RemoteWSHandler) handleConnection(conn *websocket.Conn, remoteAddr stri
 			// 函数返回后 ctx 取消会把 telegram HTTP 请求一起 abort,通知发不出去。
 			dbCtx, dbCancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer dbCancel()
+			// 只标记离线 + 记 offline_since;**不在这里发下线通知**。下线通知统一由 traffic collector 按"容忍
+			// 阈值"防抖发送(离线持续满阈值秒才发)。这样抖动 / agent 升级 / 主控重启后 agent 快速重连时,
+			// offline_since 被重连清空,collector 永远走不到发通知那一步 → 一条不发,天然覆盖原升级窗口抑制。
 			if prev, name, _, err := h.repo.MarkRemoteServerOfflineByID(dbCtx, wsConn.ServerID); err != nil {
 				log.Printf("[Remote WS] mark offline on disconnect failed for %s: %v", wsConn.ServerName, err)
 			} else if prev == storage.RemoteServerStatusConnected {
-				if IsServerUpgrading(wsConn.ServerID) {
-					log.Printf("[Remote WS] %s disconnected during upgrade window — suppressing offline notification", name)
-				} else {
-					// 用 wsConn.IPAddress(本 conn auth 时刻的 IP)而不是 DB 里的 ip — 防 agent 换 IP 重连场景下,
-					// agent 已通过新 IP successful auth 把 DB.ip_address 改成新值,旧 conn cleanup 拿到 DB 拿到的就是新 IP,
-					// 导致"离线通知 IP=新 IP"。conn-local IP 保证离线通知永远是这条 conn 当时连上来的 IP。
-					log.Printf("[Remote WS] %s disconnected: marked offline, sending notification (ip=%s)", name, wsConn.IPAddress)
-					go SendServerOfflineNotification(context.Background(), name, wsConn.IPAddress)
-				}
+				log.Printf("[Remote WS] %s disconnected: marked offline (下线通知交由容忍阈值防抖的 collector)", name)
 			}
 		} else {
 			log.Printf("[Remote WS] Connection for %s already replaced by newer conn; skip offline marking", wsConn.ServerName)
@@ -954,8 +949,11 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 	} else if server.Status != "connected" {
 		if IsServerUpgrading(server.ID) {
 			log.Printf("[Remote WS] %s came back online during upgrade window — suppressing online notification", server.Name)
+		} else if server.Status == storage.RemoteServerStatusOffline && !server.OfflineNotified {
+			// 容忍阈值内恢复:下线通知从未发出(offline_notified=0)→ 上线也不发。抖动 / 主控重启后 agent 快速重连走这里。
+			log.Printf("[Remote WS] %s recovered within tolerance (offline never notified) — suppressing online notification", server.Name)
 		} else {
-			log.Printf("[Remote WS] %s status was %s, sending online notification", server.Name, server.Status)
+			log.Printf("[Remote WS] %s status was %s (offline_notified=%v), sending online notification", server.Name, server.Status, server.OfflineNotified)
 			go SendServerOnlineNotification(context.Background(), server.Name, ip)
 		}
 	}
@@ -1039,7 +1037,7 @@ func (h *RemoteWSHandler) handleTraffic(wsConn *RemoteWSConnection, payload json
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if _, _, _, err := h.repo.UpdateRemoteServerLastActivity(ctx, wsConn.ServerID); err != nil {
+	if _, _, _, _, err := h.repo.UpdateRemoteServerLastActivity(ctx, wsConn.ServerID); err != nil {
 		log.Printf("[Remote WS] Failed to update last activity for server %s: %v", wsConn.ServerName, err)
 	}
 	// 上线通知由 auth handler 那一头负责发(WS 重连必然走 auth),这里不重复
@@ -1183,7 +1181,7 @@ func (h *RemoteWSHandler) handleSpeed(wsConn *RemoteWSConnection, payload json.R
 	defer cancel()
 
 	// 更新速度报告上的last_heartbeat - 这使服务器标记为在线
-	if _, _, _, err := h.repo.UpdateRemoteServerLastActivity(ctx, wsConn.ServerID); err != nil {
+	if _, _, _, _, err := h.repo.UpdateRemoteServerLastActivity(ctx, wsConn.ServerID); err != nil {
 		log.Printf("[Remote WS] Failed to update last activity for server %s: %v", wsConn.ServerName, err)
 	}
 

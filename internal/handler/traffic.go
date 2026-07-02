@@ -941,10 +941,11 @@ func (h *RemoteTrafficHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	// 更新流量报告上的 last_heartbeat — 这取代了单独心跳的需要;
 	// 同时检测离线→在线翻转,补发 TG 上线通知(WS 模式 auth 已经发过,
 	// HTTP push 模式以前只在这里悄悄翻状态,所以下线通知有、上线通知没有)。
-	prevStatus, serverName, serverIP, uErr := h.repo.UpdateRemoteServerLastActivity(ctx, serverID)
+	prevStatus, serverName, serverIP, prevNotified, uErr := h.repo.UpdateRemoteServerLastActivity(ctx, serverID)
 	if uErr != nil {
 		log.Printf("[Remote Traffic] Failed to update last activity for %s: %v", remoteServer.Name, uErr)
-	} else if prevStatus == storage.RemoteServerStatusOffline {
+	} else if prevStatus == storage.RemoteServerStatusOffline && prevNotified {
+		// 只有下线通知已发过(离线满容忍阈值)才补发上线通知;阈值内恢复(prevNotified=0)保持静默。
 		SendServerOnlineNotification(ctx, serverName, serverIP)
 	}
 
