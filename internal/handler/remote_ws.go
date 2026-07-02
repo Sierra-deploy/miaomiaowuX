@@ -105,10 +105,6 @@ type WSTrafficPayload struct {
 	// System 系统级网卡累计 RX/TX,跟 HTTP path 的 RemoteTrafficRequest.System 同构。
 	// 用于 server.traffic_source='system' 时累加 system_*_cycle;nil = 老 agent 不上报,跳过。
 	System *RemoteSystemTraffic `json:"system,omitempty"`
-	// UserRates 方案 K — agent 1s ringbuffer 计算的「per-email 3 档窗口平均瞬时速率」(Bytes/sec)。
-	// 老 agent 不上报 → nil → master 跳过 rates upsert;新 agent 上报 → master 转 username 后落 user_traffic 速率字段。
-	// UserRateEntry 类型定义在 internal/traffic 包,避免在 handler 包重复定义(WS+HTTP+pull 三路共用)。
-	UserRates map[string]traffic.UserRateEntry `json:"user_rates,omitempty"`
 }
 
 // WSLimiterConfigPayload 表示限速配置下发消息 (Master -> Agent)
@@ -1066,13 +1062,6 @@ func (h *RemoteWSHandler) handleTraffic(wsConn *RemoteWSConnection, payload json
 		serverID := wsConn.ServerID
 		for email, speed := range trafficPayload.UserSpeeds {
 			h.userSpeedCache.Store(fmt.Sprintf("%d:%s", serverID, email), speed)
-		}
-	}
-
-	// 方案 K — agent 1s ringbuffer 3 档速率,落 user_traffic 速率字段
-	if len(trafficPayload.UserRates) > 0 {
-		if err := h.collector.ProcessUserRates(ctx, wsConn.ServerID, trafficPayload.UserRates); err != nil {
-			log.Printf("[Remote WS] Failed to process user rates for server %s: %v", wsConn.ServerName, err)
 		}
 	}
 

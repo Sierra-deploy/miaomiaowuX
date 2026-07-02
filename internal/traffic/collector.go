@@ -34,18 +34,6 @@ type TrafficData struct {
 	Downlink int64 `json:"downlink"`
 }
 
-// UserRateEntry 方案 K — 单 email 的「3 档窗口平均瞬时速率」(Bytes/sec)。
-// agent 1s ringbuffer 计算后,通过 WS/HTTP/pull 三路 payload 上报。WS handler / HTTP handler /
-// pull response 全部用 map[string]UserRateEntry(key=email)透传到 Collector.ProcessUserRates。
-type UserRateEntry struct {
-	UpBps1s    int64 `json:"up_bps_1s"`
-	DownBps1s  int64 `json:"down_bps_1s"`
-	UpBps5s    int64 `json:"up_bps_5s"`
-	DownBps5s  int64 `json:"down_bps_5s"`
-	UpBps30s   int64 `json:"up_bps_30s"`
-	DownBps30s int64 `json:"down_bps_30s"`
-}
-
 // XrayConfig 表示 xray config.json 的结构，用于读取 metrics 端口
 type XrayConfig struct {
 	Metrics *MetricsConfig `json:"metrics,omitempty"`
@@ -458,69 +446,6 @@ type userTrafficRepo interface {
 	UpsertUserEmailTraffic(ctx context.Context, serverID int64, email string, uplink, downlink int64, isXrayRestarted bool) error
 }
 
-// ProcessUserRates 方案 K 入口 — 收到 agent 上报的 per-email 瞬时速率(三档窗口平均),
-// 按 email→username 聚合(同一 username 的多 email 取 MAX),落 user_traffic 表速率字段。
-//
-// 聚合策略 MAX:同一 username 在同一 server 上可能挂多 email(套餐多子账号 / 客户端多 UUID),
-// 取「最忙 email 的速率」作为该 username 的代表值,符合「单节点承压」直觉;SUM 会高估总吞吐(同一连接被双计)。
-// 跨 server 聚合不在此层 — 落库时按 (server_id, username) 分别记录,前端 / API 再决定 server 间策略。
-func (c *Collector) ProcessUserRates(ctx context.Context, serverID int64, rates map[string]UserRateEntry) error {
-	if len(rates) == 0 {
-		return nil
-	}
-	byUsername := make(map[string]*storage.UserRateSample)
-	for email, r := range rates {
-		username := c.repo.ResolveUsernameByEmail(ctx, email)
-		if username == "" {
-			continue
-		}
-		existing := byUsername[username]
-		if existing == nil {
-			byUsername[username] = &storage.UserRateSample{
-				Username:   username,
-				UpBps1s:    r.UpBps1s,
-				DownBps1s:  r.DownBps1s,
-				UpBps5s:    r.UpBps5s,
-				DownBps5s:  r.DownBps5s,
-				UpBps30s:   r.UpBps30s,
-				DownBps30s: r.DownBps30s,
-			}
-			continue
-		}
-		// 同 username 多 email — 每字段取 MAX
-		if r.UpBps1s > existing.UpBps1s {
-			existing.UpBps1s = r.UpBps1s
-		}
-		if r.DownBps1s > existing.DownBps1s {
-			existing.DownBps1s = r.DownBps1s
-		}
-		if r.UpBps5s > existing.UpBps5s {
-			existing.UpBps5s = r.UpBps5s
-		}
-		if r.DownBps5s > existing.DownBps5s {
-			existing.DownBps5s = r.DownBps5s
-		}
-		if r.UpBps30s > existing.UpBps30s {
-			existing.UpBps30s = r.UpBps30s
-		}
-		if r.DownBps30s > existing.DownBps30s {
-			existing.DownBps30s = r.DownBps30s
-		}
-	}
-	if len(byUsername) == 0 {
-		return nil
-	}
-	samples := make([]storage.UserRateSample, 0, len(byUsername))
-	for _, s := range byUsername {
-		samples = append(samples, *s)
-	}
-	if err := c.repo.UpsertUserTrafficRates(ctx, serverID, samples); err != nil {
-		log.Printf("[Traffic Collector] UpsertUserTrafficRates server %d: %v", serverID, err)
-		return err
-	}
-	return nil
-}
-
 // 为所有服务器创建每日快照
 func (c *Collector) CreateDailySnapshots(ctx context.Context) error {
 	remoteServers, err := c.repo.ListRemoteServers(ctx)
@@ -614,8 +539,6 @@ func (c *Collector) CollectFromRemoteServer(ctx context.Context, server storage.
 		Success bool       `json:"success"`
 		Stats   *XrayStats `json:"stats,omitempty"`
 		Error   string     `json:"error,omitempty"`
-		// 方案 K — pull 路径速率字段;字段名跟 WS/HTTP path 的 UserRates 同款。
-		UserRates map[string]UserRateEntry `json:"user_rates,omitempty"`
 	}
 
 	if err := json.Unmarshal(body, &response); err != nil {
@@ -642,13 +565,6 @@ func (c *Collector) CollectFromRemoteServer(ctx context.Context, server storage.
 	// 处理指标 — server 对象已含 XrayBootTime,直接传给 ProcessRemoteMetrics 做重启判定
 	if err := c.ProcessRemoteMetrics(ctx, server.ID, response.Stats, server.XrayBootTime); err != nil {
 		return fmt.Errorf("process metrics: %w", err)
-	}
-
-	// 方案 K — pull 路径速率字段(老 agent 不上报 → nil → 跳过)
-	if len(response.UserRates) > 0 {
-		if err := c.ProcessUserRates(ctx, server.ID, response.UserRates); err != nil {
-			log.Printf("[Traffic Collector] Failed to process user rates from server %s: %v", server.Name, err)
-		}
 	}
 
 	// 更新上次拉取时间戳

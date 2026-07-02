@@ -859,10 +859,6 @@ type RemoteTrafficRequest struct {
 	// System 系统级网卡累计 RX/TX(来自 agent /proc/net/dev),用于 server.traffic_source='system' 路径。
 	// nil = 老 agent 不支持上报,server 视图自动回退 xray 数据源。
 	System *RemoteSystemTraffic `json:"system,omitempty"`
-	// UserRates 方案 K — agent 1s ringbuffer 计算的「per-email 3 档窗口平均瞬时速率」(Bytes/sec)。
-	// 老 agent 不上报 → nil → master 跳过 rates upsert。跟 WS path 的 WSTrafficPayload.UserRates 同构。
-	// UserRateEntry 类型定义在 internal/traffic 包。
-	UserRates map[string]traffic.UserRateEntry `json:"user_rates,omitempty"`
 }
 
 // RemoteSystemTraffic 内嵌于 RemoteTrafficRequest,跟 agent 端 sendTrafficData / sendTrafficHTTP 的字段对齐。
@@ -965,13 +961,6 @@ func (h *RemoteTrafficHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	if req.System != nil {
 		if err := h.repo.UpsertRemoteServerSystemTraffic(ctx, serverID, req.System.RxTotal, req.System.TxTotal, req.System.BootTimeUnix); err != nil {
 			log.Printf("[Remote Traffic] Failed to upsert system traffic for %s: %v", remoteServer.Name, err)
-		}
-	}
-
-	// 方案 K — agent 1s ringbuffer 3 档速率,落 user_traffic 速率字段
-	if len(req.UserRates) > 0 {
-		if err := h.collector.ProcessUserRates(ctx, serverID, req.UserRates); err != nil {
-			log.Printf("[Remote Traffic] Failed to process user rates for %s: %v", remoteServer.Name, err)
 		}
 	}
 
