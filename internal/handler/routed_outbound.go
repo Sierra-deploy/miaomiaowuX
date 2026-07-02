@@ -464,18 +464,38 @@ func peekInboundFirstClientFlow(ctx context.Context, rm *RemoteManageHandler, se
 			continue
 		}
 		settings, _ := ib["settings"].(map[string]interface{})
-		if settings == nil {
-			return "", nil
-		}
-		clients, _ := settings["clients"].([]interface{})
-		if len(clients) == 0 {
-			return "", nil
-		}
-		first, _ := clients[0].(map[string]interface{})
-		flow, _ := first["flow"].(string)
-		return flow, nil
+		stream, _ := ib["streamSettings"].(map[string]interface{})
+		return vlessFlowFromInbound(settings, stream), nil
 	}
 	return "", fmt.Errorf("inbound %s not found", inboundTag)
+}
+
+// vlessFlowFromInbound 从 inbound 的 settings/streamSettings 稳健推断 VLESS 应继承的 flow:
+//   ① 扫**所有** client,取第一个非空 flow(兼容 clients[0] 恰好是无 flow 的子账户/占位、或自定义 flow);
+//   ② 仍没有 → 若 streamSettings.security 是 reality/xtls/vision → "xtls-rprx-vision"(reality 标配,vless-only);
+//   ③ 都不满足 → ""(非 vision 的 vless / 其它协议,不加 flow)。
+// 之前只读 clients[0].flow:一旦 clients[0] 无 flow(旧前端/导入的入站、client 被重排),整条继承链就断,
+// routed 子账户全丢 flow —— 这就是"之前修过又出现"的回归根。
+func vlessFlowFromInbound(settings, streamSettings map[string]interface{}) string {
+	if settings != nil {
+		if clients, ok := settings["clients"].([]interface{}); ok {
+			for _, c := range clients {
+				if cm, ok := c.(map[string]interface{}); ok {
+					if f, ok := cm["flow"].(string); ok && strings.TrimSpace(f) != "" {
+						return f
+					}
+				}
+			}
+		}
+	}
+	if streamSettings != nil {
+		sec, _ := streamSettings["security"].(string)
+		sec = strings.ToLower(strings.TrimSpace(sec))
+		if sec == "reality" || strings.Contains(sec, "xtls") || strings.Contains(sec, "vision") {
+			return "xtls-rprx-vision"
+		}
+	}
+	return ""
 }
 
 // primaryKeyFieldForProtocol 返回该协议的"主认证字段名",routed cred 复用 / peek 后回写主字段时用。
@@ -750,6 +770,18 @@ func computeRoutedNodeUserCred(ctx context.Context, rm *RemoteManageHandler, rep
 		json.Unmarshal([]byte(existing.CredentialJSON), &credential)
 		credJSON = existing.CredentialJSON
 		userEmail = existing.Email // saved 优先,避免命名规则变动导致 email 漂移
+		// 修复历史存量:VLESS Reality 复用旧子账户凭据时,若缺 flow 就从父 inbound 稳健补上并回写,
+		// 否则历史无 flow 的子账户重新绑定/加节点时会一直复用无 flow 的凭据 → 客户端连不上。
+		if strings.EqualFold(routed.Protocol, "vless") && credential != nil {
+			if _, hasFlow := credential["flow"]; !hasFlow {
+				if flow, ferr := peekInboundFirstClientFlow(ctx, rm, serverID, routed.InboundTag); ferr == nil && flow != "" {
+					credential["flow"] = flow
+					if b, merr := json.Marshal(credential); merr == nil {
+						credJSON = string(b)
+					}
+				}
+			}
+		}
 	} else {
 		// 用 generateRoutedClientCred 按 routed 节点继承的 protocol 选对字段(vless=id / trojan=password / ...)
 		newCred, newCredJSON, gerr := generateRoutedClientCred(routed.Protocol, "", userEmail)
