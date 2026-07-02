@@ -2148,8 +2148,9 @@ func (h *nodesHandler) handleFetchSubscription(w http.ResponseWriter, r *http.Re
 	})
 }
 
-// handleParseURIs 解析前端粘贴的多行 URI / base64 文本，返回 clash 节点（经 proxyparser 统一解析）。
-// 前端把含 :// 的行发到这里（Surge INI 行仍由前端本地解析）。
+// handleParseURIs 解析前端粘贴的节点文本,返回 clash 节点。
+// 支持:Clash YAML(整份含 proxies: / 裸 `- name:` 列表 / 单条 {name:...})、多行 URI 链接、base64 订阅文本、
+// Surge INI 行。前端直接把原始粘贴内容发来,由 parsePastedProxies 统一识别格式。
 func (h *nodesHandler) handleParseURIs(w http.ResponseWriter, r *http.Request) {
 	username := auth.UsernameFromContext(r.Context())
 	if username == "" {
@@ -2168,9 +2169,9 @@ func (h *nodesHandler) handleParseURIs(w http.ResponseWriter, r *http.Request) {
 		writeBadRequest(w, "内容不能为空")
 		return
 	}
-	proxies, err := proxyparser.ParseSubscription(req.Content)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, errors.New("解析失败: "+err.Error()))
+	proxies := parsePastedProxies(req.Content)
+	if len(proxies) == 0 {
+		writeError(w, http.StatusBadRequest, errors.New("解析失败: 未识别到任何节点(支持 Clash YAML、URI 链接、base64 订阅文本)"))
 		return
 	}
 	for _, proxy := range proxies {
@@ -2184,6 +2185,50 @@ func (h *nodesHandler) handleParseURIs(w http.ResponseWriter, r *http.Request) {
 		"proxies": proxies,
 		"count":   len(proxies),
 	})
+}
+
+// parsePastedProxies 识别并解析"手动粘贴"的节点文本,返回 clash proxy 列表(map)。
+// 顺序:①整份 Clash 配置 / base64 / URI 列表(复用订阅拉取同款 preprocess+yaml 管线)
+//       ②裸 `- name:` 列表(无 proxies: 头) ③单条 {name:...} ④proxyparser 兜底(URI/Surge INI)。
+func parsePastedProxies(content string) []map[string]any {
+	// ① preprocess 会把 base64 / URI 列表转成 proxies-YAML,整份 Clash 配置原样透传。
+	body := []byte(content)
+	if pre, perr := preprocessSubscriptionContent(body); perr == nil && len(pre) > 0 {
+		body = pre
+	}
+	var full struct {
+		Proxies []map[string]any `yaml:"proxies"`
+	}
+	if err := yaml.Unmarshal(body, &full); err == nil && len(full.Proxies) > 0 {
+		return full.Proxies
+	}
+	// ② 裸列表:用原始内容(避免 preprocess 干扰),`- name:` 序列直接解成 []map。
+	var list []map[string]any
+	if err := yaml.Unmarshal([]byte(content), &list); err == nil && len(list) > 0 && looksLikeProxy(list[0]) {
+		return list
+	}
+	// ③ 单条代理:{name:..., type:..., server:...}
+	var one map[string]any
+	if err := yaml.Unmarshal([]byte(content), &one); err == nil && looksLikeProxy(one) {
+		return []map[string]any{one}
+	}
+	// ④ 兜底:纯 URI / Surge INI(preprocess 未覆盖到的场景)
+	if p, err := proxyparser.ParseSubscription(content); err == nil && len(p) > 0 {
+		return p
+	}
+	return nil
+}
+
+// looksLikeProxy 判定一个 map 是否像 clash 代理节点(有 name 且有 type 或 server),
+// 避免把任意 YAML map 误当节点。
+func looksLikeProxy(m map[string]any) bool {
+	if m == nil {
+		return false
+	}
+	_, hasName := m["name"]
+	_, hasType := m["type"]
+	_, hasServer := m["server"]
+	return hasName && (hasType || hasServer)
 }
 
 func (h *nodesHandler) handleListTags(w http.ResponseWriter, r *http.Request) {
