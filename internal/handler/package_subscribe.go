@@ -551,7 +551,14 @@ func applyUserCredentials(proxy map[string]any, node storage.Node, credMap map[c
 	if err := json.Unmarshal([]byte(credJSON), &cred); err != nil {
 		return
 	}
-	switch node.Protocol {
+	applyCredToProxy(proxy, node.Protocol, cred)
+}
+
+// applyCredToProxy 按协议把用户凭据(cred = credential_json 解析结果)写进 clash proxy 的对应字段。
+// 物理节点(applyUserCredentials)和 routed 节点(buildRoutedProxyForUser)共用,避免协议分支两处维护
+// 不一致(历史 bug:routed 只覆盖了 uuid,导致 SS/Trojan/HY2 保留创建者凭据)。
+func applyCredToProxy(proxy map[string]any, protocol string, cred map[string]any) {
+	switch protocol {
 	case "vless", "vmess":
 		if id, ok := cred["id"].(string); ok && id != "" {
 			proxy["uuid"] = id
@@ -562,7 +569,7 @@ func applyUserCredentials(proxy map[string]any, node storage.Node, credMap map[c
 				// 仅 SS2022 需要 "master:userPass" 双段拼接(老 SS 单段密码不该改)。
 				cipher, _ := proxy["cipher"].(string)
 				if strings.HasPrefix(cipher, "2022-") {
-					// 兜底:存量 node.ClashConfig 可能还是老格式 "master:firstClient" — 剥掉冒号后段,
+					// 兜底:存量 clash_config 可能还是老格式 "master:firstClient" — 剥掉冒号后段,
 					// 只保留 master,再拼当前用户密码,得到正确的两段。新节点直接 nodePass 就是 master 一段。
 					if idx := strings.Index(nodePass, ":"); idx >= 0 {
 						nodePass = nodePass[:idx]
@@ -617,12 +624,12 @@ func buildRoutedProxyForUser(ctx context.Context, repo *storage.TrafficRepositor
 	if err := json.Unmarshal([]byte(clashJSON), &proxy); err != nil {
 		return nil, false
 	}
-	// 覆盖 uuid(VLESS/VMess 主键)、节点名
+	// 按协议覆盖当前用户在该 routed 节点上的凭据(vless/vmess→uuid;ss→master:userPass;trojan→password;
+	// hy2→auth)。此前只覆盖了 uuid,导致 SS/Trojan/HY2 保留了模板里创建者的凭据 → 用户串到创建者身份、
+	// 匹配不到 routed 路由规则而走错出口。改用与物理节点一致的 applyCredToProxy。
 	var cred map[string]any
 	if err := json.Unmarshal([]byte(sa.CredentialJSON), &cred); err == nil {
-		if id, ok := cred["id"].(string); ok && id != "" {
-			proxy["uuid"] = id
-		}
+		applyCredToProxy(proxy, routedNode.Protocol, cred)
 	}
 	proxy["name"] = routedNode.NodeName
 	return proxy, true
