@@ -308,7 +308,7 @@ func (h *nodesHandler) handleList(w http.ResponseWriter, r *http.Request) {
 	if user, uerr := h.repo.GetUser(r.Context(), username); uerr == nil && user.PackageID > 0 {
 		if pkg, perr := h.repo.GetPackage(r.Context(), user.PackageID); perr == nil && pkg != nil && len(pkg.NodeMultipliers) > 0 {
 			for i, n := range nodes {
-				m := pkg.MultiplierForNode(n.ID, n.ParentNodeID)
+				m := pkg.MultiplierForNode(n.ID)
 				if m != 1.0 {
 					dto[i].Multiplier = m
 				}

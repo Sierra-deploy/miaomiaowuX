@@ -511,7 +511,7 @@ func applyMultiplierPrefix(proxy map[string]any, node storage.Node, pkg *storage
 	if proxy == nil || cfg == nil || pkg == nil || !cfg.NodeNameMultiplierPrefixEnabled {
 		return "", "", false
 	}
-	mult := pkg.MultiplierForNode(node.ID, node.ParentNodeID)
+	mult := pkg.MultiplierForNode(node.ID)
 	if mult == 1.0 {
 		return "", "", false
 	}

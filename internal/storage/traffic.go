@@ -232,20 +232,17 @@ func (p *Package) TrafficMultiplier() int64 {
 	return 1
 }
 
-// MultiplierForNode 返回某节点在该套餐内的倍率。
-// routed 子节点(自身不在套餐 NodeMultipliers 里)传入 parentNodeID,自动回退到父物理节点的倍率;
-// 都查不到 → 1.0(默认权重)。
-func (p *Package) MultiplierForNode(nodeID int64, parentNodeID *int64) float64 {
+// MultiplierForNode 返回某节点在该套餐内的倍率。**每个节点(含 routed 出站节点)的倍率都是独立的**:
+// 只看该节点自己在 NodeMultipliers 里的配置,没配 → 1.0(默认权重)。
+// 不再回退到父/根节点 —— routed 节点虽与根节点共用同一 inbound,但在 xray 里是不同的 user(email/UUID),
+// 流量能按 email 精确归属到具体 routed 节点(见 GetUserWeightedTraffic 的子账号路径),故各算各的倍率,
+// 不该被根节点倍率覆盖。
+func (p *Package) MultiplierForNode(nodeID int64) float64 {
 	if p == nil || len(p.NodeMultipliers) == 0 {
 		return 1.0
 	}
 	if m, ok := p.NodeMultipliers[nodeID]; ok && m > 0 {
 		return m
-	}
-	if parentNodeID != nil {
-		if m, ok := p.NodeMultipliers[*parentNodeID]; ok && m > 0 {
-			return m
-		}
 	}
 	return 1.0
 }
@@ -8596,12 +8593,11 @@ func (r *TrafficRepository) GetUserWeightedTraffic(ctx context.Context, username
 	}
 	saRows.Close()
 
-	// 预加载:nodes 缓存(id → {id, parent_node_id, original_server, inbound_tag})
-	// 给 routed 节点拿父 ID + 给主账号反查 server+inbound → id
-	nodeByID := make(map[int64]struct {
-		ParentID *int64
-	})
-	nodeByServerTag := make(map[string]int64) // key=server_name+"\x00"+inbound_tag
+	// 预加载:主账号 <username>__<inbound_tag> 流量反查节点用。key=server_name+"\x00"+inbound_tag。
+	// **只映射物理节点(parent_node_id IS NULL)**:routed 子节点继承了父节点的 original_server+inbound_tag,
+	// 若一并映射,同一 (server,inbound) 会被 routed 子节点覆盖(后写覆盖前写)→ 主账号(连的是物理入站)
+	// 的流量会误用某个 routed 子节点的倍率。主账号流量本就属于物理节点,故只认物理节点。
+	nodeByServerTag := make(map[string]int64)
 	nRows, err := r.db.QueryContext(ctx,
 		`SELECT id, parent_node_id, COALESCE(original_server,''), COALESCE(inbound_tag,'') FROM nodes`)
 	if err != nil {
@@ -8614,8 +8610,7 @@ func (r *TrafficRepository) GetUserWeightedTraffic(ctx context.Context, username
 		if err := nRows.Scan(&id, &parentID, &srv, &tag); err != nil {
 			continue
 		}
-		nodeByID[id] = struct{ ParentID *int64 }{ParentID: parentID}
-		if srv != "" && tag != "" {
+		if parentID == nil && srv != "" && tag != "" {
 			nodeByServerTag[srv+"\x00"+tag] = id
 		}
 	}
@@ -8640,23 +8635,19 @@ func (r *TrafficRepository) GetUserWeightedTraffic(ctx context.Context, username
 		}
 		bytes := uplink + downlink
 
-		// 子账号路径(routed)
+		// 子账号路径(routed):每个 routed 节点用它自己的倍率(独立,不再回退父/根节点)。
 		if nid, ok := subaccNodeID[email]; ok {
-			var parent *int64
-			if meta, ok2 := nodeByID[nid]; ok2 {
-				parent = meta.ParentID
-			}
-			weighted += float64(bytes) * pkg.MultiplierForNode(nid, parent)
+			weighted += float64(bytes) * pkg.MultiplierForNode(nid)
 			continue
 		}
 
-		// 主账号 inbound 路径:<username>__<inbound_tag>
+		// 主账号 inbound 路径:<username>__<inbound_tag> → 物理节点(nodeByServerTag 只含物理节点)。
 		if strings.HasPrefix(email, prefix) {
 			tag := email[len(prefix):]
 			srvName := serverNames[serverID]
 			if srvName != "" {
 				if nid, ok := nodeByServerTag[srvName+"\x00"+tag]; ok {
-					weighted += float64(bytes) * pkg.MultiplierForNode(nid, nil)
+					weighted += float64(bytes) * pkg.MultiplierForNode(nid)
 					continue
 				}
 			}
