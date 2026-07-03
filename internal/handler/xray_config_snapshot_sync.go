@@ -67,8 +67,14 @@ func (h *RemoteManageHandler) SyncXrayConfigOnReconnect(ctx context.Context, ser
 				log.Printf("[XraySync] server=%d expect_recovery set but no current snapshot: %v", serverID, cerr)
 				return
 			}
-			// test → PUT current
-			testBody, _ := json.Marshal(map[string]string{"config": current.ConfigJSON})
+			// 恢复前 merge:把 agent 实配(resp.Config)里 current 落后缺失的 inbound/outbound 并回来,
+			// 避免用落后 snapshot 全量覆盖抹掉 federation 对方新加的入站("共享入站一觉醒来消失")。
+			cfgToApply, mergedN := mergeAgentOnlyInboundsOutbounds(current.ConfigJSON, resp.Config)
+			if mergedN > 0 {
+				log.Printf("[XraySync] server=%d expect_recovery: merged %d agent-only inbound/outbound into snapshot before restore", serverID, mergedN)
+			}
+			// test → PUT
+			testBody, _ := json.Marshal(map[string]string{"config": cfgToApply})
 			if raw, terr := h.forwardToRemoteServer(fctx, serverID, "POST", "/api/child/xray/test-config", testBody); terr == nil {
 				var tr struct {
 					Ok    bool   `json:"ok"`
@@ -80,7 +86,7 @@ func (h *RemoteManageHandler) SyncXrayConfigOnReconnect(ctx context.Context, ser
 					return
 				}
 			}
-			putBody, _ := json.Marshal(map[string]interface{}{"config": current.ConfigJSON, "force": true})
+			putBody, _ := json.Marshal(map[string]interface{}{"config": cfgToApply, "force": true})
 			if _, perr := h.forwardToRemoteServer(fctx, serverID, "POST", "/api/child/xray/config", putBody); perr != nil {
 				log.Printf("[XraySync] server=%d expect_recovery PUT failed: %v", serverID, perr)
 				return
@@ -189,4 +195,60 @@ func (h *RemoteManageHandler) refreshXraySnapshot(serverID int64) {
 	if h.inboundCache != nil {
 		h.inboundCache.SyncFromConfig(serverID, resp.Config)
 	}
+}
+
+// mergeAgentOnlyInboundsOutbounds 在 baseCfg(要下发的 snapshot)基础上,把 agentCfg(agent 当前实配)里
+// base 缺失的 inbound / outbound 按 tag 并回来,返回合并后的 config JSON 和新增条数。
+//
+// 场景:federation 双方各自往同一台 agent 加入站后,若某方的 current snapshot 落后(写后 refresh 抖动/
+// 超时漏了对方入站),掉线自动恢复(expect_recovery)会用这份落后 snapshot 全量覆盖 agent → 抹掉对方入站
+// ("共享入站一觉醒来只剩自己的")。恢复前先把 agent 实配里 base 缺的 inbound/outbound 并回来,避免误删。
+//
+// 只并 inbound/outbound(都有唯一 tag,可安全去重);routing 用 base 的(routing rule 无 tag,无脑并集会
+// 引入重复/歧义)。任一解析失败 → 原样返回 base,绝不因合并逻辑本身让恢复失败。
+func mergeAgentOnlyInboundsOutbounds(baseCfgJSON, agentCfgJSON string) (string, int) {
+	var base, agent map[string]any
+	if json.Unmarshal([]byte(baseCfgJSON), &base) != nil {
+		return baseCfgJSON, 0
+	}
+	if json.Unmarshal([]byte(agentCfgJSON), &agent) != nil {
+		return baseCfgJSON, 0
+	}
+	added := 0
+	for _, key := range []string{"inbounds", "outbounds"} {
+		baseArr, _ := base[key].([]any)
+		agentArr, _ := agent[key].([]any)
+		if len(agentArr) == 0 {
+			continue
+		}
+		have := make(map[string]bool, len(baseArr))
+		for _, it := range baseArr {
+			if m, ok := it.(map[string]any); ok {
+				if tag, _ := m["tag"].(string); tag != "" {
+					have[tag] = true
+				}
+			}
+		}
+		for _, it := range agentArr {
+			m, ok := it.(map[string]any)
+			if !ok {
+				continue
+			}
+			tag, _ := m["tag"].(string)
+			if tag == "" || have[tag] {
+				continue
+			}
+			baseArr = append(baseArr, it)
+			added++
+		}
+		base[key] = baseArr
+	}
+	if added == 0 {
+		return baseCfgJSON, 0
+	}
+	merged, err := json.Marshal(base)
+	if err != nil {
+		return baseCfgJSON, 0
+	}
+	return string(merged), added
 }
