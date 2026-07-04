@@ -415,6 +415,11 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 		NodeName   string
 	}
 	var inboundFallbacks []inboundFallbackItem
+	// both(v4/v6)会为同一 inbound 建两个节点(同 server + 同 InboundTag)。按节点遍历会让同一
+	// (user, server, inbound) 被收集两次 → agent 加两个同 email client → xray "User already exists" 启动失败。
+	// 凭据是绑到 inbound(server+tag)而非节点的,按 (user, server, inboundTag) 去重:每个入站每个用户只加一次。
+	// routed 节点走 collectRoutedBatchItem(按 node.ID)独立路径,不参与此去重。
+	inboundSeen := map[string]bool{}
 	// 用户间互不影响 + 节点间互不影响 → 全部并发跑。
 	// agent 端 inboundsMu 自动同服务器顺序化,master 这边不需要 per-server 锁。
 	var bindWg sync.WaitGroup
@@ -449,6 +454,15 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 				if node.InboundTag == "" || node.OriginalServer == "" {
 					return
 				}
+				// 同一 (user, server, inbound) 只收集一次 —— both 的 v4/v6 双节点共享同一入站,避免重复加 client。
+				seenKey := user.Username + "|" + node.OriginalServer + "|" + node.InboundTag
+				mu.Lock()
+				if inboundSeen[seenKey] {
+					mu.Unlock()
+					return
+				}
+				inboundSeen[seenKey] = true
+				mu.Unlock()
 				server, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer)
 				if err != nil {
 					log.Printf("[PackageUpdate] Failed to find server %s: %v", node.OriginalServer, err)
@@ -933,6 +947,10 @@ func (h *PackageAssignHandler) AssignAndProvision(ctx context.Context, username 
 			}
 			var inboundFallbacks []inboundFallbackItem
 
+			// both(v4/v6)会为同一 inbound 建两个节点(同 server + 同 InboundTag)。凭据绑到 inbound 而非节点,
+			// 按 (server, inboundTag) 去重,避免同一用户同一入站被加两个同 email client → xray "User already exists"。
+			// routed 节点走 node.ID 独立路径,不参与此去重。
+			inboundSeen := map[string]bool{}
 			// 节点绑定并发跑 — routed / inbound 都只在阶段一收集,阶段二 per-server batch 一次性提交。
 			var bindWg sync.WaitGroup
 			for _, nodeID := range pkg.Nodes {
@@ -968,6 +986,15 @@ func (h *PackageAssignHandler) AssignAndProvision(ctx context.Context, username 
 					if node.InboundTag == "" || node.OriginalServer == "" {
 						return
 					}
+					// 同一 (server, inbound) 只收集一次 —— both 的 v4/v6 双节点共享同一入站,避免重复加 client。
+					seenKey := user.Username + "|" + node.OriginalServer + "|" + node.InboundTag
+					mu.Lock()
+					if inboundSeen[seenKey] {
+						mu.Unlock()
+						return
+					}
+					inboundSeen[seenKey] = true
+					mu.Unlock()
 					server, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer)
 					if err != nil {
 						log.Printf("[PackageAssign] Failed to find server %s: %v", node.OriginalServer, err)
