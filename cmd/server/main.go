@@ -448,6 +448,10 @@ func main() {
 	limiterPusher.SetLicenseManager(licenseManager)
 	remoteWSHandler.SetLimiterPusher(limiterPusher)
 	remoteWSHandler.SetLicenseManager(licenseManager)
+	// license 从失效恢复为有效时,主动重推所有 embedded 服务器的限速(失效期被 gate 漏下发的补上)。
+	licenseManager.SetOnRecover(func() {
+		limiterPusher.PushToAllEmbeddedServers(context.Background())
+	})
 	xrayServerHandler.SetLimiterPusher(limiterPusher)
 	xrayServerHandler.SetLicenseManager(licenseManager)
 
@@ -474,6 +478,8 @@ func main() {
 	}()
 	// agent 重连后异步同步 xray config snapshot(双向兜底 — agent/master 跑路换机都能恢复)。
 	remoteWSHandler.SetXrayConfigSyncCallback(remoteManageHandler.SyncXrayConfigOnReconnect)
+	// agent 重连后校正 embedded→external 漂移(license 恢复后自动把卡在 external 的 agent 拉回 embedded)。
+	remoteWSHandler.SetXrayModeCorrectCallback(remoteManageHandler.CorrectXrayModeDrift)
 	xrayServerHandler.SetRemoteManager(remoteManageHandler)
 	xrayServerHandler.SetWSHandler(remoteWSHandler)
 

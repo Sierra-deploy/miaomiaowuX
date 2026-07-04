@@ -398,3 +398,21 @@ func (p *LimiterConfigPusher) PushToAllServersForUser(ctx context.Context, usern
 		p.PushToServer(ctx, sid)
 	}
 }
+
+// PushToAllEmbeddedServers 给所有 embedded 模式远程服务器重推限速配置。
+// 用于 license 从失效恢复时补下发:失效期间 PushToServer 内部被 license gate 跳过(实际不限速),
+// 恢复后主动补一遍,否则要等 agent 下次重连 auth 或用户改配置才恢复。
+func (p *LimiterConfigPusher) PushToAllEmbeddedServers(ctx context.Context) {
+	if p.licenseManager != nil && !p.licenseManager.HasFeature("limiter") {
+		return
+	}
+	servers, err := p.repo.ListRemoteServers(ctx)
+	if err != nil {
+		return
+	}
+	for _, s := range servers {
+		if s.XrayMode == "embedded" {
+			p.PushToServer(ctx, s.ID)
+		}
+	}
+}

@@ -252,3 +252,30 @@ func mergeAgentOnlyInboundsOutbounds(baseCfgJSON, agentCfgJSON string) (string, 
 	}
 	return string(merged), added
 }
+
+// CorrectXrayModeDrift 校正 embedded→external 漂移(agent WS auth 成功后由 RemoteWSHandler 异步触发)。
+// agentMode = agent 随 auth 上报的当前实际 xray_mode。
+//
+// 只处理"DB=embedded 但 agent=external"这一个**安全方向**:license 失效期 embedded(PRO)被 gate、
+// 服务器被迫切 external → agent config.yaml 卡在 external → 系统无 xray 起不来;license 恢复后主控
+// 又不下发 mode → 一直卡住("没同步 agent")。这里下发 switch-xray-mode(embedded) 让 agent 切回。
+// embedded 运行不依赖 license,切回绝对安全;反向(DB=external → 切 embedded 或 agent=embedded → 切 external)
+// 都不自动,避免把好端端的 external 服务器搞挂。agent 收到后改 config.yaml + 自重启,重连即 embedded。
+func (h *RemoteManageHandler) CorrectXrayModeDrift(ctx context.Context, serverID int64, agentMode string) {
+	if strings.TrimSpace(agentMode) != "external" {
+		return
+	}
+	server, err := h.repo.GetRemoteServer(ctx, serverID)
+	if err != nil || server == nil || server.XrayMode != "embedded" {
+		return
+	}
+	log.Printf("[XrayModeDrift] server=%d DB=embedded but agent=external → auto-switch agent back to embedded", serverID)
+	fctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	body, _ := json.Marshal(map[string]string{"xray_mode": "embedded"})
+	if _, perr := h.forwardToRemoteServer(fctx, serverID, "POST", "/api/child/agent/switch-xray-mode", body); perr != nil {
+		log.Printf("[XrayModeDrift] server=%d auto-switch to embedded failed: %v", serverID, perr)
+		return
+	}
+	log.Printf("[XrayModeDrift] server=%d switch-xray-mode(embedded) sent; agent will restart into embedded", serverID)
+}

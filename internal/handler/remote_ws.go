@@ -77,6 +77,10 @@ type WSAuthPayload struct {
 	// 不再反向 HTTP 拉 /api/child/system/info —— 端口隐身(HidePortOnWS)关闭入站后仍可拿到。
 	// 老 agent 不发该字段 = 空串 → fallback 反向 HTTP(向后兼容)。
 	AgentVersion string `json:"agent_version,omitempty"`
+	// XrayMode agent 当前实际运行模式(embedded/external),随 auth 上报。master 据此校正
+	// "embedded→external 漂移":DB 记 embedded 但 agent 卡 external 时自动下发切回 embedded
+	// (license 失效期被迫切 external、恢复后不同步的自愈)。老 agent 不发 = 空串 → 跳过校正。
+	XrayMode string `json:"xray_mode,omitempty"`
 }
 
 // AgentCapabilities 描述 agent 端支持的扩展能力位。
@@ -288,6 +292,9 @@ type RemoteWSHandler struct {
 	// xrayConfigSyncCallback 在 auth 成功后异步触发(args: serverID + 上次 server.status),
 	// 实现见 RemoteManageHandler.SyncXrayConfigOnReconnect — 跨 handler 用 callback 注入避免循环依赖。
 	xrayConfigSyncCallback func(ctx context.Context, serverID int64, prevStatus string)
+	// xrayModeCorrectCallback 在 auth 成功后异步触发,校正 embedded→external 漂移(agent 上报的实际 mode)。
+	// 实现见 RemoteManageHandler.CorrectXrayModeDrift。老 agent 不上报 mode → agentMode 空 → 跳过。
+	xrayModeCorrectCallback func(ctx context.Context, serverID int64, agentMode string)
 	// authFailIPs 记录最近 auth 失败的 IP,用于"狂连"场景的 backoff:
 	//   - 同 IP 在 cooldown 内的连接直接拒绝 upgrade(节省 CPU 与日志)
 	//   - 同 IP 的失败日志按窗口聚合,防止刷屏
@@ -358,6 +365,11 @@ func (h *RemoteWSHandler) SetCrypto(cc *CryptoConfig) {
 // 由 RemoteManageHandler 在 main wire 时注入,避免 ws ↔ manage 互引导致的循环依赖。
 func (h *RemoteWSHandler) SetXrayConfigSyncCallback(cb func(ctx context.Context, serverID int64, prevStatus string)) {
 	h.xrayConfigSyncCallback = cb
+}
+
+// SetXrayModeCorrectCallback 注册 agent WS auth 成功后的 xray_mode 漂移校正回调。
+func (h *RemoteWSHandler) SetXrayModeCorrectCallback(cb func(ctx context.Context, serverID int64, agentMode string)) {
+	h.xrayModeCorrectCallback = cb
 }
 
 // 处理 WebSocket 升级和连接
@@ -998,6 +1010,12 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 	// prevStatus == "offline" → 写 pending_recovery(VPS 跑路换机场景);其它 → upsert current(SSH 修复 / 首连)
 	if h.xrayConfigSyncCallback != nil {
 		go h.xrayConfigSyncCallback(context.Background(), server.ID, server.Status)
+	}
+
+	// embedded 漂移校正:agent 随 auth 上报当前实际 xray_mode,与 DB 不一致时(DB=embedded 但 agent 卡 external,
+	// 通常是 license 失效期被迫切 external、恢复后没同步)自动下发切回 embedded。老 agent 不上报 → 空串 → 跳过。
+	if h.xrayModeCorrectCallback != nil && authPayload.XrayMode != "" {
+		go h.xrayModeCorrectCallback(context.Background(), server.ID, authPayload.XrayMode)
 	}
 
 	// 在第一次连接时自动部署窃取配置（服务器处于挂起状态）

@@ -88,6 +88,15 @@ type Manager struct {
 	usage     UsageReporter
 	client    *http.Client
 	cancel    context.CancelFunc
+	// onRecover 在 license 从 invalid→valid 恢复时异步触发(如重推 limiter — 失效期被 gate 漏下发的补上)。
+	onRecover func()
+}
+
+// SetOnRecover 注册 license 从失效恢复为有效时的回调(例如重推 limiter 配置)。启动前调一次。
+func (m *Manager) SetOnRecover(cb func()) {
+	m.mu.Lock()
+	m.onRecover = cb
+	m.mu.Unlock()
 }
 
 // SetUsageReporter 注入 usage 来源,启动前调一次。nil 时 heartbeat payload 不带 used_* 字段。
@@ -357,6 +366,9 @@ func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce 
 		}
 	}
 
+	// 记录变更前是否有效,用于 invalid→valid 恢复回调(重推 limiter 等)。
+	wasValid := m.IsValid()
+
 	m.mu.Lock()
 
 	m.status.Valid = result.Valid
@@ -379,9 +391,16 @@ func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce 
 		log.Printf("[license] HARD REVOKED by server: %s", result.Error)
 	}
 
+	cb := m.onRecover
 	m.mu.Unlock()
 
 	m.persistStatus(ctx)
+
+	// invalid→valid 恢复:主动触发回调(重推 limiter 等 — 失效期被 license gate 漏下发的配置补上,
+	// 否则限速要等 agent 下次重连/用户改配置才恢复)。
+	if result.Valid && !wasValid && cb != nil {
+		go cb()
+	}
 }
 
 func (m *Manager) heartbeatLoop(ctx context.Context) {
