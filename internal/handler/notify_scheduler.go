@@ -269,9 +269,9 @@ func sendDailyTrafficNotification(ctx context.Context, repo *storage.TrafficRepo
 			if s.limit > 0 {
 				limitGB := float64(s.limit) / (1024 * 1024 * 1024)
 				pct := float64(s.used) / float64(s.limit) * 100
-				lines = append(lines, fmt.Sprintf("• %s: %.1fGB/%.0fGB (%.0f%%)", s.name, usedGB, limitGB, pct))
+				lines = append(lines, fmt.Sprintf("• %s: %.1fGB/%.0fGB (%.0f%%)", notify.EscapeMarkdown(s.name), usedGB, limitGB, pct))
 			} else {
-				lines = append(lines, fmt.Sprintf("• %s: %.1fGB", s.name, usedGB))
+				lines = append(lines, fmt.Sprintf("• %s: %.1fGB", notify.EscapeMarkdown(s.name), usedGB))
 			}
 		}
 	}
@@ -321,7 +321,7 @@ func sendDailyTrafficNotification(ctx context.Context, repo *storage.TrafficRepo
 				continue
 			}
 			usedGB := float64(u.used) / (1024 * 1024 * 1024)
-			lines = append(lines, fmt.Sprintf("• %s: %.2fGB", u.name, usedGB))
+			lines = append(lines, fmt.Sprintf("• %s: %.2fGB", notify.EscapeMarkdown(u.name), usedGB))
 		}
 	}
 

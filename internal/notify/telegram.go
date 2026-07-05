@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -47,4 +48,13 @@ func sendTelegram(ctx context.Context, botToken, chatID, text string) error {
 	}
 
 	return nil
+}
+
+// markdownEscaper 转义 Telegram legacy Markdown 的特殊字符。
+var markdownEscaper = strings.NewReplacer("_", "\\_", "*", "\\*", "`", "\\`", "[", "\\[")
+
+// EscapeMarkdown 把用户名/服务器名等动态内容安全地嵌进带 *bold* / `code` 的消息模板。
+// 未转义时,含下划线(或 * ` [)的用户名会让 TG 的 Markdown 解析失败 → 400 bad request。
+func EscapeMarkdown(s string) string {
+	return markdownEscaper.Replace(s)
 }
