@@ -1947,6 +1947,21 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
+	// anytls 入站只有内嵌 xray(fork)支持,官方外置 xray 无此协议 → 会以 "unknown config id: anytls" 启动失败。
+	// 外置模式直接拒绝(前端也会禁用该选项,这里是绕过前端直连 API 的兜底)。
+	if r.Method == http.MethodPost && inboundReq != nil {
+		if action, _ := inboundReq["action"].(string); action == "" || strings.ToLower(action) == "add" {
+			if inbound, ok := inboundReq["inbound"].(map[string]interface{}); ok {
+				if proto, _ := inbound["protocol"].(string); strings.ToLower(proto) == "anytls" {
+					if server, err := h.repo.GetRemoteServer(r.Context(), id); err == nil && server != nil && server.XrayMode == "external" {
+						remoteWriteError(w, http.StatusBadRequest, "anytls 协议需要内嵌 xray,请先将该服务器切换为内嵌模式")
+						return
+					}
+				}
+			}
+		}
+	}
+
 	// 中转(relay):relay_server/relay_port 是前端 wizard 挂在 inbound 上的带外字段,agent/xray 不需要 ——
 	// 转发前从 body 里剥掉,仅用于建节点时把 clash server/port 换成中转地址(经 InboundEvent 传给 NodeSyncListener)。
 	var relayServer string
