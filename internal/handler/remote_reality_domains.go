@@ -286,49 +286,29 @@ func (h *RemoteManageHandler) HandleSetupSSL(w http.ResponseWriter, r *http.Requ
 	// 提取通配符证书的根域（例如 us1.example.com -> example.com）
 	rootDomain := extractRootDomain(domain)
 
-	// 根据 steal_mode 选择模板路径
+	// 步骤1：读取nginx.conf基本模板（无需域替换）
 	nginxTplPath := "tunnel/nginx.conf"
-	domainTplPath := "tunnel/domain_static.conf"
 	if server.StealMode == "fallback" {
 		nginxTplPath = "fallback/nginx.conf"
-		domainTplPath = "fallback/domain_static.conf"
 	}
-	if server.SiteType == "proxy" {
-		if server.StealMode == "fallback" {
-			domainTplPath = "fallback/domain_proxy.conf"
-		} else {
-			domainTplPath = "tunnel/domain_proxy.conf"
-		}
-	}
-
-	// 步骤1：读取nginx.conf基本模板（无需域替换）
 	nginxConf, readErr := templates.ReadFile(nginxTplPath)
 	if readErr != nil {
 		remoteWriteError(w, http.StatusInternalServerError, fmt.Sprintf("读取 nginx.conf 模板失败: %v", readErr))
 		return
 	}
 
-	// 第2步：读取domain.conf模板并替换占位符
-	domainTpl, readErr := templates.ReadFile(domainTplPath)
-	if readErr != nil {
-		remoteWriteError(w, http.StatusInternalServerError, fmt.Sprintf("读取 domain.conf 模板失败: %v", readErr))
-		return
-	}
 	certName := "_." + rootDomain
 	if h.certHandler != nil {
 		if cert, certErr := h.repo.GetCertificateByDomain(r.Context(), rootDomain, id); certErr == nil && cert != nil {
 			certName = certDeployFilename(cert.Domain)
 		}
 	}
-	domainConf := strings.ReplaceAll(string(domainTpl), "{domain}", domain)
-	domainConf = strings.ReplaceAll(domainConf, "{root_domain}", rootDomain)
-	domainConf = strings.ReplaceAll(domainConf, "{cert_name}", certName)
-	staticRoot := server.SiteValue
-	if staticRoot == "" {
-		staticRoot = "/usr/local/nginx/html"
+	// 第2步：统一渲染 domain conf(伪装站 location / + 该 server 现有 ws location,reality偷自己+WSS 共存)
+	domainConf, derr := renderStealSelfDomainConf(server.StealMode, server.SiteType, server.SiteValue, domain, certName, h.fetchWSSInbounds(r.Context(), id))
+	if derr != nil {
+		remoteWriteError(w, http.StatusInternalServerError, fmt.Sprintf("渲染 domain.conf 失败: %v", derr))
+		return
 	}
-	domainConf = strings.ReplaceAll(domainConf, "{static_root_path}", staticRoot)
-	domainConf = strings.ReplaceAll(domainConf, "{proxy_pass_server}", server.SiteValue)
 
 	sslPayload, _ := json.Marshal(map[string]any{
 		"domain":        domain,

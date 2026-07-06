@@ -281,6 +281,40 @@ func (h *XrayServerHandler) RevealServerToken(w stdhttp.ResponseWriter, r *stdht
 }
 
 // 使用生成的令牌创建一个新的远程服务器
+// validateSiteValue 校验偷自己/fallback 站点的反代地址。site_type=proxy 时,site_value 必须是
+// 合法的反代目标(host:port 或带 scheme 的 URL);host 形如"纯数字+点"却不是合法 IPv4 时判为 typo
+// (如 127.0.01 少一个 0)。static(本地静态路径)与空值跳过校验。
+func validateSiteValue(siteType, siteValue string) error {
+	v := strings.TrimSpace(siteValue)
+	if v == "" || siteType != "proxy" {
+		return nil
+	}
+	u, err := url.Parse(v)
+	if err != nil || u.Host == "" {
+		if u, err = url.Parse("http://" + v); err != nil || u.Host == "" {
+			return fmt.Errorf("反代地址格式无效: %s", v)
+		}
+	}
+	host := u.Hostname()
+	if isDottedNumeric(host) && net.ParseIP(host) == nil {
+		return fmt.Errorf("反代地址 IP 无效: %s(如 127.0.01 应为 127.0.0.1)", host)
+	}
+	return nil
+}
+
+// isDottedNumeric 判断 s 是否仅由数字和点组成,用于识别"看起来是 IPv4 但写错"的 host。
+func isDottedNumeric(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c != '.' && (c < '0' || c > '9') {
+			return false
+		}
+	}
+	return true
+}
+
 func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdhttp.Request) {
 	if r.Method != "POST" {
 		stdhttp.Error(w, "Method not allowed", stdhttp.StatusMethodNotAllowed)
@@ -320,6 +354,15 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		json.NewEncoder(w).Encode(RemoteServerResponse{
 			Success: false,
 			Message: "服务器名称不能为空",
+		})
+		return
+	}
+
+	if err := validateSiteValue(req.SiteType, req.SiteValue); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(RemoteServerResponse{
+			Success: false,
+			Message: err.Error(),
 		})
 		return
 	}

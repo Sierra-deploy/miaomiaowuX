@@ -21,27 +21,16 @@ func (h *RemoteManageHandler) deployFallbackConfig(ctx context.Context, server *
 		return fmt.Errorf("读取 fallback/nginx.conf 模板失败: %w", err)
 	}
 
-	domainTplPath := "fallback/domain_static.conf"
-	if server.SiteType == "proxy" {
-		domainTplPath = "fallback/domain_proxy.conf"
-	}
-	domainTpl, err := templates.ReadFile(domainTplPath)
-	if err != nil {
-		return fmt.Errorf("读取 %s 模板失败: %w", domainTplPath, err)
-	}
 	certName := "_." + rootDomain
 	if cert, certErr := h.repo.GetCertificateByDomain(ctx, rootDomain, server.ID); certErr == nil && cert != nil {
 		certName = certDeployFilename(cert.Domain)
 	}
-	domainConf := strings.ReplaceAll(string(domainTpl), "{domain}", domain)
-	domainConf = strings.ReplaceAll(domainConf, "{root_domain}", rootDomain)
-	domainConf = strings.ReplaceAll(domainConf, "{cert_name}", certName)
-	staticRoot := server.SiteValue
-	if staticRoot == "" {
-		staticRoot = "/usr/local/nginx/html"
+	// 统一渲染:伪装站 location / + 该 server 现有 ws 入站的 location
+	// (reality偷自己 + WSS 共存 —— 下发伪装站时把已有 ws location 一并渲染,避免冲掉)
+	domainConf, err := renderStealSelfDomainConf(server.StealMode, server.SiteType, server.SiteValue, domain, certName, h.fetchWSSInbounds(ctx, server.ID))
+	if err != nil {
+		return err
 	}
-	domainConf = strings.ReplaceAll(domainConf, "{static_root_path}", staticRoot)
-	domainConf = strings.ReplaceAll(domainConf, "{proxy_pass_server}", server.SiteValue)
 
 	sslPayload, _ := json.Marshal(map[string]any{
 		"domain":        domain,

@@ -137,16 +137,25 @@ func convertInboundsForMode(inbounds []map[string]any, oldMode, newMode string) 
 	toTunnel := newMode == "tunnel"
 	fromTunnel := oldMode == "tunnel"
 
-	if fromTunnel && !toTunnel {
-		for _, inbound := range inbounds {
-			listen, _ := inbound["listen"].(string)
-			if listen == "127.0.0.1" {
-				inbound["listen"] = "0.0.0.0"
+	for _, inbound := range inbounds {
+		// ws 入站(vless+ws)两种模式下都由 nginx 反代、固定 listen 127.0.0.1 + 本地端口,切换不动它,
+		// 否则会被误改成对外 listen / 抢端口。
+		if ss, _ := inbound["streamSettings"].(map[string]any); ss != nil {
+			if net, _ := ss["network"].(string); net == "ws" {
+				continue
 			}
 		}
-	} else if !fromTunnel && toTunnel {
-		for _, inbound := range inbounds {
-			listen, _ := inbound["listen"].(string)
+		listen, _ := inbound["listen"].(string)
+		if fromTunnel && !toTunnel {
+			// tunnel → fallback:reality 主入站从内部(127.0.0.1:转发端口)回到对外(0.0.0.0:443)
+			if listen == "127.0.0.1" {
+				inbound["listen"] = "0.0.0.0"
+				inbound["port"] = float64(443)
+			}
+		} else if !fromTunnel && toTunnel {
+			// fallback → tunnel:reality 主入站从对外(0.0.0.0:443)变成内部 listen(127.0.0.1);
+			// port 的 remap(→tunnel-in.settings.port,避免和 tunnel-in 抢 443)在 injectUserInbounds 里做
+			// (那时 config 里才有部署好的 tunnel-in)。
 			if listen == "0.0.0.0" || listen == "" {
 				inbound["listen"] = "127.0.0.1"
 			}
@@ -174,6 +183,12 @@ func (h *RemoteManageHandler) injectUserInbounds(ctx context.Context, serverID i
 	if err := json.Unmarshal([]byte(configResp.Config), &newConfig); err != nil {
 		log.Printf("[SwitchStealMode] Failed to parse new config JSON")
 		return
+	}
+
+	// 切到 tunnel:把与 tunnel-in 监听端口(如 443)冲突的用户入站 port 改成 tunnel-in 转发端口(settings.port),
+	// 否则 reality vless 和 tunnel-in 抢同一端口绑定失败、且 tunnel-in 转发目标无入站(切换后 0 inbounds 的根因)。
+	if newMode == "tunnel" {
+		remapUserInboundPortsForTunnel(newConfig, userInbounds)
 	}
 
 	// 追加用户入站
@@ -251,5 +266,40 @@ func cleanTunnelRoutingRules(config map[string]any) {
 			cleanedOB = append(cleanedOB, item)
 		}
 		config["outbounds"] = cleanedOB
+	}
+}
+
+// remapUserInboundPortsForTunnel 切到 tunnel 模式时,把与 tunnel-in 监听端口冲突的用户入站 port
+// 改成 tunnel-in 的转发端口(settings.port)。典型:fallback 的 reality vless 监听 443,切 tunnel 后
+// tunnel-in 占了 443,该 vless 必须挪到 tunnel-in.settings.port(如 46174)——tunnel-in 才能把流量转发给它、
+// 且不和 tunnel-in 抢 443。config 是部署 tunnel 模板后含 tunnel-in 的新配置;userInbounds 为待注入的
+// 用户入站(原地改 port)。tunnel-in 缺失或转发端口为 0 时不动(交给后续报错,不静默改错)。
+func remapUserInboundPortsForTunnel(config map[string]any, userInbounds []map[string]any) {
+	var listenPort, fwdPort float64
+	inbounds, _ := config["inbounds"].([]any)
+	for _, raw := range inbounds {
+		ib, _ := raw.(map[string]any)
+		if ib == nil {
+			continue
+		}
+		if proto, _ := ib["protocol"].(string); proto != "tunnel" {
+			continue
+		}
+		if tag, _ := ib["tag"].(string); tag != "tunnel-in" {
+			continue
+		}
+		listenPort, _ = ib["port"].(float64)
+		if s, ok := ib["settings"].(map[string]any); ok {
+			fwdPort, _ = s["port"].(float64)
+		}
+		break
+	}
+	if listenPort == 0 || fwdPort == 0 {
+		return
+	}
+	for _, ib := range userInbounds {
+		if p, _ := ib["port"].(float64); p == listenPort {
+			ib["port"] = fwdPort
+		}
 	}
 }

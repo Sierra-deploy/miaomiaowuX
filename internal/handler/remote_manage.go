@@ -122,6 +122,25 @@ func (h *RemoteManageHandler) deployDefaultConfig(serverID int64) {
 	log.Printf("[Remote Manage] Auto-deployed default config to server %d (was empty)", serverID)
 }
 
+// serverHasXrayContent 查 server 当前 xray config 是否已有用户内容(非空模板),复用 hasNonTemplateContent。
+// GET /api/child/xray/config 读的是 agent 上的 config.json 文件、不依赖 xray 进程,xray 挂时也能返回。
+// GET / 解析失败保守返回 true(视为有内容、不覆盖),优先保护存量配置(宁可漏一次自动部署,也不误覆盖用户配置)。
+func (h *RemoteManageHandler) serverHasXrayContent(ctx context.Context, serverID int64) bool {
+	cur, err := h.forwardToRemoteServer(ctx, serverID, http.MethodGet, "/api/child/xray/config", nil)
+	if err != nil {
+		return true
+	}
+	var resp struct {
+		Success bool   `json:"success"`
+		Config  string `json:"config"`
+	}
+	if json.Unmarshal(cur, &resp) != nil || !resp.Success {
+		return true
+	}
+	cfg := strings.TrimSpace(resp.Config)
+	return cfg != "" && hasNonTemplateContent(cfg)
+}
+
 // hasNonTemplateContent 判断一份 xray config 是不是"用户有内容"的(而非空模板)。
 // 标准:
 //   - 至少 1 个 tag != "api" 的 inbound,或
@@ -216,19 +235,27 @@ func (h *RemoteManageHandler) HandleScanResult(serverID int64, payload WSScanRes
 		// xray 未运行，自动下发配置
 		server, err := h.repo.GetRemoteServer(ctx, serverID)
 		if err == nil && server != nil {
-			if server.Use443 && server.Domain != "" && h.stealSelfDeployer != nil {
-				go func() {
-					deployCtx, deployCancel := context.WithTimeout(context.Background(), 60*time.Second)
-					defer deployCancel()
+			useStealSelf := server.Use443 && server.Domain != "" && h.stealSelfDeployer != nil
+			go func() {
+				deployCtx, deployCancel := context.WithTimeout(context.Background(), 60*time.Second)
+				defer deployCancel()
+				// 已有用户内容就不覆盖:偷自己 server 重启瞬间 xray 未就绪也会上报 XrayRunning=false,
+				// 之前只有 deployDefaultConfig 内部有 hasNonTemplateContent 保护、stealSelfDeployer 分支没有,
+				// 导致已部署的偷自己 server 每次重启都被模板覆盖 nginx/config。这里统一拦一道,两分支都保护。
+				if h.serverHasXrayContent(deployCtx, serverID) {
+					log.Printf("[Remote Manage] server %d xray 未运行但配置已有用户内容,跳过自动下发(避免覆盖 nginx/config)", serverID)
+					return
+				}
+				if useStealSelf {
 					if err := h.stealSelfDeployer(deployCtx, serverID); err != nil {
 						log.Printf("[Remote Manage] Auto-deploy steal-self config failed for server %d: %v", serverID, err)
 					} else {
 						log.Printf("[Remote Manage] Auto-deployed steal-self config for server %d", serverID)
 					}
-				}()
-			} else {
-				go h.deployDefaultConfig(serverID)
-			}
+				} else {
+					h.deployDefaultConfig(serverID)
+				}
+			}()
 		}
 	}
 }
@@ -4206,6 +4233,11 @@ func (h *RemoteManageHandler) HandleValidateSite(w http.ResponseWriter, r *http.
 		return
 	}
 
+	if err := validateSiteValue(req.SiteType, req.SiteValue); err != nil {
+		remoteWriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	payload, _ := json.Marshal(map[string]string{
 		"site_type":  req.SiteType,
 		"site_value": req.SiteValue,
@@ -4237,6 +4269,11 @@ func (h *RemoteManageHandler) HandleAddWebsite(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	if err := validateSiteValue(req.SiteType, req.SiteValue); err != nil {
+		remoteWriteError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	ctx := r.Context()
 	server, err := h.repo.GetRemoteServer(ctx, req.ServerID)
 	if err != nil {
@@ -4247,35 +4284,23 @@ func (h *RemoteManageHandler) HandleAddWebsite(w http.ResponseWriter, r *http.Re
 	domain := strings.ToLower(strings.TrimSpace(req.Domain))
 	rootDomain := extractRootDomain(domain)
 
-	// 1. 生成 nginx domain config
-	tplDir := "tunnel"
-	if server.StealMode == "fallback" {
-		tplDir = "fallback"
-	}
-	tplFile := tplDir + "/domain_static.conf"
-	if req.SiteType == "proxy" {
-		tplFile = tplDir + "/domain_proxy.conf"
-	}
-	domainTpl, err := templates.ReadFile(tplFile)
-	if err != nil {
-		remoteWriteError(w, http.StatusInternalServerError, fmt.Sprintf("读取模板失败: %v", err))
-		return
-	}
 	certName := "_." + rootDomain
 	if h.certHandler != nil {
 		if cert, certErr := h.repo.GetCertificateByDomain(ctx, rootDomain, req.ServerID); certErr == nil && cert != nil {
 			certName = certDeployFilename(cert.Domain)
 		}
 	}
-	domainConf := strings.ReplaceAll(string(domainTpl), "{domain}", domain)
-	domainConf = strings.ReplaceAll(domainConf, "{root_domain}", rootDomain)
-	domainConf = strings.ReplaceAll(domainConf, "{cert_name}", certName)
-	staticRoot := req.SiteValue
-	if staticRoot == "" {
-		staticRoot = "/usr/local/nginx/html"
+	// 1. 生成 nginx domain config(统一渲染:伪装站 location / + ws location)。
+	// ws 入站走主域名 fallback,故仅当添加的正是 server 主域名时才聚合 ws location;额外网站域名不带 ws。
+	var wssForDomain []wssInboundInfo
+	if strings.EqualFold(domain, strings.ToLower(strings.TrimSpace(server.Domain))) {
+		wssForDomain = h.fetchWSSInbounds(ctx, req.ServerID)
 	}
-	domainConf = strings.ReplaceAll(domainConf, "{static_root_path}", staticRoot)
-	domainConf = strings.ReplaceAll(domainConf, "{proxy_pass_server}", req.SiteValue)
+	domainConf, err := renderStealSelfDomainConf(server.StealMode, req.SiteType, req.SiteValue, domain, certName, wssForDomain)
+	if err != nil {
+		remoteWriteError(w, http.StatusInternalServerError, fmt.Sprintf("渲染 domain.conf 失败: %v", err))
+		return
+	}
 
 	// 2. 部署 nginx domain config（不覆盖 nginx.conf）
 	sslPayload, _ := json.Marshal(map[string]any{
