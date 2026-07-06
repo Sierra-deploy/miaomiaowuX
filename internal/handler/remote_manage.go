@@ -4069,6 +4069,30 @@ func (h *RemoteManageHandler) HandleResetAllTokens(w http.ResponseWriter, r *htt
 	})
 }
 
+// isXrayConfigError 判断 xray 重启失败是否源于「配置本身」(JSON 解析 / config 构建失败)。
+// 这类错误重启多少次、清 nginx stream、停 nginx 都救不了 —— config 不改就永远起不来。
+// 内嵌模式下,主控对坏配置反复升级重启会挤占 / 阻塞 agent 的 WS 心跳,把它误判成「断联」
+// (见:负载均衡 burstObservatory 缺 pingConfig 导致整机假性掉线的事故)。命中则跳过后续升级重试。
+func isXrayConfigError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, kw := range []string{
+		"failed to parse json config",
+		"infra/conf",
+		"requires a valid",
+		"failed to build",
+		"unknown config id",
+		"failed to load",
+	} {
+		if strings.Contains(msg, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *RemoteManageHandler) restartXrayWithRecovery(ctx context.Context, serverID int64, logPrefix string) error {
 	// restartAndVerify 改成 polling — 之前固定 sleep N 秒固然简单但显著拖慢套餐绑定/批量操作:
 	// 主控对每条 server restart 都等满 sleep 时长,套餐里多 routed 节点跨多台 server 时
@@ -4112,6 +4136,13 @@ func (h *RemoteManageHandler) restartXrayWithRecovery(ctx context.Context, serve
 		return nil
 	} else {
 		log.Printf("[%s] Xray restart attempt 1 failed on server %d: %v", logPrefix, serverID, err)
+		// config 本身错误(如 burstObservatory 缺 pingConfig / anytls 未知协议 / JSON 解析失败):
+		// 后面的升级重试(等更久、清 nginx stream、停 nginx 重启)全都无济于事,只会反复折腾、
+		// 拖垮 agent。直接返回,让用户去修配置 —— 不进入升级重启风暴。
+		if isXrayConfigError(err) {
+			log.Printf("[%s] server %d: xray 配置错误,跳过升级重启(需改配置才能恢复): %v", logPrefix, serverID, err)
+			return err
+		}
 	}
 
 	// 第二轮:可能只是启动慢,polling 久一点
