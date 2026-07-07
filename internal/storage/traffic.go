@@ -2573,6 +2573,17 @@ CREATE TABLE IF NOT EXISTS user_inbound_configs (
 	if _, err := r.db.Exec(userInboundConfigsSchema); err != nil {
 		return fmt.Errorf("migrate user_inbound_configs: %w", err)
 	}
+	// 历史去重(同 username+server_id+inbound_tag 保留最早一条)+ 唯一索引:根治并发绑套餐写入的
+	// 「同用户同入站多条凭据」。加了唯一索引后 SaveUserInboundConfig 的 ON CONFLICT DO NOTHING 才生效,
+	// DB 层兜底不再产生重复。DELETE 去重 + CREATE UNIQUE INDEX IF NOT EXISTS 均幂等,可每次启动跑。
+	if _, err := r.db.Exec(`DELETE FROM user_inbound_configs WHERE id NOT IN (
+		SELECT MIN(id) FROM user_inbound_configs GROUP BY username, server_id, inbound_tag)`); err != nil {
+		return fmt.Errorf("dedup user_inbound_configs: %w", err)
+	}
+	if _, err := r.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_inbound_configs_uniq
+		ON user_inbound_configs(username, server_id, inbound_tag)`); err != nil {
+		return fmt.Errorf("index user_inbound_configs: %w", err)
+	}
 
 	const userOutboundsSchema = `
 CREATE TABLE IF NOT EXISTS user_outbounds (
@@ -7799,8 +7810,11 @@ type UserInboundConfig struct {
 }
 
 func (r *TrafficRepository) SaveUserInboundConfig(ctx context.Context, cfg UserInboundConfig) error {
+	// ON CONFLICT DO NOTHING:配合 UNIQUE(username,server_id,inbound_tag) 索引,并发写只保留第一条、
+	// 后写静默忽略。凭据以「先写入的那条」为准,与全局锁 + 生成时立即写 DB 配合,彻底防同用户同入站重复凭据。
 	_, err := r.db.ExecContext(ctx,
-		`INSERT INTO user_inbound_configs (username, server_id, inbound_tag, protocol, credential_json) VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO user_inbound_configs (username, server_id, inbound_tag, protocol, credential_json) VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(username, server_id, inbound_tag) DO NOTHING`,
 		cfg.Username, cfg.ServerID, cfg.InboundTag, cfg.Protocol, cfg.CredentialJSON)
 	return err
 }

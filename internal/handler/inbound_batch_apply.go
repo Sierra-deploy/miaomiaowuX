@@ -31,50 +31,13 @@ func collectInboundClientAddItem(ctx context.Context, cache *InboundCache, repo 
 		return nil, false, nil
 	}
 
-	// 兜底:DB 无记录,但 agent 该 inbound 可能已有同 email 的 client(user_inbound_configs 与 agent 漂移)。
-	// 直接查内存缓存的 ib.Settings(快照含完整 clients,零额外往返),命中即复用既有凭据(uuid/password),
-	// 绝不新增同 email 不同 uuid 的重复 —— xray 对同 email 会以 "User already exists" 拒绝 restart。
-	// 命中后照常进 batch(agent 端 add-client 按 id 幂等 no-op)+ 写回 user_inbound_configs 让 DB 与 agent 重新对齐。
-	if reuse := extractClientByEmail(ib.Settings, user.Username+"__"+inboundTag); reuse != nil {
-		reuseJSON, _ := json.Marshal(reuse)
-		return &InboundClientAddItem{
-			Username:       user.Username,
-			ServerID:       serverID,
-			InboundTag:     inboundTag,
-			Protocol:       ib.Protocol,
-			Credential:     reuse,
-			CredentialJSON: string(reuseJSON),
-		}, true, nil
-	}
-
-	// shadowsocks 需要 method 决定 key 长度
-	var method string
-	if ib.Settings != nil {
-		method, _ = ib.Settings["method"].(string)
-	}
-	credential, credJSON, err := generateCredential(ib.Protocol, user, method, inboundTag)
+	// DB 无记录 → 走 getOrCreateInboundCredential:全局锁内按 email 复用 agent 已有 client / 生成新凭据 + 立即写 DB。
+	// 并发时两条路径拿到同一份 canonical 凭据(同 uuid),batch-apply / add-client 按 id 幂等,永不产生重复子账户。
+	// flow(VLESS Reality)继承 + 写 DB 都在其内部完成。
+	credential, credJSON, _, err := getOrCreateInboundCredential(ctx, repo, user, serverID, inboundTag, ib.Protocol, ib.Settings)
 	if err != nil {
 		return nil, false, fmt.Errorf("generate credential: %w", err)
 	}
-
-	// VLESS Reality 必须有 flow=xtls-rprx-vision,否则客户端连不上。
-	// 跟 addUserToInbound line 1181-1195 同款继承逻辑 — batch 路径之前漏了这一段,
-	// 套餐加节点给已有用户分发时新生成的 client 全部丢 flow 字段(用户报的 bug)。
-	if strings.EqualFold(ib.Protocol, "vless") {
-		if _, hasFlow := credential["flow"]; !hasFlow && ib.Settings != nil {
-			if clients, ok := ib.Settings["clients"].([]interface{}); ok && len(clients) > 0 {
-				if first, ok := clients[0].(map[string]interface{}); ok {
-					if flow, ok := first["flow"].(string); ok && flow != "" {
-						credential["flow"] = flow
-						if b, err := json.Marshal(credential); err == nil {
-							credJSON = string(b)
-						}
-					}
-				}
-			}
-		}
-	}
-
 	return &InboundClientAddItem{
 		Username:       user.Username,
 		ServerID:       serverID,

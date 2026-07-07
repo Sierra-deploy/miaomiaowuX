@@ -1202,6 +1202,85 @@ func restartXrayInParallel(ctx context.Context, rm *RemoteManageHandler, serverI
 	wg.Wait()
 }
 
+// inboundCredLocks 串行化同一 (user, server, inbound) 的凭据生成 + 写 DB。
+// 根治跨操作并发(套餐绑定 + 限速 enforcer / node-sync 同时命中同一 user+inbound)时,两条路径各自
+// 查到 DB 无记录 → 各生成不同随机 uuid → agent 按 uuid 去重失效 → 同 email 重复子账户。
+var inboundCredLocks sync.Map // key "username|serverID|inboundTag" → *sync.Mutex
+
+func inboundCredLock(username string, serverID int64, inboundTag string) *sync.Mutex {
+	key := fmt.Sprintf("%s|%d|%s", username, serverID, inboundTag)
+	v, _ := inboundCredLocks.LoadOrStore(key, &sync.Mutex{})
+	return v.(*sync.Mutex)
+}
+
+// getOrCreateInboundCredential 在 (user, server, inbound) 全局锁内原子地拿到该用户在该入站的凭据:
+//  1. DB user_inbound_configs 有记录 → 复用(续费 / 重复绑定 / 并发中的第二个请求)
+//  2. agent 该入站已有同 email 的 client(settings 快照)→ 复用并回写 DB
+//  3. 都没有 → 生成新凭据 + 立即写 DB
+//
+// 「全局锁 + 生成时立即写 DB」是根治并发重复的核心:串行后第二个并发请求在步骤 1 就命中第一个刚写入的
+// 凭据、拿到同一 uuid,agent add-client 按 uuid 幂等 no-op,不再产生同 email 不同 uuid 的重复子账户。
+// settings 为该入站 settings 快照(InboundCache 或 live GET 均可)。返回 (credential, credJSON, reused)。
+func getOrCreateInboundCredential(ctx context.Context, repo *storage.TrafficRepository,
+	user storage.User, serverID int64, inboundTag, protocol string, settings map[string]interface{},
+) (map[string]interface{}, string, bool, error) {
+	lock := inboundCredLock(user.Username, serverID, inboundTag)
+	lock.Lock()
+	defer lock.Unlock()
+
+	// 1) DB 复用
+	if existing, _ := repo.GetUserInboundConfig(ctx, user.Username, serverID, inboundTag); existing != nil && existing.Protocol == protocol {
+		var cred map[string]interface{}
+		if json.Unmarshal([]byte(existing.CredentialJSON), &cred) == nil && cred != nil {
+			return cred, existing.CredentialJSON, true, nil
+		}
+	}
+
+	email := user.Username + "__" + inboundTag
+
+	// 2) agent 已有同 email → 复用并回写 DB(主控与 agent 重新对齐,下次直接走步骤 1)
+	if reuse := extractClientByEmail(settings, email); reuse != nil {
+		b, _ := json.Marshal(reuse)
+		credJSON := string(b)
+		_ = repo.SaveUserInboundConfig(ctx, storage.UserInboundConfig{
+			Username: user.Username, ServerID: serverID, InboundTag: inboundTag,
+			Protocol: protocol, CredentialJSON: credJSON,
+		})
+		return reuse, credJSON, true, nil
+	}
+
+	// 3) 生成新 + 立即写 DB(锁内)。后续 add-client / batch-apply 即便失败也没关系:凭据已 reserve,
+	// 下次复用同一份重发,agent 幂等 → 永不重复。
+	var method string
+	if settings != nil {
+		method, _ = settings["method"].(string)
+	}
+	cred, credJSON, err := generateCredential(protocol, user, method, inboundTag)
+	if err != nil {
+		return nil, "", false, err
+	}
+	// VLESS Reality 从现有 client 继承 flow
+	if strings.EqualFold(protocol, "vless") {
+		if _, hasFlow := cred["flow"]; !hasFlow && settings != nil {
+			if clients, ok := settings["clients"].([]interface{}); ok && len(clients) > 0 {
+				if first, ok := clients[0].(map[string]interface{}); ok {
+					if flow, ok := first["flow"].(string); ok && flow != "" {
+						cred["flow"] = flow
+						if b, err := json.Marshal(cred); err == nil {
+							credJSON = string(b)
+						}
+					}
+				}
+			}
+		}
+	}
+	_ = repo.SaveUserInboundConfig(ctx, storage.UserInboundConfig{
+		Username: user.Username, ServerID: serverID, InboundTag: inboundTag,
+		Protocol: protocol, CredentialJSON: credJSON,
+	})
+	return cred, credJSON, false, nil
+}
+
 func addUserToInbound(ctx context.Context, rm *RemoteManageHandler, repo *storage.TrafficRepository, user storage.User, serverID int64, inboundTag string) error {
 	// 只读 inbound 列表,目的是拿到 protocol/method/flow 这些构造 credential 必需的字段。
 	// 不再在主控这边修改 inbound:实际的"加 client"由 agent 在 inboundsMu 锁内原子完成,
@@ -1233,53 +1312,11 @@ func addUserToInbound(ctx context.Context, rm *RemoteManageHandler, repo *storag
 	protocol, _ := targetInbound["protocol"].(string)
 	settings, _ := targetInbound["settings"].(map[string]interface{})
 
-	// 尝试复用已保存的凭据(续费场景);否则生成新的。
-	var credential map[string]interface{}
-	var credJSON string
-	existing, _ := repo.GetUserInboundConfig(ctx, user.Username, serverID, inboundTag)
-	if existing != nil && existing.Protocol == protocol {
-		json.Unmarshal([]byte(existing.CredentialJSON), &credential)
-		credJSON = existing.CredentialJSON
-	}
-	// 兜底:DB 无记录,但 agent 该 inbound 已有同 email(username__tag)的 client → 复用它,
-	// 绝不再生成新 uuid 新增重复 —— xray 对同 email 会以 "User already exists" 拒绝 restart,
-	// 重复 client 也正是「同 email 不同 uuid」bug 的来源。复用后写回 DB,让主控与 agent 重新对齐。
-	if credential == nil {
-		if reuse := extractClientByEmail(settings, user.Username+"__"+inboundTag); reuse != nil {
-			credential = reuse
-			if b, err := json.Marshal(reuse); err == nil {
-				credJSON = string(b)
-			}
-			log.Printf("[addUserToInbound] reuse existing client by email %s__%s on server=%d (skip new credential)", user.Username, inboundTag, serverID)
-		}
-	}
-	if credential == nil {
-		// shadowsocks 需要 settings.method 决定 key 长度(SS2022 各档不同)
-		var method string
-		if settings != nil {
-			method, _ = settings["method"].(string)
-		}
-		var err error
-		credential, credJSON, err = generateCredential(protocol, user, method, inboundTag)
-		if err != nil {
-			return fmt.Errorf("generate credential: %w", err)
-		}
-	}
-
-	// 从现有 client 继承 flow 字段(VLESS Reality 需要)
-	if strings.EqualFold(protocol, "vless") {
-		if _, hasFlow := credential["flow"]; !hasFlow && settings != nil {
-			if clients, ok := settings["clients"].([]interface{}); ok && len(clients) > 0 {
-				if first, ok := clients[0].(map[string]interface{}); ok {
-					if flow, ok := first["flow"].(string); ok && flow != "" {
-						credential["flow"] = flow
-						if b, err := json.Marshal(credential); err == nil {
-							credJSON = string(b)
-						}
-					}
-				}
-			}
-		}
+	// 凭据统一走 getOrCreateInboundCredential:全局锁内查 DB 复用 / 按 email 复用 / 生成 + 立即写 DB。
+	// 根治跨操作并发时两条路径各自生成不同 uuid 的重复子账户;flow 继承 + 写 DB 都在其内部完成。
+	credential, _, _, err := getOrCreateInboundCredential(ctx, repo, user, serverID, inboundTag, protocol, settings)
+	if err != nil {
+		return fmt.Errorf("get or create credential: %w", err)
 	}
 
 	// 原子 add-client:agent 端在 inboundsMu 内做 read-modify-write,自带幂等(已存在则 no-op)。
@@ -1290,17 +1327,6 @@ func addUserToInbound(ctx context.Context, rm *RemoteManageHandler, repo *storag
 	})
 	if _, err := rm.forwardToRemoteServer(ctx, serverID, "POST", "/api/child/inbounds", body); err != nil {
 		return fmt.Errorf("add-client: %w", err)
-	}
-
-	// 仅在没有已保存记录时写入新记录
-	if existing == nil {
-		repo.SaveUserInboundConfig(ctx, storage.UserInboundConfig{
-			Username:       user.Username,
-			ServerID:       serverID,
-			InboundTag:     inboundTag,
-			Protocol:       protocol,
-			CredentialJSON: credJSON,
-		})
 	}
 
 	return nil
