@@ -1134,6 +1134,12 @@ CREATE TABLE IF NOT EXISTS users (
 		return err
 	}
 
+	// 给历史遗留、从未登录的用户补建 user_tokens(含 user_short_code),否则用户管理看不到订阅链接。
+	// 必须在 users 与 user_tokens 表都建好后跑;新用户由 CreateUser 即时补齐。
+	if err := r.ensureAllUsersHaveTokens(); err != nil {
+		return fmt.Errorf("ensure all users have tokens: %w", err)
+	}
+
 	// === Telegram bot 相关 ===
 	// users 加 3 列:tg_id / tg_handle / 绑定时间。tg_id 用 INTEGER 是因为 TG userId 是 int64,
 	// 部分唯一索引(WHERE telegram_id IS NOT NULL)允许多用户都 NULL,但已绑必须唯一。
@@ -3962,6 +3968,50 @@ func (r *TrafficRepository) generateMissingUserShortCodes() error {
 		}
 	}
 
+	return nil
+}
+
+// ensureAllUsersHaveTokens 为 users 表里还没有 user_tokens 行的用户补建 token + user_short_code。
+// 短码原本是懒生成(GetOrCreateUserToken,首次登录 / 访问订阅时才建行),导致管理员新建但从未登录的
+// 用户在用户管理看不到订阅链接。启动迁移时一次性补齐历史遗留用户;新用户由 CreateUser 即时补齐。
+func (r *TrafficRepository) ensureAllUsersHaveTokens() error {
+	rows, err := r.db.Query(`SELECT username FROM users WHERE username NOT IN (SELECT username FROM user_tokens)`)
+	if err != nil {
+		return fmt.Errorf("query users without tokens: %w", err)
+	}
+	var usernames []string
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan username: %w", err)
+		}
+		usernames = append(usernames, u)
+	}
+	rows.Close()
+
+	for _, username := range usernames {
+		token := uuid.NewString()
+		const maxRetries = 10
+		for i := 0; i < maxRetries; i++ {
+			shortCode, err := generateUserShortCode()
+			if err != nil {
+				return fmt.Errorf("generate user short code: %w", err)
+			}
+			_, err = r.db.Exec(`INSERT INTO user_tokens (username, token, user_short_code, updated_at) VALUES (?, ?, ?, CURRENT_TIMESTAMP)`, username, token, shortCode)
+			if err != nil {
+				le := strings.ToLower(err.Error())
+				if strings.Contains(le, "unique") && strings.Contains(le, "user_short_code") {
+					continue // 短码冲突,换一个重试
+				}
+				if strings.Contains(le, "unique") {
+					break // username 已存在(并发已补),跳过
+				}
+				return fmt.Errorf("insert user token for %s: %w", username, err)
+			}
+			break
+		}
+	}
 	return nil
 }
 

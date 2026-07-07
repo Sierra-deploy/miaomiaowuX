@@ -415,6 +415,12 @@ func (h *userCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 立即为新用户生成 user_tokens(含 user_short_code),使订阅链接创建后即可用。
+	// 否则短码是懒生成(首次登录 / 访问订阅才建行),管理员新建用户、绑套餐后在用户管理看不到订阅链接。
+	if _, err := h.repo.GetOrCreateUserToken(r.Context(), username); err != nil {
+		log.Printf("[CreateUser] 生成 user token/short_code 失败 user=%s: %v", username, err)
+	}
+
 	SendUserRegisteredNotification(r.Context(), username, email, "管理员添加")
 
 	w.Header().Set("Content-Type", "application/json")
