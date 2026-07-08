@@ -42,7 +42,9 @@ const (
 	//   - busy_timeout=5000  写锁忙时自动等 5s(刚好匹配业务层 5s context),避免立刻失败
 	//   - journal_mode=WAL   多 reader 并发 + 1 writer,跟现有 pragmaJournalMode 一致
 	//   - synchronous=NORMAL WAL 推荐组合(FULL 仅在断电时多一层保护,代价是显著变慢)
-	sqliteDSNPragma = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(normal)"
+	//   - journal_size_limit=64MB  checkpoint 后把 -wal 文件截回 ≤64MB(默认 -1=无限,-wal 只涨不缩)。
+	//     配合 main.go 里周期性 wal_checkpoint(TRUNCATE),避免长跑容器里 mmwx.db-wal 无界膨胀。
+	sqliteDSNPragma = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(normal)&_pragma=journal_size_limit(67108864)"
 
 	// 多连接数:实测 1 个 SQLite 数据库文件并发写仍串行(文件锁),但多 conn 让"读 / 短写"
 	// 不会被"长写 / 等锁"完全堵死。8 ≈ 典型 server 数 + 后台采集/订阅生成的并发,留充裕度。
@@ -905,12 +907,19 @@ func NewTrafficRepository(path string) (*TrafficRepository, error) {
 
 	db.SetMaxOpenConns(sqliteMaxOpenConns)
 	db.SetMaxIdleConns(sqliteMaxIdleConns)
+	// 空闲连接最多留 5 分钟就回收 — 释放其持有的 WAL 读快照,让 checkpoint 能抽干旧帧。
+	// (不设时 idle conn 永不回收,长跑容器里旧读标记会一直钉住 WAL。)
+	db.SetConnMaxIdleTime(5 * time.Minute)
 
 	// 兜底再 Exec 一次 — DSN _pragma 在某些 modernc.org/sqlite 版本路径异常时可能不生效,
-	// 这里在第一个 conn 上强制设一次 journal_mode 让整库进入 WAL(db-level、persistent)。
+	// 这里在第一个 conn 上强制设一次 journal_mode 让整库进入 WAL(db-level、persistent),
+	// 并设 journal_size_limit 让 checkpoint 后 -wal 文件缩回。
 	if _, err := db.Exec(pragmaJournalMode); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("enable wal: %w", err)
+	}
+	if _, err := db.Exec("PRAGMA journal_size_limit=67108864"); err != nil {
+		log.Printf("[storage] set journal_size_limit failed (non-fatal): %v", err)
 	}
 
 	repo := &TrafficRepository{db: db}

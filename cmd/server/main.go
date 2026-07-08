@@ -1091,6 +1091,8 @@ func main() {
 	go trafficCollector.StartSpeedCollection(collectorCtx)
 	// 启动每日快照和清理任务
 	go startDailySnapshotTask(collectorCtx, trafficHandler, trafficCollector)
+	// WAL 巡检:每 5 分钟 wal_checkpoint(TRUNCATE),把 -wal 抽干并截断,防止长跑容器里 mmwx.db-wal 无界膨胀。
+	go startWALCheckpointTask(collectorCtx, repo)
 	// 一次性补:上一轮已切到 traffic_source='system' 但 daily snapshot baseline 缺失的 server。
 	// 行数 < 7 视为"切换时漏迁移"(覆盖本周维度);ON CONFLICT 覆盖,重启重跑也安全。
 	// 新装的 system server 跑 7 天后自然有 ≥7 行,不会被误触发。
@@ -1306,6 +1308,25 @@ func backfillSystemSnapshotsForSwitchedServers(ctx context.Context, repo *storag
 }
 
 // 创建每日快照并清理旧数据
+// startWALCheckpointTask 每 5 分钟做一次 wal_checkpoint(TRUNCATE):把 WAL 已提交帧写回主库并截断 -wal 文件。
+// SQLite 默认 PASSIVE 自动 checkpoint 在持续并发读下常抽不干、且从不截断文件;配合 DSN 里的 journal_size_limit,
+// 这个巡检保证长跑容器里 mmwx.db-wal 不会无界膨胀。TRUNCATE 会等 reader(有 5s busy_timeout),
+// 偶发 SQLITE_BUSY 属正常,下一轮再来,非致命。
+func startWALCheckpointTask(ctx context.Context, repo *storage.TrafficRepository) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := repo.Checkpoint(); err != nil {
+				log.Printf("[WAL] periodic checkpoint failed: %v", err)
+			}
+		}
+	}
+}
+
 func startDailySnapshotTask(ctx context.Context, trafficHandler *handler.TrafficSummaryHandler, trafficCollector *traffic.Collector) {
 	if trafficHandler == nil {
 		return
