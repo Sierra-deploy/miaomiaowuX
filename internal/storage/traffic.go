@@ -8310,6 +8310,71 @@ func (r *TrafficRepository) ListUserSubaccounts(ctx context.Context, username st
 	return out, rows.Err()
 }
 
+// SubaccountRef 是流量归因用的精简子账号行(email → routed 节点 + 归属 user)。
+type SubaccountRef struct {
+	Email        string
+	Username     string
+	RoutedNodeID int64
+	IsActive     bool
+}
+
+// ListAllSubaccounts 返回全部 user_subaccounts(**忽略 is_active**),供流量归因用。
+// 归因必须涵盖被停用的子账号 email——历史流量仍属该 routed 节点,绝不能落到父入站(否则双算)。
+func (r *TrafficRepository) ListAllSubaccounts(ctx context.Context) ([]SubaccountRef, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT email, username, routed_node_id, is_active FROM user_subaccounts`)
+	if err != nil {
+		return nil, fmt.Errorf("list all subaccounts: %w", err)
+	}
+	defer rows.Close()
+	var out []SubaccountRef
+	for rows.Next() {
+		var s SubaccountRef
+		var active int
+		if err := rows.Scan(&s.Email, &s.Username, &s.RoutedNodeID, &active); err != nil {
+			return nil, err
+		}
+		s.IsActive = active == 1
+		if s.Email != "" {
+			out = append(out, s)
+		}
+	}
+	return out, rows.Err()
+}
+
+// RoutedAdminRef 是 routed 节点的 admin 占位 email → 节点 + 创建者。
+type RoutedAdminRef struct {
+	Email    string
+	NodeID   int64
+	Username string
+}
+
+// ListRoutedAdminEmailNodes 返回所有 routed 节点的 (routed_admin_email, id, username)。
+// admin 占位 client 直连 routed 出站的流量(email 前缀 _admin__)应归该 routed 节点,而非父入站。
+func (r *TrafficRepository) ListRoutedAdminEmailNodes(ctx context.Context) ([]RoutedAdminRef, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	rows, err := r.db.QueryContext(ctx, `SELECT COALESCE(routed_admin_email,''), id, username FROM nodes WHERE node_type='routed' AND COALESCE(routed_admin_email,'') != ''`)
+	if err != nil {
+		return nil, fmt.Errorf("list routed admin emails: %w", err)
+	}
+	defer rows.Close()
+	var out []RoutedAdminRef
+	for rows.Next() {
+		var a RoutedAdminRef
+		if err := rows.Scan(&a.Email, &a.NodeID, &a.Username); err != nil {
+			return nil, err
+		}
+		if a.Email != "" {
+			out = append(out, a)
+		}
+	}
+	return out, rows.Err()
+}
+
 func (r *TrafficRepository) ListSubaccountsByRoutedNode(ctx context.Context, routedNodeID int64) ([]UserSubaccount, error) {
 	rows, err := r.db.QueryContext(ctx, `
 		SELECT id, username, routed_node_id, email, credential_json, is_active, created_at, updated_at
