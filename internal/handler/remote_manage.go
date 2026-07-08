@@ -3623,6 +3623,9 @@ func (h *RemoteManageHandler) inboundToClashProxy(inbound map[string]interface{}
 	case "anytls":
 		// mihomo anytls(https://wiki.metacubex.one/en/config/proxies/anytls/):password + sni,跟 trojan 几乎一致。
 		proxy["type"] = "anytls"
+		// anytls 天然支持 UDP(UDP-over-TCP,服务端自动无需配置),默认开启;不依赖 streamSettings
+		// 是否为 nil(addStreamSettings 在 streamSettings==nil 时会提前返回、漏设 udp)。
+		proxy["udp"] = true
 		if password, ok := client["password"].(string); ok {
 			proxy["password"] = password
 		}
