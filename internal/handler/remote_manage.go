@@ -1979,9 +1979,9 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 	if r.Method == http.MethodPost && inboundReq != nil {
 		if action, _ := inboundReq["action"].(string); action == "" || strings.ToLower(action) == "add" {
 			if inbound, ok := inboundReq["inbound"].(map[string]interface{}); ok {
-				if proto, _ := inbound["protocol"].(string); strings.ToLower(proto) == "anytls" {
+				if proto, _ := inbound["protocol"].(string); strings.ToLower(proto) == "anytls" || strings.ToLower(proto) == "snell" {
 					if server, err := h.repo.GetRemoteServer(r.Context(), id); err == nil && server != nil && server.XrayMode == "external" {
-						remoteWriteError(w, http.StatusBadRequest, "anytls 协议需要内嵌 xray,请先将该服务器切换为内嵌模式")
+						remoteWriteError(w, http.StatusBadRequest, strings.ToLower(proto)+" 协议需要内嵌 xray,请先将该服务器切换为内嵌模式")
 						return
 					}
 				}
@@ -3642,6 +3642,32 @@ func (h *RemoteManageHandler) inboundToClashProxy(inbound map[string]interface{}
 			if pass, ok := client["pass"].(string); ok {
 				proxy["password"] = pass
 			}
+		}
+
+	case "snell":
+		// mihomo/clash snell:type:snell, server, port, psk, version, obfs-opts:{mode,host}(v4/v5);
+		// v6:mode(default/unshaped/unsafe-raw)。字段来自 settings.users[] 条目(generateInboundConfig 下发)。
+		proxy["type"] = "snell"
+		if psk, ok := client["psk"].(string); ok {
+			proxy["psk"] = psk
+		}
+		version := 4
+		if v, ok := client["version"].(float64); ok {
+			version = int(v)
+		} else if v, ok := client["version"].(int); ok {
+			version = v
+		}
+		proxy["version"] = version
+		if version == 6 {
+			if mode, ok := client["v6Mode"].(string); ok && mode != "" {
+				proxy["mode"] = mode
+			}
+		} else if obfsMode, ok := client["obfsMode"].(string); ok && obfsMode != "" && obfsMode != "none" {
+			obfsOpts := map[string]interface{}{"mode": obfsMode}
+			if obfsHost, ok := client["obfsHost"].(string); ok && obfsHost != "" {
+				obfsOpts["host"] = obfsHost
+			}
+			proxy["obfs-opts"] = obfsOpts
 		}
 
 	default:

@@ -509,6 +509,8 @@ func primaryKeyFieldForProtocol(protocol string) string {
 		return "password"
 	case "hysteria", "hysteria2", "hy2":
 		return "auth"
+	case "snell":
+		return "psk"
 	}
 	return "id"
 }

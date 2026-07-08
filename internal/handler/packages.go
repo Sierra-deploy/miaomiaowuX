@@ -1419,6 +1419,12 @@ func generateCredential(protocol string, user storage.User, method, inboundTag s
 		cred["password"] = uuid.New().String()
 		cred["email"] = email
 		cred["level"] = 0
+	case "snell":
+		// Snell v4/v5 多用户 = 每用户独立 psk(逐 PSK 试解);version/obfs 由 inbound(users[0])决定。
+		// v6(共享 psk + clientId)需 version 感知,由 inbound 创建时处理,此处按 v4/v5 生成 psk。
+		cred["psk"] = uuid.New().String()
+		cred["email"] = email
+		cred["level"] = 0
 	case "hysteria":
 		// HY2 客户端凭据:auth(密码) + email(用于 per-user 流量统计,接入套餐限额)。
 		cred["auth"] = uuid.New().String()
@@ -1465,6 +1471,8 @@ func matchCredential(a, b map[string]interface{}, protocol string) bool {
 		return fmt.Sprint(a["id"]) == fmt.Sprint(b["id"])
 	case "trojan", "anytls":
 		return fmt.Sprint(a["password"]) == fmt.Sprint(b["password"])
+	case "snell":
+		return fmt.Sprint(a["psk"]) == fmt.Sprint(b["psk"])
 	case "hysteria":
 		return fmt.Sprint(a["auth"]) == fmt.Sprint(b["auth"])
 	case "shadowsocks":
