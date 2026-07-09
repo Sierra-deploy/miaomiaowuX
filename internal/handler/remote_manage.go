@@ -185,9 +185,15 @@ func hasNonTemplateContent(cfgJSON string) bool {
 var deviceKickPrevMu sync.Mutex
 var deviceKickPrev = make(map[string]int64) // key = fmt.Sprintf("%d|%s", serverID, email)
 
-func handleDeviceKickDelta(ctx context.Context, serverID int64, kicks map[string]int64) {
+// handleConnLimitKickDelta:agent 上报的累计"连接数超限被拒次数"(payload.DeviceKicks,现语义=连接超限),
+// 主控算 delta>0 → 解析 用户名 + 节点名 → 连接数超限通知(5min 节流兜底)。
+func (h *RemoteManageHandler) handleConnLimitKickDelta(ctx context.Context, serverID int64, kicks map[string]int64) {
 	deviceKickPrevMu.Lock()
 	defer deviceKickPrevMu.Unlock()
+	var serverName string
+	if srv, err := h.repo.GetRemoteServer(ctx, serverID); err == nil && srv != nil {
+		serverName = srv.Name
+	}
 	for email, current := range kicks {
 		key := fmt.Sprintf("%d|%s", serverID, email)
 		prev, seen := deviceKickPrev[key]
@@ -199,8 +205,12 @@ func handleDeviceKickDelta(ctx context.Context, serverID int64, kicks map[string
 		delta := int(current - prev)
 		if delta > 0 {
 			deviceKickPrev[key] = current
-			// device_limit 主控不易拿到精确值(email 可能是子账号 email),通知文案不带 limit,只带 delta
-			SendDeviceLimitExceededNotification(ctx, email, delta, 0)
+			username := h.repo.ResolveUsernameByEmail(ctx, email)
+			if username == "" {
+				username = email
+			}
+			nodeName := h.repo.ResolveNodeNameByEmail(ctx, serverName, email)
+			SendConnLimitExceededNotification(ctx, username, nodeName, delta)
 		}
 	}
 }
@@ -224,7 +234,7 @@ func (h *RemoteManageHandler) HandleScanResult(serverID int64, payload WSScanRes
 	// payload.DeviceKicks 是累计量(自 agent 启动起单调递增),主控内存记录上次见到的值,算 delta。
 	// 设备超限通知给 admin,文案带 email + delta。同一 email 5min 节流由 notifyAsync 兜底。
 	if len(payload.DeviceKicks) > 0 {
-		handleDeviceKickDelta(ctx, serverID, payload.DeviceKicks)
+		h.handleConnLimitKickDelta(ctx, serverID, payload.DeviceKicks)
 	}
 
 	if payload.XrayRunning {

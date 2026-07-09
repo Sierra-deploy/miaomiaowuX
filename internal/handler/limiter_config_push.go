@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"time"
@@ -46,6 +47,12 @@ func (p *LimiterConfigPusher) SetLicenseManager(mgr *license.Manager) {
 // 每一层用 "map 是否含 key" / "指针是否非 nil" 判断;**不能用 value > 0 判断**,
 // 因为 0 是显式不限速的有意义值。客户端数同结构。
 // nodeID = 0 时跳过 per-node 层,只用全局/通用层(常见于反查未命中)。
+// connGroupKey 连接数计数分组键 = "<username>|<物理节点ID>"。同一用户在同一物理节点(含其路由出站
+// 子账户)的所有 email 共用此 key → agent 侧共享一份并发连接配额(问题1:20 而非 20×N)。
+func connGroupKey(username string, physicalNodeID int64) string {
+	return fmt.Sprintf("%s|%d", username, physicalNodeID)
+}
+
 func resolveLimit(user *storage.User, pkg *storage.Package, nodeID, parentID int64) (speedMbps float64, deviceLimit int) {
 	// 限速
 	switch {
@@ -212,9 +219,11 @@ func (p *LimiterConfigPusher) BuildLimiterConfigForServer(ctx context.Context, s
 			// email 必须与 generateCredential 写进 xray inbound 的 client email 一致 —— 强制 <username>__<inboundTag>
 			// (自动子账户格式)。此前这里用纯 username,导致限速器按 username 记账、xray 流量走子账户 email,
 			// agent GetUserBucket 用连接 email 查不到限速记录 → 套餐/固定限速对自动子账户全部失效。
-			Email:       user.Username + "__" + c.InboundTag,
-			SpeedLimit:  speedBytes,
+			Email:      user.Username + "__" + c.InboundTag,
+			SpeedLimit: speedBytes,
+			// 物理节点自身即 group 的物理节点(ref.NodeID);其路由出站子账户在下面用 ParentID 归到同一 group。
 			DeviceLimit: deviceLimit,
+			ConnGroup:   connGroupKey(user.Username, ref.NodeID),
 		})
 		if user.PackageID > 0 {
 			if tagPkgIDs[c.InboundTag] == nil {
@@ -241,10 +250,16 @@ func (p *LimiterConfigPusher) BuildLimiterConfigForServer(ctx context.Context, s
 		if speedMbps > 0 {
 			speedBytes = uint64(speedMbps * 1000000 / 8)
 		}
+		// 路由出站的 group 归到**父物理节点**(ref.ParentID),从而与父节点及其它路由出站共享连接配额。
+		physID := ref.ParentID
+		if physID == 0 {
+			physID = ref.NodeID // 兜底:父未知时按自身,避免 group="user|0" 把不同节点误并
+		}
 		tagUsers[sa.InboundTag] = append(tagUsers[sa.InboundTag], WSUserLimitInfo{
 			Email:       sa.Email,
 			SpeedLimit:  speedBytes,
 			DeviceLimit: deviceLimit,
+			ConnGroup:   connGroupKey(user.Username, physID),
 		})
 		if user.PackageID > 0 {
 			if tagPkgIDs[sa.InboundTag] == nil {

@@ -57,6 +57,8 @@ func (h *TrafficHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleNodeUsers(w, r)
 	case path == "node-totals":
 		h.handleNodeTotals(w, r)
+	case path == "user-connections":
+		h.handleUserConnections(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -360,6 +362,17 @@ func (h *TrafficHandler) handleNodeTotals(w http.ResponseWriter, r *http.Request
 	})
 
 	h.writeJSON(w, http.StatusOK, map[string]any{"success": true, "items": out})
+}
+
+// handleUserConnections 返回各用户当前并发连接数(跨所有 server 按 username 聚合)。
+// 数据来自 agent 每次 traffic 上报的 conn_counts(内存、实时、非持久)。用户视图「当前连接数」列用。
+// GET /api/admin/traffic/user-connections → { success, connections: { "<username>": <n> } }
+func (h *TrafficHandler) handleUserConnections(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	h.writeJSON(w, http.StatusOK, map[string]any{"success": true, "connections": AggregateUserConnCounts()})
 }
 
 // emailBaseline 加载 <= date 的 email 级 baseline,key = "<server_id>|<email>"。

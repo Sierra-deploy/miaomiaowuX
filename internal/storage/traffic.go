@@ -8596,6 +8596,32 @@ func (r *TrafficRepository) ResolveUsernameByEmail(ctx context.Context, email st
 	return email
 }
 
+// ResolveNodeNameByEmail 按 xray client email 反查节点名(连接数超限通知"哪个节点"用)。
+// 子账号 email → 其 routed 节点;物理 email(<user>__<inbound_tag>)→ 该 server 上匹配 inbound_tag 的物理节点。
+// 返回 "" = 未解析到(通知里省略节点)。
+func (r *TrafficRepository) ResolveNodeNameByEmail(ctx context.Context, serverName, email string) string {
+	if r == nil || r.db == nil || email == "" {
+		return ""
+	}
+	var name string
+	// 1. 子账号(routed 节点)
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT n.node_name FROM user_subaccounts sa JOIN nodes n ON sa.routed_node_id = n.id WHERE sa.email = ? LIMIT 1`,
+		email).Scan(&name); err == nil && name != "" {
+		return name
+	}
+	// 2. 物理:email = <user>__<inbound_tag>,取首个 "__" 之后为 inbound_tag
+	if i := strings.Index(email, "__"); i > 0 && serverName != "" {
+		tag := email[i+2:]
+		if err := r.db.QueryRowContext(ctx,
+			`SELECT node_name FROM nodes WHERE original_server = ? AND inbound_tag = ? AND COALESCE(node_type,'physical') != 'routed' LIMIT 1`,
+			serverName, tag).Scan(&name); err == nil && name != "" {
+			return name
+		}
+	}
+	return ""
+}
+
 func (r *TrafficRepository) ListUsersWithPackage(ctx context.Context) ([]User, error) {
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT username, password_hash, COALESCE(email, ''), COALESCE(nickname, ''), COALESCE(avatar_url, ''), COALESCE(role, ''), is_active, COALESCE(remark, ''), COALESCE(package_id, 0), COALESCE(is_reset, 0), COALESCE(reset_day, 1), last_reset_at, package_end_date, speed_limit_override, device_limit_override, COALESCE(node_speed_limit_overrides, '{}'), COALESCE(node_device_limit_overrides, '{}'), created_at, updated_at FROM users WHERE package_id IS NOT NULL AND package_id > 0`)

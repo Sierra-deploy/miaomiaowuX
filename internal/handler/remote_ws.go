@@ -106,9 +106,29 @@ type WSTrafficPayload struct {
 	Stats       *traffic.XrayStats  `json:"stats,omitempty"`
 	OnlineUsers map[string][]string `json:"online_users,omitempty"`
 	UserSpeeds  map[string]int64    `json:"user_speeds,omitempty"`
+	// ConnCounts 每 group("<user>|<物理节点ID>")当前并发连接数;主控存内存、按用户聚合供用户视图展示。
+	ConnCounts map[string]int64 `json:"conn_counts,omitempty"`
 	// System 系统级网卡累计 RX/TX,跟 HTTP path 的 RemoteTrafficRequest.System 同构。
 	// 用于 server.traffic_source='system' 时累加 system_*_cycle;nil = 老 agent 不上报,跳过。
 	System *RemoteSystemTraffic `json:"system,omitempty"`
+}
+
+// connCountsByServer 存各 server 最近一次上报的 group→当前并发连接数(内存、非持久)。用户视图"当前连接数"用。
+var connCountsByServer sync.Map // serverID(int64) -> map[string]int64
+
+// AggregateUserConnCounts 把所有 server 的 group 连接数按 username 聚合(group="<user>|<nodeID>" 取 user 段求和)。
+func AggregateUserConnCounts() map[string]int64 {
+	out := make(map[string]int64)
+	connCountsByServer.Range(func(_, v interface{}) bool {
+		m, _ := v.(map[string]int64)
+		for group, n := range m {
+			if i := strings.LastIndex(group, "|"); i > 0 {
+				out[group[:i]] += n
+			}
+		}
+		return true
+	})
+	return out
 }
 
 // WSLimiterConfigPayload 表示限速配置下发消息 (Master -> Agent)
@@ -120,10 +140,16 @@ type WSLimiterConfigPayload struct {
 }
 
 // WSUserLimitInfo 表示单个用户的限速配置
+//
+// DeviceLimit 现语义 = **并发连接上限**(0=不限)。历史列名/JSON 保留 device_limit(免迁移),
+// 但 agent 侧按「连接数」而非「去重 IP 数」执行,且按 ConnGroup 计数以在同一物理节点上共享配额。
 type WSUserLimitInfo struct {
 	Email       string `json:"email"`
 	SpeedLimit  uint64 `json:"speed_limit"`
 	DeviceLimit int    `json:"device_limit"`
+	// ConnGroup 连接数计数分组键 = "<username>|<物理父节点ID>"。一个用户在同一物理节点(含其路由
+	// 出站子账户)的多个 email 共享同一 group → 共享一份连接配额(问题1:20 而非 20×N)。空=老 agent 兼容,退化按 email。
+	ConnGroup string `json:"conn_group,omitempty"`
 }
 
 // WSHeartbeatPayload 表示心跳消息负载
@@ -1065,6 +1091,9 @@ func (h *RemoteWSHandler) handleTraffic(wsConn *RemoteWSConnection, payload json
 		log.Printf("[Remote WS] Failed to process traffic from server %s: %v", wsConn.ServerName, err)
 		return
 	}
+
+	// 存最近一次 group 并发连接数(nil = 该 server 当前无连接,覆盖清零)。
+	connCountsByServer.Store(wsConn.ServerID, trafficPayload.ConnCounts)
 
 	// 系统级网卡累计 — 同 HTTP path 的 RemoteTrafficHandler 处理。WS path 之前漏了这段,
 	// 导致 source=system 的 server 在 WS 连接模式下 system_*_cycle 永远不动 → traffic_used 静止。
