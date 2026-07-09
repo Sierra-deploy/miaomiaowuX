@@ -2281,6 +2281,8 @@ CREATE TABLE IF NOT EXISTS user_email_traffic (
     total_downlink INTEGER NOT NULL DEFAULT 0,
     last_uplink INTEGER NOT NULL DEFAULT 0,
     last_downlink INTEGER NOT NULL DEFAULT 0,
+    cycle_base_uplink INTEGER NOT NULL DEFAULT 0,
+    cycle_base_downlink INTEGER NOT NULL DEFAULT 0,
     cycle_start TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(server_id, email),
@@ -2292,6 +2294,11 @@ CREATE INDEX IF NOT EXISTS idx_user_email_traffic_email ON user_email_traffic(em
 	if _, err := r.db.Exec(userEmailTrafficSchema); err != nil {
 		return fmt.Errorf("migrate user_email_traffic: %w", err)
 	}
+	// 周期基线:月度重置时把 uplink/downlink 的当前值抬进 cycle_base_*,判定/展示只看 (uplink - base)。
+	// 相比直接把 uplink 清零,这样保住了 total_* 的历史累计,也不需要动 collector 的 delta 逻辑。
+	// 存量行 base=0 → 增量 == 当前累计值,与升级前行为完全一致。
+	_, _ = r.db.Exec("ALTER TABLE user_email_traffic ADD COLUMN cycle_base_uplink INTEGER NOT NULL DEFAULT 0")
+	_, _ = r.db.Exec("ALTER TABLE user_email_traffic ADD COLUMN cycle_base_downlink INTEGER NOT NULL DEFAULT 0")
 
 	// 流量快照表 - 存储每日流量快照以了解历史趋势
 	const trafficSnapshotsSchema = `
@@ -8748,10 +8755,12 @@ func (r *TrafficRepository) GetUserWeightedTraffic(ctx context.Context, username
 	}
 	nRows.Close()
 
-	// 扫该用户所有 email 流量行
+	// 扫该用户所有 email 流量行。只取本周期增量:月度重置把当时的累计值抬进了 cycle_base_*,
+	// 不减掉基线的话,重置后仍会拿历史累计去判超限(见 ResetUserTrafficCycle)。
 	prefix := username + "__"
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT server_id, email, uplink, downlink FROM user_email_traffic WHERE email = ? OR email LIKE ?`,
+		`SELECT server_id, email, uplink - cycle_base_uplink, downlink - cycle_base_downlink
+		 FROM user_email_traffic WHERE email = ? OR email LIKE ?`,
 		username, prefix+"%")
 	if err != nil {
 		return 0, fmt.Errorf("query user_email_traffic: %w", err)
@@ -8765,7 +8774,7 @@ func (r *TrafficRepository) GetUserWeightedTraffic(ctx context.Context, username
 		if err := rows.Scan(&serverID, &email, &uplink, &downlink); err != nil {
 			continue
 		}
-		bytes := uplink + downlink
+		bytes := max(uplink, 0) + max(downlink, 0)
 
 		// 子账号路径(routed):每个 routed 节点用它自己的倍率(独立,不再回退父/根节点)。
 		if nid, ok := subaccNodeID[email]; ok {
@@ -10915,7 +10924,9 @@ func (r *TrafficRepository) ListUserEmailTraffic(ctx context.Context) ([]UserEma
 	if r == nil || r.db == nil {
 		return nil, errors.New("traffic repository not initialized")
 	}
-	rows, err := r.db.QueryContext(ctx, `SELECT id, server_id, email, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at FROM user_email_traffic`)
+	// Uplink/Downlink 返回本周期增量(减去月度重置抬起的基线),与 user_traffic 的口径一致;
+	// TotalUplink/TotalDownlink 仍是不受重置影响的历史累计。
+	rows, err := r.db.QueryContext(ctx, `SELECT id, server_id, email, uplink - cycle_base_uplink, downlink - cycle_base_downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at FROM user_email_traffic`)
 	if err != nil {
 		return nil, fmt.Errorf("query user email traffic: %w", err)
 	}
@@ -10926,6 +10937,8 @@ func (r *TrafficRepository) ListUserEmailTraffic(ctx context.Context) ([]UserEma
 		if err := rows.Scan(&t.ID, &t.ServerID, &t.Email, &t.Uplink, &t.Downlink, &t.TotalUplink, &t.TotalDownlink, &t.LastUplink, &t.LastDownlink, &t.CycleStart, &t.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan user email traffic: %w", err)
 		}
+		t.Uplink = max(t.Uplink, 0)
+		t.Downlink = max(t.Downlink, 0)
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -11014,6 +11027,12 @@ func (r *TrafficRepository) GetUserTrafficByUsername(ctx context.Context, userna
 }
 
 // 重置用户在所有服务器上的当前周期流量。
+//
+// 两张表口径必须一起归零,否则会撕裂:面板/订阅头读 user_traffic(已归零),而套餐配了 node_multipliers 时
+// 超限判定读 user_email_traffic —— 后者不归零的话,重置当轮就会"恢复入站→按累计值重新判超限→再踢出"。
+//
+// user_email_traffic 走基线而非清零:把 uplink/downlink 的当前值抬进 cycle_base_*,判定只看差值。
+// 这样 total_* 的历史累计得以保留,collector 的 `uplink = uplink + delta` 累加逻辑也无需改动。
 func (r *TrafficRepository) ResetUserTrafficCycle(ctx context.Context, username string) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
@@ -11023,12 +11042,31 @@ func (r *TrafficRepository) ResetUserTrafficCycle(ctx context.Context, username 
 		return errors.New("username is required")
 	}
 
-	const stmt = `UPDATE user_traffic SET uplink = 0, downlink = 0, cycle_start = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE username = ?`
-	_, err := r.db.ExecContext(ctx, stmt, username)
+	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("begin reset user traffic cycle: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	const userStmt = `UPDATE user_traffic SET uplink = 0, downlink = 0, cycle_start = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE username = ?`
+	if _, err := tx.ExecContext(ctx, userStmt, username); err != nil {
 		return fmt.Errorf("reset user traffic cycle: %w", err)
 	}
 
+	// WHERE 与 GetUserWeightedTraffic 的扫描条件保持严格一致,确保"判定看得见的行"都被抬了基线。
+	// 注:'_' 在 LIKE 里是单字符通配符,所以 `<user>__%` 也会捞到 `<user>-<tag>` 形态的子账号行 ——
+	// 这正是现网判定所依赖的行为,不要在这里给下划线转义,否则两边行集不等。
+	const emailStmt = `UPDATE user_email_traffic
+		SET cycle_base_uplink = uplink, cycle_base_downlink = downlink,
+		    cycle_start = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+		WHERE email = ? OR email LIKE ?`
+	if _, err := tx.ExecContext(ctx, emailStmt, username, username+"__%"); err != nil {
+		return fmt.Errorf("reset user email traffic cycle: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit reset user traffic cycle: %w", err)
+	}
 	return nil
 }
 
@@ -11045,6 +11083,26 @@ func (r *TrafficRepository) UpdateUserLastResetAt(ctx context.Context, username 
 	_, err := r.db.ExecContext(ctx, stmt, t, username)
 	if err != nil {
 		return fmt.Errorf("update user last_reset_at: %w", err)
+	}
+	return nil
+}
+
+// UpdateUserResetDay 修正用户的每月重置日(1-31)。
+// 用于自愈历史脏数据:is_reset=1 但 reset_day=0 的用户永远不会触发重置。
+func (r *TrafficRepository) UpdateUserResetDay(ctx context.Context, username string, day int) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if username == "" {
+		return errors.New("username is required")
+	}
+	if day < 1 || day > 31 {
+		return fmt.Errorf("invalid reset day: %d", day)
+	}
+	const stmt = `UPDATE users SET reset_day = ?, updated_at = CURRENT_TIMESTAMP WHERE username = ?`
+	_, err := r.db.ExecContext(ctx, stmt, day, username)
+	if err != nil {
+		return fmt.Errorf("update user reset_day: %w", err)
 	}
 	return nil
 }

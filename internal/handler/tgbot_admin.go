@@ -390,20 +390,19 @@ func (h *TGBotAPIHandler) bindNew(ctx context.Context, w http.ResponseWriter,
 	if ic.PackageID != nil {
 		if pkg, perr := h.repo.GetPackage(ctx, *ic.PackageID); perr == nil && pkg != nil {
 			start := time.Now()
-			// 邀请码指定了月数则按月数算到期,并在 >1 月时自动开启续期(按月重置流量);
-			// 未指定(0)沿用套餐自身周期 + 套餐默认 is_reset。
+			// 邀请码指定了月数则按月数算到期,未指定(0)沿用套餐自身周期。
 			end := start.AddDate(0, 0, pkg.CycleDays)
-			isReset := pkg.IsReset
-			resetDay := pkg.ResetDay
 			if ic.DurationMonths > 0 {
 				end = start.AddDate(0, ic.DurationMonths, 0)
-				isReset = ic.DurationMonths > 1
 			}
-			if isReset && resetDay < 1 { // 强制开续期但套餐没设重置日 → 用注册当天(避免 reset_day=0)
-				resetDay = start.Day()
-				if resetDay > 28 {
-					resetDay = 28
-				}
+			// TG 绑定套餐一律开启按月重置:此后续费只需延长有效期,流量到 reset_day 自动归零。
+			// 重置日取注册当天(封顶 28,避开月末不存在的日期),顺带把各用户的重置日分散开。
+			// 注:旧逻辑是 isReset = ic.DurationMonths > 1,而实际签发的邀请码都是 1 个月,
+			// 于是恒为 false,再叠加 resetDay = pkg.ResetDay(0),TG 用户永远不会重置。
+			isReset := true
+			resetDay := start.Day()
+			if resetDay > 28 {
+				resetDay = 28
 			}
 			if aerr := h.assignPackage(ctx, requestedUsername, pkg.ID, start, end,
 				isReset, resetDay); aerr == nil {
@@ -894,18 +893,17 @@ func (h *TGBotAPIHandler) redeem(w http.ResponseWriter, r *http.Request) {
 	if user.PackageEndDate != nil && user.PackageEndDate.After(now) {
 		base = *user.PackageEndDate
 	}
-	isReset := pkg.IsReset
 	var end time.Time
 	if ic.DurationMonths > 0 {
 		end = base.AddDate(0, ic.DurationMonths, 0)
-		if ic.DurationMonths > 1 {
-			isReset = true
-		}
 	} else {
 		end = base.AddDate(0, 0, pkg.CycleDays)
 	}
-	resetDay := pkg.ResetDay
-	if isReset && resetDay < 1 {
+	// 续费只延长有效期,不改动按月重置:沿用用户当前的重置日,否则每续一次费重置日就漂一次。
+	// is_reset 与绑定路径一致恒开启 —— 存量用户(历史上被写成 is_reset=0/reset_day=0)在续费时一并修好。
+	isReset := true
+	resetDay := user.ResetDay
+	if resetDay < 1 || resetDay > 31 {
 		resetDay = now.Day()
 		if resetDay > 28 {
 			resetDay = 28

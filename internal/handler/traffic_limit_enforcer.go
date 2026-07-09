@@ -123,6 +123,22 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 			pkgCache[user.PackageID] = pkg
 		}
 
+		// 自愈:is_reset=true 但 reset_day 非法(历史上 assign 接口不校验、套餐保存又会把它清成 0)。
+		// 这类用户在 shouldResetThisMonth 第一道门就被静默挡掉,永远不会重置。补成当天(封顶 28,
+		// 避开月末不存在的日期),与 TG 续期路径的兜底一致。写回 DB 后下一轮即合法,不会反复打日志。
+		if user.IsReset && (user.ResetDay < 1 || user.ResetDay > 31) {
+			day := now.Day()
+			if day > 28 {
+				day = 28
+			}
+			log.Printf("[TrafficLimitEnforcer] User %s has is_reset=true but invalid reset_day=%d, fixing to %d", user.Username, user.ResetDay, day)
+			if err := e.repo.UpdateUserResetDay(ctx, user.Username, day); err != nil {
+				log.Printf("[TrafficLimitEnforcer] Failed to fix reset_day for %s: %v", user.Username, err)
+			} else {
+				user.ResetDay = day
+			}
+		}
+
 		// 每月流量周期自动重置 — 到 reset_day 当天 0 点之后(实际由 enforcer ticker 触发,粒度=interval)
 		// 触发后立刻把当前周期 uplink/downlink 归 0 + cycle_start=now,并写 last_reset_at 防止同月反复。
 		// 还原"超额"标志:重置后用户应该重新有流量配额,wasOverLimit → 立即恢复入站。

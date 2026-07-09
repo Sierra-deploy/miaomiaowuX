@@ -235,8 +235,8 @@ type updatePackageRequest struct {
 	Description      string                       `json:"description"`
 	TrafficLimitGB   float64                      `json:"traffic_limit_gb"`
 	CycleDays        int                          `json:"cycle_days"`
-	IsReset          bool                         `json:"is_reset"`
-	ResetDay         int                          `json:"reset_day"`
+	IsReset          *bool                        `json:"is_reset"`  // 指针:请求未携带时保留库中旧值,不按零值覆盖
+	ResetDay         *int                         `json:"reset_day"` // 同上
 	Nodes            []int64                      `json:"nodes"`
 	NodeMultipliers  map[int64]float64            `json:"node_multipliers"` // node_id → 倍率
 	NodeSpeedLimits  map[int64]float64            `json:"node_speed_limits"`  // 套餐 per-node 限速覆盖 (Mbps);0=显式不限速,缺省=继承 SpeedLimitMbps
@@ -287,11 +287,6 @@ func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	if req.IsReset && (req.ResetDay < 1 || req.ResetDay > 31) {
-		http.Error(w, "Reset day must be between 1 and 31", http.StatusBadRequest)
-		return
-	}
-
 	if err := validatePackageTemplateFilename(req.TemplateFilename); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -305,8 +300,27 @@ func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 	// 获取旧套餐的节点列表，用于后续计算差异
 	var oldNodes []int64
-	if oldPkg, err := h.repo.GetPackage(r.Context(), req.ID); err == nil {
-		oldNodes = oldPkg.Nodes
+	var oldPkg *storage.Package
+	if p, err := h.repo.GetPackage(r.Context(), req.ID); err == nil {
+		oldPkg = p
+		oldNodes = p.Nodes
+	}
+
+	// 套餐表单没有按月重置的控件,请求里不带这两个字段。缺省时必须沿用旧值,
+	// 否则每保存一次套餐就把 is_reset/reset_day 清成 false/0,已开启的按月重置被静默关闭。
+	isReset, resetDay := false, 0
+	if oldPkg != nil {
+		isReset, resetDay = oldPkg.IsReset, oldPkg.ResetDay
+	}
+	if req.IsReset != nil {
+		isReset = *req.IsReset
+	}
+	if req.ResetDay != nil {
+		resetDay = *req.ResetDay
+	}
+	if isReset && (resetDay < 1 || resetDay > 31) {
+		http.Error(w, "Reset day must be between 1 and 31", http.StatusBadRequest)
+		return
 	}
 
 	trafficMode := req.TrafficMode
@@ -321,8 +335,8 @@ func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		TrafficLimitGB:    req.TrafficLimitGB,
 		TrafficLimitBytes: int64(req.TrafficLimitGB * 1024 * 1024 * 1024),
 		CycleDays:         req.CycleDays,
-		IsReset:           req.IsReset,
-		ResetDay:          req.ResetDay,
+		IsReset:           isReset,
+		ResetDay:          resetDay,
 		Nodes:             nodes,
 		NodeMultipliers:   req.NodeMultipliers,
 		NodeSpeedLimits:   req.NodeSpeedLimits,
@@ -834,6 +848,20 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	}
 	if req.PackageID <= 0 {
 		http.Error(w, "Package ID is required", http.StatusBadRequest)
+		return
+	}
+
+	// 开启按月重置但未指定重置日 → 取当天(封顶 28,避开月末不存在的日期),与 TG 续期路径的兜底一致。
+	// 前端在用户未显式选日时会回传 0(回显用的 `reset_day ?? 1` 对数字 0 不兜底),这里补齐;
+	// 若不补,reset_day=0 会落库并让 shouldResetThisMonth 永远返回 false —— 开关形同虚设。
+	if req.IsReset && req.ResetDay == 0 {
+		req.ResetDay = time.Now().Day()
+		if req.ResetDay > 28 {
+			req.ResetDay = 28
+		}
+	}
+	if req.IsReset && (req.ResetDay < 1 || req.ResetDay > 31) {
+		http.Error(w, "Reset day must be between 1 and 31", http.StatusBadRequest)
 		return
 	}
 
