@@ -136,6 +136,63 @@ func (h *SystemSettingsHandler) SetMasterURL(w http.ResponseWriter, r *http.Requ
 	json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "主服务器地址已更新"})
 }
 
+// defaultRedeemTemplate 兑换码复制文案的默认模板。占位符:
+//   {兑换码}     — 具体兑换码
+//   {机器人地址} — TG 机器人链接(由 tgbot miniapp 端按 getMe 自动注入,如 https://t.me/xxx_bot)
+//   {主控域名}   — master_url 完整 URL
+const defaultRedeemTemplate = `使用教程
+打开这个机器人 {机器人地址}
+点左下角我的面板，然后输入兑换码注册
+{兑换码}
+
+如果需要自定义出站落地，需要登录妙妙屋X
+{主控域名}`
+
+// GetRedeemTemplate 返回兑换码复制文案模板;未配置时返回内置默认模板。
+func (h *SystemSettingsHandler) GetRedeemTemplate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		return
+	}
+	value, err := h.repo.GetSystemSetting(r.Context(), "redeem_copy_template")
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "获取兑换码文案失败"})
+		return
+	}
+	if value == "" {
+		value = defaultRedeemTemplate
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "redeem_template": value})
+}
+
+// SetRedeemTemplate 保存兑换码复制文案模板(多行文本)。
+func (h *SystemSettingsHandler) SetRedeemTemplate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		RedeemTemplate string `json:"redeem_template"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "请求格式错误"})
+		return
+	}
+	if err := h.repo.SetSystemSetting(r.Context(), "redeem_copy_template", req.RedeemTemplate); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "保存失败"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "兑换码文案已更新"})
+}
+
 func (h *SystemSettingsHandler) GetShortLinkEnabled(w http.ResponseWriter, r *http.Request) {
 	cfg, err := h.repo.GetSystemConfig(r.Context())
 	if err != nil {

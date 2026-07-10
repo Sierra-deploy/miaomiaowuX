@@ -5781,6 +5781,91 @@ func (r *TrafficRepository) DeleteExternalSubscription(ctx context.Context, id i
 	return nil
 }
 
+// GetExternalSubscriptionByID 不限 owner 按 ID 取(仅管理员路径使用)。返回的 sub.Username 即 owner。
+func (r *TrafficRepository) GetExternalSubscriptionByID(ctx context.Context, id int64) (ExternalSubscription, error) {
+	var sub ExternalSubscription
+	if r == nil || r.db == nil {
+		return sub, errors.New("traffic repository not initialized")
+	}
+	if id <= 0 {
+		return sub, errors.New("subscription id is required")
+	}
+	const stmt = `SELECT id, username, name, url, COALESCE(user_agent, 'clash-meta/2.4.0'), node_count, last_sync_at, COALESCE(upload, 0), COALESCE(download, 0), COALESCE(total, 0), expire, COALESCE(traffic_mode, 'both'), created_at, updated_at FROM external_subscriptions WHERE id = ? LIMIT 1`
+	var lastSyncAt, expire sql.NullTime
+	err := r.db.QueryRowContext(ctx, stmt, id).Scan(&sub.ID, &sub.Username, &sub.Name, &sub.URL, &sub.UserAgent, &sub.NodeCount, &lastSyncAt, &sub.Upload, &sub.Download, &sub.Total, &expire, &sub.TrafficMode, &sub.CreatedAt, &sub.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return sub, ErrExternalSubscriptionNotFound
+		}
+		return sub, fmt.Errorf("get external subscription by id: %w", err)
+	}
+	if lastSyncAt.Valid {
+		sub.LastSyncAt = &lastSyncAt.Time
+	}
+	if expire.Valid {
+		sub.Expire = &expire.Time
+	}
+	return sub, nil
+}
+
+// UpdateExternalSubscriptionByID 不限 owner 按 ID 更新(仅管理员路径使用)。owner(username)不变。
+func (r *TrafficRepository) UpdateExternalSubscriptionByID(ctx context.Context, sub ExternalSubscription) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if sub.ID <= 0 {
+		return errors.New("subscription id is required")
+	}
+	name := strings.TrimSpace(sub.Name)
+	if name == "" {
+		return errors.New("subscription name is required")
+	}
+	url := strings.TrimSpace(sub.URL)
+	if url == "" {
+		return errors.New("subscription url is required")
+	}
+	userAgent := strings.TrimSpace(sub.UserAgent)
+	if userAgent == "" {
+		userAgent = "clash-meta/2.4.0"
+	}
+	trafficMode := strings.TrimSpace(sub.TrafficMode)
+	if trafficMode == "" {
+		trafficMode = "both"
+	}
+	const stmt = `UPDATE external_subscriptions SET name = ?, url = ?, user_agent = ?, node_count = ?, last_sync_at = ?, upload = ?, download = ?, total = ?, expire = ?, traffic_mode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+	result, err := r.db.ExecContext(ctx, stmt, name, url, userAgent, sub.NodeCount, sub.LastSyncAt, sub.Upload, sub.Download, sub.Total, sub.Expire, trafficMode, sub.ID)
+	if err != nil {
+		return fmt.Errorf("update external subscription by id: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return ErrExternalSubscriptionNotFound
+	}
+	return nil
+}
+
+// DeleteExternalSubscriptionByID 不限 owner 按 ID 删除(仅管理员路径使用)。级联清 proxy_provider_configs。
+func (r *TrafficRepository) DeleteExternalSubscriptionByID(ctx context.Context, id int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if id <= 0 {
+		return errors.New("subscription id is required")
+	}
+	if _, err := r.db.ExecContext(ctx, `DELETE FROM proxy_provider_configs WHERE external_subscription_id = ?`, id); err != nil {
+		return fmt.Errorf("delete related proxy provider configs: %w", err)
+	}
+	result, err := r.db.ExecContext(ctx, `DELETE FROM external_subscriptions WHERE id = ?`, id)
+	if err != nil {
+		return fmt.Errorf("delete external subscription by id: %w", err)
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return ErrExternalSubscriptionNotFound
+	}
+	return nil
+}
+
 // 自定义规则CRUD操作
 
 var (
@@ -8236,6 +8321,30 @@ UPDATE node_traffic       SET total_uplink = 0, total_downlink = 0, uplink = las
 // 老的 _admin__ 占位 email 不动 — agent inbound + routing rule 继续工作,本步只让流量归属走子账号查询命中。
 //
 // 返回新写入的行数。NOT EXISTS 保护:已有的不重复写。
+// BackfillUserResetFromPackage 一次性把「套餐开了按月重置、但用户行 is_reset=0」的存量用户按套餐刷回。
+// 历史 bug:web 绑定套餐只用请求体的 is_reset(前端恒发 false),导致套餐的按月重置对存量用户从未生效。
+// 只处理 is_reset=0 且套餐 is_reset=1 且 reset_day 合法的用户;不动用户已显式开启的重置设置。返回受影响行数。
+func (r *TrafficRepository) BackfillUserResetFromPackage(ctx context.Context) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	res, err := r.db.ExecContext(ctx, `
+UPDATE users
+SET is_reset = 1,
+    reset_day = (SELECT p.reset_day FROM packages p WHERE p.id = users.package_id)
+WHERE package_id IS NOT NULL AND package_id > 0
+  AND COALESCE(is_reset, 0) = 0
+  AND EXISTS (
+      SELECT 1 FROM packages p
+      WHERE p.id = users.package_id AND p.is_reset = 1 AND p.reset_day BETWEEN 1 AND 31
+  )`)
+	if err != nil {
+		return 0, fmt.Errorf("backfill user reset from package: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 func (r *TrafficRepository) BackfillRoutedCreatorSubaccounts(ctx context.Context) (int64, error) {
 	if r == nil || r.db == nil {
 		return 0, errors.New("traffic repository not initialized")
