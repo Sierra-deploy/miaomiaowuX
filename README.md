@@ -158,6 +158,27 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.3.3 (2026-07-10)
+- 🌈 增加tgbot复制文案配置
+- 🌈 客户端限流配置改为连接数限制
+- 🌈 支持snell协议
+- 🛠️ fix: anytls udp fullcone
+- 🛠️ fix: mmwx-wal异常占用磁盘
+- 🛠️ fix: tgapp上的流量无法重置
+- 🛠️ fix: 流量信息流量显示错误
+- 🛠️ fix: 流量通知没有计算offset
+- 🛠️ fix: 添加节点证书首次下发失败
+- 🛠️ fix: 管理员支持管理所有外部订阅
+- 🛠️ fix: 节点名称重复的时候自动给新节点添加后缀
+- 🛠️ fix:tg通知特殊字符导致通知失败
+- 🛠️ fix:v4+v6双栈节点绑定套餐失败#6
+- 🛠️ fix:ws和vless偷自己nginx配置冲突
+- 🛠️ fix:xray配置错误导致的重启风暴
+- 🛠️ fix:偶尔添加账户绑定套餐用户重复
+- 🛠️ fix:分享的服务器节点丢失
+- 🛠️ fix:分享的服务断联后无法恢复
+- 🛠️ fix:外置xray添加anytls节点报错
+- 🛠️ fix:用户管理支持复制用户的客户端订阅
 ### v0.3.2 (2026-07-03)
 - 🌈 修改许可证服务器域名
 - 🌈 增加ipv6开关
