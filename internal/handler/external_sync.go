@@ -881,34 +881,27 @@ func (h *SyncSingleExternalSubscriptionHandler) ServeHTTP(w http.ResponseWriter,
 
 	logger.Info("[Sync API] Single subscription sync triggered by user, subscription ID", "user", username, "param", subID)
 
-	// 获取用户设置
-	userSettings, err := h.repo.GetUserSettings(r.Context(), username)
-	if err != nil {
-		logger.Info("[Sync API] 获取用户设置失败，使用默认设置", "error", err)
-		userSettings.MatchRule = "node_name"
-		userSettings.SyncScope = "saved_only"
-		userSettings.KeepNodeName = true
-		userSettings.NodeNameFilter = defaultNodeNameFilterPattern
-	}
-
-	// 获取特定订阅
-	externalSubs, err := h.repo.ListExternalSubscriptions(r.Context(), username)
-	if err != nil {
-		logger.Info("[Sync API] Failed to list external subscriptions", "error", err)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{
-			"error": "获取订阅列表失败",
-		})
-		return
-	}
-
-	// 通过ID查找订阅
+	// 解析目标订阅:管理员可同步任意 owner 的订阅,普通用户仅限自己的。
+	isAdmin := userIsAdmin(r.Context(), h.repo, username)
 	var targetSub *storage.ExternalSubscription
-	for i := range externalSubs {
-		if externalSubs[i].ID == subID {
-			targetSub = &externalSubs[i]
-			break
+	if isAdmin {
+		if sub, gerr := h.repo.GetExternalSubscriptionByID(r.Context(), subID); gerr == nil {
+			targetSub = &sub
+		}
+	} else {
+		externalSubs, lerr := h.repo.ListExternalSubscriptions(r.Context(), username)
+		if lerr != nil {
+			logger.Info("[Sync API] Failed to list external subscriptions", "error", lerr)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "获取订阅列表失败"})
+			return
+		}
+		for i := range externalSubs {
+			if externalSubs[i].ID == subID {
+				targetSub = &externalSubs[i]
+				break
+			}
 		}
 	}
 
@@ -921,13 +914,26 @@ func (h *SyncSingleExternalSubscriptionHandler) ServeHTTP(w http.ResponseWriter,
 		return
 	}
 
+	// 同步作用域到订阅的 owner —— 管理员替他人同步时,节点/订阅文件写到 owner 名下,而非管理员自己。
+	ownerUsername := targetSub.Username
+
+	// 获取(owner 的)用户设置
+	userSettings, err := h.repo.GetUserSettings(r.Context(), ownerUsername)
+	if err != nil {
+		logger.Info("[Sync API] 获取用户设置失败，使用默认设置", "error", err)
+		userSettings.MatchRule = "node_name"
+		userSettings.SyncScope = "saved_only"
+		userSettings.KeepNodeName = true
+		userSettings.NodeNameFilter = defaultNodeNameFilterPattern
+	}
+
 	logger.Info("[Sync API] 开始同步单个订阅 (ID)", "name", targetSub.Name, "id", targetSub.ID)
 
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 	}
 
-	nodeCount, updatedSub, err := syncSingleExternalSubscription(r.Context(), client, h.repo, h.subscribeDir, username, *targetSub, userSettings)
+	nodeCount, updatedSub, err := syncSingleExternalSubscription(r.Context(), client, h.repo, h.subscribeDir, ownerUsername, *targetSub, userSettings)
 	if err != nil {
 		logger.Info("[Sync API] Failed to sync subscription", "name", targetSub.Name, "error", err)
 		w.Header().Set("Content-Type", "application/json")

@@ -772,6 +772,16 @@ func main() {
 			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
 		}
 	})))
+	mux.Handle("/api/admin/system-settings/redeem-template", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			systemSettingsHandler.GetRedeemTemplate(w, r)
+		case http.MethodPut:
+			systemSettingsHandler.SetRedeemTemplate(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
 	mux.Handle("/api/admin/system-settings/short-link", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -1112,6 +1122,14 @@ func main() {
 		log.Printf("[Startup] BackfillRoutedCreatorSubaccounts failed: %v", err)
 	} else if n > 0 {
 		log.Printf("[Startup] BackfillRoutedCreatorSubaccounts: filled %d creator subaccount row(s) for legacy routed nodes", n)
+	}
+
+	// 一次性补:历史 bug 导致「套餐开了按月重置但用户行 is_reset=0」的存量用户从未重置。按套餐刷回。
+	// 幂等:只改 is_reset=0 且套餐要求重置的行;下次启动这些行已 is_reset=1,不再命中。
+	if n, err := repo.BackfillUserResetFromPackage(context.Background()); err != nil {
+		log.Printf("[Startup] BackfillUserResetFromPackage failed: %v", err)
+	} else if n > 0 {
+		log.Printf("[Startup] BackfillUserResetFromPackage: enabled monthly reset for %d user(s) per their package", n)
 	}
 
 	// 一次性数据迁移:清掉旧"new<last 启发式重启检测"误判累加的 total_* 脏数据。

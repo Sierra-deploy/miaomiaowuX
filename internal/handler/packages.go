@@ -826,8 +826,10 @@ type assignPackageRequest struct {
 	PackageID  int64  `json:"package_id"`
 	StartDate  string `json:"start_date"`
 	ExpireDate string `json:"expire_date"`
-	IsReset    bool   `json:"is_reset"`
-	ResetDay   int    `json:"reset_day"`
+	// IsReset/ResetDay 用指针:nil = 请求未提供 → 回退取套餐自身的 is_reset/reset_day(套餐才是真值源);
+	// 非 nil = 调用方显式覆盖。历史 bug:前端恒发 is_reset=false 让套餐的按月重置永远不生效。
+	IsReset  *bool `json:"is_reset"`
+	ResetDay *int  `json:"reset_day"`
 }
 
 func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -851,16 +853,32 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// 开启按月重置但未指定重置日 → 取当天(封顶 28,避开月末不存在的日期),与 TG 续期路径的兜底一致。
-	// 前端在用户未显式选日时会回传 0(回显用的 `reset_day ?? 1` 对数字 0 不兜底),这里补齐;
-	// 若不补,reset_day=0 会落库并让 shouldResetThisMonth 永远返回 false —— 开关形同虚设。
-	if req.IsReset && req.ResetDay == 0 {
-		req.ResetDay = time.Now().Day()
-		if req.ResetDay > 28 {
-			req.ResetDay = 28
+	ctx := r.Context()
+	// 先取套餐:既用于 is_reset/reset_day 的回退真值源,也用于默认到期日(CycleDays)。
+	pkg, pkgErr := h.repo.GetPackage(ctx, req.PackageID)
+
+	// 解析重置设置:请求提供了就用请求值(管理员显式覆盖),否则回退套餐自身值。
+	isReset := false
+	resetDay := 0
+	if pkg != nil {
+		isReset = pkg.IsReset
+		resetDay = pkg.ResetDay
+	}
+	if req.IsReset != nil {
+		isReset = *req.IsReset
+	}
+	if req.ResetDay != nil {
+		resetDay = *req.ResetDay
+	}
+	// 开启按月重置但没有有效重置日 → 取当天(封顶 28,避开月末不存在的日期),与 TG 续期路径一致。
+	// 否则 reset_day=0 落库会让 shouldResetThisMonth 永远返回 false —— 开关形同虚设。
+	if isReset && resetDay == 0 {
+		resetDay = time.Now().Day()
+		if resetDay > 28 {
+			resetDay = 28
 		}
 	}
-	if req.IsReset && (req.ResetDay < 1 || req.ResetDay > 31) {
+	if isReset && (resetDay < 1 || resetDay > 31) {
 		http.Error(w, "Reset day must be between 1 and 31", http.StatusBadRequest)
 		return
 	}
@@ -877,8 +895,7 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		startDate = time.Now()
 	}
 
-	// 计算到期时间：优先使用前端传入的 expire_date，否则默认 start + 30 天
-	ctx := r.Context()
+	// 计算到期时间：优先使用前端传入的 expire_date，否则默认 start + CycleDays 天
 	var endDate time.Time
 	if req.ExpireDate != "" {
 		parsed, err := time.Parse("2006-01-02", req.ExpireDate)
@@ -887,16 +904,13 @@ func (h *PackageAssignHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		endDate = parsed
+	} else if pkgErr == nil && pkg != nil && pkg.CycleDays > 0 {
+		endDate = startDate.AddDate(0, 0, pkg.CycleDays)
 	} else {
-		pkg, err := h.repo.GetPackage(ctx, req.PackageID)
-		if err == nil && pkg.CycleDays > 0 {
-			endDate = startDate.AddDate(0, 0, pkg.CycleDays)
-		} else {
-			endDate = startDate.AddDate(0, 1, 0)
-		}
+		endDate = startDate.AddDate(0, 1, 0)
 	}
 
-	warnings, perr := h.AssignAndProvision(ctx, req.Username, req.PackageID, startDate, endDate, req.IsReset, req.ResetDay)
+	warnings, perr := h.AssignAndProvision(ctx, req.Username, req.PackageID, startDate, endDate, isReset, resetDay)
 	if perr != nil {
 		if perr == storage.ErrPackageNotFound {
 			http.Error(w, "Package not found", http.StatusNotFound)

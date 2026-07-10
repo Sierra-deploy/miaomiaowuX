@@ -22,6 +22,7 @@ type externalSubscriptionRequest struct {
 
 type externalSubscriptionResponse struct {
 	ID          int64   `json:"id"`
+	Username    string  `json:"username"` // owner;管理员列表视图展示归属用户,普通用户即自己
 	Name        string  `json:"name"`
 	URL         string  `json:"url"`
 	UserAgent   string  `json:"user_agent"`
@@ -47,24 +48,56 @@ func NewExternalSubscriptionsHandler(repo *storage.TrafficRepository) http.Handl
 			writeError(w, http.StatusUnauthorized, errors.New("unauthorized"))
 			return
 		}
+		// 管理员可查看/编辑/删除所有用户的外部订阅;普通用户仅限自己的(照 nodes.go 的 isAdmin 分支)。
+		isAdmin := userIsAdmin(r.Context(), repo, username)
 
 		switch r.Method {
 		case http.MethodGet:
-			handleListExternalSubscriptions(w, r, repo, username)
+			handleListExternalSubscriptions(w, r, repo, username, isAdmin)
 		case http.MethodPost:
 			handleCreateExternalSubscription(w, r, repo, username)
 		case http.MethodPut:
-			handleUpdateExternalSubscription(w, r, repo, username)
+			handleUpdateExternalSubscription(w, r, repo, username, isAdmin)
 		case http.MethodDelete:
-			handleDeleteExternalSubscription(w, r, repo, username)
+			handleDeleteExternalSubscription(w, r, repo, username, isAdmin)
 		default:
 			writeError(w, http.StatusMethodNotAllowed, errors.New("method not allowed"))
 		}
 	})
 }
 
-func handleListExternalSubscriptions(w http.ResponseWriter, r *http.Request, repo *storage.TrafficRepository, username string) {
-	subs, err := repo.ListExternalSubscriptions(r.Context(), username)
+// fetchExternalSubForAccess 管理员按 ID 取任意订阅,普通用户按 (id, 自己) 取。
+func fetchExternalSubForAccess(r *http.Request, repo *storage.TrafficRepository, id int64, username string, isAdmin bool) (storage.ExternalSubscription, error) {
+	if isAdmin {
+		return repo.GetExternalSubscriptionByID(r.Context(), id)
+	}
+	return repo.GetExternalSubscription(r.Context(), id, username)
+}
+
+// updateExternalSubForAccess 管理员按 ID 更新(owner 不变),普通用户按 owner 作用域更新。
+func updateExternalSubForAccess(r *http.Request, repo *storage.TrafficRepository, sub storage.ExternalSubscription, isAdmin bool) error {
+	if isAdmin {
+		return repo.UpdateExternalSubscriptionByID(r.Context(), sub)
+	}
+	return repo.UpdateExternalSubscription(r.Context(), sub)
+}
+
+// deleteExternalSubForAccess 管理员按 ID 删除,普通用户按 owner 作用域删除。
+func deleteExternalSubForAccess(r *http.Request, repo *storage.TrafficRepository, id int64, username string, isAdmin bool) error {
+	if isAdmin {
+		return repo.DeleteExternalSubscriptionByID(r.Context(), id)
+	}
+	return repo.DeleteExternalSubscription(r.Context(), id, username)
+}
+
+func handleListExternalSubscriptions(w http.ResponseWriter, r *http.Request, repo *storage.TrafficRepository, username string, isAdmin bool) {
+	var subs []storage.ExternalSubscription
+	var err error
+	if isAdmin {
+		subs, err = repo.ListAllExternalSubscriptions(r.Context()) // 管理员看全部(含 owner)
+	} else {
+		subs, err = repo.ListExternalSubscriptions(r.Context(), username)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -86,6 +119,7 @@ func handleListExternalSubscriptions(w http.ResponseWriter, r *http.Request, rep
 
 		resp = append(resp, externalSubscriptionResponse{
 			ID:          sub.ID,
+			Username:    sub.Username,
 			Name:        sub.Name,
 			URL:         sub.URL,
 			UserAgent:   sub.UserAgent,
@@ -223,7 +257,7 @@ func handleCreateExternalSubscription(w http.ResponseWriter, r *http.Request, re
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func handleUpdateExternalSubscription(w http.ResponseWriter, r *http.Request, repo *storage.TrafficRepository, username string) {
+func handleUpdateExternalSubscription(w http.ResponseWriter, r *http.Request, repo *storage.TrafficRepository, username string, isAdmin bool) {
 	idStr := r.URL.Query().Get("id")
 	if idStr == "" {
 		writeError(w, http.StatusBadRequest, errors.New("subscription id is required"))
@@ -254,7 +288,7 @@ func handleUpdateExternalSubscription(w http.ResponseWriter, r *http.Request, re
 		return
 	}
 
-	existing, err := repo.GetExternalSubscription(r.Context(), id, username)
+	existing, err := fetchExternalSubForAccess(r, repo, id, username, isAdmin)
 	if err != nil {
 		if errors.Is(err, storage.ErrExternalSubscriptionNotFound) {
 			writeError(w, http.StatusNotFound, errors.New("subscription not found"))
@@ -272,7 +306,7 @@ func handleUpdateExternalSubscription(w http.ResponseWriter, r *http.Request, re
 
 	sub := storage.ExternalSubscription{
 		ID:          id,
-		Username:    username,
+		Username:    existing.Username, // 保持原 owner(管理员改他人订阅时不能把 owner 改成自己)
 		Name:        name,
 		URL:         url,
 		UserAgent:   payload.UserAgent, // 会在存储层使用默认值如果为空
@@ -285,7 +319,7 @@ func handleUpdateExternalSubscription(w http.ResponseWriter, r *http.Request, re
 		Expire:      existing.Expire,
 	}
 
-	if err := repo.UpdateExternalSubscription(r.Context(), sub); err != nil {
+	if err := updateExternalSubForAccess(r, repo, sub, isAdmin); err != nil {
 		if errors.Is(err, storage.ErrExternalSubscriptionNotFound) {
 			writeError(w, http.StatusNotFound, errors.New("subscription not found"))
 			return
@@ -294,7 +328,7 @@ func handleUpdateExternalSubscription(w http.ResponseWriter, r *http.Request, re
 		return
 	}
 
-	updated, err := repo.GetExternalSubscription(r.Context(), id, username)
+	updated, err := fetchExternalSubForAccess(r, repo, id, username, isAdmin)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -314,6 +348,7 @@ func handleUpdateExternalSubscription(w http.ResponseWriter, r *http.Request, re
 
 	resp := externalSubscriptionResponse{
 		ID:          updated.ID,
+		Username:    updated.Username,
 		Name:        updated.Name,
 		URL:         updated.URL,
 		UserAgent:   updated.UserAgent,
@@ -333,7 +368,7 @@ func handleUpdateExternalSubscription(w http.ResponseWriter, r *http.Request, re
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func handleDeleteExternalSubscription(w http.ResponseWriter, r *http.Request, repo *storage.TrafficRepository, username string) {
+func handleDeleteExternalSubscription(w http.ResponseWriter, r *http.Request, repo *storage.TrafficRepository, username string, isAdmin bool) {
 	idStr := r.URL.Query().Get("id")
 	if idStr == "" {
 		writeError(w, http.StatusBadRequest, errors.New("subscription id is required"))
@@ -346,7 +381,7 @@ func handleDeleteExternalSubscription(w http.ResponseWriter, r *http.Request, re
 		return
 	}
 
-	if err := repo.DeleteExternalSubscription(r.Context(), id, username); err != nil {
+	if err := deleteExternalSubForAccess(r, repo, id, username, isAdmin); err != nil {
 		if errors.Is(err, storage.ErrExternalSubscriptionNotFound) {
 			writeError(w, http.StatusNotFound, errors.New("subscription not found"))
 			return
