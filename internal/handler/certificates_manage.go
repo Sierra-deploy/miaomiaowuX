@@ -947,13 +947,24 @@ func (h *CertificateHandler) DeployCertToServerSync(ctx context.Context, server 
 		return certPath, keyPath, nil
 	}
 
-	// 1) 优先 WS
+	// 1) 优先 WS —— 走请求-响应(ForwardToAgent over WS 命中 agent 同步的 HandleCertDeploy,写完证书返回 200 才继续)。
+	// 旧的 SendCertDeploy 是「主控发完即返回 + agent 侧 go handleCertDeploy 异步落盘」双重异步,会与随后「添加 TLS 入站」
+	// 竞态:证书还没写到磁盘 xray 就加载入站 → "证书文件不存在",首次必失败、重试才成功。payload.Reload="none" 只写不重启。
 	if h.wsHandler != nil && h.wsHandler.IsConnected(server.Token) {
-		if err := h.wsHandler.SendCertDeploy(server.Token, payload); err == nil {
-			log.Printf("[Certificate] Sync cert_deploy via WS to %s for %s", server.Name, payload.Domain)
+		if h.remoteManage != nil {
+			body, _ := json.Marshal(payload)
+			fctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			_, ferr := h.remoteManage.ForwardToAgent(fctx, server.ID, http.MethodPost, "/api/child/cert/deploy", body)
+			cancel()
+			if ferr == nil {
+				log.Printf("[Certificate] Sync cert_deploy via WS(req-resp) to %s for %s", server.Name, payload.Domain)
+				return certPath, keyPath, nil
+			}
+			log.Printf("[Certificate] Sync WS(req-resp) cert_deploy to %s failed: %v, falling back to HTTP", server.Name, ferr)
+		} else if err := h.wsHandler.SendCertDeploy(server.Token, payload); err == nil {
+			log.Printf("[Certificate] Sync cert_deploy via WS(async, no remoteManage) to %s for %s", server.Name, payload.Domain)
 			return certPath, keyPath, nil
 		}
-		log.Printf("[Certificate] Sync WS cert_deploy failed for %s, falling back to HTTP", server.Name)
 	}
 
 	// 2) Fallback HTTP — 同步等 agent 200 OK 才返回
