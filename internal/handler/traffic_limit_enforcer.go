@@ -223,6 +223,7 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 					continue
 				}
 				_ = e.repo.UpdateRemoteServerLastTrafficResetAt(ctx, s.ID, now)
+				_ = e.repo.ClearTrafficThresholdNotified(ctx, s.ID) // 新周期清去重标记,越线可再次告警
 				log.Printf("[TrafficLimitEnforcer] server %d(%s) monthly traffic reset (day=%d)", s.ID, s.Name, s.TrafficResetDay)
 			}
 		} else {

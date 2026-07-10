@@ -253,6 +253,7 @@ func sendDailyTrafficNotification(ctx context.Context, repo *storage.TrafficRepo
 
 	for _, s := range servers {
 		used, _ := repo.GetServerTrafficUsed(ctx, s.ID)
+		used += s.TrafficUsedOffset // 与面板「已用流量」同口径(offset 可为负)
 		totalUsed += used
 		serverList = append(serverList, serverTraffic{name: s.Name, used: used, limit: s.TrafficLimit})
 	}
@@ -349,6 +350,7 @@ func checkTrafficThreshold(ctx context.Context, repo *storage.TrafficRepository,
 			continue
 		}
 		used, _ := repo.GetServerTrafficUsed(ctx, s.ID)
+		used += s.TrafficUsedOffset // 与面板「已用流量」同口径(offset 可为负)
 		pct := int(float64(used) / float64(s.TrafficLimit) * 100)
 		if pct >= thresholdPct {
 			alreadyNotified, _ := repo.IsTrafficThresholdNotified(ctx, s.ID)
@@ -366,6 +368,9 @@ func checkTrafficThreshold(ctx context.Context, repo *storage.TrafficRepository,
 				log.Printf("[Notify] send failed event=traffic_threshold server=%s: %v", s.Name, err)
 			}
 			_ = repo.MarkTrafficThresholdNotified(ctx, s.ID)
+		} else {
+			// 掉回阈值以下 → 清除去重标记,下次越线可再次告警(offset 校准/重置后自愈)
+			_ = repo.ClearTrafficThresholdNotified(ctx, s.ID)
 		}
 	}
 }
