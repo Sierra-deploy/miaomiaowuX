@@ -140,27 +140,29 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 
 	// admin 已同步过的同 server 节点(按 server-host + protocol + port 去重)
 	existingNodes, _ := l.repo.ListNodes(ctx, sysOwner)
+	// 已占用的节点名集合 —— 撞名(不同物理节点碰巧同名)时用 UniqueNodeName 加后缀,保证订阅侧 proxy name 唯一
+	takenNames := make(map[string]bool, len(existingNodes))
+	for _, n := range existingNodes {
+		takenNames[n.NodeName] = true
+	}
 
 	for _, p := range plans {
-		// 按名去重(v6 节点名带 "(v6)" 后缀,与 v4 不冲突)
-		if exists, _ := l.repo.CheckNodeNameExists(ctx, p.name, sysOwner, 0); exists {
-			log.Printf("[NodeSync] Node already exists: %s", p.name)
-			continue
-		}
-		// 按 server-host + protocol + port 去重 —— 带上 host,避免「both」时 v4/v6 同 proto+port 互相误杀
+		// 真重复(同 server-host + protocol + port)才 skip —— 带上 host,避免「both」时 v4/v6 同 proto+port 互相误杀
 		if nodeWithHostProtoPortExists(existingNodes, server.Name, p.host, event.Protocol, event.Port) {
 			log.Printf("[NodeSync] Node with same host/protocol/port exists, skip: %s @ %s", p.name, p.host)
 			continue
 		}
+		// 撞名但物理坐标不同(如同名的 VLESS / HY2)→ 加协议后缀,而不是丢弃
+		name := storage.UniqueNodeName(p.name, event.Protocol, takenNames)
 
-		cfg, err := cloneClashWithServerPort(clashMap, p.name, p.host, p.port)
+		cfg, err := cloneClashWithServerPort(clashMap, name, p.host, p.port)
 		if err != nil {
-			log.Printf("[NodeSync] Failed to build clash config for %s: %v", p.name, err)
+			log.Printf("[NodeSync] Failed to build clash config for %s: %v", name, err)
 			continue
 		}
 		node := storage.Node{
 			Username:       sysOwner,
-			NodeName:       p.name,
+			NodeName:       name,
 			Protocol:       event.Protocol,
 			ClashConfig:    cfg,
 			ParsedConfig:   cfg,
@@ -175,10 +177,11 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 		}
 		created, err := l.repo.CreateNode(ctx, node)
 		if err != nil {
-			log.Printf("[NodeSync] Failed to create node %s: %v", p.name, err)
+			log.Printf("[NodeSync] Failed to create node %s: %v", name, err)
 			continue
 		}
-		log.Printf("[NodeSync] Created node: %s", p.name)
+		takenNames[name] = true
+		log.Printf("[NodeSync] Created node: %s", name)
 		l.prependNodeOrder(ctx, sysOwner, created.ID)
 	}
 }
@@ -297,11 +300,13 @@ func (l *NodeSyncListener) createForwardTunnelNode(ctx context.Context, event In
 	}
 
 	sysOwner := l.repo.GetSystemNodeOwner(ctx)
-	nodeName := src.NodeName + " | Tunnel"
-	if exists, _ := l.repo.CheckNodeNameExists(ctx, nodeName, sysOwner, 0); exists {
-		log.Printf("[NodeSync] forward-tunnel: 节点已存在: %s", nodeName)
-		return
+	// 撞名(如源节点已有同名 Tunnel 配套)→ 加协议后缀保证唯一,而不是丢弃
+	existingNodes, _ := l.repo.ListNodes(ctx, sysOwner)
+	takenNames := make(map[string]bool, len(existingNodes))
+	for _, n := range existingNodes {
+		takenNames[n.NodeName] = true
 	}
+	nodeName := storage.UniqueNodeName(src.NodeName+" | Tunnel", src.Protocol, takenNames)
 
 	// 克隆源节点 clash 配置,改 name/server/port(端口取 tunnel 监听端口)
 	var clashMap map[string]any

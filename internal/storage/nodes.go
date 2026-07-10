@@ -81,6 +81,32 @@ func (r *TrafficRepository) CheckNodeNameExists(ctx context.Context, nodeName, u
 	return count > 0, nil
 }
 
+// UniqueNodeName 在 base 撞名时追加协议/序号后缀,保证在 taken 集合里唯一。
+// taken 为调用方已加载的现有节点名集合(值 true=已占用),本函数不修改它。
+func UniqueNodeName(base, protocol string, taken map[string]bool) string {
+	if !taken[base] {
+		return base
+	}
+	if p := strings.TrimSpace(protocol); p != "" {
+		withProto := base + " " + p // 例:"A hysteria2"
+		if !taken[withProto] {
+			return withProto
+		}
+		for i := 2; ; i++ {
+			c := fmt.Sprintf("%s %s %d", base, p, i)
+			if !taken[c] {
+				return c
+			}
+		}
+	}
+	for i := 2; ; i++ {
+		c := fmt.Sprintf("%s (%d)", base, i)
+		if !taken[c] {
+			return c
+		}
+	}
+}
+
 // 返回特定用户名的所有节点。
 func (r *TrafficRepository) ListNodes(ctx context.Context, username string) ([]Node, error) {
 	if r == nil || r.db == nil {

@@ -2858,7 +2858,7 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 			nodeName = fmt.Sprintf("[%s] %s:%d", server.Name, protocol, int(port))
 		}
 
-		// 检查同名节点是否已存在
+		// 走到这里已过 Step 1(tag)+ Step 2(fingerprint)两道真重复闸门,撞名一定是"不同物理节点碰巧同名"。
 		if existingNodeNames[nodeName] {
 			if forceOverride {
 				// 强制覆盖:删除同名节点,后面走"创建"路径覆盖
@@ -2874,8 +2874,8 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 				}
 				delete(existingNodeNames, nodeName)
 			} else {
-				response.SkippedCount++
-				continue
+				// 撞名 → 加协议后缀保证唯一(否则订阅侧会出现重复 proxy name),而不是 skip 丢节点
+				nodeName = storage.UniqueNodeName(nodeName, protocol, existingNodeNames)
 			}
 		}
 
@@ -2888,6 +2888,12 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 				existingByTag[server.Name+":"+tag] = true
 			}
 			continue
+		}
+
+		// 把 clash 配置的 name 同步成最终 nodeName(撞名改名后必须一致,订阅用的是 clash 配置里的 name)
+		clashProxy["name"] = nodeName
+		if b, mErr := json.Marshal(clashProxy); mErr == nil {
+			clashConfigJSON = b
 		}
 
 		// 创建节点
