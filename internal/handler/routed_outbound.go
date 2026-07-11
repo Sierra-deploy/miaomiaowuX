@@ -464,19 +464,19 @@ func peekInboundFirstClientFlow(ctx context.Context, rm *RemoteManageHandler, se
 			continue
 		}
 		settings, _ := ib["settings"].(map[string]interface{})
-		stream, _ := ib["streamSettings"].(map[string]interface{})
-		return vlessFlowFromInbound(settings, stream), nil
+		return vlessFlowFromInbound(settings), nil
 	}
 	return "", fmt.Errorf("inbound %s not found", inboundTag)
 }
 
-// vlessFlowFromInbound 从 inbound 的 settings/streamSettings 稳健推断 VLESS 应继承的 flow:
-//   ① 扫**所有** client,取第一个非空 flow(兼容 clients[0] 恰好是无 flow 的子账户/占位、或自定义 flow);
-//   ② 仍没有 → 若 streamSettings.security 是 reality/xtls/vision → "xtls-rprx-vision"(reality 标配,vless-only);
-//   ③ 都不满足 → ""(非 vision 的 vless / 其它协议,不加 flow)。
-// 之前只读 clients[0].flow:一旦 clients[0] 无 flow(旧前端/导入的入站、client 被重排),整条继承链就断,
-// routed 子账户全丢 flow —— 这就是"之前修过又出现"的回归根。
-func vlessFlowFromInbound(settings, streamSettings map[string]interface{}) string {
+// vlessFlowFromInbound 从父入站的 settings 推断 VLESS routed 子账户应继承的 flow:
+// 只信**父入站实际的 client flow**——扫所有 client,取第一个非空 flow(兼容 clients[0] 恰好无 flow 的
+// 子账户/占位、client 被重排、或自定义 flow)。取不到 → ""。
+//
+// 不能用 streamSettings.security==reality 兜底加 "xtls-rprx-vision":reality 分 with-vision 与 without-vision
+// 两种,后者的 client 本就没有 flow,一律塞 vision 会让 reality-without-vision 节点的 routed 出站配置与父节点
+// 不一致(客户端连不上)。vision 节点每个 client 必带 flow=xtls-rprx-vision,靠扫 client 就能正确继承。
+func vlessFlowFromInbound(settings map[string]interface{}) string {
 	if settings != nil {
 		if clients, ok := settings["clients"].([]interface{}); ok {
 			for _, c := range clients {
@@ -486,13 +486,6 @@ func vlessFlowFromInbound(settings, streamSettings map[string]interface{}) strin
 					}
 				}
 			}
-		}
-	}
-	if streamSettings != nil {
-		sec, _ := streamSettings["security"].(string)
-		sec = strings.ToLower(strings.TrimSpace(sec))
-		if sec == "reality" || strings.Contains(sec, "xtls") || strings.Contains(sec, "vision") {
-			return "xtls-rprx-vision"
 		}
 	}
 	return ""
