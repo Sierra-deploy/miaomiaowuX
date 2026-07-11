@@ -136,6 +136,90 @@ func (h *SystemSettingsHandler) SetMasterURL(w http.ResponseWriter, r *http.Requ
 	json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "主服务器地址已更新"})
 }
 
+// 伪装探针配置的 4 个 KV 键。
+const (
+	probeDisguiseEnabledKey   = "probe_disguise_enabled"    // "1"/"" 开关
+	probeDisguiseTitleKey     = "probe_disguise_title"      // 伪装页标题(管理员自定义)
+	probeDisguiseServerIDsKey = "probe_disguise_server_ids" // JSON int64 数组:展示哪些服务器
+	probeDisguiseShowNameKey  = "probe_disguise_show_name"  // "1"/"" 是否显示服务器名
+)
+
+// GetProbeDisguise 返回伪装探针配置(管理端)。
+func (h *SystemSettingsHandler) GetProbeDisguise(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		return
+	}
+	ctx := r.Context()
+	enabled, _ := h.repo.GetSystemSetting(ctx, probeDisguiseEnabledKey)
+	title, _ := h.repo.GetSystemSetting(ctx, probeDisguiseTitleKey)
+	showName, _ := h.repo.GetSystemSetting(ctx, probeDisguiseShowNameKey)
+	idsRaw, _ := h.repo.GetSystemSetting(ctx, probeDisguiseServerIDsKey)
+
+	ids := []int64{}
+	if idsRaw != "" {
+		_ = json.Unmarshal([]byte(idsRaw), &ids)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"success":    true,
+		"enabled":    enabled == "1",
+		"title":      title,
+		"server_ids": ids,
+		"show_name":  showName == "1",
+	})
+}
+
+// SetProbeDisguise 写入伪装探针配置(管理端)。
+func (h *SystemSettingsHandler) SetProbeDisguise(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Enabled   bool    `json:"enabled"`
+		Title     string  `json:"title"`
+		ServerIDs []int64 `json:"server_ids"`
+		ShowName  bool    `json:"show_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "请求格式错误"})
+		return
+	}
+
+	ctx := r.Context()
+	boolStr := func(b bool) string {
+		if b {
+			return "1"
+		}
+		return ""
+	}
+	if req.ServerIDs == nil {
+		req.ServerIDs = []int64{}
+	}
+	idsJSON, _ := json.Marshal(req.ServerIDs)
+
+	for _, kv := range []struct{ k, v string }{
+		{probeDisguiseEnabledKey, boolStr(req.Enabled)},
+		{probeDisguiseTitleKey, req.Title},
+		{probeDisguiseShowNameKey, boolStr(req.ShowName)},
+		{probeDisguiseServerIDsKey, string(idsJSON)},
+	} {
+		if err := h.repo.SetSystemSetting(ctx, kv.k, kv.v); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "保存失败"})
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "伪装探针配置已更新"})
+}
+
 // defaultRedeemTemplate 兑换码复制文案的默认模板。占位符:
 //   {兑换码}     — 具体兑换码
 //   {机器人地址} — TG 机器人链接(由 tgbot miniapp 端按 getMe 自动注入,如 https://t.me/xxx_bot)

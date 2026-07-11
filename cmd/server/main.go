@@ -782,6 +782,21 @@ func main() {
 			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
 		}
 	})))
+	// 公开端点:伪装探针的只读服务器状态(无鉴权)。伪装关闭时返回 {enabled:false},开启时只吐白名单字段。
+	// 走明文(前端 shouldEncrypt 已放行 /api/public/);此处 remoteWSHandler 已构造(见上文)。
+	mux.Handle("/api/public/probe-servers", handler.NewProbePublicHandler(repo, remoteWSHandler))
+
+	// 伪装探针配置(开关 + 标题 + 展示的服务器 + 是否显名)
+	mux.Handle("/api/admin/system-settings/probe-disguise", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			systemSettingsHandler.GetProbeDisguise(w, r)
+		case http.MethodPut:
+			systemSettingsHandler.SetProbeDisguise(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
 	mux.Handle("/api/admin/system-settings/short-link", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
