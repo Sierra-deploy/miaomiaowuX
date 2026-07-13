@@ -639,7 +639,7 @@ const DefaultThemeKey = "default_theme"
 
 func (h *SystemSettingsHandler) GetDefaultTheme(w http.ResponseWriter, r *http.Request) {
 	value, _ := h.repo.GetSystemSetting(r.Context(), DefaultThemeKey)
-	if value != "flat" && value != "pixel" {
+	if value != "flat" && value != "pixel" && value != "anime" {
 		value = "pixel"
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -656,10 +656,10 @@ func (h *SystemSettingsHandler) SetDefaultTheme(w http.ResponseWriter, r *http.R
 		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "请求格式错误"})
 		return
 	}
-	if req.DefaultTheme != "flat" && req.DefaultTheme != "pixel" {
+	if req.DefaultTheme != "flat" && req.DefaultTheme != "pixel" && req.DefaultTheme != "anime" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "主题必须为 flat 或 pixel"})
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "主题必须为 flat / pixel / anime"})
 		return
 	}
 	if err := h.repo.SetSystemSetting(r.Context(), DefaultThemeKey, req.DefaultTheme); err != nil {

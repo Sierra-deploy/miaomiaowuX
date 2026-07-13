@@ -34,7 +34,7 @@ var (
 // 由 main.go 启动时按 DB 设置调用一次,并在管理员改主题时同步调用。
 func SetDefaultTheme(theme string) {
 	initOnce.Do(initialize)
-	if theme != "flat" && theme != "pixel" {
+	if theme != "flat" && theme != "pixel" && theme != "anime" {
 		theme = "pixel"
 	}
 	themeMu.Lock()
