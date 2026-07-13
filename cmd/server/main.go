@@ -515,6 +515,8 @@ func main() {
 	packageAssignHandler := handler.NewPackageAssignHandler(repo, remoteManageHandler, limiterPusher)
 	tgbotAPIHandler.SetPackageAssign(packageAssignHandler) // 让 TGBOT 注册/兑换的套餐走同一套下发
 	mux.Handle("/api/admin/packages/assign", auth.RequireAdmin(tokenStore, userRepo, packageAssignHandler))
+	// 快捷续期:复用 packageAssignHandler 的 AssignAndProvision(samePackage 快路径),只延长 package_end_date
+	mux.Handle("/api/admin/users/extend", auth.RequireAdmin(tokenStore, userRepo, handler.NewUserExtendHandler(packageAssignHandler)))
 	mux.Handle("/api/admin/packages/unassign", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageUnassignHandler(repo, remoteManageHandler, limiterPusher)))
 	// 删除套餐:解绑所有绑定用户(移除入站凭据/清 package_id/删套餐订阅)后再删,故依赖 remoteManageHandler/limiterPusher
 	mux.Handle("/api/admin/packages/", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageDeleteHandler(repo, remoteManageHandler, limiterPusher)))
