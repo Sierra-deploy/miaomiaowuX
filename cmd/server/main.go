@@ -757,6 +757,10 @@ func main() {
 	if encVal, _ := repo.GetSystemSetting(context.Background(), "require_encryption"); encVal == "true" {
 		cryptoConfig.SetRequireEncryption(true)
 	}
+	// 启动时把 DB 里的默认主题注入到下发的 index.html(无 cookie 的用户首屏据此套主题,无闪烁)
+	if theme, _ := repo.GetSystemSetting(context.Background(), handler.DefaultThemeKey); theme != "" {
+		web.SetDefaultTheme(theme)
+	}
 	// 自定义安全阈值(登录/暴力防护/订阅频率)— 写入后 handler 内部热更新 3 个 limiter 单例,无需重启
 	mux.Handle("/api/admin/security-settings", auth.RequireAdmin(tokenStore, userRepo, handler.NewSecuritySettingsHandler(repo)))
 	// Turnstile 配置自测:前端 widget 验完拿 token,后端用 DB 已存 secret 调 cloudflare siteverify,
@@ -795,6 +799,20 @@ func main() {
 			systemSettingsHandler.GetProbeDisguise(w, r)
 		case http.MethodPut:
 			systemSettingsHandler.SetProbeDisguise(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
+	// 默认主题(flat / pixel):PUT 保存后重读并同步注入到 index.html,让新用户首屏立即用新默认
+	mux.Handle("/api/admin/system-settings/default-theme", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			systemSettingsHandler.GetDefaultTheme(w, r)
+		case http.MethodPut:
+			systemSettingsHandler.SetDefaultTheme(w, r)
+			if theme, _ := repo.GetSystemSetting(r.Context(), handler.DefaultThemeKey); theme != "" {
+				web.SetDefaultTheme(theme)
+			}
 		default:
 			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
 		}

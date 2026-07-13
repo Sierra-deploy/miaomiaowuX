@@ -633,6 +633,45 @@ func (h *SystemSettingsHandler) SetSubscriptionOutputFormat(w http.ResponseWrite
 	json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "订阅序列化格式已更新"})
 }
 
+// DefaultThemeKey 是「默认主题」系统设置的 KV 键。值:"flat"(扁平)/ "pixel"(妙妙屋像素风,默认)。
+// 无 mmw-theme-style cookie 的用户首屏用它决定初始主题(由 web.SetDefaultTheme 注入 index.html)。
+const DefaultThemeKey = "default_theme"
+
+func (h *SystemSettingsHandler) GetDefaultTheme(w http.ResponseWriter, r *http.Request) {
+	value, _ := h.repo.GetSystemSetting(r.Context(), DefaultThemeKey)
+	if value != "flat" && value != "pixel" {
+		value = "pixel"
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "default_theme": value})
+}
+
+func (h *SystemSettingsHandler) SetDefaultTheme(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DefaultTheme string `json:"default_theme"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "请求格式错误"})
+		return
+	}
+	if req.DefaultTheme != "flat" && req.DefaultTheme != "pixel" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "主题必须为 flat 或 pixel"})
+		return
+	}
+	if err := h.repo.SetSystemSetting(r.Context(), DefaultThemeKey, req.DefaultTheme); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "保存失败"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "默认主题已更新"})
+}
+
 func (h *SystemSettingsHandler) GetSilentMode(w http.ResponseWriter, r *http.Request) {
 	cfg, err := h.repo.GetSystemConfig(r.Context())
 	if err != nil {

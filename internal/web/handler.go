@@ -14,13 +14,35 @@ import (
 //go:embed dist/*
 var embeddedFiles embed.FS
 
+// themePlaceholder 是 index.html 内联脚本里的默认主题占位符,serveIndex 时替换成管理员设置的值。
+// 无 cookie 的用户首屏据此决定初始主题(flat / pixel),避免像素↔扁平的加载闪烁。
+const themePlaceholder = "__MMW_DEFAULT_THEME__"
+
 var (
 	initOnce    sync.Once
 	staticFS    fs.FS
 	staticFiles http.Handler
 	indexBytes  []byte
 	indexMod    time.Time
+
+	themeMu      sync.RWMutex
+	servedIndex  []byte // indexBytes 替换占位符后的实际下发内容
+	currentTheme = "pixel"
 )
+
+// SetDefaultTheme 更新首屏注入的默认主题(flat / pixel),供无 mmw-theme-style cookie 的用户决定初始主题。
+// 由 main.go 启动时按 DB 设置调用一次,并在管理员改主题时同步调用。
+func SetDefaultTheme(theme string) {
+	initOnce.Do(initialize)
+	if theme != "flat" && theme != "pixel" {
+		theme = "pixel"
+	}
+	themeMu.Lock()
+	defer themeMu.Unlock()
+	currentTheme = theme
+	servedIndex = bytes.ReplaceAll(indexBytes, []byte(themePlaceholder), []byte(theme))
+	indexMod = time.Now() // 内容变了 → 刷新 modtime,避免 If-Modified-Since 命中旧 index
+}
 
 func initialize() {
 	sub, err := fs.Sub(embeddedFiles, "dist")
@@ -35,6 +57,8 @@ func initialize() {
 	if err != nil {
 		panic(err)
 	}
+	// 默认先按 pixel 替换占位符;main.go 启动后会用 DB 里的值再 SetDefaultTheme 一次。
+	servedIndex = bytes.ReplaceAll(indexBytes, []byte(themePlaceholder), []byte(currentTheme))
 
 	if info, err := fs.Stat(sub, "index.html"); err == nil {
 		indexMod = info.ModTime()
@@ -90,8 +114,11 @@ func serveIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reader := bytes.NewReader(indexBytes)
-	http.ServeContent(w, r, "index.html", indexMod, reader)
+	themeMu.RLock()
+	content := servedIndex
+	mod := indexMod
+	themeMu.RUnlock()
+	http.ServeContent(w, r, "index.html", mod, bytes.NewReader(content))
 }
 
 func fileExists(name string) bool {
