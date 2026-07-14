@@ -788,6 +788,19 @@ func main() {
 			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
 		}
 	})))
+	// 自定义登录页壁纸:管理员读写 + 公开读取(登录页未鉴权时读)
+	mux.Handle("/api/admin/system-settings/login-wallpaper", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			systemSettingsHandler.GetLoginWallpaper(w, r)
+		case http.MethodPut:
+			systemSettingsHandler.SetLoginWallpaper(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.HandleFunc("/api/public/login-wallpaper", systemSettingsHandler.GetLoginWallpaperPublic)
+
 	// 公开端点:伪装探针的只读服务器状态(无鉴权)。伪装关闭时返回 {enabled:false},开启时只吐白名单字段。
 	// 走明文(前端 shouldEncrypt 已放行 /api/public/);此处 remoteWSHandler 已构造(见上文)。
 	mux.Handle("/api/public/probe-servers", handler.NewProbePublicHandler(repo, remoteWSHandler))

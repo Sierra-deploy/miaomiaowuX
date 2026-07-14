@@ -672,6 +672,49 @@ func (h *SystemSettingsHandler) SetDefaultTheme(w http.ResponseWriter, r *http.R
 	json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "默认主题已更新"})
 }
 
+// LoginWallpaperKey 是「自定义登录页壁纸」的 KV 键(存图片 URL,可为空)。
+const LoginWallpaperKey = "login_wallpaper"
+
+func (h *SystemSettingsHandler) GetLoginWallpaper(w http.ResponseWriter, r *http.Request) {
+	value, _ := h.repo.GetSystemSetting(r.Context(), LoginWallpaperKey)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "login_wallpaper": value})
+}
+
+func (h *SystemSettingsHandler) SetLoginWallpaper(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		LoginWallpaper string `json:"login_wallpaper"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "请求格式错误"})
+		return
+	}
+	v := strings.TrimSpace(req.LoginWallpaper)
+	if len(v) > 2000 {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "URL 过长"})
+		return
+	}
+	if err := h.repo.SetSystemSetting(r.Context(), LoginWallpaperKey, v); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "保存失败"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "登录页壁纸已更新"})
+}
+
+// GetLoginWallpaperPublic 公开读取(登录页未鉴权时用)。
+func (h *SystemSettingsHandler) GetLoginWallpaperPublic(w http.ResponseWriter, r *http.Request) {
+	value, _ := h.repo.GetSystemSetting(r.Context(), LoginWallpaperKey)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"login_wallpaper": value})
+}
+
 func (h *SystemSettingsHandler) GetSilentMode(w http.ResponseWriter, r *http.Request) {
 	cfg, err := h.repo.GetSystemConfig(r.Context())
 	if err != nil {
