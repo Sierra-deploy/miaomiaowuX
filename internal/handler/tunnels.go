@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -41,10 +43,10 @@ type tunnelInfo struct {
 	TargetAddress string   `json:"target_address"`
 	TargetPort    int      `json:"target_port"`
 	Network       string   `json:"network"`
-	InboundTag    string   `json:"inbound_tag,omitempty"`    // routed: rule.inboundTag[0]
-	MatchDomain   []string `json:"match_domain,omitempty"`   // routed: rule.domain
-	MatchIP       []string `json:"match_ip,omitempty"`       // routed: rule.ip
-	RuleIndex     int      `json:"rule_index,omitempty"`     // routed: 删除时按 index 调 remove_rule(以拉取时为准,删前主控再 GET 一次校对)
+	InboundTag    string   `json:"inbound_tag,omitempty"`  // routed: rule.inboundTag[0]
+	MatchDomain   []string `json:"match_domain,omitempty"` // routed: rule.domain
+	MatchIP       []string `json:"match_ip,omitempty"`     // routed: rule.ip
+	RuleIndex     int      `json:"rule_index,omitempty"`   // routed: 删除时按 index 调 remove_rule(以拉取时为准,删前主控再 GET 一次校对)
 }
 
 func (h *TunnelsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -167,7 +169,94 @@ func (h *TunnelsHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			tunnels = append(tunnels, ti)
 		}
 	}
-	respondJSON(w, http.StatusOK, map[string]any{"success": true, "tunnels": tunnels})
+	// 链式转发聚合:把 tag 形如 `tunnel-<label>-h<i>` 的 inbound tunnel 按 <label> 分组、按 <i> 排序成一条链;
+	// 这些跳从散装 tunnels 里剔除,避免重复展示。
+	chains, flat := groupTunnelChains(tunnels)
+	respondJSON(w, http.StatusOK, map[string]any{"success": true, "tunnels": flat, "chains": chains})
+}
+
+type tunnelChainHop struct {
+	ServerID      int64  `json:"server_id"`
+	ServerName    string `json:"server_name"`
+	Tag           string `json:"tag"`
+	ListenPort    int    `json:"listen_port"`
+	TargetAddress string `json:"target_address"`
+	TargetPort    int    `json:"target_port"`
+}
+
+type tunnelChain struct {
+	Label       string           `json:"label"`
+	Hops        []tunnelChainHop `json:"hops"`         // 按跳顺序(h0=入口 … 末=出口)
+	EntryServer int64            `json:"entry_server"` // 入口服务器 id(前端据此取可达地址 + relay 切换)
+	EntryPort   int              `json:"entry_port"`
+	FinalTarget string           `json:"final_target"` // 出口跳的 target address:port
+}
+
+// groupTunnelChains 把 inbound tunnel 里的链跳分组;返回 chains 和剔除链跳后的散装 tunnels。
+func groupTunnelChains(tunnels []tunnelInfo) ([]tunnelChain, []tunnelInfo) {
+	byLabel := map[string][]tunnelInfo{}
+	flat := make([]tunnelInfo, 0, len(tunnels))
+	for _, t := range tunnels {
+		if t.Kind == "inbound" {
+			if label, _, ok := parseChainTag(t.Tag); ok {
+				byLabel[label] = append(byLabel[label], t)
+				continue
+			}
+		}
+		flat = append(flat, t)
+	}
+	chains := make([]tunnelChain, 0, len(byLabel))
+	for label, hops := range byLabel {
+		// 按 tag 里的 hop index 排序
+		sort.Slice(hops, func(a, b int) bool {
+			_, ia, _ := parseChainTag(hops[a].Tag)
+			_, ib, _ := parseChainTag(hops[b].Tag)
+			return ia < ib
+		})
+		ch := tunnelChain{Label: label}
+		for _, hp := range hops {
+			ch.Hops = append(ch.Hops, tunnelChainHop{
+				ServerID: hp.ServerID, ServerName: hp.ServerName, Tag: hp.Tag,
+				ListenPort: hp.ListenPort, TargetAddress: hp.TargetAddress, TargetPort: hp.TargetPort,
+			})
+		}
+		if len(ch.Hops) > 0 {
+			ch.EntryServer = ch.Hops[0].ServerID
+			ch.EntryPort = ch.Hops[0].ListenPort
+			last := ch.Hops[len(ch.Hops)-1]
+			ch.FinalTarget = fmt.Sprintf("%s:%d", last.TargetAddress, last.TargetPort)
+		}
+		chains = append(chains, ch)
+	}
+	sort.Slice(chains, func(a, b int) bool { return chains[a].Label < chains[b].Label })
+	return chains, flat
+}
+
+// parseChainTag 解析 `tunnel-<label>-h<i>`;返回 label、hop 索引、是否匹配。
+func parseChainTag(tag string) (string, int, bool) {
+	if !strings.HasPrefix(tag, "tunnel-") {
+		return "", 0, false
+	}
+	i := strings.LastIndex(tag, "-h")
+	if i <= len("tunnel-")-1 {
+		return "", 0, false
+	}
+	idxStr := tag[i+2:]
+	if idxStr == "" {
+		return "", 0, false
+	}
+	idx := 0
+	for _, c := range idxStr {
+		if c < '0' || c > '9' {
+			return "", 0, false
+		}
+		idx = idx*10 + int(c-'0')
+	}
+	label := tag[len("tunnel-"):i]
+	if label == "" {
+		return "", 0, false
+	}
+	return label, idx, true
 }
 
 func toInt(v any) int {
