@@ -3652,7 +3652,13 @@ func (h *RemoteManageHandler) inboundToClashProxy(inbound map[string]interface{}
 		}
 
 	case "socks", "http":
-		proxy["type"] = protocol
+		// proxyparser/mihomo 生态统一用 "socks5"(xray 协议名是 "socks")—— 存 "socks" 会被 substore
+		// 各生成器(clash 白名单、uri.go case)漏掉:订阅里丢节点、复制 URI 产出空串。这里归一。
+		if protocol == "socks" {
+			proxy["type"] = "socks5"
+		} else {
+			proxy["type"] = protocol
+		}
 		// client 为 nil 时(无认证模式),clash 配置不带 username/password,客户端按无认证直连。
 		if client != nil {
 			if user, ok := client["user"].(string); ok {
