@@ -411,6 +411,11 @@ func main() {
 	// Xray 服务器处理程序（远程服务器管理复用）
 	xrayServerHandler := handler.NewXrayServerHandler(repo, trafficCollector, cryptoConfig)
 
+	// 面向浏览器的实时数据推送 WS(替代前端高频轮询):RequireToken 认(支持 ?token= query 参数),
+	// hub 内按 admin/user 角色区分推送内容。数据源复用 xrayServerHandler.BuildRemoteServersList。
+	dashboardWSHub := handler.NewDashboardWSHub(repo, xrayServerHandler, getAllowedOrigins())
+	mux.Handle("/api/ws/dashboard", auth.RequireToken(tokenStore, userRepo, dashboardWSHub))
+
 	// 远程服务器管理端点（仅限管理员）
 	mux.Handle("/api/admin/remote-servers", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.ListRemoteServers)))
 	mux.Handle("/api/admin/remote-servers/create", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(xrayServerHandler.CreateRemoteServer)))
@@ -433,6 +438,8 @@ func main() {
 	mux.Handle("/api/admin/traffic", auth.RequireAdmin(tokenStore, userRepo, trafficApiHandler))
 	mux.Handle("/api/admin/traffic/", auth.RequireAdmin(tokenStore, userRepo, trafficApiHandler))
 	mux.Handle("/api/remote/traffic", remoteTrafficHandler)
+	// 把 traffic 汇总/明细 handler 注入实时 WS hub,快照复用其 JSON 输出(traffic-summary + admin-traffic)。
+	dashboardWSHub.SetTrafficHandlers(trafficHandler, trafficApiHandler)
 
 	// 远程速度处理程序（来自子服务器的 HTTP 推送）
 	remoteSpeedHandler := handler.NewRemoteSpeedHandler(repo, cryptoConfig)
@@ -621,6 +628,8 @@ func main() {
 	// xray 配置 snapshot / 跑路恢复 / 历史回滚
 	xraySnapshotHandler := handler.NewXraySnapshotHandler(repo, remoteManageHandler)
 	mux.Handle("/api/admin/xray-snapshots/", auth.RequireAdmin(tokenStore, userRepo, xraySnapshotHandler))
+	// 慢通道:把 services/status + recovery-status handler + WS handler 注入实时 hub(主控定时查在线服务器状态,消 N+1)。
+	dashboardWSHub.SetStatusHandlers(http.HandlerFunc(remoteManageHandler.HandleServicesStatus), xraySnapshotHandler, remoteWSHandler)
 
 	mux.Handle("/api/admin/remote-servers/reset-server-token", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleResetServerToken)))
 	mux.Handle("/api/admin/remote-servers/reset-agent-token", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleResetAgentToken)))

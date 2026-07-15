@@ -185,15 +185,19 @@ func (h *XrayServerHandler) ListRemoteServers(w stdhttp.ResponseWriter, r *stdht
 		return
 	}
 
-	ctx := r.Context()
+	resp := h.BuildRemoteServersList(r.Context())
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// BuildRemoteServersList 组装服务器列表响应(状态/网速/流量/入站),供 HTTP handler 与浏览器 WS 推送共用。
+func (h *XrayServerHandler) BuildRemoteServersList(ctx context.Context) RemoteServersListResponse {
 	servers, err := h.repo.ListRemoteServers(ctx)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(RemoteServersListResponse{
+		return RemoteServersListResponse{
 			Success: false,
 			Message: fmt.Sprintf("获取服务器列表失败: %s", err.Error()),
-		})
-		return
+		}
 	}
 
 	// 使用流量和入站信息构建扩展服务器列表
@@ -232,11 +236,10 @@ func (h *XrayServerHandler) ListRemoteServers(w stdhttp.ResponseWriter, r *stdht
 		extendedServers = append(extendedServers, extended)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(RemoteServersListResponse{
+	return RemoteServersListResponse{
 		Success: true,
 		Servers: extendedServers,
-	})
+	}
 }
 
 // maskServerSecrets 清空响应里的令牌字段。列表/详情接口不再明文回传 token,
