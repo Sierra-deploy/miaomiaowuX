@@ -184,6 +184,8 @@ func (h *nodesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(path, "/related-inbounds") && r.Method == http.MethodGet:
 		idSegment := strings.TrimSuffix(path, "/related-inbounds")
 		h.handleGetRelatedInbounds(w, r, idSegment)
+	case strings.HasSuffix(path, "/uri") && r.Method == http.MethodGet:
+		h.handleNodeURI(w, r, strings.TrimSuffix(path, "/uri"))
 	case strings.HasSuffix(path, "/server") && r.Method == http.MethodPut:
 		if denyNonAdmin() {
 			return
@@ -1032,6 +1034,50 @@ func cancelRelayOnNode(n *storage.Node) {
 	n.ParsedConfig = setClashConfigServerPort(n.ParsedConfig, n.RelayOrigServer, n.RelayOrigPort)
 	n.RelayOrigServer = ""
 	n.RelayOrigPort = 0
+}
+
+// handleNodeURI GET /api/admin/nodes/{id}/uri:后端用 proxyparser(substore.URIProducer)生成该节点的分享 URI。
+// 统一走后端权威实现,不再让前端各自维护 producer(避免协议分支漂移,如 SOCKS5 复制为空)。
+func (h *nodesHandler) handleNodeURI(w http.ResponseWriter, r *http.Request, idSegment string) {
+	username := auth.UsernameFromContext(r.Context())
+	if username == "" {
+		writeError(w, http.StatusUnauthorized, errors.New("用户未认证"))
+		return
+	}
+	id, err := strconv.ParseInt(idSegment, 10, 64)
+	if err != nil || id <= 0 {
+		writeBadRequest(w, "无效的节点标识")
+		return
+	}
+	node, err := h.fetchNodeForAccess(r.Context(), id, username, userIsAdmin(r.Context(), h.repo, username))
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, storage.ErrNodeNotFound) {
+			status = http.StatusNotFound
+		}
+		writeError(w, status, err)
+		return
+	}
+	if strings.TrimSpace(node.ClashConfig) == "" {
+		writeBadRequest(w, "该节点无 clash 配置,无法生成 URI")
+		return
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(node.ClashConfig), &m); err != nil {
+		writeBadRequest(w, "节点配置解析失败")
+		return
+	}
+	// 历史数据兜底:SOCKS5 入站曾存成 type:"socks"(xray 协议名),而 proxyparser 生态统一用 "socks5",
+	// 不归一会匹配不到生成分支、产出空串。新数据已在 inboundToClashProxy 直接存 "socks5"。
+	if t, _ := m["type"].(string); t == "socks" {
+		m["type"] = "socks5"
+	}
+	uri, perr := substore.NewURIProducer().ProduceOne(substore.Proxy(m))
+	if perr != nil || strings.TrimSpace(uri) == "" {
+		writeError(w, http.StatusUnprocessableEntity, fmt.Errorf("生成 URI 失败: %v", perr))
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"uri": uri})
 }
 
 // handleSetRelay 设置/修改节点中转:PUT /api/admin/nodes/{id}/relay  {relay_server, relay_port}

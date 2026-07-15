@@ -75,6 +75,11 @@ func RunNodeTest(ctx context.Context, mihomoBin, clashConfigJSON string, opts Op
 	if err := json.Unmarshal([]byte(clashConfigJSON), &proxy); err != nil {
 		return Result{}, fmt.Errorf("解析节点 clash 配置失败: %w", err)
 	}
+	// 历史数据兜底:SOCKS5 入站曾把 type 存成 "socks"(xray 协议名),但 mihomo 只认 "socks5",
+	// 否则 mihomo 启动即 fatal（unsupport proxy type: socks）→ 测速延迟/速度全失败。新数据已存 "socks5"。
+	if t, _ := proxy["type"].(string); t == "socks" {
+		proxy["type"] = "socks5"
+	}
 	name, _ := proxy["name"].(string)
 	if name == "" {
 		name = "node"
