@@ -385,6 +385,10 @@ func (h *userCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, errors.New("username is required"))
 		return
 	}
+	if err := validateUsername(username); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
 
 	if password == "" {
 		random, err := generateRandomPassword(12)

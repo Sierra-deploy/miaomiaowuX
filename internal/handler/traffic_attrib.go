@@ -181,6 +181,16 @@ func (a *emailAttributor) resolveUser(email string) string {
 	if u, ok := a.usersEmail[email]; ok {
 		return u
 	}
+	// 按最长真实用户名匹配 `<username>__`,避免用户名含 `__`/尾 `_` 时首个 `__` 拆错(纯内存,遍历预载的 realUsernames)。
+	best := ""
+	for u := range a.realUsernames {
+		if len(u) > len(best) && strings.HasPrefix(email, u+"__") {
+			best = u
+		}
+	}
+	if best != "" {
+		return best
+	}
 	if i := strings.Index(email, "__"); i > 0 {
 		return email[:i]
 	}

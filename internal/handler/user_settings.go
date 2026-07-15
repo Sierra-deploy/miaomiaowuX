@@ -64,6 +64,10 @@ func NewUserSettingsHandler(repo *storage.TrafficRepository, tokens *auth.TokenS
 				writeError(w, http.StatusBadRequest, errors.New("管理员用户名不可修改"))
 				return
 			}
+			if err := validateUsername(desiredUsername); err != nil {
+				writeError(w, http.StatusBadRequest, err)
+				return
+			}
 
 			if err := repo.RenameUser(r.Context(), username, desiredUsername); err != nil {
 				lower := strings.ToLower(err.Error())

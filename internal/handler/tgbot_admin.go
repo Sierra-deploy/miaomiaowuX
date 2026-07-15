@@ -255,7 +255,17 @@ func (h *TGBotAPIHandler) deleteInvite(w http.ResponseWriter, r *http.Request) {
 
 // ============ /bind 一次性入口 ============
 
-var usernameRe = regexp.MustCompile(`^[a-zA-Z0-9_-]{3,20}$`)
+// 用户名字符集:字母/数字/短横线,3-20 位,**不含下划线**。
+// 下划线会破坏流量归因(email 用 `<username>__<...>` 编码,下划线与分隔符 `__` 及 SQL LIKE 的 `_` 通配冲突)。
+var usernameRe = regexp.MustCompile(`^[a-zA-Z0-9-]{3,20}$`)
+
+// validateUsername 是所有创建/改名入口共用的用户名校验(setup / admin 创建 / 自助改名 / TG 注册)。
+func validateUsername(s string) error {
+	if !usernameRe.MatchString(s) {
+		return errors.New("用户名只能包含字母、数字、短横线,长度 3-20,且不能包含下划线")
+	}
+	return nil
+}
 
 func (h *TGBotAPIHandler) bind(w http.ResponseWriter, r *http.Request) {
 	var body struct {
@@ -343,8 +353,8 @@ func (h *TGBotAPIHandler) bindNew(ctx context.Context, w http.ResponseWriter,
 	tgID int64, tgHandle, requestedUsername, email, password string, ic storage.InviteCode) {
 
 	requestedUsername = strings.TrimSpace(requestedUsername)
-	if !usernameRe.MatchString(requestedUsername) {
-		writeJSONError(w, http.StatusBadRequest, "username 不合法(3-20 字符 字母数字 _ -)")
+	if err := validateUsername(requestedUsername); err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if _, err := h.repo.GetUser(ctx, requestedUsername); err == nil {

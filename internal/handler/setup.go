@@ -148,6 +148,10 @@ func NewInitialSetupHandler(repo *storage.TrafficRepository) http.Handler {
 			writeError(w, http.StatusBadRequest, errors.New("用户名不能为空"))
 			return
 		}
+		if err := validateUsername(username); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
 
 		if password == "" {
 			writeError(w, http.StatusBadRequest, errors.New("密码不能为空"))

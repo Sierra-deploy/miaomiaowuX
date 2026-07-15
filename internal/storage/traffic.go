@@ -8705,7 +8705,15 @@ func (r *TrafficRepository) ResolveUsernameByEmail(ctx context.Context, email st
 		return username
 	}
 	// 新格式 inbound 凭据 email = `<username>__<inbound_tag>`(generateCredential 生成);
-	// routed 子账户老格式 `<username>__<id>__<label>` 没命中 user_subaccounts 时也走这里(取首段一致)。
+	// routed 子账户老格式 `<username>__<id>__<label>` 没命中 user_subaccounts 时也走这里。
+	// 用 instr(精确子串,无 SQL LIKE 的 `_` 通配符坑)按最长真实用户名匹配 —— 避免用户名含 `__` 或以 `_` 结尾时
+	// 首个 `__` 拆错(如 `foo__bar__tag` 应归 `foo__bar` 而非 `foo`)。
+	var matched string
+	if e := r.db.QueryRowContext(ctx,
+		`SELECT username FROM users WHERE instr(?, username || '__') = 1 ORDER BY length(username) DESC LIMIT 1`,
+		email).Scan(&matched); e == nil && matched != "" {
+		return matched
+	}
 	if i := strings.Index(email, "__"); i > 0 {
 		return email[:i]
 	}
@@ -8726,13 +8734,24 @@ func (r *TrafficRepository) ResolveNodeNameByEmail(ctx context.Context, serverNa
 		email).Scan(&name); err == nil && name != "" {
 		return name
 	}
-	// 2. 物理:email = <user>__<inbound_tag>,取首个 "__" 之后为 inbound_tag
-	if i := strings.Index(email, "__"); i > 0 && serverName != "" {
-		tag := email[i+2:]
-		if err := r.db.QueryRowContext(ctx,
-			`SELECT node_name FROM nodes WHERE original_server = ? AND inbound_tag = ? AND COALESCE(node_type,'physical') != 'routed' LIMIT 1`,
-			serverName, tag).Scan(&name); err == nil && name != "" {
-			return name
+	// 2. 物理:email = <user>__<inbound_tag>。用 instr 按最长真实用户名定位分隔点,避免用户名含 `__` 时拆错 tag。
+	if serverName != "" {
+		var uname string
+		_ = r.db.QueryRowContext(ctx,
+			`SELECT username FROM users WHERE instr(?, username || '__') = 1 ORDER BY length(username) DESC LIMIT 1`,
+			email).Scan(&uname)
+		tag := ""
+		if uname != "" && len(email) > len(uname)+2 {
+			tag = email[len(uname)+2:]
+		} else if i := strings.Index(email, "__"); i > 0 {
+			tag = email[i+2:]
+		}
+		if tag != "" {
+			if err := r.db.QueryRowContext(ctx,
+				`SELECT node_name FROM nodes WHERE original_server = ? AND inbound_tag = ? AND COALESCE(node_type,'physical') != 'routed' LIMIT 1`,
+				serverName, tag).Scan(&name); err == nil && name != "" {
+				return name
+			}
 		}
 	}
 	return ""
@@ -8796,6 +8815,15 @@ func (r *TrafficRepository) GetUserTotalTraffic(ctx context.Context, username st
 //   - 子账号:命中 user_subaccounts → routed_node_id → routed 节点 → 父节点 → 父倍率
 //   - 其它(主账号无 __ 分隔等)→ 兜底按 1.0 计算
 // 套餐 nil 或 NodeMultipliers 空 → 等价于 GetUserTotalTraffic 在 email 维度的求和(全部按 1)。
+// escapeLikePattern 转义 SQL LIKE 元字符(`\` `_` `%`),配合 `ESCAPE '\'` 做「字面」匹配,
+// 避免用户名里的 `_` 被当成 SQL 单字符通配符导致跨用户误匹配。
+func escapeLikePattern(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	return s
+}
+
 func (r *TrafficRepository) GetUserWeightedTraffic(ctx context.Context, username string, pkg *Package) (int64, error) {
 	if r == nil || r.db == nil {
 		return 0, errors.New("traffic repository not initialized")
@@ -8867,10 +8895,18 @@ func (r *TrafficRepository) GetUserWeightedTraffic(ctx context.Context, username
 	// 扫该用户所有 email 流量行。只取本周期增量:月度重置把当时的累计值抬进了 cycle_base_*,
 	// 不减掉基线的话,重置后仍会拿历史累计去判超限(见 ResetUserTrafficCycle)。
 	prefix := username + "__"
+	// 转义 `_`(SQL 单字符通配符),用「字面」前缀匹配,防止用户名含 `_` 时跨用户串味(如 alice__% 误吞 alice_2 的行)。
+	// 两种子账号 email 形态都显式覆盖:`<user>__...`(物理 + routed)与 `<user>-<tag>`(dash 老格式);
+	// 再并上 user_subaccounts 精确集兜底。三者都对 `_` 转义,故不会像旧 `_` 通配符那样误吞别的用户。
+	esc := escapeLikePattern(username)
 	rows, err := r.db.QueryContext(ctx,
 		`SELECT server_id, email, uplink - cycle_base_uplink, downlink - cycle_base_downlink
-		 FROM user_email_traffic WHERE email = ? OR email LIKE ?`,
-		username, prefix+"%")
+		 FROM user_email_traffic
+		 WHERE email = ?
+		    OR email LIKE ? ESCAPE '\'
+		    OR email LIKE ? ESCAPE '\'
+		    OR email IN (SELECT email FROM user_subaccounts WHERE username = ?)`,
+		username, esc+`\_\_%`, esc+`-%`, username)
 	if err != nil {
 		return 0, fmt.Errorf("query user_email_traffic: %w", err)
 	}
@@ -11162,14 +11198,17 @@ func (r *TrafficRepository) ResetUserTrafficCycle(ctx context.Context, username 
 		return fmt.Errorf("reset user traffic cycle: %w", err)
 	}
 
-	// WHERE 与 GetUserWeightedTraffic 的扫描条件保持严格一致,确保"判定看得见的行"都被抬了基线。
-	// 注:'_' 在 LIKE 里是单字符通配符,所以 `<user>__%` 也会捞到 `<user>-<tag>` 形态的子账号行 ——
-	// 这正是现网判定所依赖的行为,不要在这里给下划线转义,否则两边行集不等。
+	// WHERE 必须与 GetUserWeightedTraffic 的扫描条件严格一致,确保"判定看得见的行"都被抬了基线。
+	// 转义 `_`(防跨用户串味)+ 显式覆盖 `<user>__...` 和 `<user>-<tag>` 两种子账号形态 + user_subaccounts 精确集。
+	esc := escapeLikePattern(username)
 	const emailStmt = `UPDATE user_email_traffic
 		SET cycle_base_uplink = uplink, cycle_base_downlink = downlink,
 		    cycle_start = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-		WHERE email = ? OR email LIKE ?`
-	if _, err := tx.ExecContext(ctx, emailStmt, username, username+"__%"); err != nil {
+		WHERE email = ?
+		   OR email LIKE ? ESCAPE '\'
+		   OR email LIKE ? ESCAPE '\'
+		   OR email IN (SELECT email FROM user_subaccounts WHERE username = ?)`
+	if _, err := tx.ExecContext(ctx, emailStmt, username, esc+`\_\_%`, esc+`-%`, username); err != nil {
 		return fmt.Errorf("reset user email traffic cycle: %w", err)
 	}
 
