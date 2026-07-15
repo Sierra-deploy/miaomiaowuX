@@ -1250,6 +1250,11 @@ func cloneClashWithCredential(parentClash, protocol string, newCred map[string]i
 		if auth, ok := newCred["auth"].(string); ok && auth != "" {
 			pc["password"] = auth
 		}
+	case "snell":
+		// snell v4/v5 每用户独立 psk;routed 节点的 clash 必须换成本 client 的 psk,否则订阅里是父节点(admin)的 psk → 连不上
+		if psk, ok := newCred["psk"].(string); ok && psk != "" {
+			pc["psk"] = psk
+		}
 	}
 	b, err := json.Marshal(pc)
 	if err != nil {
