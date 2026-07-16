@@ -518,7 +518,12 @@ func (h *TGBotAPIHandler) bindNew(ctx context.Context, w http.ResponseWriter,
 		writeJSONError(w, http.StatusBadRequest, "消耗邀请码失败: "+err.Error())
 		return
 	}
-	if err := h.repo.CreateUser(ctx, requestedUsername, email, "", string(hash), "user", "TG 注册"); err != nil {
+	// 备注记录 TG 身份:@用户名 + 数字 tgid,便于管理员在用户管理里对应到 Telegram 账号。
+	tgRemark := fmt.Sprintf("TG @%s (%d)", tgHandle, tgID)
+	if strings.TrimSpace(tgHandle) == "" {
+		tgRemark = fmt.Sprintf("TG (%d)", tgID) // 用户未设 TG 用户名时只记 tgid
+	}
+	if err := h.repo.CreateUser(ctx, requestedUsername, email, "", string(hash), "user", tgRemark); err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "创建账号失败: "+err.Error())
 		return
 	}
