@@ -187,6 +187,36 @@ func (r *TrafficRepository) ListNotifyUsers(ctx context.Context) ([]NotifyTarget
 	return out, rows.Err()
 }
 
+// TGPackageUser 绑定了 TG 且当前有生效套餐的用户(供公告定向广播)。
+type TGPackageUser struct {
+	Username   string
+	TelegramID int64
+	PackageID  int64
+}
+
+// ListActivePackageTGUsers 列出「绑定 TG + 有生效套餐(未过期)」的用户。公告只发给有套餐的用户,
+// 不看通知开关(公告是重要通知,区别于每日流量播报)。package_end_date 为空 = 永久套餐,视为生效。
+func (r *TrafficRepository) ListActivePackageTGUsers(ctx context.Context) ([]TGPackageUser, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT username, telegram_id, COALESCE(package_id, 0) FROM users
+		  WHERE telegram_id IS NOT NULL AND telegram_id != 0
+		    AND package_id IS NOT NULL AND package_id > 0
+		    AND (package_end_date IS NULL OR package_end_date > CURRENT_TIMESTAMP)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []TGPackageUser
+	for rows.Next() {
+		var u TGPackageUser
+		if err := rows.Scan(&u.Username, &u.TelegramID, &u.PackageID); err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
 // ============ 邀请码 ============
 
 // GenerateInviteCode 生成 12 位大小写字母数字串(密码学随机)。

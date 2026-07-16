@@ -841,6 +841,24 @@ func main() {
 			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
 		}
 	})))
+	// 公告系统:模板配置(admin GET/PUT)、公告实例 CRUD(admin)、生效公告(登录可读)
+	announcementHandler := handler.NewAnnouncementHandler(repo)
+	mux.Handle("/api/admin/system-settings/announcements", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			announcementHandler.GetConfig(w, r)
+		case http.MethodPut:
+			announcementHandler.SetConfig(w, r)
+		default:
+			http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		}
+	})))
+	mux.Handle("/api/admin/announcements", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(announcementHandler.ServeAdmin)))
+	mux.Handle("/api/admin/announcements/blocked-nodes", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(announcementHandler.GetBlockedNodes)))
+	mux.Handle("/api/announcements/active", auth.RequireToken(tokenStore, userRepo, http.HandlerFunc(announcementHandler.GetActive)))
+	// 节点被墙自动探测循环(探测源可在系统设置里配国内 agent)
+	handler.StartReachabilityScheduler(context.Background(), repo, remoteManageHandler, announcementHandler)
+
 	mux.Handle("/api/admin/system-settings/short-link", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:

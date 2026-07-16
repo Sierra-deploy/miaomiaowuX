@@ -964,6 +964,33 @@ CREATE TABLE IF NOT EXISTS traffic_records (
 		return fmt.Errorf("migrate traffic_records: %w", err)
 	}
 
+	// 公告实例(手动发布 / 节点被墙自动触发)。miniapp 读未过期 + via_miniapp;
+	// bot 读 via_bot + bot_delivered_at 空 + 未过期,发完回填 bot_delivered_at。
+	const announcementSchema = `
+CREATE TABLE IF NOT EXISTS announcements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    type TEXT NOT NULL DEFAULT 'general',
+    title TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    node_id INTEGER NOT NULL DEFAULT 0,
+    via_bot INTEGER NOT NULL DEFAULT 1,
+    via_miniapp INTEGER NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP,
+    bot_delivered_at TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS node_reachability (
+    node_id INTEGER PRIMARY KEY,
+    reachable INTEGER NOT NULL DEFAULT 1,
+    consecutive_fail INTEGER NOT NULL DEFAULT 0,
+    since TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    announced_blocked INTEGER NOT NULL DEFAULT 0
+);
+`
+	if _, err := r.db.Exec(announcementSchema); err != nil {
+		return fmt.Errorf("migrate announcements: %w", err)
+	}
+
 	// 节点测速结果(PRO speed_test)。source: master_local(主控本机) / 预留 home_tester。
 	const speedTestResultsSchema = `
 CREATE TABLE IF NOT EXISTS speed_test_results (

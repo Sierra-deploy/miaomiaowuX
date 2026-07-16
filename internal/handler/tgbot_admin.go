@@ -103,9 +103,139 @@ func (h *TGBotAPIHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.redeem(w, r)
 	case path == "admin-subview" && r.Method == http.MethodGet:
 		h.adminSubview(w, r)
+	// 公告(bot 轮询广播 + miniapp 横幅 + /announce 命令)
+	case path == "announcements/pending" && r.Method == http.MethodGet:
+		h.announcementsPending(w, r)
+	case path == "announcements/delivered" && r.Method == http.MethodPost:
+		h.announcementDelivered(w, r)
+	case path == "announcements/active" && r.Method == http.MethodGet:
+		h.announcementsActive(w, r)
+	case path == "announcements" && r.Method == http.MethodPost:
+		h.postAnnouncement(w, r)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
 	}
+}
+
+// announcementsPending 供 bot 轮询:未推送的 bot 公告,每条带自己的收件人 tg_id 列表。
+// 收件人规则:只发给「有生效套餐」的绑定用户;若公告关联了节点(node_id!=0),再进一步只发给
+// 「套餐内含该节点」的用户(没有该节点的用户不打扰)。
+func (h *TGBotAPIHandler) announcementsPending(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	items, err := h.repo.ListPendingBotAnnouncements(ctx)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	type pendingAnn struct {
+		ID         int64   `json:"id"`
+		Title      string  `json:"title"`
+		Body       string  `json:"body"`
+		Recipients []int64 `json:"recipients"`
+	}
+	out := make([]pendingAnn, 0, len(items))
+	if len(items) > 0 {
+		users, _ := h.repo.ListActivePackageTGUsers(ctx)
+		// 套餐是否含某节点的缓存(同一批用户很多共用套餐,避免重复查库)
+		pkgHasNode := map[string]bool{} // key = "packageID:nodeID"
+		hasNode := func(pkgID, nodeID int64) bool {
+			key := fmt.Sprintf("%d:%d", pkgID, nodeID)
+			if v, ok := pkgHasNode[key]; ok {
+				return v
+			}
+			has := false
+			if pkg, perr := h.repo.GetPackage(ctx, pkgID); perr == nil && pkg != nil {
+				for _, nid := range pkg.Nodes {
+					if nid == nodeID {
+						has = true
+						break
+					}
+				}
+			}
+			pkgHasNode[key] = has
+			return has
+		}
+		for _, it := range items {
+			recips := make([]int64, 0, len(users))
+			for _, u := range users {
+				if it.NodeID != 0 && !hasNode(u.PackageID, it.NodeID) {
+					continue // 节点相关公告:套餐内没这个节点 → 不发
+				}
+				recips = append(recips, u.TelegramID)
+			}
+			out = append(out, pendingAnn{ID: it.ID, Title: it.Title, Body: it.Body, Recipients: recips})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "announcements": out})
+}
+
+// announcementDelivered bot 推送完回填 bot_delivered_at,避免重复发。
+func (h *TGBotAPIHandler) announcementDelivered(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID <= 0 {
+		writeJSONError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if err := h.repo.MarkAnnouncementBotDelivered(r.Context(), req.ID); err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true})
+}
+
+// announcementsActive 供 miniapp /me:当前生效(未过期 + via_miniapp)公告,按 username 定向过滤
+// (无套餐不显示;节点相关公告仅套餐内含该节点才显示)。
+func (h *TGBotAPIHandler) announcementsActive(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	items, err := h.repo.ListActiveAnnouncements(ctx, true)
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	items = filterAnnouncementsForUser(ctx, h.repo, strings.TrimSpace(r.URL.Query().Get("username")), items)
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "announcements": items})
+}
+
+// postAnnouncement 管理员经 bot 命令 /announce 或 miniapp 发布一条公告(默认 general,两渠道都发)。
+func (h *TGBotAPIHandler) postAnnouncement(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Type           string `json:"type"`
+		Title          string `json:"title"`
+		Body           string `json:"body"`
+		ExpiresMinutes int    `json:"expires_minutes"`
+		ViaBot         *bool  `json:"via_bot"`
+		ViaMiniapp     *bool  `json:"via_miniapp"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Body) == "" {
+		writeJSONError(w, http.StatusBadRequest, "body 必填")
+		return
+	}
+	if req.Type == "" {
+		req.Type = "general"
+	}
+	viaBot, viaMiniapp := true, true
+	if req.ViaBot != nil {
+		viaBot = *req.ViaBot
+	}
+	if req.ViaMiniapp != nil {
+		viaMiniapp = *req.ViaMiniapp
+	}
+	var expiresAt *time.Time
+	if req.ExpiresMinutes > 0 {
+		t := time.Now().Add(time.Duration(req.ExpiresMinutes) * time.Minute)
+		expiresAt = &t
+	}
+	id, err := h.repo.CreateAnnouncement(r.Context(), storage.Announcement{
+		Type: req.Type, Title: strings.TrimSpace(req.Title), Body: strings.TrimSpace(req.Body),
+		ViaBot: viaBot, ViaMiniapp: viaMiniapp, ExpiresAt: expiresAt,
+	})
+	if err != nil {
+		writeJSONError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"success": true, "id": id})
 }
 
 // ============ 邀请码 CRUD ============
