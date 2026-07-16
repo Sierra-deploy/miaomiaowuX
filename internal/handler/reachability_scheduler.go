@@ -52,6 +52,19 @@ func runReachabilityCycle(ctx context.Context, repo *storage.TrafficRepository, 
 	if !blockedCfg.Enabled { // node_blocked 关 = 整个被墙探测停用
 		return
 	}
+	// 未配置探测源 → 不探。主控在机房,探不准「被墙」(还会把外部/落地节点误判被墙),
+	// 必须配国内 agent 作探测源才启用被墙探测,避免误报。
+	if len(ah.probeServerIDs(ctx)) == 0 {
+		return
+	}
+	// 只探「主控管理的节点」——original_server 匹配某个远程服务器。外部导入节点(original_server 为空
+	// 或不对应任何服务器)主控管不到、探不准,直接跳过,不产被墙公告。
+	serverNames := map[string]bool{}
+	if servers, serr := repo.ListRemoteServers(ctx); serr == nil {
+		for _, s := range servers {
+			serverNames[s.Name] = true
+		}
+	}
 	nodes, err := repo.ListAllNodes(ctx)
 	if err != nil {
 		return
@@ -62,6 +75,9 @@ func runReachabilityCycle(ctx context.Context, repo *storage.TrafficRepository, 
 	for _, n := range nodes {
 		if n.NodeType == "routed" || !n.Enabled {
 			continue
+		}
+		if strings.TrimSpace(n.OriginalServer) == "" || !serverNames[n.OriginalServer] {
+			continue // 外部/无归属节点,主控不探
 		}
 		tgt := parseNodeTarget(n.ClashConfig)
 		if tgt == "" {

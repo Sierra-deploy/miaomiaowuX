@@ -154,6 +154,14 @@ func (a *emailAttributor) classify(email string, serverID int64) emailAttributio
 	if serverName == "" {
 		return emailAttribution{}
 	}
+	// email 形如 <username>__<inbound_tag>:后段就是采集时的 inbound tag。
+	// 能凭它精确命中本 server 的某个物理入站节点时,直接归该节点(scale=1),不再在用户的多个
+	// 入站间均分 —— 均分只是无法定位到具体 tag 时的兜底(email==username、或 tag 已无对应节点)。
+	if strings.HasPrefix(email, username+"__") {
+		if n, ok := a.inbNodeByKey[serverName+"::"+email[len(username)+2:]]; ok {
+			return emailAttribution{Username: username, Shares: []nodeShare{{NodeID: n.ID, NodeName: n.NodeName, ServerName: serverName, Scale: 1}}}
+		}
+	}
 	tags := a.userServerTags[username][serverID]
 	if len(tags) == 0 {
 		// admin 自用 inbound(email==username、没走绑套餐注册)→ 摊到该 server 所有物理入站。
