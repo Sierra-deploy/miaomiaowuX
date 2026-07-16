@@ -90,6 +90,7 @@ func (h *DDNSAdminHandler) handleStatus(w http.ResponseWriter, r *http.Request, 
 		"ddns_last_error":     server.DDNSLastError,
 		"ddns_pending":        server.DDNSPending,
 		"pull_address":        server.PullAddress,
+		"pull_address_v6":     server.PullAddressV6,
 		"ip_address":          server.IPAddress,
 		"ip_address_v6":       server.IPAddressV6,
 	})

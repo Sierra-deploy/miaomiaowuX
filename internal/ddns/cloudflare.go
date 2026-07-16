@@ -213,3 +213,15 @@ func truncate(s string, n int) string {
 	}
 	return s[:n] + "..."
 }
+
+// CanManage 只读探测:能否解析到 fqdn 所属 zone 的 zone_id。
+func (p *cloudflareProvider) CanManage(ctx context.Context, fqdn string) (bool, error) {
+	zone, _, err := SplitFQDN(fqdn)
+	if err != nil {
+		return false, err
+	}
+	if _, err := p.resolveZoneID(ctx, zone); err != nil {
+		return false, err
+	}
+	return true, nil
+}

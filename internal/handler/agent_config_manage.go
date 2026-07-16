@@ -79,6 +79,7 @@ type RemoteServerCreateRequest struct {
 	ConnectionMode    string `json:"connection_mode"`     // push | pull | websocket
 	ListenPort        int    `json:"listen_port"`         // Agent HTTP 监听端口(0 = 用默认 23889);通过 install 脚本注入 MMWX_LISTEN_PORT
 	PullAddress       string `json:"pull_address"`        // 对于pull模式
+	PullAddressV6     string `json:"pull_address_v6"`      // DDNS 专用:v6 单独域名(空则 AAAA 也写 pull_address)
 	PullPort          int    `json:"pull_port"`           // 对于pull模式
 	PullToken         string `json:"pull_token"`          // 对于pull模式
 	StealSelf         bool   `json:"steal_self"`          // 代理安装后自动安装xray+nginx
@@ -148,6 +149,7 @@ type RemoteServerUpdateRequest struct {
 	ConnectionMode  string `json:"connection_mode"`
 	ListenPort      int    `json:"listen_port"`     // Agent HTTP 监听端口;变更时主控会通知 agent 改配置+重启
 	PullAddress     string `json:"pull_address"`
+	PullAddressV6   string `json:"pull_address_v6"` // DDNS 专用:v6 单独域名
 	PullPort        int    `json:"pull_port"`
 	PullToken       string `json:"pull_token"`
 	XrayMode         string `json:"xray_mode"`
@@ -515,13 +517,17 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 				return
 			}
 		}
-		// provider_id=0 自动模式:必须能找到匹配证书,否则没办法推断 provider
+		// provider_id=0 自动模式:按证书 + DNS 服务商识别。没匹配证书时不硬拦——同步会遍历 DNS 服务商兜底,
+		// 只要至少配了一个 DNS 服务商就放行。
 		if req.DDNSProviderID == 0 {
 			if _, cerr := h.repo.FindCertificateForDomain(ctx, pa); cerr != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(stdhttp.StatusBadRequest)
-				json.NewEncoder(w).Encode(RemoteServerResponse{Success: false, Message: fmt.Sprintf("DDNS 自动模式:找不到匹配 %s 的通配符证书,请先签发证书或显式选择 DNS 服务商", pa)})
-				return
+				providers, _ := h.repo.ListDNSProviders(ctx)
+				if len(providers) == 0 {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(stdhttp.StatusBadRequest)
+					json.NewEncoder(w).Encode(RemoteServerResponse{Success: false, Message: "DDNS 自动模式:没有匹配证书,也没有配置任何 DNS 服务商,请先添加 DNS 服务商或签发证书"})
+					return
+				}
 			}
 		}
 	}
@@ -534,6 +540,7 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		ConnectionMode:    connectionMode,
 		ListenPort:        listenPort,
 		PullAddress:       req.PullAddress,
+		PullAddressV6:     req.PullAddressV6,
 		PullPort:          req.PullPort,
 		PullToken:         agentToken,
 		Domain:            strings.TrimSpace(req.Domain),
@@ -559,6 +566,10 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 			Message: fmt.Sprintf("创建服务器失败: %s", err.Error()),
 		})
 		return
+	}
+	// 需求1:添加后立即触发一次 DDNS(若此刻还没上报 IP 则是空跑,agent 连上后会再触发)。
+	if h.ddnsManager != nil && server.DDNSEnabled {
+		go h.ddnsManager.Trigger(context.Background(), server)
 	}
 
 	// 构建安装命令 — 优先用系统设置里的 master_url(用户配置的对外域名),
@@ -909,16 +920,27 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 				return
 			}
 		} else {
+			// 自动模式:按证书 + DNS 服务商识别。没匹配证书时不再硬拦——同步时会遍历 DNS 服务商兜底,
+			// 只要至少配了一个 DNS 服务商就放行(都没有才真的无从下手)。
 			if _, cerr := h.repo.FindCertificateForDomain(ctx, effectivePull); cerr != nil {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(stdhttp.StatusBadRequest)
-				json.NewEncoder(w).Encode(RemoteServerResponse{Success: false, Message: fmt.Sprintf("DDNS 自动模式:找不到匹配 %s 的通配符证书,请先签发证书或显式选择 DNS 服务商", effectivePull)})
-				return
+				providers, _ := h.repo.ListDNSProviders(ctx)
+				if len(providers) == 0 {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(stdhttp.StatusBadRequest)
+					json.NewEncoder(w).Encode(RemoteServerResponse{Success: false, Message: "DDNS 自动模式:没有匹配证书,也没有配置任何 DNS 服务商,请先添加 DNS 服务商或签发证书"})
+					return
+				}
 			}
 		}
 	}
-	if err := h.repo.UpdateRemoteServerDDNSConfig(ctx, req.ID, req.DDNSEnabled, req.DDNSProviderID); err != nil {
+	if err := h.repo.UpdateRemoteServerDDNSConfig(ctx, req.ID, req.DDNSEnabled, req.DDNSProviderID, strings.TrimSpace(req.PullAddressV6)); err != nil {
 		log.Printf("[Remote Server] Failed to update DDNS config for server %d: %v", req.ID, err)
+	}
+	// 需求1:编辑保存后立即触发一次 DDNS 同步(不再只等 IP 变化)。取最新完整 server 再触发。
+	if h.ddnsManager != nil && req.DDNSEnabled {
+		if latest, gerr := h.repo.GetRemoteServer(ctx, req.ID); gerr == nil && latest != nil {
+			go h.ddnsManager.Trigger(context.Background(), latest)
+		}
 	}
 
 	// 更新已用流量偏移量。优先级:

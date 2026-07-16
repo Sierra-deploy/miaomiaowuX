@@ -121,3 +121,20 @@ func (p *tencentProvider) createRecord(ctx context.Context, zone, sub, recordTyp
 	}
 	return nil
 }
+
+// CanManage 只读探测:list 该 zone 记录;NoDataOfRecord = zone 存在只是没记录 → 也算能管。
+func (p *tencentProvider) CanManage(ctx context.Context, fqdn string) (bool, error) {
+	zone, _, err := SplitFQDN(fqdn)
+	if err != nil {
+		return false, err
+	}
+	req := dnspod.NewDescribeRecordListRequest()
+	req.Domain = &zone
+	if _, err := dnspod.DescribeRecordListWithContext(ctx, p.client, req); err != nil {
+		if strings.Contains(err.Error(), "ResourceNotFound.NoDataOfRecord") {
+			return true, nil
+		}
+		return false, err
+	}
+	return true, nil
+}

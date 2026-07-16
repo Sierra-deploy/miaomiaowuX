@@ -18,6 +18,11 @@ type Provider interface {
 	// recordType ∈ {"A", "AAAA"};content 是 IP 字符串。
 	// ttl=0 表示让 provider 用默认值(通常是 auto / 120-300s)。
 	UpsertRecord(ctx context.Context, fqdn string, recordType string, content string, ttl int) error
+
+	// CanManage 只读探测:该 provider 的账号是否托管了 fqdn 所属的 zone(能否改这个域名的记录)。
+	// 供「自动模式无证书兜底」时遍历 dns_providers 找能管辖该域名的那个。
+	// true=能管;false+err=不能管/探测失败(遍历时直接跳过)。不写任何记录。
+	CanManage(ctx context.Context, fqdn string) (bool, error)
 }
 
 // ProviderType 跟 dns_providers.provider_type 列、acme/dns_providers.go DNSProviderEnvKeys 的 key 一致。

@@ -96,3 +96,19 @@ func (p *namesiloProvider) UpsertRecord(ctx context.Context, fqdn string, record
 	}
 	return nil
 }
+
+// CanManage 只读探测:list 该 zone 记录,reply code=300 即账号托管了它。
+func (p *namesiloProvider) CanManage(ctx context.Context, fqdn string) (bool, error) {
+	zone, _, err := SplitFQDN(fqdn)
+	if err != nil {
+		return false, err
+	}
+	resp, err := p.client.DnsListRecords(ctx, &namesilo.DnsListRecordsParams{Domain: zone})
+	if err != nil {
+		return false, err
+	}
+	if resp == nil || resp.Reply.Code != "300" {
+		return false, errors.New("namesilo: domain not in this account")
+	}
+	return true, nil
+}

@@ -108,3 +108,16 @@ func (p *alidnsProvider) UpsertRecord(ctx context.Context, fqdn string, recordTy
 	}
 	return nil
 }
+
+// CanManage 只读探测:describe 该 zone 的记录,不报「域名不存在」即视为账号托管了它。
+func (p *alidnsProvider) CanManage(ctx context.Context, fqdn string) (bool, error) {
+	zone, _, err := SplitFQDN(fqdn)
+	if err != nil {
+		return false, err
+	}
+	req := &alidns.DescribeDomainRecordsRequest{DomainName: dara.String(zone)}
+	if _, err := alidns.DescribeDomainRecordsWithContext(ctx, p.client, req, &dara.RuntimeOptions{}); err != nil {
+		return false, err
+	}
+	return true, nil
+}

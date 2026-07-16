@@ -108,3 +108,21 @@ func (p *dnspodProvider) createRecord(zone, sub, recordType, content string, ttl
 	}
 	return nil
 }
+
+// CanManage 只读探测:list 该 zone 记录;空记录 = zone 存在 → 算能管。
+func (p *dnspodProvider) CanManage(ctx context.Context, fqdn string) (bool, error) {
+	zone, _, err := SplitFQDN(fqdn)
+	if err != nil {
+		return false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if _, _, err := p.client.Records.List(zone, ""); err != nil {
+		if strings.Contains(err.Error(), "Record list is empty") || strings.Contains(err.Error(), "No records") {
+			return true, nil
+		}
+		return false, err
+	}
+	return true, nil
+}

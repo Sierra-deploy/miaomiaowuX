@@ -73,12 +73,26 @@ func (m *Manager) lockFor(id int64) *sync.Mutex {
 // doSync 真正执行同步,返回业务级 error。任何步骤失败都不写 record — 例如 v4 失败就放弃 v6,
 // 因为通常用户是同一份凭据 → 一处失败两处都会失败,继续只是雪上加霜。
 func (m *Manager) doSync(ctx context.Context, server *storage.RemoteServer) error {
-	fqdn := strings.TrimSpace(server.PullAddress)
-	if ip := net.ParseIP(fqdn); ip != nil {
-		return fmt.Errorf("pull_address is an IP %q, DDNS requires a domain name", fqdn)
+	fqdn := strings.TrimSpace(server.PullAddress)   // v4 域名(A 记录)
+	fqdnV6 := strings.TrimSpace(server.PullAddressV6) // v6 域名(AAAA 记录);空则回落到 v4 域名(保持旧「同域名双栈」)
+	if fqdnV6 == "" {
+		fqdnV6 = fqdn
+	}
+	if fqdn != "" {
+		if ip := net.ParseIP(fqdn); ip != nil {
+			return fmt.Errorf("pull_address is an IP %q, DDNS requires a domain name", fqdn)
+		}
+	}
+	// provider 解析用的域名:优先 v4 域名,空则用 v6 域名
+	resolveDomain := fqdn
+	if resolveDomain == "" {
+		resolveDomain = fqdnV6
+	}
+	if resolveDomain == "" {
+		return fmt.Errorf("DDNS 未配置域名(pull_address / pull_address_v6 均为空)")
 	}
 
-	providerID, err := m.resolveProviderID(ctx, server, fqdn)
+	providerID, err := m.resolveProviderID(ctx, server, resolveDomain)
 	if err != nil {
 		return err
 	}
@@ -87,41 +101,65 @@ func (m *Manager) doSync(ctx context.Context, server *storage.RemoteServer) erro
 		return err
 	}
 
-	// 同步 A(v4)+ AAAA(v6),哪个 record type 当次没 IP 就跳过(不删除已有记录)
+	// 同步 A(v4,写 fqdn)+ AAAA(v6,写 fqdnV6),哪个当次没 IP 就跳过(不删除已有记录)
 	var syncErrs []string
-	if v4 := strings.TrimSpace(server.IPAddress); v4 != "" && net.ParseIP(v4) != nil && net.ParseIP(v4).To4() != nil {
+	wrote := false
+	if v4 := strings.TrimSpace(server.IPAddress); fqdn != "" && v4 != "" && net.ParseIP(v4) != nil && net.ParseIP(v4).To4() != nil {
 		if e := provider.UpsertRecord(ctx, fqdn, "A", v4, 0); e != nil {
 			syncErrs = append(syncErrs, fmt.Sprintf("A: %v", e))
+		} else {
+			wrote = true
 		}
 	}
-	if v6 := strings.TrimSpace(server.IPAddressV6); v6 != "" {
+	if v6 := strings.TrimSpace(server.IPAddressV6); server.IPv6Enabled && v6 != "" {
 		if p := net.ParseIP(v6); p != nil && p.To4() == nil {
-			if e := provider.UpsertRecord(ctx, fqdn, "AAAA", v6, 0); e != nil {
+			if e := provider.UpsertRecord(ctx, fqdnV6, "AAAA", v6, 0); e != nil {
 				syncErrs = append(syncErrs, fmt.Sprintf("AAAA: %v", e))
+			} else {
+				wrote = true
 			}
 		}
 	}
 	if len(syncErrs) > 0 {
 		return fmt.Errorf("provider=%s: %s", providerType, strings.Join(syncErrs, "; "))
 	}
+	// 修掉「有域名但没写任何记录却静默成功」的坑:明确报错写进 last_error,别让用户以为生效了。
+	if !wrote {
+		return fmt.Errorf("没有可同步的公网 IP(A/AAAA 均无有效地址),请确认 agent 已上报公网 IP")
+	}
 	return nil
 }
 
 // resolveProviderID 决定用哪个 dns_providers 行:
 //   - server.DDNSProviderID > 0 → 显式指定
-//   - server.DDNSProviderID == 0 → 自动模式,从 FindCertificateForDomain 取证书的 dns_provider_id
+//   - == 0(自动)→ 先按证书(匹配域名且证书绑了 DNS 服务商);
+//     没证书 / 证书没绑服务商 → 遍历所有 dns_providers,用「能管辖该域名(CanManage 只读探测)」的第一个。
 func (m *Manager) resolveProviderID(ctx context.Context, server *storage.RemoteServer, fqdn string) (int64, error) {
 	if server.DDNSProviderID > 0 {
 		return server.DDNSProviderID, nil
 	}
-	cert, err := m.repo.FindCertificateForDomain(ctx, fqdn)
+	// 自动第一步:按证书
+	if cert, err := m.repo.FindCertificateForDomain(ctx, fqdn); err == nil && cert != nil && cert.DNSProviderID > 0 {
+		return cert.DNSProviderID, nil
+	}
+	// 自动第二步:遍历 DNS 服务商,只读探测谁能管辖这个域名(不写任何记录)
+	providers, err := m.repo.ListDNSProviders(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("auto-resolve provider: no matching wildcard cert for %q: %w", fqdn, err)
+		return 0, fmt.Errorf("auto-resolve provider: 读取 DNS 服务商列表失败: %w", err)
 	}
-	if cert.DNSProviderID == 0 {
-		return 0, fmt.Errorf("auto-resolve provider: matching cert %q has no DNS provider", cert.Domain)
+	for _, dp := range providers {
+		prov, _, lerr := m.loadProvider(ctx, dp.ID)
+		if lerr != nil {
+			continue // 凭据坏的服务商跳过
+		}
+		pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		ok, _ := prov.CanManage(pctx, fqdn)
+		cancel()
+		if ok {
+			return dp.ID, nil
+		}
 	}
-	return cert.DNSProviderID, nil
+	return 0, fmt.Errorf("auto-resolve provider: 没有能管辖 %q 的 DNS 服务商(证书未绑定服务商,且已配置的 %d 个 DNS 服务商都无法管理该域名)", fqdn, len(providers))
 }
 
 // loadProvider 拿凭据 → 构造 provider 实例。

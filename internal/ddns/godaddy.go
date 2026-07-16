@@ -98,3 +98,26 @@ func (p *godaddyProvider) UpsertRecord(ctx context.Context, fqdn string, recordT
 	}
 	return fmt.Errorf("godaddy HTTP %d: %s", resp.StatusCode, truncate(string(respBytes), 200))
 }
+
+// CanManage 只读探测:GET /domains/{zone},2xx 即账号托管了它。
+func (p *godaddyProvider) CanManage(ctx context.Context, fqdn string) (bool, error) {
+	zone, _, err := SplitFQDN(fqdn)
+	if err != nil {
+		return false, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s/domains/%s", p.baseURL, zone), nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Authorization", p.authHeader)
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return true, nil
+	}
+	return false, fmt.Errorf("godaddy HTTP %d for domain %s", resp.StatusCode, zone)
+}
