@@ -2,10 +2,12 @@ package handler
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -175,9 +177,7 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	if clientType == "" || clientType == "clash" || clientType == "clashmeta" {
 		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
 		// 显式带 t=clash/clashmeta 通常是浏览器/调试预览,不想被强制下载;只有完全不带 t(典型 Clash 客户端拉取)才下发 attachment
-		if clientType == "" {
-			w.Header().Set("Content-Disposition", "attachment; filename=\""+pkg.Name+".yaml\"")
-		}
+		setSubscriptionName(w, pkg.Name, ".yaml")
 		h.writeTrafficHeader(r.Context(), w, user, pkg)
 		w.Write([]byte(result))
 		return
@@ -190,8 +190,20 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	setSubscriptionName(w, pkg.Name, "")
 	h.writeTrafficHeader(r.Context(), w, user, pkg)
 	w.Write(converted)
+}
+
+// setSubscriptionName 让客户端显示套餐名作为订阅名。
+// Content-Disposition 用 RFC5987(filename*=UTF-8'')避免中文套餐名乱码;
+// 再附 profile-title(Surge/Loon/QX 优先认此头显示订阅名)。ext 为扩展名(可空)。
+func setSubscriptionName(w http.ResponseWriter, name, ext string) {
+	if strings.TrimSpace(name) == "" {
+		return
+	}
+	w.Header().Set("Content-Disposition", "attachment; filename*=UTF-8''"+url.PathEscape(name)+ext)
+	w.Header().Set("profile-title", "base64:"+base64.StdEncoding.EncodeToString([]byte(name)))
 }
 
 // orderPackageNodes 按用户 node_order 重排套餐节点 ID 列表。

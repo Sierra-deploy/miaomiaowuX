@@ -3,6 +3,7 @@ package handler
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -809,6 +810,8 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	isBrowser := strings.Contains(userAgent, "Mozilla") || strings.Contains(userAgent, "Chrome") || strings.Contains(userAgent, "Safari") || strings.Contains(userAgent, "Edge")
 	if !isBrowser {
 		w.Header().Set("content-disposition", "attachment;filename*=UTF-8''"+attachmentName)
+		// profile-title:Surge/Loon/QX 优先认此头显示订阅名(否则回退 URL 短码显示成数字)。
+		w.Header().Set("profile-title", "base64:"+base64.StdEncoding.EncodeToString([]byte(displayName)))
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(data)
