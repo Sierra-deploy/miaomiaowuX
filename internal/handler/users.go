@@ -99,11 +99,8 @@ func NewUserListHandler(repo *storage.TrafficRepository) http.Handler {
 			pkgMap[p.ID] = p
 		}
 
-		allTraffic, _ := repo.GetAllUserTraffic(r.Context())
-		trafficMap := make(map[string]int64)
-		for _, t := range allTraffic {
-			trafficMap[t.Username] += t.Uplink + t.Downlink
-		}
+		// 计费流量:倍率已由 collector 在采集时折算,拿到即最终值。批量版避免 N+1。
+		trafficMap, _ := repo.GetAllUserBillableTraffic(r.Context())
 
 		// 一次性查所有用户短码,避免列表循环里逐个 query(N+1)。
 		shortCodeMap, _ := repo.ListUserShortCodeInfo(r.Context())
@@ -146,12 +143,12 @@ func NewUserListHandler(repo *storage.TrafficRepository) http.Handler {
 					gb := float64(*user.TrafficLimitOverride) / (1024 * 1024 * 1024)
 					entry.TrafficLimitOverrideGB = &gb
 				}
-				used := trafficMap[user.Username]
+				// TrafficUsed 已是计费流量(采集时折算),不再乘倍率。
+				// traffic_multiplier 仍吐给前端,但只作展示标注(首页按用户流量列表用它标"×2")。
 				if pkg, ok := pkgMap[pid]; ok {
 					entry.TrafficMultiplier = pkg.TrafficMultiplier()
-					used *= pkg.TrafficMultiplier()
 				}
-				entry.TrafficUsed = used
+				entry.TrafficUsed = trafficMap[user.Username]
 				if entry.TrafficLimit > 0 && entry.TrafficUsed >= entry.TrafficLimit {
 					entry.IsOverLimit = true
 				}

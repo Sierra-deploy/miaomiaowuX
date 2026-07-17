@@ -415,6 +415,19 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 	log.Printf("[PackageUpdate] Syncing inbound users for package %d: %d added nodes, %d removed nodes, %d users",
 		packageID, len(addedNodes), len(removedNodes), len(targetUsers))
 
+	// 移除节点后**仍被套餐占用**的 (server, inbound) 集合。
+	// both(v4/v6) 会为同一入站建两个节点(同 server + 同 InboundTag),凭据却是绑在入站上的 ——
+	// 只从套餐移除其中一个节点时,该入站的 client 必须保留,否则把还在套餐里的另一个节点也一起废了。
+	// add 路径早有 inboundSeen 去重(见下),remove 路径此前没有对应保护。
+	stillUsedInbounds := map[string]bool{}
+	for _, id := range newNodes {
+		node, nerr := h.repo.GetNodeByID(ctx, id)
+		if nerr != nil || node.NodeType == "routed" || node.InboundTag == "" || node.OriginalServer == "" {
+			continue
+		}
+		stillUsedInbounds[node.OriginalServer+"|"+node.InboundTag] = true
+	}
+
 	// 只 routed 节点改 routing rules 才需要重启 xray;非 routed 的 add-client / remove-client
 	// 由 agent 走 HandlerService 热更新,运行态立即生效。同步路径上每台少 ~3s。
 	var mu sync.Mutex
@@ -434,6 +447,9 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 	// 凭据是绑到 inbound(server+tag)而非节点的,按 (user, server, inboundTag) 去重:每个入站每个用户只加一次。
 	// routed 节点走 collectRoutedBatchItem(按 node.ID)独立路径,不参与此去重。
 	inboundSeen := map[string]bool{}
+	// remove 路径同款去重:两个被移除的节点可能共享同一入站,重复摘除会在 agent 侧
+	// 变成"第二次 no-op",本身无害,但第一次成功后就该停手,避免重复日志与无谓往返。
+	removedSeen := map[string]bool{}
 	// 用户间互不影响 + 节点间互不影响 → 全部并发跑。
 	// agent 端 inboundsMu 自动同服务器顺序化,master 这边不需要 per-server 锁。
 	var bindWg sync.WaitGroup
@@ -520,6 +536,19 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 				if node.InboundTag == "" || node.OriginalServer == "" {
 					return
 				}
+				// 该入站仍被套餐里的其它节点占用(both 的 v4/v6 同入站)→ 不能摘 client。
+				if stillUsedInbounds[node.OriginalServer+"|"+node.InboundTag] {
+					return
+				}
+				// 同一 (user, server, inbound) 只摘一次 —— 两个被移除的节点可能共享同一入站。
+				seenKey := user.Username + "|" + node.OriginalServer + "|" + node.InboundTag
+				mu.Lock()
+				if removedSeen[seenKey] {
+					mu.Unlock()
+					return
+				}
+				removedSeen[seenKey] = true
+				mu.Unlock()
 				server, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer)
 				if err != nil {
 					return
@@ -528,9 +557,13 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 				if err != nil {
 					return
 				}
+				// 仅在 agent 确认摘除成功时才删 DB 登记行 —— 与 traffic_limit_enforcer.go 的 removed 守卫对齐。
+				// 此前无条件删:agent 离线时 client 残留 xray 而登记行没了,removeUserFromAllInbounds(DB 驱动)
+				// 从此永远扫不到它 → 残留永久化。保留行则下轮 reconciler / 解绑路径还能重试。
 				if err := removeUserFromInbound(ctx, h.remoteManage, *cfg); err != nil {
-					log.Printf("[PackageUpdate] Failed to remove user %s from inbound %s on server %d: %v",
+					log.Printf("[PackageUpdate] Failed to remove user %s from inbound %s on server %d (keep DB row for retry): %v",
 						user.Username, cfg.InboundTag, cfg.ServerID, err)
+					return
 				}
 				_ = h.repo.DeleteUserInboundConfig(ctx, user.Username, server.ID, node.InboundTag)
 			}(user, nodeID)

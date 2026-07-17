@@ -354,8 +354,7 @@ func (h *PackageSubscribeHandler) writeTrafficHeader(ctx context.Context, w http
 	// 与限额判定口径一致(traffic_limit_enforcer.go:已用×TrafficMultiplier 比限额),
 	// 这样客户端显示的已用/剩余与实际被断流的时机吻合。
 	// 之前这里硬编码 download=0,导致客户端永远显示已用 0。
-	raw, _ := h.repo.GetUserTotalTraffic(ctx, user.Username)
-	used := raw * pkg.TrafficMultiplier()
+	used, _ := h.repo.GetUserBillableTraffic(ctx, user.Username)
 	info := fmt.Sprintf("upload=0; download=%d; total=%d", used, limitBytes)
 	if user.PackageEndDate != nil {
 		info += fmt.Sprintf("; expire=%d", user.PackageEndDate.Unix())

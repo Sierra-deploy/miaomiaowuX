@@ -117,8 +117,9 @@ func (h *TrafficSummaryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 			if pkg, perr := h.repo.GetPackage(ctx, user.PackageID); perr == nil {
 				// 有效上限 = 用户级覆写 ?? 套餐流量,与 enforcer 断流口径一致。
 				totalLimit += resolveTrafficLimitBytes(&user, pkg)
-				if raw, terr := h.repo.GetUserTotalTraffic(ctx, username); terr == nil {
-					totalUsed += raw * pkg.TrafficMultiplier()
+				// 计费流量:倍率已由 collector 在采集时折算进 weighted_*,拿到即最终值,不再乘倍率。
+				if billable, terr := h.repo.GetUserBillableTraffic(ctx, username); terr == nil {
+					totalUsed += billable
 				}
 			}
 		}

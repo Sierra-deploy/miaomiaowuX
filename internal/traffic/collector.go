@@ -412,15 +412,31 @@ func (c *Collector) ProcessRemoteMetrics(ctx context.Context, serverID int64, st
 // 同时**并行双写** user_email_traffic — 保留 email 维度,供前端 drilldown 看"用户每个节点的流量"。
 // 老 user_traffic 是套餐扣减热路径,继续按 username 聚合;新表是 email 细分,只用于细粒度展示。
 func aggregateAndUpsertUserTraffic(ctx context.Context, repo userTrafficRepo, serverID int64, userStats map[string]TrafficData, isXrayRestarted bool) {
+	// 采集时计价:每 tick 预载一次归因器,按当时的倍率把 delta 折算成计费流量写进 weighted_*。
+	// 之后改倍率只影响后续 tick —— 历史不再被追溯重算。
+	// 预载失败不能让采集停摆:退化为 weight=1(裸量),该 tick 的计价偏差上界 1 个采集周期。
+	attr, aerr := repo.BuildEmailAttributor(ctx)
+	if aerr != nil {
+		log.Printf("[Traffic Collector] build email attributor failed on server %d, this tick bills at weight=1: %v", serverID, aerr)
+	}
+
 	type sum struct{ uplink, downlink int64 }
 	byUsername := make(map[string]*sum)
 	for emailKey, data := range userStats {
-		// 双写新表 — email 维度原样保留,即使 ResolveUsernameByEmail 解析不到 username 也写
-		// (野 client 也算"该 server 的 email 流量",前端可显示成"未识别节点")
-		if err := repo.UpsertUserEmailTraffic(ctx, serverID, emailKey, data.Uplink, data.Downlink, isXrayRestarted); err != nil {
+		weight, attributed := 1.0, ""
+		if attr != nil {
+			weight = attr.EmailWeight(emailKey, serverID)
+			attributed = attr.Classify(emailKey, serverID).Username
+		}
+		// 双写新表 — email 维度原样保留,即使解析不到 username 也写
+		// (野 client 也算"该 server 的 email 流量",前端可显示成"未识别节点";
+		//  attributed_username 为空 → 不进任何用户的计费)
+		if err := repo.UpsertUserEmailTraffic(ctx, serverID, emailKey, data.Uplink, data.Downlink, isXrayRestarted, weight, attributed); err != nil {
 			log.Printf("[Traffic Collector] Failed to upsert user email traffic for %s on server %d: %v", emailKey, serverID, err)
 		}
 
+		// user_traffic 仍按 ResolveUsernameByEmail 聚合(它是 per-server 视图/快照/limiter 的数据源,
+		// 不再是计费源)。换成 attributor 会改变它的聚合语义,单独灰度。
 		username := repo.ResolveUsernameByEmail(ctx, emailKey)
 		if username == "" {
 			continue
@@ -442,8 +458,9 @@ func aggregateAndUpsertUserTraffic(ctx context.Context, repo userTrafficRepo, se
 // userTrafficRepo 只取 collector 实际用到的方法,避免去 import 整个 storage 接口
 type userTrafficRepo interface {
 	ResolveUsernameByEmail(ctx context.Context, email string) string
+	BuildEmailAttributor(ctx context.Context) (*storage.EmailAttributor, error)
 	UpsertUserTraffic(ctx context.Context, serverID int64, username string, uplink, downlink int64, isXrayRestarted bool) error
-	UpsertUserEmailTraffic(ctx context.Context, serverID int64, email string, uplink, downlink int64, isXrayRestarted bool) error
+	UpsertUserEmailTraffic(ctx context.Context, serverID int64, email string, uplink, downlink int64, isXrayRestarted bool, weight float64, attributedUsername string) error
 }
 
 // 为所有服务器创建每日快照

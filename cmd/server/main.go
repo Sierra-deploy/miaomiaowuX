@@ -1222,6 +1222,18 @@ func main() {
 		log.Printf("[Startup] ResetTrafficTotalsForXrayBootTimeMigration: reset done, %d rows affected (3 tables)", n)
 	}
 
+	// 一次性回填:collector 从"读时乘倍率"切到"采集时计价"。用当前倍率把存量裸量换算成
+	// weighted_*,并写入采集时归因的 attributed_username → 上线读数与切换前等价(零行为变化),
+	// 从下一个 tick 起改倍率不再追溯重算历史。
+	// flag = weighted_traffic_backfill_done。**二次回填会覆盖已累积的加权历史,故 flag 与数据同事务**。
+	if n, alreadyDone, err := repo.BackfillWeightedTraffic(context.Background()); err != nil {
+		log.Printf("[Startup] BackfillWeightedTraffic failed: %v", err)
+	} else if alreadyDone {
+		log.Printf("[Startup] BackfillWeightedTraffic: already done, skip")
+	} else {
+		log.Printf("[Startup] BackfillWeightedTraffic: backfilled %d user_email_traffic row(s)", n)
+	}
+
 	// 紧急修复:reset migration 把 node_traffic.uplink/downlink 改成了 last_*(很小),snapshot
 	// baseline 还是历史累计 → 服务器视图算"已用 = current - snapshot"全负数 → clamp 0 → "流量丢失"。
 	// 真正修复:从 node_traffic_snapshots 反推恢复 node_traffic 到 reset 前的累计值。

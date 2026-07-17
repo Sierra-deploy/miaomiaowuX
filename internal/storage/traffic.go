@@ -2320,6 +2320,11 @@ CREATE TABLE IF NOT EXISTS user_email_traffic (
     last_downlink INTEGER NOT NULL DEFAULT 0,
     cycle_base_uplink INTEGER NOT NULL DEFAULT 0,
     cycle_base_downlink INTEGER NOT NULL DEFAULT 0,
+    weighted_uplink REAL NOT NULL DEFAULT 0,
+    weighted_downlink REAL NOT NULL DEFAULT 0,
+    cycle_base_weighted_uplink REAL NOT NULL DEFAULT 0,
+    cycle_base_weighted_downlink REAL NOT NULL DEFAULT 0,
+    attributed_username TEXT NOT NULL DEFAULT '',
     cycle_start TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(server_id, email),
@@ -2336,6 +2341,23 @@ CREATE INDEX IF NOT EXISTS idx_user_email_traffic_email ON user_email_traffic(em
 	// 存量行 base=0 → 增量 == 当前累计值,与升级前行为完全一致。
 	_, _ = r.db.Exec("ALTER TABLE user_email_traffic ADD COLUMN cycle_base_uplink INTEGER NOT NULL DEFAULT 0")
 	_, _ = r.db.Exec("ALTER TABLE user_email_traffic ADD COLUMN cycle_base_downlink INTEGER NOT NULL DEFAULT 0")
+
+	// 采集时计价(替代"读时乘倍率",后者会让改倍率追溯重算历史流量):
+	//   weighted_*            = Σ(每 tick 的 delta × 采集当时的计费权重),单调累计,永不归零
+	//   cycle_base_weighted_* = 周期基线,与 cycle_base_* 同构
+	//   本周期计费量 = (weighted_* - cycle_base_weighted_*)
+	// 必须是 REAL 不是 INTEGER:权重含 per-node 倍率(float64,可为 1.5),每 tick 结算一次,
+	// 整数列会每 tick 截断一次 → 系统性少计。float64 对 <2^53 字节(9PB)的整数精确。
+	_, _ = r.db.Exec("ALTER TABLE user_email_traffic ADD COLUMN weighted_uplink REAL NOT NULL DEFAULT 0")
+	_, _ = r.db.Exec("ALTER TABLE user_email_traffic ADD COLUMN weighted_downlink REAL NOT NULL DEFAULT 0")
+	_, _ = r.db.Exec("ALTER TABLE user_email_traffic ADD COLUMN cycle_base_weighted_uplink REAL NOT NULL DEFAULT 0")
+	_, _ = r.db.Exec("ALTER TABLE user_email_traffic ADD COLUMN cycle_base_weighted_downlink REAL NOT NULL DEFAULT 0")
+	// 采集时归因出的 username(''=脏 email/认不出)。计费读侧与周期重置都按它过滤 —— 取代旧的
+	// 4 段 LIKE(email= / esc__% / esc-% / IN subaccounts)。旧 WHERE 是两个 bug 的共同根因:
+	// 它漏掉 client.email == users.email 形态(ResolveUsernameByEmail 却认它)→ 有 per-node 倍率时
+	// 这类流量完全不计费、永不断流;ResetUserTrafficCycle 用同一 WHERE → 其 cycle_base 永不抬升。
+	_, _ = r.db.Exec("ALTER TABLE user_email_traffic ADD COLUMN attributed_username TEXT NOT NULL DEFAULT ''")
+	_, _ = r.db.Exec("CREATE INDEX IF NOT EXISTS idx_user_email_traffic_attributed_username ON user_email_traffic(attributed_username)")
 
 	// 流量快照表 - 存储每日流量快照以了解历史趋势
 	const trafficSnapshotsSchema = `
@@ -8379,6 +8401,130 @@ UPDATE node_traffic       SET total_uplink = 0, total_downlink = 0, uplink = las
 	return n, false, nil
 }
 
+// GetPackageNodesStrict 只读 packages.nodes 原文并**严格**解析,专供「解析失败必须放弃决策、
+// 而不是当成空集合去删光 client」的调用方(XrayClientReconciler)。
+//
+// 与 GetPackage 的区别 —— GetPackage 把两种相反的失败哲学叠在了一起,对账场景两种都不能要:
+//   - json 解析失败:GetPackage **静默降级成空数组**(traffic.go:7702) → 期望状态塌成空 → 会删光该套餐所有用户的 client
+//   - 孤儿 node id:GetPackage 末尾 filterAliveNodeIDs **fail-open**(查询出错就原样返回)
+//
+// 本函数:解析失败 → error(调用方据此放弃决策);不做 filterAliveNodeIDs(孤儿 id 由调用方
+// 按"跳过该节点"处理,语义更清晰,且不会因一次查询抖动而放大成整套餐的期望变化)。
+// 合法空(nodes 列为 NULL / '' / '[]')→ ([], nil):套餐确实没配节点,用户本就不该有 client。
+func (r *TrafficRepository) GetPackageNodesStrict(ctx context.Context, id int64) ([]int64, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	var raw sql.NullString
+	if err := r.db.QueryRowContext(ctx, `SELECT nodes FROM packages WHERE id = ?`, id).Scan(&raw); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("package %d not found", id)
+		}
+		return nil, fmt.Errorf("query package nodes: %w", err)
+	}
+	text := strings.TrimSpace(raw.String)
+	if !raw.Valid || text == "" || text == "[]" {
+		return []int64{}, nil
+	}
+	var nodes []int64
+	if err := json.Unmarshal([]byte(text), &nodes); err != nil {
+		return nil, fmt.Errorf("package %d nodes json invalid (%q): %w", id, text, err)
+	}
+	// 非空文本却解析出零元素 → 可疑("null" / "{}" / 未来 schema 漂移都会走到这)。
+	// 当成 error 而非空集合:宁可这轮不对账,也不能误判成"该用户不该有任何节点"。
+	if len(nodes) == 0 {
+		return nil, fmt.Errorf("package %d nodes text %q parsed to empty, refusing to treat as no-nodes", id, text)
+	}
+	return nodes, nil
+}
+
+// BackfillWeightedTraffic 一次性回填「采集时计价」新增的 5 列 —— 配套 collector 从"读时乘倍率"
+// 切到"采集时计价"。
+//
+// 回填口径 = **上线那一刻的倍率**:
+//
+//	weighted_*            = uplink/downlink * w
+//	cycle_base_weighted_* = cycle_base_*    * w
+//	attributed_username   = 归因结果('' = 脏 email,自然被排除出计费)
+//
+// 于是 billable = (uplink - cycle_base) × w,与切换前的读时公式等价 → **上线零行为变化**,
+// 从下一个 tick 起才不再追溯。这不是"重建历史真实倍率"(快照表不存 package_id/倍率,做不到),
+// 只是把当前进度接上。
+//
+// ⚠️ 必须只跑一次。二次回填会用「当前倍率 × 裸量」覆盖掉已按各时期倍率累积的 weighted_*,
+// 追溯 bug 原地复活 —— flag 是唯一防线,故 flag 写失败时**回滚整个事务**(与
+// ResetTrafficTotalsForXrayBootTimeMigration 那种"重跑幂等所以可容忍"的迁移不同,这个重跑不幂等)。
+//
+// 返回回填行数 + flag 是否已存在(已存在 → 跳过)。
+func (r *TrafficRepository) BackfillWeightedTraffic(ctx context.Context) (n int64, alreadyDone bool, err error) {
+	if r == nil || r.db == nil {
+		return 0, false, errors.New("traffic repository not initialized")
+	}
+	const flagKey = "weighted_traffic_backfill_done"
+	if v, gerr := r.GetSystemSetting(ctx, flagKey); gerr == nil && v == "1" {
+		return 0, true, nil
+	}
+
+	attr, aerr := r.BuildEmailAttributor(ctx)
+	if aerr != nil {
+		return 0, false, fmt.Errorf("build attributor for backfill: %w", aerr)
+	}
+
+	type row struct {
+		id       int64
+		serverID int64
+		email    string
+	}
+	var rowsToFix []row
+	qRows, qerr := r.db.QueryContext(ctx, `SELECT id, server_id, email FROM user_email_traffic`)
+	if qerr != nil {
+		return 0, false, fmt.Errorf("scan user_email_traffic for backfill: %w", qerr)
+	}
+	for qRows.Next() {
+		var rw row
+		if serr := qRows.Scan(&rw.id, &rw.serverID, &rw.email); serr != nil {
+			continue
+		}
+		rowsToFix = append(rowsToFix, rw)
+	}
+	qRows.Close()
+	if rerr := qRows.Err(); rerr != nil {
+		return 0, false, fmt.Errorf("scan user_email_traffic for backfill: %w", rerr)
+	}
+
+	tx, terr := r.db.BeginTx(ctx, nil)
+	if terr != nil {
+		return 0, false, fmt.Errorf("begin backfill: %w", terr)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	const stmt = `UPDATE user_email_traffic
+		SET weighted_uplink = uplink * ?, weighted_downlink = downlink * ?,
+		    cycle_base_weighted_uplink = cycle_base_uplink * ?, cycle_base_weighted_downlink = cycle_base_downlink * ?,
+		    attributed_username = ?
+		WHERE id = ?`
+	for _, rw := range rowsToFix {
+		w := attr.EmailWeight(rw.email, rw.serverID)
+		username := attr.Classify(rw.email, rw.serverID).Username
+		if _, eerr := tx.ExecContext(ctx, stmt, w, w, w, w, username, rw.id); eerr != nil {
+			return 0, false, fmt.Errorf("backfill row %d: %w", rw.id, eerr)
+		}
+		n++
+	}
+
+	// flag 与数据同事务:写不进去就整体回滚,宁可下次重跑一次干净的回填,也不能留下
+	// "数据已回填但 flag 没写" → 下次启动二次回填 → 加权历史被覆盖。
+	if _, serr := tx.ExecContext(ctx,
+		`INSERT INTO system_settings (key, value, updated_at) VALUES (?, '1', CURRENT_TIMESTAMP)
+		 ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = CURRENT_TIMESTAMP`, flagKey); serr != nil {
+		return 0, false, fmt.Errorf("set backfill flag: %w", serr)
+	}
+	if cerr := tx.Commit(); cerr != nil {
+		return 0, false, fmt.Errorf("commit backfill: %w", cerr)
+	}
+	return n, false, nil
+}
+
 // BackfillRoutedCreatorSubaccounts 给所有 routed 节点补 creator 自己的 user_subaccounts 行。
 // 老代码 routed_outbound.create 时只写"占位 admin client",没给 creator 自己写子账号,
 // 导致 ResolveUsernameByEmail 走 _admin__ 兜底 fallback,多 admin 系统下归属错乱。
@@ -8881,22 +9027,15 @@ func (r *TrafficRepository) GetUserTotalTraffic(ctx context.Context, username st
 	return total, err
 }
 
-// GetUserWeightedTraffic 按 pkg.NodeMultipliers 加权汇总该用户的流量。
-// 数据源:user_email_traffic(每行 email 维度),email 形态:
-//   - <username>__<inbound_tag>:主账号在某 inbound 的流量,反查 nodes(server_name+inbound_tag)→ 节点 → 倍率
-//   - 子账号:命中 user_subaccounts → routed_node_id → routed 节点 → 父节点 → 父倍率
-//   - 其它(主账号无 __ 分隔等)→ 兜底按 1.0 计算
-// 套餐 nil 或 NodeMultipliers 空 → 等价于 GetUserTotalTraffic 在 email 维度的求和(全部按 1)。
-// escapeLikePattern 转义 SQL LIKE 元字符(`\` `_` `%`),配合 `ESCAPE '\'` 做「字面」匹配,
-// 避免用户名里的 `_` 被当成 SQL 单字符通配符导致跨用户误匹配。
-func escapeLikePattern(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `_`, `\_`)
-	s = strings.ReplaceAll(s, `%`, `\%`)
-	return s
-}
-
-func (r *TrafficRepository) GetUserWeightedTraffic(ctx context.Context, username string, pkg *Package) (int64, error) {
+// GetUserBillableTraffic 返回该用户本周期的**计费流量**(bytes)。
+//
+// 这是全系统唯一的计费口径 —— 调用方拿到即最终值,**不得再乘任何倍率**。
+// 倍率(per-node × 套餐 oneway/twoway)已由 collector 在采集时按当时配置折算进 weighted_*,
+// 所以改倍率只影响后续 tick,不会追溯重算历史(旧的 GetUserWeightedTraffic 是"读时乘当前倍率",
+// 一改倍率整个周期的历史流量就被重算,用户会被立即断流)。
+//
+// 按 attributed_username 过滤,与 ResetUserTrafficCycle 同源。
+func (r *TrafficRepository) GetUserBillableTraffic(ctx context.Context, username string) (int64, error) {
 	if r == nil || r.db == nil {
 		return 0, errors.New("traffic repository not initialized")
 	}
@@ -8904,120 +9043,42 @@ func (r *TrafficRepository) GetUserWeightedTraffic(ctx context.Context, username
 	if username == "" {
 		return 0, errors.New("username is required")
 	}
-
-	// 套餐空 / 无倍率配置 → 直接用 user_traffic(按 username 聚合,等价于全 1)
-	if pkg == nil || len(pkg.NodeMultipliers) == 0 {
-		return r.GetUserTotalTraffic(ctx, username)
-	}
-
-	// 预加载:server_id → server.name(反查主账号节点用)
-	serverNames := make(map[int64]string)
-	srvRows, err := r.db.QueryContext(ctx, `SELECT id, name FROM remote_servers`)
+	var billable float64
+	err := r.db.QueryRowContext(ctx,
+		`SELECT COALESCE(SUM(MAX(weighted_uplink - cycle_base_weighted_uplink, 0)
+		                   + MAX(weighted_downlink - cycle_base_weighted_downlink, 0)), 0)
+		 FROM user_email_traffic WHERE attributed_username = ?`, username).Scan(&billable)
 	if err != nil {
-		return 0, fmt.Errorf("list servers: %w", err)
+		return 0, fmt.Errorf("query billable traffic: %w", err)
 	}
-	for srvRows.Next() {
-		var id int64
-		var name string
-		if err := srvRows.Scan(&id, &name); err == nil {
-			serverNames[id] = name
-		}
-	}
-	srvRows.Close()
+	return int64(billable), nil
+}
 
-	// 预加载:user_subaccounts(email → routed_node_id);仅本用户的
-	subaccNodeID := make(map[string]int64)
-	saRows, err := r.db.QueryContext(ctx,
-		`SELECT email, routed_node_id FROM user_subaccounts WHERE username = ?`, username)
-	if err != nil {
-		return 0, fmt.Errorf("list subaccounts: %w", err)
+// GetAllUserBillableTraffic 一次性返回所有用户的本周期计费流量(username → bytes)。
+// 给用户列表这类要展示 N 个用户的地方用,避免 N+1。语义同 GetUserBillableTraffic。
+func (r *TrafficRepository) GetAllUserBillableTraffic(ctx context.Context) (map[string]int64, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
 	}
-	for saRows.Next() {
-		var email string
-		var nid int64
-		if err := saRows.Scan(&email, &nid); err == nil {
-			subaccNodeID[email] = nid
-		}
-	}
-	saRows.Close()
-
-	// 预加载:主账号 <username>__<inbound_tag> 流量反查节点用。key=server_name+"\x00"+inbound_tag。
-	// **只映射物理节点(parent_node_id IS NULL)**:routed 子节点继承了父节点的 original_server+inbound_tag,
-	// 若一并映射,同一 (server,inbound) 会被 routed 子节点覆盖(后写覆盖前写)→ 主账号(连的是物理入站)
-	// 的流量会误用某个 routed 子节点的倍率。主账号流量本就属于物理节点,故只认物理节点。
-	nodeByServerTag := make(map[string]int64)
-	nRows, err := r.db.QueryContext(ctx,
-		`SELECT id, parent_node_id, COALESCE(original_server,''), COALESCE(inbound_tag,'') FROM nodes`)
-	if err != nil {
-		return 0, fmt.Errorf("list nodes: %w", err)
-	}
-	for nRows.Next() {
-		var id int64
-		var parentID *int64
-		var srv, tag string
-		if err := nRows.Scan(&id, &parentID, &srv, &tag); err != nil {
-			continue
-		}
-		if parentID == nil && srv != "" && tag != "" {
-			nodeByServerTag[srv+"\x00"+tag] = id
-		}
-	}
-	nRows.Close()
-
-	// 扫该用户所有 email 流量行。只取本周期增量:月度重置把当时的累计值抬进了 cycle_base_*,
-	// 不减掉基线的话,重置后仍会拿历史累计去判超限(见 ResetUserTrafficCycle)。
-	prefix := username + "__"
-	// 转义 `_`(SQL 单字符通配符),用「字面」前缀匹配,防止用户名含 `_` 时跨用户串味(如 alice__% 误吞 alice_2 的行)。
-	// 两种子账号 email 形态都显式覆盖:`<user>__...`(物理 + routed)与 `<user>-<tag>`(dash 老格式);
-	// 再并上 user_subaccounts 精确集兜底。三者都对 `_` 转义,故不会像旧 `_` 通配符那样误吞别的用户。
-	esc := escapeLikePattern(username)
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT server_id, email, uplink - cycle_base_uplink, downlink - cycle_base_downlink
-		 FROM user_email_traffic
-		 WHERE email = ?
-		    OR email LIKE ? ESCAPE '\'
-		    OR email LIKE ? ESCAPE '\'
-		    OR email IN (SELECT email FROM user_subaccounts WHERE username = ?)`,
-		username, esc+`\_\_%`, esc+`-%`, username)
+		`SELECT attributed_username,
+		        COALESCE(SUM(MAX(weighted_uplink - cycle_base_weighted_uplink, 0)
+		                   + MAX(weighted_downlink - cycle_base_weighted_downlink, 0)), 0)
+		 FROM user_email_traffic WHERE attributed_username != '' GROUP BY attributed_username`)
 	if err != nil {
-		return 0, fmt.Errorf("query user_email_traffic: %w", err)
+		return nil, fmt.Errorf("query all billable traffic: %w", err)
 	}
 	defer rows.Close()
-
-	var weighted float64
+	out := make(map[string]int64)
 	for rows.Next() {
-		var serverID, uplink, downlink int64
-		var email string
-		if err := rows.Scan(&serverID, &email, &uplink, &downlink); err != nil {
+		var username string
+		var billable float64
+		if err := rows.Scan(&username, &billable); err != nil {
 			continue
 		}
-		bytes := max(uplink, 0) + max(downlink, 0)
-
-		// 子账号路径(routed):每个 routed 节点用它自己的倍率(独立,不再回退父/根节点)。
-		if nid, ok := subaccNodeID[email]; ok {
-			weighted += float64(bytes) * pkg.MultiplierForNode(nid)
-			continue
-		}
-
-		// 主账号 inbound 路径:<username>__<inbound_tag> → 物理节点(nodeByServerTag 只含物理节点)。
-		if strings.HasPrefix(email, prefix) {
-			tag := email[len(prefix):]
-			srvName := serverNames[serverID]
-			if srvName != "" {
-				if nid, ok := nodeByServerTag[srvName+"\x00"+tag]; ok {
-					weighted += float64(bytes) * pkg.MultiplierForNode(nid)
-					continue
-				}
-			}
-		}
-
-		// 兜底:无法识别节点 → 按 1 算(包括 email == username 的历史孤行)
-		weighted += float64(bytes)
+		out[username] = int64(billable)
 	}
-	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("scan user_email_traffic: %w", err)
-	}
-	return int64(weighted), nil
+	return out, rows.Err()
 }
 
 func (r *TrafficRepository) UpdateUserLimitOverrides(ctx context.Context, username string, speedOverride *float64, deviceOverride *int) error {
@@ -11103,7 +11164,11 @@ type UserEmailTraffic struct {
 // UpsertUserEmailTraffic 跟 UpsertUserTraffic 完全一样的 delta/restart 检测逻辑,key 换成 email。
 // collector 同一次循环里跟 UpsertUserTraffic 并行调用,**双写两张表**:user_traffic 按 username
 // 聚合(老路径不变),user_email_traffic 保留 email 细分(新功能用)。
-func (r *TrafficRepository) UpsertUserEmailTraffic(ctx context.Context, serverID int64, email string, uplink, downlink int64, isXrayRestarted bool) error {
+// weight/attributedUsername 来自采集当时的 EmailAttributor(collector 每 tick build 一次):
+// delta × weight 累加进 weighted_*,把「按当时倍率计价」固化进历史 —— 之后改倍率只影响后续 tick,
+// 不再追溯重算(这正是"读时乘倍率"的根本缺陷)。计价搭这条 UPDATE 的车 → 与 collector 天然无竞态。
+// weight<=0 视为 1(裸量),attributedUsername 为空表示脏 email/认不出 → 不进任何用户的计费。
+func (r *TrafficRepository) UpsertUserEmailTraffic(ctx context.Context, serverID int64, email string, uplink, downlink int64, isXrayRestarted bool, weight float64, attributedUsername string) error {
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
 	}
@@ -11112,6 +11177,9 @@ func (r *TrafficRepository) UpsertUserEmailTraffic(ctx context.Context, serverID
 	}
 	if email == "" {
 		return errors.New("email is required")
+	}
+	if weight <= 0 {
+		weight = 1
 	}
 
 	var existing UserEmailTraffic
@@ -11126,9 +11194,9 @@ func (r *TrafficRepository) UpsertUserEmailTraffic(ctx context.Context, serverID
 
 	if !exists {
 		// 首次见到 (server, email):见 UpsertNodeTraffic 同款注释 —— raw 仅作 baseline,
-		// 累计字段从 0 起步,避免历史累计灌入当期。
-		const insertStmt = `INSERT INTO user_email_traffic (server_id, email, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at) VALUES (?, ?, 0, 0, 0, 0, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-		if _, err := r.db.ExecContext(ctx, insertStmt, serverID, email, uplink, downlink); err != nil {
+		// 累计字段从 0 起步,避免历史累计灌入当期。weighted_* 同理从 0 起步。
+		const insertStmt = `INSERT INTO user_email_traffic (server_id, email, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, weighted_uplink, weighted_downlink, cycle_base_weighted_uplink, cycle_base_weighted_downlink, attributed_username, cycle_start, updated_at) VALUES (?, ?, 0, 0, 0, 0, ?, ?, 0, 0, 0, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+		if _, err := r.db.ExecContext(ctx, insertStmt, serverID, email, uplink, downlink, attributedUsername); err != nil {
 			return fmt.Errorf("insert user email traffic: %w", err)
 		}
 		return nil
@@ -11157,8 +11225,14 @@ func (r *TrafficRepository) UpsertUserEmailTraffic(ctx context.Context, serverID
 		newTotalDownlink = existing.TotalDownlink
 	}
 
-	const updateStmt = `UPDATE user_email_traffic SET uplink = uplink + ?, downlink = downlink + ?, total_uplink = ?, total_downlink = ?, last_uplink = ?, last_downlink = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-	if _, err := r.db.ExecContext(ctx, updateStmt, deltaUplink, deltaDownlink, newTotalUplink, newTotalDownlink, uplink, downlink, existing.ID); err != nil {
+	// weighted_* 与 uplink/downlink 在同一条 UPDATE 里自增 → 计价与采集原子,无竞态。
+	// attributed_username 每 tick 刷新:归因数据变了(如新建节点)下一 tick 自愈;
+	// 但已计入 weighted_* 的历史不受影响 —— 这正是"不追溯"的含义。
+	const updateStmt = `UPDATE user_email_traffic SET uplink = uplink + ?, downlink = downlink + ?, weighted_uplink = weighted_uplink + ?, weighted_downlink = weighted_downlink + ?, total_uplink = ?, total_downlink = ?, last_uplink = ?, last_downlink = ?, attributed_username = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+	if _, err := r.db.ExecContext(ctx, updateStmt,
+		deltaUplink, deltaDownlink,
+		float64(deltaUplink)*weight, float64(deltaDownlink)*weight,
+		newTotalUplink, newTotalDownlink, uplink, downlink, attributedUsername, existing.ID); err != nil {
 		return fmt.Errorf("update user email traffic: %w", err)
 	}
 	return nil
@@ -11298,17 +11372,16 @@ func (r *TrafficRepository) ResetUserTrafficCycle(ctx context.Context, username 
 		return fmt.Errorf("reset user traffic cycle: %w", err)
 	}
 
-	// WHERE 必须与 GetUserWeightedTraffic 的扫描条件严格一致,确保"判定看得见的行"都被抬了基线。
-	// 转义 `_`(防跨用户串味)+ 显式覆盖 `<user>__...` 和 `<user>-<tag>` 两种子账号形态 + user_subaccounts 精确集。
-	esc := escapeLikePattern(username)
+	// 按 attributed_username 过滤 —— 与 GetUserBillableTraffic 同源,"计费看得见的行"必然被抬基线。
+	// 旧实现在这里用 4 段 LIKE(email= / esc__% / esc-% / IN subaccounts),要求与读侧逐字一致,
+	// 是个只靠注释维持的口头约定;而且它漏掉 client.email == users.email 形态 → 那些行的基线永不抬升。
+	// 归因失败的行(attributed_username='')不被任何用户计费,自然也不需要重置。
 	const emailStmt = `UPDATE user_email_traffic
 		SET cycle_base_uplink = uplink, cycle_base_downlink = downlink,
+		    cycle_base_weighted_uplink = weighted_uplink, cycle_base_weighted_downlink = weighted_downlink,
 		    cycle_start = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-		WHERE email = ?
-		   OR email LIKE ? ESCAPE '\'
-		   OR email LIKE ? ESCAPE '\'
-		   OR email IN (SELECT email FROM user_subaccounts WHERE username = ?)`
-	if _, err := tx.ExecContext(ctx, emailStmt, username, esc+`\_\_%`, esc+`-%`, username); err != nil {
+		WHERE attributed_username = ?`
+	if _, err := tx.ExecContext(ctx, emailStmt, username); err != nil {
 		return fmt.Errorf("reset user email traffic cycle: %w", err)
 	}
 

@@ -168,15 +168,14 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 			continue
 		}
 
-		// 加权流量:每行 user_email_traffic 乘以节点在套餐内的倍率(routed 子节点继承父节点)
-		totalTraffic, err := e.repo.GetUserWeightedTraffic(ctx, user.Username, pkg)
+		// 计费流量:倍率(per-node × 套餐 oneway/twoway)已由 collector 在采集时折算进 weighted_*,
+		// 这里拿到即最终值 —— **不能再乘任何倍率**。改倍率只影响后续 tick,不追溯重算历史。
+		usedWeighted, err := e.repo.GetUserBillableTraffic(ctx, user.Username)
 		if err != nil {
 			log.Printf("[TrafficLimitEnforcer] Failed to get traffic for %s: %v", user.Username, err)
 			continue
 		}
 
-		// 倍率仍取自套餐:覆写只改"上限",不改"用量怎么计"。
-		usedWeighted := totalTraffic * pkg.TrafficMultiplier()
 		wasOverLimit, _ := e.repo.IsUserOverLimit(ctx, user.Username)
 		isOverLimit := usedWeighted >= limitBytes
 
@@ -194,7 +193,7 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 
 		if isOverLimit && !wasOverLimit {
 			log.Printf("[TrafficLimitEnforcer] User %s exceeded limit (%d/%d bytes), removing from inbounds",
-				user.Username, totalTraffic, limitBytes)
+				user.Username, usedWeighted, limitBytes)
 			e.removeUserFromAllInbounds(ctx, user.Username)
 			suspendUserPrivateRouted(ctx, e.remoteManage, e.repo, user.Username)
 			e.repo.UpdateUserOverLimit(ctx, user.Username, true)
@@ -203,7 +202,7 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 			SendOverLimitNotification(ctx, user.Username, usedGB, limitGB)
 		} else if !isOverLimit && wasOverLimit {
 			log.Printf("[TrafficLimitEnforcer] User %s back under limit (%d/%d bytes), restoring inbounds",
-				user.Username, totalTraffic, limitBytes)
+				user.Username, usedWeighted, limitBytes)
 			e.restoreUserToInbounds(ctx, user)
 			resumeUserPrivateRouted(ctx, e.remoteManage, e.repo, user.Username)
 			e.repo.UpdateUserOverLimit(ctx, user.Username, false)
