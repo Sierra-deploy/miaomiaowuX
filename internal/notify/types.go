@@ -48,6 +48,9 @@ type Config struct {
 	NotifyAgentLongOffline     bool
 	AgentLongOfflineMinutes    int // 默认 30
 	NotifyDeviceLimitExceeded  bool
+	// NotifyIPBan：IP 被暴力防护封禁时通知。历史上 EventIPBan 有触发点(brute_force.go)但
+	// CheckEnabled 没有对应 case → 通知永远发不出。补上字段 + case + 配置读写修复它。
+	NotifyIPBan bool
 }
 
 type Event struct {

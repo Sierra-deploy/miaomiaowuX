@@ -32,6 +32,7 @@ import (
 	"miaomiaowux/internal/proxygroups"
 	"miaomiaowux/internal/securechan"
 	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/taskrun"
 	"miaomiaowux/internal/traffic"
 	"miaomiaowux/internal/version"
 	"miaomiaowux/internal/web"
@@ -121,6 +122,13 @@ func main() {
 		os.Exit(1)
 	}
 	defer repo.Close()
+
+	// 定时任务运行记录器(P3)。高频 collector 的成功按 5min 节流(否则 speed 3s/次会写爆表),
+	// 其余低频任务每次都记。失败永远记。各任务通过 taskrun.Record 全局调用,无需改构造函数。
+	taskrun.Init(taskrun.New(repo, map[string]time.Duration{
+		"traffic_collector": 5 * time.Minute,
+		"speed_collector":   5 * time.Minute,
+	}))
 
 	addr := getAddr(config, repo)
 
@@ -773,6 +781,16 @@ func main() {
 	if theme, _ := repo.GetSystemSetting(context.Background(), handler.DefaultThemeKey); theme != "" {
 		web.SetDefaultTheme(theme)
 	}
+	// 日志管理(admin):系统日志(主控自身 mmwx.log)只读查询。定时/agent 日志端点见后续注册。
+	mux.Handle("/api/admin/logs/system", auth.RequireAdmin(tokenStore, userRepo, handler.NewSystemLogHandler(repo)))
+	// 安全日志:探测/封禁事件流 + 当前封禁列表 + 手动封禁/解封。子路径 events / bans / bans/{ip}。
+	securityLogHandler := handler.NewSecurityLogHandler(repo)
+	mux.Handle("/api/admin/security/", auth.RequireAdmin(tokenStore, userRepo, securityLogHandler))
+	// 定时任务运行记录:runs(列表,后端分页) / types(下拉筛选清单)。
+	taskLogHandler := handler.NewTaskLogHandler(repo)
+	mux.Handle("/api/admin/tasks/", auth.RequireAdmin(tokenStore, userRepo, taskLogHandler))
+	// Agent 日志:转发到指定 agent 拉取远程机器日志(agent 自身/xray/nginx)。旧版 agent 降级提示。
+	mux.Handle("/api/admin/logs/agent", auth.RequireAdmin(tokenStore, userRepo, handler.NewAgentLogHandler(remoteManageHandler)))
 	// 自定义安全阈值(登录/暴力防护/订阅频率)— 写入后 handler 内部热更新 3 个 limiter 单例,无需重启
 	mux.Handle("/api/admin/security-settings", auth.RequireAdmin(tokenStore, userRepo, handler.NewSecuritySettingsHandler(repo)))
 	// Turnstile 配置自测:前端 widget 验完拿 token,后端用 DB 已存 secret 调 cloudflare siteverify,
@@ -1077,6 +1095,10 @@ func main() {
 		secCfg.BruteForceWindowMinutes, secCfg.BruteForceBlockMinutes,
 	)
 	bruteForceProtector.SetSkipLocalIP(secCfg.SkipLocalIP)
+	// 持久化:注入 repo → 封禁/探测事件双写 DB;启动回填 → 永久封禁跨重启生效;后台清理 → 修内存泄漏
+	bruteForceProtector.SetRepo(repo)
+	bruteForceProtector.RestoreFromDB(context.Background())
+	go bruteForceProtector.StartCleanup(context.Background())
 	subRateLimiter := handler.NewSubscriptionRateLimiterWithConfig(
 		secCfg.SubRateEnabled, secCfg.SubRateLimit, secCfg.SubRateWindowMinutes,
 	)
@@ -1492,6 +1514,13 @@ func startDailySnapshotTask(ctx context.Context, trafficHandler *handler.Traffic
 	firstDelay := time.Until(nextMidnight)
 	logger.Info("[流量收集器] 定时调度器已启动", "first_run_at", nextMidnight.Format("2006-01-02 15:04:05"), "interval", "24小时")
 
+	recorded := func() {
+		taskrun.Record(ctx, "daily_snapshot", func() (string, error) {
+			runWithRetry()
+			return "", nil
+		})
+	}
+
 	firstTimer := time.NewTimer(firstDelay)
 	select {
 	case <-ctx.Done():
@@ -1499,7 +1528,7 @@ func startDailySnapshotTask(ctx context.Context, trafficHandler *handler.Traffic
 		logger.Info("[流量收集器] 定时调度器已停止")
 		return
 	case <-firstTimer.C:
-		runWithRetry()
+		recorded()
 	}
 
 	ticker := time.NewTicker(24 * time.Hour)
@@ -1511,7 +1540,7 @@ func startDailySnapshotTask(ctx context.Context, trafficHandler *handler.Traffic
 			logger.Info("[流量收集器] 定时调度器已停止")
 			return
 		case <-ticker.C:
-			runWithRetry()
+			recorded()
 		}
 	}
 }

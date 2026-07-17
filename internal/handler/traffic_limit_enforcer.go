@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/taskrun"
 )
 
 type TrafficLimitEnforcer struct {
@@ -23,7 +24,7 @@ func (e *TrafficLimitEnforcer) Start(ctx context.Context, interval time.Duration
 		interval = 5 * time.Minute
 	}
 	log.Printf("[TrafficLimitEnforcer] Starting with interval: %v", interval)
-	e.CheckAll(ctx)
+	e.recordedCheck(ctx)
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -32,9 +33,18 @@ func (e *TrafficLimitEnforcer) Start(ctx context.Context, interval time.Duration
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			e.CheckAll(ctx)
+			e.recordedCheck(ctx)
 		}
 	}
+}
+
+// recordedCheck 跑一次 CheckAll 并记入 task_runs（P3）。CheckAll 本身不返回 error/摘要，
+// 故这里只记「跑过 + 耗时」；任务内部的错误仍走它自己的日志。
+func (e *TrafficLimitEnforcer) recordedCheck(ctx context.Context) {
+	taskrun.Record(ctx, "traffic_enforcer", func() (string, error) {
+		e.CheckAll(ctx)
+		return "", nil
+	})
 }
 
 // shouldResetThisMonth 判断当前时刻是否应触发用户的本月流量重置。

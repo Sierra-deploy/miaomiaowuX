@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/taskrun"
 )
 
 // OrphanXrayClientCleaner 每天凌晨扫一次:清理 xray inbound 上已无主的 client(email)。
@@ -67,7 +68,7 @@ func (c *OrphanXrayClientCleaner) loop(ctx context.Context) {
 		firstTimer.Stop()
 		return
 	case <-firstTimer.C:
-		c.runOnce(ctx)
+		c.recordedRun(ctx)
 	}
 
 	ticker := time.NewTicker(24 * time.Hour)
@@ -77,9 +78,17 @@ func (c *OrphanXrayClientCleaner) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			c.runOnce(ctx)
+			c.recordedRun(ctx)
 		}
 	}
+}
+
+// recordedRun 跑一次清理并记入 task_runs（P3）。
+func (c *OrphanXrayClientCleaner) recordedRun(ctx context.Context) {
+	taskrun.Record(ctx, "orphan_xray_cleaner", func() (string, error) {
+		c.runOnce(ctx)
+		return "", nil
+	})
 }
 
 func (c *OrphanXrayClientCleaner) runOnce(ctx context.Context) {

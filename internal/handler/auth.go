@@ -112,13 +112,27 @@ func NewLoginHandler(manager *auth.Manager, tokens *auth.TokenStore, repo *stora
 		}
 
 		if !ok {
+			locked := false
 			if rateLimiter != nil {
 				rateLimiter.RecordFailure(clientIP, username)
+				// Check 在已达锁定阈值时返回 ErrRateLimited —— 用它区分 login_fail / login_locked
+				locked = errors.Is(rateLimiter.Check(clientIP, username), ErrRateLimited)
 			}
 			logger.Warn("🔐 [LOGIN_FAIL] 登录失败",
 				"username", username,
 				"client_ip", clientIP,
 				"time", time.Now().Format("2006-01-02 15:04:05"))
+			// 登录暴破进安全事件流（与 brute_force 的封禁体系独立：只记事件、不进 ip_bans，
+			// 因为限流锁定 ≠ 封禁，生命周期不同）。best-effort，失败静默。
+			if repo != nil {
+				kind := "login_fail"
+				if locked {
+					kind = "login_locked"
+				}
+				_ = repo.InsertSecurityEvent(r.Context(), storage.SecurityEvent{
+					IP: clientIP, Kind: kind, Username: username, Path: r.URL.Path,
+				})
+			}
 			writeError(w, http.StatusUnauthorized, errors.New("invalid credentials"))
 			return
 		}

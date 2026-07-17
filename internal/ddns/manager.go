@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/taskrun"
 )
 
 // Manager 把 agent IP 漂移信号转成 DNS provider API 调用。
@@ -196,7 +197,10 @@ func (m *Manager) StartReconciler(ctx context.Context) {
 			log.Printf("[DDNS] reconciler stopped")
 			return
 		case <-ticker.C:
-			m.runReconcile(ctx)
+			taskrun.Record(ctx, "ddns_reconciler", func() (string, error) {
+				m.runReconcile(ctx)
+				return "", nil
+			})
 		}
 	}
 }

@@ -13,6 +13,7 @@ import (
 
 	"miaomiaowux/internal/notify"
 	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/taskrun"
 )
 
 // 服务器上下线通知去抖动 — 同一 server 同一状态短时间内频繁触发(国际线路抖动 / 心跳延迟卡阈值 /
@@ -127,7 +128,10 @@ func StartNotifyScheduler(ctx context.Context, repo *storage.TrafficRepository) 
 				}
 				if nowTime == targetTime && lastDailyRun != today {
 					lastDailyRun = today
-					go sendDailyTrafficNotification(ctx, repo, n)
+					go taskrun.Record(ctx, "notify_daily_traffic", func() (string, error) {
+						sendDailyTrafficNotification(ctx, repo, n)
+						return "", nil
+					})
 				}
 			}
 

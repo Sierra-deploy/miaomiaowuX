@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/taskrun"
 )
 
 // XrayMetrics 表示来自 Xray 的 /debug/vars 端点的指标响应
@@ -152,7 +153,10 @@ func (c *Collector) Start(ctx context.Context) {
 			log.Printf("[Traffic Collector] Stopping...")
 			return
 		case <-ticker.C:
-			c.collectAll(ctx)
+			taskrun.Record(ctx, "traffic_collector", func() (string, error) {
+				c.collectAll(ctx)
+				return "", nil
+			})
 		}
 	}
 }
@@ -616,7 +620,10 @@ func (c *Collector) StartSpeedCollection(ctx context.Context) {
 			log.Printf("[Speed Collector] Stopping...")
 			return
 		case <-ticker.C:
-			c.collectSpeedFromPullServers(ctx)
+			taskrun.Record(ctx, "speed_collector", func() (string, error) {
+				c.collectSpeedFromPullServers(ctx)
+				return "", nil
+			})
 		}
 	}
 }

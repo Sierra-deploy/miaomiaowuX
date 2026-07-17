@@ -554,6 +554,7 @@ type SystemConfig struct {
 	NotifyAgentLongOffline       bool // agent 长期离线
 	NotifyAgentLongOfflineMinutes int // 默认 30
 	NotifyDeviceLimitExceeded    bool // 设备数超限(agent 上报触发)
+	NotifyIPBan                  bool // IP 被暴力防护封禁
 	EnableOverrideScripts       bool   // 启用覆写脚本功能
 	SubscriptionOutputFormat    string // 订阅序列化格式: "yaml"(default) or "json"。仅影响 Clash 客户端输出。
 	SilentMode                  bool   // 静默模式：所有请求返回404，仅订阅接口可用
@@ -1266,6 +1267,11 @@ CREATE INDEX IF NOT EXISTS idx_tg_audit_at ON tg_audit(at);
 		return fmt.Errorf("migrate tg_audit: %w", err)
 	}
 
+	// 日志管理功能的表(安全事件流/当前封禁态/定时任务运行记录)。实现见 logs_tables.go。
+	if err := r.migrateLogTables(); err != nil {
+		return err
+	}
+
 	const historySchema = `
 CREATE TABLE IF NOT EXISTS rule_versions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1728,6 +1734,9 @@ WHERE NOT EXISTS (SELECT 1 FROM system_config WHERE id = 1);
 		return err
 	}
 	if err := r.ensureSystemConfigColumn("notify_device_limit_exceeded", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("notify_ip_ban", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 
@@ -6738,7 +6747,8 @@ SELECT proxy_groups_source_url, client_compatibility_mode, COALESCE(enable_short
        COALESCE(notify_cert_result, 0),
        COALESCE(notify_agent_long_offline, 0),
        COALESCE(notify_agent_long_offline_minutes, 30),
-       COALESCE(notify_device_limit_exceeded, 0)
+       COALESCE(notify_device_limit_exceeded, 0),
+       COALESCE(notify_ip_ban, 0)
 FROM system_config
 WHERE id = 1
 `
@@ -6751,7 +6761,7 @@ WHERE id = 1
 	var enableMiaomiaowuFeatures, enableMmwShortLinkCompat int
 	var nodeNameMultPrefixEnabled int
 	var notifyTH80, notifyOverLimit, notifyPkgExpiring, notifyPkgExpired int
-	var notifyUserReg, notifyTGBound, notifyCert, notifyAgentLO, notifyDeviceLimit int
+	var notifyUserReg, notifyTGBound, notifyCert, notifyAgentLO, notifyDeviceLimit, notifyIPBan int
 	err := r.db.QueryRowContext(ctx, query).Scan(
 		&cfg.ProxyGroupsSourceURL, &compatibilityMode, &enableShortLink,
 		&cfg.SpeedCollectInterval, &cfg.TrafficCollectInterval,
@@ -6769,7 +6779,7 @@ WHERE id = 1
 		&nodeNameMultPrefixEnabled, &cfg.NodeNameMultiplierLeft, &cfg.NodeNameMultiplierRight,
 		&notifyTH80, &notifyOverLimit, &notifyPkgExpiring, &cfg.NotifyPackageExpiringDays,
 		&notifyPkgExpired, &notifyUserReg, &notifyTGBound, &notifyCert, &notifyAgentLO,
-		&cfg.NotifyAgentLongOfflineMinutes, &notifyDeviceLimit,
+		&cfg.NotifyAgentLongOfflineMinutes, &notifyDeviceLimit, &notifyIPBan,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -6809,6 +6819,7 @@ WHERE id = 1
 	cfg.NotifyCertResult = notifyCert != 0
 	cfg.NotifyAgentLongOffline = notifyAgentLO != 0
 	cfg.NotifyDeviceLimitExceeded = notifyDeviceLimit != 0
+	cfg.NotifyIPBan = notifyIPBan != 0
 	if cfg.NotifyPackageExpiringDays <= 0 {
 		cfg.NotifyPackageExpiringDays = 3
 	}
@@ -6863,6 +6874,7 @@ SET proxy_groups_source_url = ?,
     notify_agent_long_offline = ?,
     notify_agent_long_offline_minutes = ?,
     notify_device_limit_exceeded = ?,
+    notify_ip_ban = ?,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = 1
 `
@@ -6936,7 +6948,7 @@ WHERE id = 1
 		boolToInt(cfg.NotifyPackageExpired), boolToInt(cfg.NotifyUserRegistered),
 		boolToInt(cfg.NotifyTelegramBound), boolToInt(cfg.NotifyCertResult),
 		boolToInt(cfg.NotifyAgentLongOffline), agentLOMinutes,
-		boolToInt(cfg.NotifyDeviceLimitExceeded))
+		boolToInt(cfg.NotifyDeviceLimitExceeded), boolToInt(cfg.NotifyIPBan))
 	if err != nil {
 		return fmt.Errorf("update system config: %w", err)
 	}
@@ -6958,8 +6970,8 @@ INSERT INTO system_config (id, proxy_groups_source_url, client_compatibility_mod
     node_name_multiplier_prefix_enabled, node_name_multiplier_left, node_name_multiplier_right,
     notify_traffic_threshold_80, notify_over_limit, notify_package_expiring, notify_package_expiring_days,
     notify_package_expired, notify_user_registered, notify_telegram_bound, notify_cert_result,
-    notify_agent_long_offline, notify_agent_long_offline_minutes, notify_device_limit_exceeded)
-VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    notify_agent_long_offline, notify_agent_long_offline_minutes, notify_device_limit_exceeded, notify_ip_ban)
+VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 		if _, err := r.db.ExecContext(ctx, insertStmt, cfg.ProxyGroupsSourceURL, compatibilityMode, enableShortLink,
 			cfg.SpeedCollectInterval, cfg.TrafficCollectInterval, cfg.TrafficCheckInterval, cfg.HeartbeatInterval, agentLogEnabled,
@@ -6978,7 +6990,7 @@ VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
 			boolToInt(cfg.NotifyPackageExpired), boolToInt(cfg.NotifyUserRegistered),
 			boolToInt(cfg.NotifyTelegramBound), boolToInt(cfg.NotifyCertResult),
 			boolToInt(cfg.NotifyAgentLongOffline), agentLOMinutes,
-			boolToInt(cfg.NotifyDeviceLimitExceeded)); err != nil {
+			boolToInt(cfg.NotifyDeviceLimitExceeded), boolToInt(cfg.NotifyIPBan)); err != nil {
 			return fmt.Errorf("insert system config: %w", err)
 		}
 	}

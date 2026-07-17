@@ -3,10 +3,12 @@ package logger
 import (
 	"fmt"
 	"io"
+	"log"
 	"log/slog"
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -21,25 +23,70 @@ type Logger struct {
 var (
 	defaultLogger *Logger
 	once          sync.Once
-	// 主日志文件写入器（lumberjack 大小轮转：单文件 50MB，最多保留 2 个文件即当前+1备份，超出删最旧）
+	// 主日志文件写入器（lumberjack 大小轮转：单文件 50MB，最多保留 4 个文件即当前+3备份，超出删最旧）
 	fileWriter *lumberjack.Logger
+	// baseLevel 是 LOG_LEVEL 解析出来的基准级别。DisableDebugLog 结束 debug 会话时要回到它，
+	// 而不是回到写死的 Info —— 否则 LOG_LEVEL=debug 的部署开关过一次 debug 就永久降级了。
+	baseLevel = slog.LevelInfo
 )
+
+// parseLevel 解析 LOG_LEVEL。无法识别（含空串）→ Info。
+func parseLevel(s string) slog.Level {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "debug":
+		return slog.LevelDebug
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		return slog.LevelInfo
+	}
+}
+
+// stdlogAdapter 把标准库 log 的裸文本行包装成与 slog 一致的 logfmt。
+//
+// 为什么需要它：全仓库有 ~725 处 log.Printf，历史上从未调用过 log.SetOutput，
+// 这些日志只进 stderr、根本不落 mmwx.log（占主控日志量的约六成，且恰是 remote_manage /
+// remote_ws / collector 这些最需要排障的地方）。直接 log.SetOutput 又会让文件里混进
+// 标准库自带的 "2009/11/10 23:00:00" 时间戳格式，解析器得兼容两套 —— 故在此统一成 logfmt。
+//
+// 标准库 log 没有级别概念，一律记为 INFO（它们本来也从来没有级别）。
+type stdlogAdapter struct{ w io.Writer }
+
+func (a stdlogAdapter) Write(p []byte) (int, error) {
+	msg := strings.TrimRight(string(p), "\n")
+	line := fmt.Sprintf("time=%q level=%q msg=%q\n",
+		time.Now().Format("2006-01-02 15:04:05"), "INFO ", msg)
+	if _, err := a.w.Write([]byte(line)); err != nil {
+		return 0, err
+	}
+	// 必须返回入参长度而非改写后的长度：标准库 log 拿 n != len(p) 会当成写入不完整。
+	return len(p), nil
+}
 
 // 初始化全局logger — 日志真实落地到 data/logs/mmwx.log（同时保留 stdout 供 journalctl/容器查看）
 func Init() *Logger {
 	once.Do(func() {
 		_ = os.MkdirAll("data/logs", 0755)
 		fileWriter = &lumberjack.Logger{
-			Filename:   "data/logs/mmwx.log",
-			MaxSize:    50, // MB
-			MaxBackups: 1,  // 当前文件 + 1 个备份 = 最多 2 个文件
-			MaxAge:     0,  // 不按时间删，只看大小/数量
+			Filename: "data/logs/mmwx.log",
+			MaxSize:  50, // MB
+			// 接管标准库 log 后写入量约为原来的 2.7 倍（414 → 1139 个调用点），
+			// 备份从 1 提到 3，否则历史被冲得比以前快得多。
+			MaxBackups: 3,
+			MaxAge:     0, // 不按时间删，只看大小/数量
 			Compress:   false,
 		}
-		handler := newTextHandler(io.MultiWriter(os.Stdout, fileWriter), slog.LevelInfo)
+		baseLevel = parseLevel(os.Getenv("LOG_LEVEL"))
+		w := io.MultiWriter(os.Stdout, fileWriter)
+		handler := newTextHandler(w, baseLevel)
 		defaultLogger = &Logger{
 			Logger: slog.New(handler),
 		}
+		// 把标准库 log 也接进同一个 sink。SetFlags(0) 去掉它自带的时间戳，改由 adapter 统一加。
+		log.SetFlags(0)
+		log.SetOutput(stdlogAdapter{w: w})
 	})
 	return defaultLogger
 }
@@ -130,12 +177,13 @@ func (l *Logger) DisableDebugLog() string {
 	l.debugFile.Close()
 	l.debugFile = nil
 
-	// 恢复到控制台 + 主日志文件输出
+	// 恢复到控制台 + 主日志文件输出。级别回到 baseLevel（LOG_LEVEL 解析值）而非写死的 Info——
+	// 否则 LOG_LEVEL=debug 的部署一旦开关过 debug 会话，级别就被永久降回 Info 且无法恢复。
 	var w io.Writer = os.Stdout
 	if fileWriter != nil {
 		w = io.MultiWriter(os.Stdout, fileWriter)
 	}
-	handler := newTextHandler(w, slog.LevelInfo)
+	handler := newTextHandler(w, baseLevel)
 	l.Logger = slog.New(handler)
 
 	return filePath

@@ -34,6 +34,7 @@ type notifyConfigResponse struct {
 	NotifyAgentLongOffline        bool `json:"notify_agent_long_offline"`
 	NotifyAgentLongOfflineMinutes int  `json:"notify_agent_long_offline_minutes"`
 	NotifyDeviceLimitExceeded     bool `json:"notify_device_limit_exceeded"`
+	NotifyIPBan                   bool `json:"notify_ip_ban"`
 	// 服务器上下线通知容忍阈值(秒):离线满该秒数才发下线通知,阈值内又上线则不发(压抖动+主控重启误报)。0=关闭。
 	NotifyServerToleranceSeconds int `json:"notify_server_tolerance_seconds"`
 	// 每日推送文案模板。空 = 未自定义,渲染时用默认模板。
@@ -68,6 +69,7 @@ type notifyConfigRequest struct {
 	NotifyAgentLongOffline        bool `json:"notify_agent_long_offline"`
 	NotifyAgentLongOfflineMinutes int  `json:"notify_agent_long_offline_minutes"`
 	NotifyDeviceLimitExceeded     bool `json:"notify_device_limit_exceeded"`
+	NotifyIPBan                   bool `json:"notify_ip_ban"`
 	// 指针:nil=不改;非 nil=写入(0 合法,表示关闭容忍)。
 	NotifyServerToleranceSeconds *int `json:"notify_server_tolerance_seconds"`
 	// 指针:nil=不改;非 nil=写入(空字符串合法,表示恢复默认模板)。
@@ -143,6 +145,7 @@ func (h *NotifyConfigHandler) handleGet(w http.ResponseWriter, r *http.Request) 
 		NotifyAgentLongOffline:        sysCfg.NotifyAgentLongOffline,
 		NotifyAgentLongOfflineMinutes: sysCfg.NotifyAgentLongOfflineMinutes,
 		NotifyDeviceLimitExceeded:     sysCfg.NotifyDeviceLimitExceeded,
+		NotifyIPBan:                   sysCfg.NotifyIPBan,
 		NotifyServerToleranceSeconds:  h.repo.GetServerNotifyToleranceSeconds(r.Context()),
 		// 返回**存的原值**(未自定义时为空),不替换成默认 —— 前端据此区分「用默认」与
 		// 「自定义成了跟默认一样」,后者会把文案冻在旧默认上,以后改默认推不下去。
@@ -200,6 +203,7 @@ func (h *NotifyConfigHandler) handleUpdate(w http.ResponseWriter, r *http.Reques
 		sysCfg.NotifyAgentLongOfflineMinutes = req.NotifyAgentLongOfflineMinutes
 	}
 	sysCfg.NotifyDeviceLimitExceeded = req.NotifyDeviceLimitExceeded
+	sysCfg.NotifyIPBan = req.NotifyIPBan
 
 	if err := h.repo.UpdateSystemConfig(r.Context(), sysCfg); err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -252,6 +256,7 @@ func (h *NotifyConfigHandler) handleUpdate(w http.ResponseWriter, r *http.Reques
 			NotifyAgentLongOffline:        sysCfg.NotifyAgentLongOffline,
 			AgentLongOfflineMinutes:       sysCfg.NotifyAgentLongOfflineMinutes,
 			NotifyDeviceLimitExceeded:     sysCfg.NotifyDeviceLimitExceeded,
+			NotifyIPBan:                   sysCfg.NotifyIPBan,
 		})
 	}
 

@@ -16,6 +16,7 @@ import (
 	"miaomiaowux/internal/acme"
 	"miaomiaowux/internal/auth"
 	"miaomiaowux/internal/storage"
+	"miaomiaowux/internal/taskrun"
 )
 
 // CertificateHandler 处理证书管理 API 端点。
@@ -698,10 +699,18 @@ func (h *CertificateHandler) ListValidCertificates(w http.ResponseWriter, r *htt
 
 // 启动一个 goroutine 来检查过期的证书。
 func (h *CertificateHandler) StartRenewalChecker(ctx context.Context) {
+	recorded := func() {
+		// 只记「跑过 + 耗时」入 task_runs（P3）。checkAndRenewCertificates 内部自带
+		// context.Background()（关机不取消，见其实现），这里传 ctx 仅用于记录写入。
+		taskrun.Record(ctx, "cert_renewal", func() (string, error) {
+			h.checkAndRenewCertificates()
+			return "", nil
+		})
+	}
 	go func() {
 		// 启动后初步检查
 		time.Sleep(1 * time.Minute)
-		h.checkAndRenewCertificates()
+		recorded()
 
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()
@@ -711,7 +720,7 @@ func (h *CertificateHandler) StartRenewalChecker(ctx context.Context) {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				h.checkAndRenewCertificates()
+				recorded()
 			}
 		}
 	}()

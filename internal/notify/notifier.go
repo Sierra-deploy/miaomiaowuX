@@ -93,6 +93,8 @@ func (n *Notifier) CheckEnabled(eventType EventType) (bool, SkipReason) {
 		on = n.cfg.NotifyAgentLongOffline
 	case EventDeviceLimitExceeded:
 		on = n.cfg.NotifyDeviceLimitExceeded
+	case EventIPBan:
+		on = n.cfg.NotifyIPBan
 	default:
 		on = false
 	}
