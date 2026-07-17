@@ -102,6 +102,18 @@ func (n *Notifier) CheckEnabled(eventType EventType) (bool, SkipReason) {
 	return true, ReasonEnabled
 }
 
+// composeText 拼最终发给 TG 的正文。
+//
+// Title 为空 → 整条消息就是 Message,不前置标题行。每日流量推送走这条路:
+// 它的文案(含首行标题)整段由管理员的模板决定;若仍无条件前置,会渲染出 "**" 这种
+// 坏 Markdown,TG 直接 400,当天推送整个发不出去。
+func composeText(title, message string) string {
+	if title == "" {
+		return message
+	}
+	return fmt.Sprintf("*%s*\n%s", title, message)
+}
+
 func (n *Notifier) Send(ctx context.Context, event Event) error {
 	if ok, _ := n.CheckEnabled(event.Type); !ok {
 		return nil
@@ -111,8 +123,7 @@ func (n *Notifier) Send(ctx context.Context, event Event) error {
 	defer n.sendMu.Unlock()
 
 	cfg := n.GetConfig()
-	text := fmt.Sprintf("*%s*\n%s", event.Title, event.Message)
-	return sendTelegram(ctx, cfg.BotToken, cfg.ChatID, text)
+	return sendTelegram(ctx, cfg.BotToken, cfg.ChatID, composeText(event.Title, event.Message))
 }
 
 func (n *Notifier) SendTest(ctx context.Context) error {

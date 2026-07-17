@@ -236,11 +236,13 @@ func checkAgentLongOffline(ctx context.Context, repo *storage.TrafficRepository,
 	}
 }
 
-func sendDailyTrafficNotification(ctx context.Context, repo *storage.TrafficRepository, n *notify.Notifier) {
+// buildDailyTrafficData 汇总每日推送需要的数据。ok=false 表示无数据可发(两个列表都空)。
+// 与渲染分离,好让模板渲染是个能单测的纯函数。
+func buildDailyTrafficData(ctx context.Context, repo *storage.TrafficRepository) (dailyTrafficData, bool) {
 	servers, err := repo.ListRemoteServers(ctx)
 	if err != nil {
 		log.Printf("[Notify] 获取服务器列表失败: %v", err)
-		return
+		return dailyTrafficData{}, false
 	}
 
 	type serverTraffic struct {
@@ -260,20 +262,19 @@ func sendDailyTrafficNotification(ctx context.Context, repo *storage.TrafficRepo
 
 	sort.Slice(serverList, func(i, j int) bool { return serverList[i].used > serverList[j].used })
 
-	var lines []string
-	lines = append(lines, fmt.Sprintf("*总流量:* %.2fGB", float64(totalUsed)/(1024*1024*1024)))
+	data := dailyTrafficData{
+		Date:    time.Now().Format("2006-01-02"),
+		TotalGB: fmt.Sprintf("%.2f", float64(totalUsed)/(1024*1024*1024)),
+	}
 
-	if len(serverList) > 0 {
-		lines = append(lines, "\n*服务器流量:*")
-		for _, s := range serverList {
-			usedGB := float64(s.used) / (1024 * 1024 * 1024)
-			if s.limit > 0 {
-				limitGB := float64(s.limit) / (1024 * 1024 * 1024)
-				pct := float64(s.used) / float64(s.limit) * 100
-				lines = append(lines, fmt.Sprintf("• %s: %.1fGB/%.0fGB (%.0f%%)", notify.EscapeMarkdown(s.name), usedGB, limitGB, pct))
-			} else {
-				lines = append(lines, fmt.Sprintf("• %s: %.1fGB", notify.EscapeMarkdown(s.name), usedGB))
-			}
+	for _, s := range serverList {
+		usedGB := float64(s.used) / (1024 * 1024 * 1024)
+		if s.limit > 0 {
+			limitGB := float64(s.limit) / (1024 * 1024 * 1024)
+			pct := float64(s.used) / float64(s.limit) * 100
+			data.ServerLines = append(data.ServerLines, fmt.Sprintf("• %s: %.1fGB/%.0fGB (%.0f%%)", notify.EscapeMarkdown(s.name), usedGB, limitGB, pct))
+		} else {
+			data.ServerLines = append(data.ServerLines, fmt.Sprintf("• %s: %.1fGB", notify.EscapeMarkdown(s.name), usedGB))
 		}
 	}
 
@@ -282,7 +283,6 @@ func sendDailyTrafficNotification(ctx context.Context, repo *storage.TrafficRepo
 	// routed 子账号的流量归到了父用户名下(见 EmailAttributor 的 routedEmailUser)。
 	userTotals, err := repo.GetAllUserBillableTraffic(ctx)
 	if err == nil && len(userTotals) > 0 {
-
 		type userUsage struct {
 			name string
 			used int64
@@ -293,24 +293,40 @@ func sendDailyTrafficNotification(ctx context.Context, repo *storage.TrafficRepo
 		}
 		sort.Slice(users, func(i, j int) bool { return users[i].used > users[j].used })
 
-		lines = append(lines, "\n*用户流量:*")
 		for _, u := range users {
 			if u.used == 0 {
 				continue
 			}
 			usedGB := float64(u.used) / (1024 * 1024 * 1024)
-			lines = append(lines, fmt.Sprintf("• %s: %.2fGB", notify.EscapeMarkdown(u.name), usedGB))
+			data.UserLines = append(data.UserLines, fmt.Sprintf("• %s: %.2fGB", notify.EscapeMarkdown(u.name), usedGB))
 		}
 	}
 
-	if len(lines) <= 1 {
+	if len(data.ServerLines) == 0 && len(data.UserLines) == 0 {
+		return data, false
+	}
+	return data, true
+}
+
+func sendDailyTrafficNotification(ctx context.Context, repo *storage.TrafficRepository, n *notify.Notifier) {
+	data, ok := buildDailyTrafficData(ctx, repo)
+	if !ok {
 		return
 	}
 
+	// 模板读不出(DB 错)→ tpl 为空 → renderDailyTrafficTemplate 回退默认模板,推送照发。
+	tpl, _ := repo.GetSystemSetting(ctx, notifyDailyTemplateKey)
+	msg := renderDailyTrafficTemplate(tpl, data)
+	if strings.TrimSpace(msg) == "" {
+		log.Printf("[Notify] daily_traffic 模板渲染结果为空,跳过发送")
+		return
+	}
+
+	// Title 留空:文案首行标题由模板自己带(见 defaultDailyTrafficTemplate),
+	// 否则 Notifier.Send 会再前置一行标题,管理员改不掉。
 	if err := n.Send(ctx, notify.Event{
 		Type:    notify.EventDailyTraffic,
-		Title:   "每日流量统计",
-		Message: strings.Join(lines, "\n"),
+		Message: msg,
 	}); err != nil {
 		log.Printf("[Notify] send failed event=daily_traffic: %v", err)
 	}

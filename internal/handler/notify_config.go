@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
 	"miaomiaowux/internal/notify"
 	"miaomiaowux/internal/storage"
@@ -35,6 +36,13 @@ type notifyConfigResponse struct {
 	NotifyDeviceLimitExceeded     bool `json:"notify_device_limit_exceeded"`
 	// 服务器上下线通知容忍阈值(秒):离线满该秒数才发下线通知,阈值内又上线则不发(压抖动+主控重启误报)。0=关闭。
 	NotifyServerToleranceSeconds int `json:"notify_server_tolerance_seconds"`
+	// 每日推送文案模板。空 = 未自定义,渲染时用默认模板。
+	NotifyDailyTrafficTemplate string `json:"notify_daily_traffic_template"`
+	// 默认模板正文,只读:前端拿它做「恢复默认」和首次填充,避免前端另抄一份导致两边漂移。
+	NotifyDailyTrafficTemplateDefault string `json:"notify_daily_traffic_template_default"`
+	// 可用占位符说明,只读。同样由后端下发:前端硬编码一份的话,
+	// 后端加/改占位符时 UI 会教管理员写一个不生效的占位符。
+	NotifyDailyTrafficPlaceholders any `json:"notify_daily_traffic_placeholders"`
 }
 
 type notifyConfigRequest struct {
@@ -62,6 +70,10 @@ type notifyConfigRequest struct {
 	NotifyDeviceLimitExceeded     bool `json:"notify_device_limit_exceeded"`
 	// 指针:nil=不改;非 nil=写入(0 合法,表示关闭容忍)。
 	NotifyServerToleranceSeconds *int `json:"notify_server_tolerance_seconds"`
+	// 指针:nil=不改;非 nil=写入(空字符串合法,表示恢复默认模板)。
+	// 必须是指针 —— 前端每次改开关都 PUT 整个对象,若用值类型,任何一次开关操作
+	// 都会把管理员写的文案冲成空。
+	NotifyDailyTrafficTemplate *string `json:"notify_daily_traffic_template"`
 }
 
 type NotifyConfigHandler struct {
@@ -75,6 +87,10 @@ func NewNotifyConfigHandler(repo *storage.TrafficRepository) *NotifyConfigHandle
 func (h *NotifyConfigHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(r.URL.Path, "/test") && r.Method == http.MethodPost {
 		h.handleTest(w, r)
+		return
+	}
+	if strings.HasSuffix(r.URL.Path, "/preview") && r.Method == http.MethodPost {
+		h.handlePreview(w, r)
 		return
 	}
 
@@ -99,6 +115,9 @@ func (h *NotifyConfigHandler) handleGet(w http.ResponseWriter, r *http.Request) 
 	if len(maskedToken) > 4 {
 		maskedToken = strings.Repeat("*", len(maskedToken)-4) + maskedToken[len(maskedToken)-4:]
 	}
+
+	// 读不出(键不存在是正常的"未自定义")→ 空,前端展示默认模板
+	tpl, _ := h.repo.GetSystemSetting(r.Context(), notifyDailyTemplateKey)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(notifyConfigResponse{
@@ -125,6 +144,11 @@ func (h *NotifyConfigHandler) handleGet(w http.ResponseWriter, r *http.Request) 
 		NotifyAgentLongOfflineMinutes: sysCfg.NotifyAgentLongOfflineMinutes,
 		NotifyDeviceLimitExceeded:     sysCfg.NotifyDeviceLimitExceeded,
 		NotifyServerToleranceSeconds:  h.repo.GetServerNotifyToleranceSeconds(r.Context()),
+		// 返回**存的原值**(未自定义时为空),不替换成默认 —— 前端据此区分「用默认」与
+		// 「自定义成了跟默认一样」,后者会把文案冻在旧默认上,以后改默认推不下去。
+		NotifyDailyTrafficTemplate:        tpl,
+		NotifyDailyTrafficTemplateDefault: defaultDailyTrafficTemplate,
+		NotifyDailyTrafficPlaceholders:    dailyTrafficPlaceholders,
 	})
 }
 
@@ -191,6 +215,19 @@ func (h *NotifyConfigHandler) handleUpdate(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// 每日推送文案模板,同样存 system_settings。指针非 nil 才写(空串合法=恢复默认)。
+	// 与默认逐字相同 → 存空,这样以后改了默认模板能自动跟上,不会被冻在旧文案。
+	if req.NotifyDailyTrafficTemplate != nil {
+		tpl := *req.NotifyDailyTrafficTemplate
+		if strings.TrimSpace(tpl) == "" || tpl == defaultDailyTrafficTemplate {
+			tpl = ""
+		}
+		if err := h.repo.SetSystemSetting(r.Context(), notifyDailyTemplateKey, tpl); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+	}
+
 	if n := GetNotifier(); n != nil {
 		n.UpdateConfig(notify.Config{
 			Enabled:                       sysCfg.NotifyEnabled,
@@ -220,6 +257,41 @@ func (h *NotifyConfigHandler) handleUpdate(w http.ResponseWriter, r *http.Reques
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// handlePreview 用**当前真实数据**渲染传入的模板并回显,不发送、不落库。
+// 走后端渲染而不是前端本地替换:预览与真正发出去的用同一个 renderDailyTrafficTemplate,
+// 前端另抄一份 TS 实现迟早会和 Go 这边漂移。
+func (h *NotifyConfigHandler) handlePreview(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Template string `json:"template"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+
+	data, ok := buildDailyTrafficData(r.Context(), h.repo)
+	// 没有真实数据(没服务器、也没用户流量)也要能预览 —— 给一份示例数据,
+	// 否则新部署的管理员打开预览是空白,会以为模板坏了。
+	if !ok {
+		data = dailyTrafficData{
+			Date:    time.Now().Format("2006-01-02"),
+			TotalGB: "12.34",
+			ServerLines: []string{
+				"• 示例服务器 A: 8.2GB/100GB (8%)",
+				"• 示例服务器 B: 4.1GB",
+			},
+			UserLines: []string{"• alice: 7.20GB", "• bob: 5.14GB"},
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"preview":      renderDailyTrafficTemplate(req.Template, data),
+		"sample":       !ok,
+		"placeholders": dailyTrafficPlaceholders,
+	})
 }
 
 func (h *NotifyConfigHandler) handleTest(w http.ResponseWriter, r *http.Request) {

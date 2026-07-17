@@ -1014,6 +1014,7 @@ func main() {
 	notifyConfigHandler := handler.NewNotifyConfigHandler(repo)
 	mux.Handle("/api/admin/notify-config", auth.RequireAdmin(tokenStore, userRepo, notifyConfigHandler))
 	mux.Handle("/api/admin/notify-config/test", auth.RequireAdmin(tokenStore, userRepo, notifyConfigHandler))
+	mux.Handle("/api/admin/notify-config/preview", auth.RequireAdmin(tokenStore, userRepo, notifyConfigHandler))
 
 	// 证书管理 API（仅限管理员）
 	certHandler := handler.NewCertificateHandler(repo, remoteWSHandler)
