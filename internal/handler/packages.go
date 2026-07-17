@@ -370,6 +370,42 @@ func (h *PackageUpdateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	})
 }
 
+// resolveNodeServer 解析一个 physical 节点应该把用户 client 下发到哪台 server。
+//
+// 优先 node.OriginalServer(按名字查)。为空时——最常见于**多台服务器共用同一域名**,主控按 host
+// 匹配无法唯一识别归属 server,于是 original_server 被留空——退回用 node.InboundTag 在 InboundCache
+// 里反查:仅当**唯一**一台已连服务器拥有该 inbound 时才采用。
+//
+// 返回 (nil, 原因) 时调用方必须**明确告警而非静默跳过**——历史 bug 正是这里静默 return 导致用户
+// 永远拿不到自己的 client、只能用管理员的种子配置。
+func resolveNodeServer(ctx context.Context, repo *storage.TrafficRepository, rm *RemoteManageHandler, node storage.Node) (*storage.RemoteServer, string) {
+	if strings.TrimSpace(node.InboundTag) == "" {
+		return nil, "节点无 inbound_tag"
+	}
+	if name := strings.TrimSpace(node.OriginalServer); name != "" {
+		if srv, err := repo.GetRemoteServerByName(ctx, name); err == nil {
+			return srv, ""
+		}
+		// original_server 有值但查不到该 server(被删/改名)→ 继续用 inbound_tag 兜底
+	}
+	if rm == nil || rm.inboundCache == nil {
+		return nil, "original_server 为空且 inbound 缓存不可用"
+	}
+	ids := rm.inboundCache.FindServersByInboundTag(node.InboundTag)
+	switch len(ids) {
+	case 1:
+		srv, err := repo.GetRemoteServer(ctx, ids[0])
+		if err != nil {
+			return nil, fmt.Sprintf("inbound %s 反查到 server %d 但读取失败: %v", node.InboundTag, ids[0], err)
+		}
+		return srv, ""
+	case 0:
+		return nil, fmt.Sprintf("inbound %s 无归属服务器(该服务器可能未连接,或 original_server 为空且无快照)", node.InboundTag)
+	default:
+		return nil, fmt.Sprintf("inbound %s 同时存在于 %d 台服务器,无法唯一确定归属(请给各服务器配置唯一域名/host)", node.InboundTag, len(ids))
+	}
+}
+
 func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Context, packageID int64, oldNodes, newNodes []int64) {
 	oldSet := make(map[int64]bool, len(oldNodes))
 	for _, id := range oldNodes {
@@ -419,13 +455,19 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 	// both(v4/v6) 会为同一入站建两个节点(同 server + 同 InboundTag),凭据却是绑在入站上的 ——
 	// 只从套餐移除其中一个节点时,该入站的 client 必须保留,否则把还在套餐里的另一个节点也一起废了。
 	// add 路径早有 inboundSeen 去重(见下),remove 路径此前没有对应保护。
+	// key 用解析后的 server.Name(而非 node.OriginalServer)—— original_server 为空的节点也要能算进
+	// "仍被占用"集合,否则移除某节点时会误摘另一个共享同一入站、但 original_server 同样为空的节点的 client。
 	stillUsedInbounds := map[string]bool{}
 	for _, id := range newNodes {
 		node, nerr := h.repo.GetNodeByID(ctx, id)
-		if nerr != nil || node.NodeType == "routed" || node.InboundTag == "" || node.OriginalServer == "" {
+		if nerr != nil || node.NodeType == "routed" || node.InboundTag == "" {
 			continue
 		}
-		stillUsedInbounds[node.OriginalServer+"|"+node.InboundTag] = true
+		srv, _ := resolveNodeServer(ctx, h.repo, h.remoteManage, node)
+		if srv == nil {
+			continue
+		}
+		stillUsedInbounds[srv.Name+"|"+node.InboundTag] = true
 	}
 
 	// 只 routed 节点改 routing rules 才需要重启 xray;非 routed 的 add-client / remove-client
@@ -481,11 +523,18 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 					}
 					return
 				}
-				if node.InboundTag == "" || node.OriginalServer == "" {
+				if node.InboundTag == "" {
+					return
+				}
+				// original_server 为空(多台共用域名致 host 匹配歧义)时用 inbound_tag 兜底解析;
+				// 解析不出则明确 log 跳过,不再静默丢弃用户下发。
+				server, reason := resolveNodeServer(ctx, h.repo, h.remoteManage, node)
+				if server == nil {
+					log.Printf("[PackageUpdate] 跳过节点 %s 对用户 %s 的配置下发: %s", node.NodeName, user.Username, reason)
 					return
 				}
 				// 同一 (user, server, inbound) 只收集一次 —— both 的 v4/v6 双节点共享同一入站,避免重复加 client。
-				seenKey := user.Username + "|" + node.OriginalServer + "|" + node.InboundTag
+				seenKey := user.Username + "|" + server.Name + "|" + node.InboundTag
 				mu.Lock()
 				if inboundSeen[seenKey] {
 					mu.Unlock()
@@ -493,11 +542,6 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 				}
 				inboundSeen[seenKey] = true
 				mu.Unlock()
-				server, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer)
-				if err != nil {
-					log.Printf("[PackageUpdate] Failed to find server %s: %v", node.OriginalServer, err)
-					return
-				}
 				// 阶段一:从 InboundCache 算 cred,收集成 batch item;cache miss / 续费 → fallback 逐项。
 				item, collected, cerr := collectInboundClientAddItem(ctx, h.remoteManage.inboundCache, h.repo, user, server.ID, node.InboundTag)
 				if cerr != nil {
@@ -533,15 +577,19 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 					}
 					return
 				}
-				if node.InboundTag == "" || node.OriginalServer == "" {
+				if node.InboundTag == "" {
+					return
+				}
+				server, _ := resolveNodeServer(ctx, h.repo, h.remoteManage, node)
+				if server == nil {
 					return
 				}
 				// 该入站仍被套餐里的其它节点占用(both 的 v4/v6 同入站)→ 不能摘 client。
-				if stillUsedInbounds[node.OriginalServer+"|"+node.InboundTag] {
+				if stillUsedInbounds[server.Name+"|"+node.InboundTag] {
 					return
 				}
 				// 同一 (user, server, inbound) 只摘一次 —— 两个被移除的节点可能共享同一入站。
-				seenKey := user.Username + "|" + node.OriginalServer + "|" + node.InboundTag
+				seenKey := user.Username + "|" + server.Name + "|" + node.InboundTag
 				mu.Lock()
 				if removedSeen[seenKey] {
 					mu.Unlock()
@@ -549,10 +597,6 @@ func (h *PackageUpdateHandler) syncInboundUsersAfterNodeChange(ctx context.Conte
 				}
 				removedSeen[seenKey] = true
 				mu.Unlock()
-				server, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer)
-				if err != nil {
-					return
-				}
 				cfg, err := h.repo.GetUserInboundConfig(ctx, user.Username, server.ID, node.InboundTag)
 				if err != nil {
 					return
@@ -1058,11 +1102,21 @@ func (h *PackageAssignHandler) AssignAndProvision(ctx context.Context, username 
 						}
 						return
 					}
-					if node.InboundTag == "" || node.OriginalServer == "" {
+					if node.InboundTag == "" {
+						return
+					}
+					// original_server 为空(多台共用域名致 host 匹配歧义)时用 inbound_tag 兜底解析;
+					// 解析不出则告警回传前端 + log,不再静默丢弃 —— 这正是"用户只拿到管理员配置"的历史根因。
+					server, reason := resolveNodeServer(ctx, h.repo, h.remoteManage, node)
+					if server == nil {
+						log.Printf("[PackageAssign] 跳过节点 %s 对用户 %s 的配置下发: %s", node.NodeName, username, reason)
+						mu.Lock()
+						warnings = append(warnings, fmt.Sprintf("节点 %s 无法确定所属服务器,已跳过用户配置下发", node.NodeName))
+						mu.Unlock()
 						return
 					}
 					// 同一 (server, inbound) 只收集一次 —— both 的 v4/v6 双节点共享同一入站,避免重复加 client。
-					seenKey := user.Username + "|" + node.OriginalServer + "|" + node.InboundTag
+					seenKey := user.Username + "|" + server.Name + "|" + node.InboundTag
 					mu.Lock()
 					if inboundSeen[seenKey] {
 						mu.Unlock()
@@ -1070,11 +1124,6 @@ func (h *PackageAssignHandler) AssignAndProvision(ctx context.Context, username 
 					}
 					inboundSeen[seenKey] = true
 					mu.Unlock()
-					server, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer)
-					if err != nil {
-						log.Printf("[PackageAssign] Failed to find server %s: %v", node.OriginalServer, err)
-						return
-					}
 					// 阶段一:从 InboundCache 算 cred,收集成 batch item;cache miss / 续费 → fallback 逐项。
 					item, collected, cerr := collectInboundClientAddItem(ctx, h.remoteManage.inboundCache, h.repo, user, server.ID, node.InboundTag)
 					if cerr != nil {

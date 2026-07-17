@@ -62,6 +62,26 @@ func (c *InboundCache) ListServerInbounds(serverID int64) []CachedInbound {
 	return out
 }
 
+// FindServersByInboundTag 返回所有拥有该 inbound tag 的 serverID(遍历所有 server 的索引)。
+//
+// 用途:节点 original_server 为空时(多台服务器共用同一域名导致 host 匹配歧义、无法唯一识别归属
+// server)反查该 inbound 到底在哪台机器上。调用方**仅在唯一命中时**才可安全采用 —— 多台命中说明
+// 存在真正的歧义(不同 server 有同名 inbound),不能瞎猜。
+func (c *InboundCache) FindServersByInboundTag(tag string) []int64 {
+	if tag == "" {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var out []int64
+	for sid, m := range c.data {
+		if _, ok := m[tag]; ok {
+			out = append(out, sid)
+		}
+	}
+	return out
+}
+
 // SyncFromConfig 用一份完整 xray config.json 重建 server 的 inbound 索引(原子替换)。
 // 解析失败 → 不动现有 cache(继续提供旧数据,等下次 sync)。
 func (c *InboundCache) SyncFromConfig(serverID int64, configJSON string) {
