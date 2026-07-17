@@ -39,6 +39,9 @@ type userEntry struct {
 	DeviceLimit         int      `json:"device_limit"`
 	SpeedLimitOverride  *float64 `json:"speed_limit_override"`
 	DeviceLimitOverride *int     `json:"device_limit_override"`
+	// 用户级流量上限覆写(GB)。指针必需:0(显式不限流量)与 null(继承套餐)语义不同。
+	// 注意 TrafficLimitGB/TrafficLimit 给的是**有效值**(已含覆写),这个字段只供弹窗回填 + 标记"已覆写"。
+	TrafficLimitOverrideGB *float64 `json:"traffic_limit_override_gb"`
 	NodeSpeedLimitOverrides  map[int64]float64 `json:"node_speed_limit_overrides,omitempty"`
 	NodeDeviceLimitOverrides map[int64]int     `json:"node_device_limit_overrides,omitempty"`
 	// 短码:user_short_code 是系统自动生成的;custom_user_short_code 非空时优先生效。
@@ -126,12 +129,22 @@ func NewUserListHandler(repo *storage.TrafficRepository) http.Handler {
 			if user.PackageID > 0 {
 				pid := user.PackageID
 				entry.PackageID = &pid
+				var pkgPtr *storage.Package
 				if pkg, ok := pkgMap[pid]; ok {
+					pkgPtr = &pkg
 					entry.PackageName = pkg.Name
-					entry.TrafficLimitGB = pkg.TrafficLimitGB
-					entry.TrafficLimit = pkg.TrafficLimitBytes
 					entry.SpeedLimitMbps = pkg.SpeedLimitMbps
 					entry.DeviceLimit = pkg.DeviceLimit
+				}
+				// TrafficLimit/TrafficLimitGB 给的是**有效值**(用户覆写 ?? 套餐),前端流量条直接用,
+				// 全量视图与套餐视图两处进度条因此无需各自解析优先级。
+				limitBytes := resolveTrafficLimitBytes(&user, pkgPtr)
+				entry.TrafficLimit = limitBytes
+				entry.TrafficLimitGB = float64(limitBytes) / (1024 * 1024 * 1024)
+				// 原始覆写值单独给出:供弹窗回填 + 前端标记"已覆写"。
+				if user.TrafficLimitOverride != nil {
+					gb := float64(*user.TrafficLimitOverride) / (1024 * 1024 * 1024)
+					entry.TrafficLimitOverrideGB = &gb
 				}
 				used := trafficMap[user.Username]
 				if pkg, ok := pkgMap[pid]; ok {

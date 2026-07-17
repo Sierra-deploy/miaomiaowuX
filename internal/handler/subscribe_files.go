@@ -780,7 +780,8 @@ func (h *subscribeFilesHandler) handleTrafficForUser(ctx context.Context, w http
 	if username != "" {
 		if user, err := h.repo.GetUser(ctx, username); err == nil && user.PackageID > 0 {
 			if pkg, perr := h.repo.GetPackage(ctx, user.PackageID); perr == nil {
-				limit = pkg.TrafficLimitBytes
+				// 有效上限 = 用户级覆写 ?? 套餐流量,与 enforcer 断流口径一致。
+				limit = resolveTrafficLimitBytes(&user, pkg)
 				if raw, terr := h.repo.GetUserTotalTraffic(ctx, username); terr == nil {
 					used = raw * pkg.TrafficMultiplier()
 				}

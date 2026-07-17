@@ -161,7 +161,10 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 			}
 		}
 
-		if pkg.TrafficLimitBytes <= 0 {
+		// 有效上限 = 用户级覆写 ?? 套餐流量。<=0 = 不限流量。
+		// 位置必须留在月度重置之后:提前 continue 会让不限流量的用户永远不重置周期。
+		limitBytes := resolveTrafficLimitBytes(&user, pkg)
+		if limitBytes <= 0 {
 			continue
 		}
 
@@ -172,34 +175,35 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 			continue
 		}
 
+		// 倍率仍取自套餐:覆写只改"上限",不改"用量怎么计"。
+		usedWeighted := totalTraffic * pkg.TrafficMultiplier()
 		wasOverLimit, _ := e.repo.IsUserOverLimit(ctx, user.Username)
-		isOverLimit := totalTraffic*pkg.TrafficMultiplier() >= pkg.TrafficLimitBytes
+		isOverLimit := usedWeighted >= limitBytes
 
 		// 流量 80% 预警(在没超限的 ramp 期触发一次,用 user_overflag 复用记忆易混淆,
 		// 借现有 IsTrafficThresholdNotified 同款表会跟 server 阈值冲突 → 简单:每次都判断,Send 端节流即可
 		// 实际重复触发会有,5min log throttle 兜底;若用户报"被打扰",再加专用记忆表)
-		usedWeighted := totalTraffic * pkg.TrafficMultiplier()
-		if !isOverLimit && pkg.TrafficLimitBytes > 0 {
-			pct := float64(usedWeighted) / float64(pkg.TrafficLimitBytes) * 100
+		if !isOverLimit {
+			pct := float64(usedWeighted) / float64(limitBytes) * 100
 			if pct >= 80 {
 				usedGB := float64(usedWeighted) / (1024 * 1024 * 1024)
-				limitGB := float64(pkg.TrafficLimitBytes) / (1024 * 1024 * 1024)
+				limitGB := float64(limitBytes) / (1024 * 1024 * 1024)
 				SendTrafficThreshold80Notification(ctx, user.Username, usedGB, limitGB)
 			}
 		}
 
 		if isOverLimit && !wasOverLimit {
 			log.Printf("[TrafficLimitEnforcer] User %s exceeded limit (%d/%d bytes), removing from inbounds",
-				user.Username, totalTraffic, pkg.TrafficLimitBytes)
+				user.Username, totalTraffic, limitBytes)
 			e.removeUserFromAllInbounds(ctx, user.Username)
 			suspendUserPrivateRouted(ctx, e.remoteManage, e.repo, user.Username)
 			e.repo.UpdateUserOverLimit(ctx, user.Username, true)
 			usedGB := float64(usedWeighted) / (1024 * 1024 * 1024)
-			limitGB := float64(pkg.TrafficLimitBytes) / (1024 * 1024 * 1024)
+			limitGB := float64(limitBytes) / (1024 * 1024 * 1024)
 			SendOverLimitNotification(ctx, user.Username, usedGB, limitGB)
 		} else if !isOverLimit && wasOverLimit {
 			log.Printf("[TrafficLimitEnforcer] User %s back under limit (%d/%d bytes), restoring inbounds",
-				user.Username, totalTraffic, pkg.TrafficLimitBytes)
+				user.Username, totalTraffic, limitBytes)
 			e.restoreUserToInbounds(ctx, user)
 			resumeUserPrivateRouted(ctx, e.remoteManage, e.repo, user.Username)
 			e.repo.UpdateUserOverLimit(ctx, user.Username, false)

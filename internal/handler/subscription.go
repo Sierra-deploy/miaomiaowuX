@@ -764,7 +764,8 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		if creator != "" {
 			if user, uerr := h.repo.GetUser(r.Context(), creator); uerr == nil && user.Role != storage.RoleAdmin && user.PackageID > 0 {
 				if pkg, perr := h.repo.GetPackage(r.Context(), user.PackageID); perr == nil && pkg != nil {
-					remoteTrafficLimit = pkg.TrafficLimitBytes
+					// 有效上限 = 用户级覆写 ?? 套餐流量,与 enforcer 断流口径一致。
+					remoteTrafficLimit = resolveTrafficLimitBytes(&user, pkg)
 					if raw, terr := h.repo.GetUserTotalTraffic(r.Context(), creator); terr == nil {
 						remoteTrafficUsed = raw * pkg.TrafficMultiplier()
 					}

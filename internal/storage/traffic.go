@@ -228,6 +228,9 @@ type Package struct {
 }
 
 func (p *Package) TrafficMultiplier() int64 {
+	if p == nil {
+		return 1
+	}
 	if p.TrafficMode == "twoway" {
 		return 2
 	}
@@ -2202,6 +2205,9 @@ CREATE INDEX IF NOT EXISTS idx_remote_servers_status ON remote_servers(status);
 	// 用户限速覆写字段
 	_, _ = r.db.Exec("ALTER TABLE users ADD COLUMN speed_limit_override REAL")
 	_, _ = r.db.Exec("ALTER TABLE users ADD COLUMN device_limit_override INTEGER")
+
+	// 用户流量上限覆写(bytes)。刻意不给 DEFAULT — 存量行为 NULL 即"继承套餐"。
+	_, _ = r.db.Exec("ALTER TABLE users ADD COLUMN traffic_limit_override INTEGER")
 
 	// 套餐/用户 per-node 限速 + 客户端数(map[node_id] → 值;0=显式不限速,不含 key=继承上层)
 	_, _ = r.db.Exec("ALTER TABLE packages ADD COLUMN node_speed_limits TEXT DEFAULT '{}'")
@@ -4568,6 +4574,11 @@ type User struct {
 	PackageEndDate      *time.Time
 	SpeedLimitOverride  *float64
 	DeviceLimitOverride *int
+	// TrafficLimitOverride 用户级流量上限覆写(bytes),优先于套餐的 traffic_limit_bytes。
+	// 三态:nil = 继承套餐;0 = 显式不限流量;>0 = 覆写值。
+	// 判断必须用"指针是否非 nil",不能用 value > 0 —— 0 是有意义的值。
+	// 生命周期:换套餐/解绑/过期时清除,纯续期保留(见 AssignPackageToUser / RemovePackageFromUser)。
+	TrafficLimitOverride *int64
 	// 用户级 per-node 限速覆盖。map 含 key 即生效:0 = 显式不限速;>0 = 该值;不含 key = 沿用上层。
 	NodeSpeedLimitOverrides  map[int64]float64
 	// 用户级 per-node 客户端数覆盖。语义同上。
@@ -4660,13 +4671,14 @@ func (r *TrafficRepository) GetUser(ctx context.Context, username string) (User,
 		return user, errors.New("username is required")
 	}
 
-	row := r.db.QueryRowContext(ctx, `SELECT username, password_hash, COALESCE(email, ''), COALESCE(nickname, ''), COALESCE(avatar_url, ''), COALESCE(role, ''), is_active, COALESCE(package_id, 0), COALESCE(is_reset, 0), COALESCE(reset_day, 1), package_end_date, speed_limit_override, device_limit_override, COALESCE(node_speed_limit_overrides, '{}'), COALESCE(node_device_limit_overrides, '{}'), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(recovery_codes, '[]'), created_at, updated_at FROM users WHERE username = ? LIMIT 1`, username)
+	row := r.db.QueryRowContext(ctx, `SELECT username, password_hash, COALESCE(email, ''), COALESCE(nickname, ''), COALESCE(avatar_url, ''), COALESCE(role, ''), is_active, COALESCE(package_id, 0), COALESCE(is_reset, 0), COALESCE(reset_day, 1), package_end_date, speed_limit_override, device_limit_override, traffic_limit_override, COALESCE(node_speed_limit_overrides, '{}'), COALESCE(node_device_limit_overrides, '{}'), COALESCE(totp_secret, ''), COALESCE(totp_enabled, 0), COALESCE(recovery_codes, '[]'), created_at, updated_at FROM users WHERE username = ? LIMIT 1`, username)
 	var active, isReset, totpEnabled int
 	var endDate sql.NullTime
 	var speedOverride sql.NullFloat64
 	var deviceOverride sql.NullInt64
+	var trafficOverride sql.NullInt64
 	var nodeSpeedJSON, nodeDeviceJSON string
-	if err := row.Scan(&user.Username, &user.PasswordHash, &user.Email, &user.Nickname, &user.AvatarURL, &user.Role, &active, &user.PackageID, &isReset, &user.ResetDay, &endDate, &speedOverride, &deviceOverride, &nodeSpeedJSON, &nodeDeviceJSON, &user.TOTPSecret, &totpEnabled, &user.RecoveryCodes, &user.CreatedAt, &user.UpdatedAt); err != nil {
+	if err := row.Scan(&user.Username, &user.PasswordHash, &user.Email, &user.Nickname, &user.AvatarURL, &user.Role, &active, &user.PackageID, &isReset, &user.ResetDay, &endDate, &speedOverride, &deviceOverride, &trafficOverride, &nodeSpeedJSON, &nodeDeviceJSON, &user.TOTPSecret, &totpEnabled, &user.RecoveryCodes, &user.CreatedAt, &user.UpdatedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return user, ErrUserNotFound
 		}
@@ -4692,6 +4704,10 @@ func (r *TrafficRepository) GetUser(ctx context.Context, username string) (User,
 		v := int(deviceOverride.Int64)
 		user.DeviceLimitOverride = &v
 	}
+	if trafficOverride.Valid {
+		v := trafficOverride.Int64
+		user.TrafficLimitOverride = &v
+	}
 	if nodeSpeedJSON != "" && nodeSpeedJSON != "{}" {
 		unmarshalStringKeyedMap(nodeSpeedJSON, &user.NodeSpeedLimitOverrides)
 	}
@@ -4712,7 +4728,7 @@ func (r *TrafficRepository) ListUsers(ctx context.Context, limit int) ([]User, e
 		limit = 10
 	}
 
-	rows, err := r.db.QueryContext(ctx, `SELECT username, password_hash, COALESCE(email, ''), COALESCE(nickname, ''), COALESCE(avatar_url, ''), COALESCE(role, ''), is_active, COALESCE(remark, ''), COALESCE(package_id, 0), COALESCE(is_reset, 0), COALESCE(reset_day, 1), package_end_date, speed_limit_override, device_limit_override, COALESCE(node_speed_limit_overrides, '{}'), COALESCE(node_device_limit_overrides, '{}'), created_at, updated_at FROM users ORDER BY created_at ASC LIMIT ?`, limit)
+	rows, err := r.db.QueryContext(ctx, `SELECT username, password_hash, COALESCE(email, ''), COALESCE(nickname, ''), COALESCE(avatar_url, ''), COALESCE(role, ''), is_active, COALESCE(remark, ''), COALESCE(package_id, 0), COALESCE(is_reset, 0), COALESCE(reset_day, 1), package_end_date, speed_limit_override, device_limit_override, traffic_limit_override, COALESCE(node_speed_limit_overrides, '{}'), COALESCE(node_device_limit_overrides, '{}'), created_at, updated_at FROM users ORDER BY created_at ASC LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list users: %w", err)
 	}
@@ -4725,8 +4741,9 @@ func (r *TrafficRepository) ListUsers(ctx context.Context, limit int) ([]User, e
 		var endDate sql.NullTime
 		var speedOverride sql.NullFloat64
 		var deviceOverride sql.NullInt64
+		var trafficOverride sql.NullInt64
 		var nodeSpeedJSON, nodeDeviceJSON string
-		if err := rows.Scan(&user.Username, &user.PasswordHash, &user.Email, &user.Nickname, &user.AvatarURL, &user.Role, &active, &user.Remark, &user.PackageID, &isReset, &user.ResetDay, &endDate, &speedOverride, &deviceOverride, &nodeSpeedJSON, &nodeDeviceJSON, &user.CreatedAt, &user.UpdatedAt); err != nil {
+		if err := rows.Scan(&user.Username, &user.PasswordHash, &user.Email, &user.Nickname, &user.AvatarURL, &user.Role, &active, &user.Remark, &user.PackageID, &isReset, &user.ResetDay, &endDate, &speedOverride, &deviceOverride, &trafficOverride, &nodeSpeedJSON, &nodeDeviceJSON, &user.CreatedAt, &user.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan user: %w", err)
 		}
 		if user.Nickname == "" {
@@ -4747,6 +4764,10 @@ func (r *TrafficRepository) ListUsers(ctx context.Context, limit int) ([]User, e
 		if deviceOverride.Valid {
 			v := int(deviceOverride.Int64)
 			user.DeviceLimitOverride = &v
+		}
+		if trafficOverride.Valid {
+			v := trafficOverride.Int64
+			user.TrafficLimitOverride = &v
 		}
 		if nodeSpeedJSON != "" && nodeSpeedJSON != "{}" {
 			unmarshalStringKeyedMap(nodeSpeedJSON, &user.NodeSpeedLimitOverrides)
@@ -7923,13 +7944,24 @@ func (r *TrafficRepository) AssignPackageToUser(ctx context.Context, username st
 		isResetInt = 1
 	}
 
+	// traffic_limit_override 的生命周期:换套餐清除,纯续期保留。
+	// CASE 里的 package_id 是 UPDATE 前的旧值(标准 SQL:SET 表达式一律按旧行求值),
+	// 拿它跟新 packageID 比即可区分两种调用:
+	//   旧 == 新 → 续期/改到期 → 保留覆写
+	//   旧 != 新 → 换套餐;旧为 NULL(过期后续费)→ 清除覆写
+	// 必须用 IS NOT(null-safe)而非 != :`NULL != 5` 求值为 NULL(falsy),会让过期后续费漏清。
+	//
+	// 清除逻辑刻意下沉到这里而不是放 handler 层的 AssignAndProvision(它已有 samePackage 判断):
+	// tgbot_admin.go 的 assignPackage 有一条 h.assign == nil 时直接调本函数的兜底路径,
+	// 放 handler 层会漏。这里是所有调用方的必经之路。
 	const query = `
 		UPDATE users
-		SET package_id = ?, package_start_date = ?, package_end_date = ?, is_reset = ?, reset_day = ?, updated_at = CURRENT_TIMESTAMP
+		SET traffic_limit_override = CASE WHEN package_id IS NOT ? THEN NULL ELSE traffic_limit_override END,
+		    package_id = ?, package_start_date = ?, package_end_date = ?, is_reset = ?, reset_day = ?, updated_at = CURRENT_TIMESTAMP
 		WHERE username = ?
 	`
 
-	result, err := r.db.ExecContext(ctx, query, packageID, startDate, endDate, isResetInt, resetDay, username)
+	result, err := r.db.ExecContext(ctx, query, packageID, packageID, startDate, endDate, isResetInt, resetDay, username)
 	if err != nil {
 		return fmt.Errorf("assign package to user: %w", err)
 	}
@@ -7957,9 +7989,13 @@ func (r *TrafficRepository) RemovePackageFromUser(ctx context.Context, username 
 		return errors.New("username is required")
 	}
 
+	// 一并清 traffic_limit_override:覆写只对"当前这次套餐绑定"有效。
+	// 三个调用方(enforcer 过期摘除 / 删套餐 / 手动解绑)语义一致。
+	// 不清的话覆写会变成孤儿:package_id 没了 → 前端流量条和入口都不显示 →
+	// 管理员看不见也删不掉 → 用户下次绑套餐时它又悄悄复活。
 	const query = `
 		UPDATE users
-		SET package_id = NULL, package_start_date = NULL, package_end_date = NULL, is_reset = 0, reset_day = 1, updated_at = CURRENT_TIMESTAMP
+		SET package_id = NULL, package_start_date = NULL, package_end_date = NULL, is_reset = 0, reset_day = 1, traffic_limit_override = NULL, updated_at = CURRENT_TIMESTAMP
 		WHERE username = ?
 	`
 
@@ -8790,7 +8826,7 @@ func (r *TrafficRepository) ResolveNodeNameByEmail(ctx context.Context, serverNa
 
 func (r *TrafficRepository) ListUsersWithPackage(ctx context.Context) ([]User, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT username, password_hash, COALESCE(email, ''), COALESCE(nickname, ''), COALESCE(avatar_url, ''), COALESCE(role, ''), is_active, COALESCE(remark, ''), COALESCE(package_id, 0), COALESCE(is_reset, 0), COALESCE(reset_day, 1), last_reset_at, package_end_date, speed_limit_override, device_limit_override, COALESCE(node_speed_limit_overrides, '{}'), COALESCE(node_device_limit_overrides, '{}'), created_at, updated_at FROM users WHERE package_id IS NOT NULL AND package_id > 0`)
+		`SELECT username, password_hash, COALESCE(email, ''), COALESCE(nickname, ''), COALESCE(avatar_url, ''), COALESCE(role, ''), is_active, COALESCE(remark, ''), COALESCE(package_id, 0), COALESCE(is_reset, 0), COALESCE(reset_day, 1), last_reset_at, package_end_date, speed_limit_override, device_limit_override, traffic_limit_override, COALESCE(node_speed_limit_overrides, '{}'), COALESCE(node_device_limit_overrides, '{}'), created_at, updated_at FROM users WHERE package_id IS NOT NULL AND package_id > 0`)
 	if err != nil {
 		return nil, err
 	}
@@ -8802,8 +8838,9 @@ func (r *TrafficRepository) ListUsersWithPackage(ctx context.Context) ([]User, e
 		var lastResetAt, endDate sql.NullTime
 		var speedOverride sql.NullFloat64
 		var deviceOverride sql.NullInt64
+		var trafficOverride sql.NullInt64
 		var nodeSpeedJSON, nodeDeviceJSON string
-		if err := rows.Scan(&u.Username, &u.PasswordHash, &u.Email, &u.Nickname, &u.AvatarURL, &u.Role, &active, &u.Remark, &u.PackageID, &isReset, &u.ResetDay, &lastResetAt, &endDate, &speedOverride, &deviceOverride, &nodeSpeedJSON, &nodeDeviceJSON, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		if err := rows.Scan(&u.Username, &u.PasswordHash, &u.Email, &u.Nickname, &u.AvatarURL, &u.Role, &active, &u.Remark, &u.PackageID, &isReset, &u.ResetDay, &lastResetAt, &endDate, &speedOverride, &deviceOverride, &trafficOverride, &nodeSpeedJSON, &nodeDeviceJSON, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			return nil, err
 		}
 		u.IsActive = active != 0
@@ -8821,6 +8858,10 @@ func (r *TrafficRepository) ListUsersWithPackage(ctx context.Context) ([]User, e
 		if deviceOverride.Valid {
 			v := int(deviceOverride.Int64)
 			u.DeviceLimitOverride = &v
+		}
+		if trafficOverride.Valid {
+			v := trafficOverride.Int64
+			u.TrafficLimitOverride = &v
 		}
 		if nodeSpeedJSON != "" && nodeSpeedJSON != "{}" {
 			unmarshalStringKeyedMap(nodeSpeedJSON, &u.NodeSpeedLimitOverrides)
@@ -8984,6 +9025,34 @@ func (r *TrafficRepository) UpdateUserLimitOverrides(ctx context.Context, userna
 		`UPDATE users SET speed_limit_override = ?, device_limit_override = ?, updated_at = CURRENT_TIMESTAMP WHERE username = ?`,
 		speedOverride, deviceOverride, username)
 	return err
+}
+
+// UpdateUserTrafficLimitOverride 写用户级流量上限覆写(bytes)。
+// nil = 清除覆写(继承套餐);0 = 显式不限流量;>0 = 覆写值。
+// 刻意独立于 UpdateUserLimitOverrides:那个是无条件全量 UPDATE,把流量并进去会让
+// 只改限速的调用方(限速弹窗 / MCP user_set_limits)把流量覆写静默清成 NULL。
+func (r *TrafficRepository) UpdateUserTrafficLimitOverride(ctx context.Context, username string, limitBytes *int64) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return errors.New("username is required")
+	}
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE users SET traffic_limit_override = ?, updated_at = CURRENT_TIMESTAMP WHERE username = ?`,
+		limitBytes, username)
+	if err != nil {
+		return fmt.Errorf("update user traffic limit override: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if affected == 0 {
+		return ErrUserNotFound
+	}
+	return nil
 }
 
 // UpdateUserNodeLimits 写用户级 per-node 限速 / 客户端数覆盖。
