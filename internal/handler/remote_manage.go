@@ -146,6 +146,7 @@ func (h *RemoteManageHandler) serverHasXrayContent(ctx context.Context, serverID
 //   - 至少 1 个 tag != "api" 的 inbound,或
 //   - 至少 1 个 tag != "direct" && tag != "block" 的 outbound,或
 //   - 任何 routing.rules
+//
 // 任一满足即认为有内容,不应被默认模板覆盖。
 func hasNonTemplateContent(cfgJSON string) bool {
 	var cfg map[string]any
@@ -850,11 +851,11 @@ func (h *RemoteManageHandler) HandleAgentUpgradeStream(w http.ResponseWriter, r 
 }
 
 // forwardUpgradeStream 是升级专用版本的 SSE 转发,在 forwardStreamToRemote 基础上加了:
-//   1. 主控侧 5min 硬超时 — 老 agent 的 sseStreamCmd 会卡死,通用 forward 无 timeout 浏览器会一直转
-//   2. 升级成功检测 — 用 system-info.agent_version 前后对比;无 agent_version 字段的老 agent 退化为
-//      "ping 是否变化"(老 binary 没重启 → 旧 PID 还在响应原 conn;若新 binary 起来 → 短暂 502 然后恢复)
-//   3. 失败时往 SSE 末尾追一条 {type:"result", success:false, hint:"..."} — 前端可据此提示
-//      用户哪几台需要手工 ssh 上去跑 upgrade-agent.sh
+//  1. 主控侧 5min 硬超时 — 老 agent 的 sseStreamCmd 会卡死,通用 forward 无 timeout 浏览器会一直转
+//  2. 升级成功检测 — 用 system-info.agent_version 前后对比;无 agent_version 字段的老 agent 退化为
+//     "ping 是否变化"(老 binary 没重启 → 旧 PID 还在响应原 conn;若新 binary 起来 → 短暂 502 然后恢复)
+//  3. 失败时往 SSE 末尾追一条 {type:"result", success:false, hint:"..."} — 前端可据此提示
+//     用户哪几台需要手工 ssh 上去跑 upgrade-agent.sh
 func (h *RemoteManageHandler) forwardUpgradeStream(w http.ResponseWriter, r *http.Request, serverID int64) {
 	const upgradeTimeout = 5 * time.Minute
 
@@ -1223,6 +1224,7 @@ func (h *RemoteManageHandler) ForwardToAgent(ctx context.Context, serverID int64
 //   - agent/拥有方"无会话"返回 412 "no session, re-negotiate"
 //   - agent 解密我方请求失败返回 400 "decrypt failed"(我方持有的会话已过期/被新 KX 覆盖,与对端错位)
 //   - 我方解密对端响应失败 "decrypt response/federation response"(同上,会话错位)
+//
 // 密钥轮换窗口(agent 会话 1h TTL 过期 / 同 token 并发请求触发重新 KX 覆盖旧会话)会出现后两种,
 // 仅靠重协商一次即可自愈(doPullKeyExchange 是 KX+请求+明文响应一次往返,不涉及解密,必定成功)。
 func isSessionInvalidErr(err error) bool {
@@ -1883,6 +1885,61 @@ func (h *RemoteManageHandler) resolveInboundCert(ctx context.Context, serverID i
 	return json.Marshal(inboundReq)
 }
 
+// inboundCredentialKey 返回某协议在 inbound.settings 里存放客户端凭据的数组字段名。
+func inboundCredentialKey(protocol string) string {
+	switch strings.ToLower(protocol) {
+	case "socks", "socks5", "http":
+		return "accounts"
+	case "anytls", "snell":
+		return "users"
+	default: // vless/vmess/trojan/shadowsocks/hysteria/hysteria2...
+		return "clients"
+	}
+}
+
+// preserveInboundCredentials 把 current 入站的客户端凭据(clients/users/accounts + SS2022 服务端 password)
+// 原样拷回 newInbound,覆盖前端传来的任何凭据 —— 保证「修改节点」不能改 xray 用户(uuid/password)。
+func preserveInboundCredentials(newInbound, current map[string]any, protocol string) {
+	curSettings, _ := current["settings"].(map[string]any)
+	if curSettings == nil {
+		return
+	}
+	newSettings, _ := newInbound["settings"].(map[string]any)
+	if newSettings == nil {
+		newSettings = map[string]any{}
+		newInbound["settings"] = newSettings
+	}
+	key := inboundCredentialKey(protocol)
+	if cred, ok := curSettings[key]; ok {
+		newSettings[key] = cred
+	}
+	// SS2022 服务端密码也属凭据
+	if pw, ok := curSettings["password"]; ok {
+		newSettings["password"] = pw
+	}
+}
+
+// fetchRemoteInboundByTag 从 agent 拉当前全部入站,按 tag 返回一条完整配置(含 settings/streamSettings)。
+// 无匹配返回 (nil, nil)。给「修改入站」保留原协议/凭据用。
+func (h *RemoteManageHandler) fetchRemoteInboundByTag(ctx context.Context, serverID int64, tag string) (map[string]any, error) {
+	raw, err := h.forwardToRemoteServer(ctx, serverID, http.MethodGet, "/api/child/inbounds", nil)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Inbounds []map[string]any `json:"inbounds"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil, err
+	}
+	for _, ib := range resp.Inbounds {
+		if t, _ := ib["tag"].(string); t == tag {
+			return ib, nil
+		}
+	}
+	return nil, nil
+}
+
 func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Request) {
 	serverID := r.URL.Query().Get("server_id")
 	if serverID == "" {
@@ -1911,11 +1968,55 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
+	// update = 修改节点对应的入站:服务端强制保留原协议 + 原凭据(不信任前端),先删旧入站,
+	// 再改写成 add 走后续预处理/下发,最后发 EventInboundUpdated(原地更新 v4/v6 节点,不重建)。
+	origAction := ""
+	if inboundReq != nil {
+		origAction, _ = inboundReq["action"].(string)
+	}
+	isUpdate := r.Method == http.MethodPost && strings.EqualFold(origAction, "update")
+	if isUpdate {
+		tag, _ := inboundReq["tag"].(string)
+		inbound, _ := inboundReq["inbound"].(map[string]interface{})
+		if strings.TrimSpace(tag) == "" || inbound == nil {
+			remoteWriteError(w, http.StatusBadRequest, "update 需要 tag 与 inbound")
+			return
+		}
+		current, cerr := h.fetchRemoteInboundByTag(r.Context(), id, tag)
+		if cerr != nil {
+			remoteWriteError(w, http.StatusBadGateway, "获取当前入站失败: "+cerr.Error())
+			return
+		}
+		if current == nil {
+			remoteWriteError(w, http.StatusBadRequest, "未找到要修改的入站: "+tag)
+			return
+		}
+		// 强制不可变:协议 + 客户端凭据 + tag
+		if p, _ := current["protocol"].(string); p != "" {
+			inbound["protocol"] = p
+		}
+		protocol, _ := inbound["protocol"].(string)
+		preserveInboundCredentials(inbound, current, protocol)
+		inbound["tag"] = tag
+		// 先删旧入站(直接 forward,不发 EventInboundRemoved —— 否则 handleRemoved 会删掉 DB 节点)
+		removeBody, _ := json.Marshal(map[string]any{"action": "remove", "tag": tag})
+		if _, rerr := h.forwardToRemoteServer(r.Context(), id, http.MethodPost, "/api/child/inbounds", removeBody); rerr != nil {
+			remoteWriteError(w, http.StatusBadGateway, "删除旧入站失败: "+rerr.Error())
+			return
+		}
+		// 改写成 add 走后续 add 预处理 + forward(post 处理里用 isUpdate 改发 EventInboundUpdated)
+		inboundReq["action"] = "add"
+		if nb, mErr := json.Marshal(inboundReq); mErr == nil {
+			body = nb
+		}
+	}
+
 	// 添加节点(add inbound)时校验:inbound.settings.clients/accounts 只能包含"当前登录账号自己"。
 	// 用户卡片在前端已锁死,但后端必须独立校验,防止普通用户绕过前端直接构造请求把别人的 uuid/email 塞进节点。
 	// 管理员是节点管理者,可添加任意 client(任意 uuid/email),不受此限制。
 	// 注:套餐分配用户走的是 addUserToInbound → forwardToRemoteServer,不经过本 HTTP handler,不受影响。
-	if r.Method == http.MethodPost && inboundReq != nil {
+	// update 已在上面强制保留 current 凭据(前端改不了),故跳过此自身校验(current 可能合法含多 client)。
+	if r.Method == http.MethodPost && inboundReq != nil && !isUpdate {
 		action, _ := inboundReq["action"].(string)
 		if al := strings.ToLower(action); al == "" || al == "add" {
 			uname := auth.UsernameFromContext(r.Context())
@@ -2062,8 +2163,13 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 						for k, v := range inbound {
 							inboundAny[k] = v
 						}
+						// update:发 EventInboundUpdated → handleUpdated 原地更新该 tag 下 v4/v6 节点(不重建、保留 ID/ip_family)。
+						evtType := event.EventInboundAdded
+						if isUpdate {
+							evtType = event.EventInboundUpdated
+						}
 						event.GetBus().PublishAsync(event.InboundEvent{
-							Type:          event.EventInboundAdded,
+							Type:          evtType,
 							ServerID:      id,
 							Tag:           tag,
 							Protocol:      protocol,
@@ -2329,6 +2435,15 @@ func autoInjectPinnedCertSha256(ctx context.Context, body []byte) ([]byte, error
 		return nil, nil
 	}
 	if sec, _ := ss["security"].(string); strings.ToLower(strings.TrimSpace(sec)) != "tls" {
+		return nil, nil
+	}
+	// Hysteria2 走 QUIC/UDP,证书经 QUIC 握手协商 —— TCP 版的 fetchPeerCertSha256 连不上其 UDP 端口。
+	// 跳过 pin 注入(不 dial 也不报错),让 config 原样下发。真证书 HY2 客户端按 serverName 正常验证即可;
+	// 自签证书 HY2 是 fork 禁用 allowInsecure 后的固有限制,另议。
+	if net, _ := ss["network"].(string); strings.ToLower(strings.TrimSpace(net)) == "hysteria" {
+		return nil, nil
+	}
+	if _, hasHy := ss["hysteriaSettings"]; hasHy {
 		return nil, nil
 	}
 	tlsObj, _ := ss["tlsSettings"].(map[string]any)
@@ -2718,7 +2833,7 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 	// 端口与协议用 clash_config 字段(已应用过 tunnel 端口映射等规则,与本次同步生成的 clashProxy 同坐标系)。
 	existingNodes, _ := h.repo.ListNodes(ctx, username)
 	existingNodeNames := make(map[string]bool)
-	existingByTag := make(map[string]bool)            // 键: server.Name + ":" + inbound_tag
+	existingByTag := make(map[string]bool)                  // 键: server.Name + ":" + inbound_tag
 	existingByFingerprint := make(map[string]*storage.Node) // 键: server.Name + ":" + 归一化协议 + ":" + 端口
 
 	serverAddrSet := map[string]bool{}
@@ -2952,9 +3067,9 @@ func (h *RemoteManageHandler) syncInboundsToNodes(ctx context.Context, serverID 
 	if len(emailToOutbound) > 0 {
 		// per-inbound 视角:protocol:port → (credToEmail / clients)
 		type inboundClientMap struct {
-			credToEmail map[string]string                    // uuid|password → email
-			emailToCred map[string]map[string]interface{}    // email → 完整 client(用来自动建节点)
-			rawInbound  map[string]interface{}               // 原始 inbound 引用,后续可调 inboundToClashProxy
+			credToEmail map[string]string                 // uuid|password → email
+			emailToCred map[string]map[string]interface{} // email → 完整 client(用来自动建节点)
+			rawInbound  map[string]interface{}            // 原始 inbound 引用,后续可调 inboundToClashProxy
 		}
 		perInbound := map[string]*inboundClientMap{}
 		for _, inbound := range inboundsResp.Inbounds {
@@ -3243,7 +3358,6 @@ func normalizeProtocol(s string) string {
 	return s
 }
 
-
 // 同样的等价判断,也给 NodeSyncListener / 别处用。在 event 包里也有 tryClaim,
 // 那边自己也保留一份语义一致的判断;此处不导出避免跨包耦合。
 
@@ -3287,7 +3401,7 @@ func (h *RemoteManageHandler) MatchRemoteServerByNodeHost(ctx context.Context, c
 }
 
 // tryClaimExternalNodeForSync 在 sync inbounds → nodes 流程里,扫"外部节点"
-// (original_server='' AND inbound_tag=''),按 server 地址(IP/Domain/PullAddress 任一)+ port + protocol
+// (original_server=” AND inbound_tag=”),按 server 地址(IP/Domain/PullAddress 任一)+ port + protocol
 // 匹配,把命中的节点全部升级为受管节点(填上 original_server + inbound_tag),返回是否至少 claim 了一个。
 //
 // 全部 claim 而非 claim 第一个:同一台服务器使用「回落+路由出站」时,订阅里会出现多条
@@ -3483,6 +3597,7 @@ func chooseClashServerHost(server *storage.RemoteServer) string {
 //   - 手动 SSH 操作时半截写入的入站
 //   - 历史 bug 留下的损坏入站
 //   - confdir 下 *.json 文件丢失但 runtime 还在跑
+//
 // 这类入站既无法生成节点配置,留着只会每次扫描污染 SkippedCount/Errors,用户也看不懂。
 // 直接调 agent 的 inbounds remove RPC 清掉,跟 deleteRemoteInbound 同款路径。
 // 失败只 log,不阻塞 sync 流程;成功也只 log,前端无感。
