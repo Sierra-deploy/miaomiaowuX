@@ -136,6 +136,46 @@ func (h *SystemSettingsHandler) SetMasterURL(w http.ResponseWriter, r *http.Requ
 	json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "主服务器地址已更新"})
 }
 
+// 获取「外部已配 HTTPS/反代」开关(用户自建反代、外部终结 TLS 时置 1,证书页据此不再提示开启 HTTPS)
+func (h *SystemSettingsHandler) GetExternalHTTPS(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		return
+	}
+	value, _ := h.repo.GetSystemSetting(r.Context(), "external_https")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "external_https": value == "1"})
+}
+
+// 设置「外部已配 HTTPS/反代」开关
+func (h *SystemSettingsHandler) SetExternalHTTPS(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		http.Error(w, "方法不允许", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ExternalHTTPS bool `json:"external_https"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "请求格式错误"})
+		return
+	}
+	val := "0"
+	if req.ExternalHTTPS {
+		val = "1"
+	}
+	if err := h.repo.SetSystemSetting(r.Context(), "external_https", val); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "保存失败"})
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "已更新"})
+}
+
 // 伪装探针配置的 4 个 KV 键。
 const (
 	probeDisguiseEnabledKey   = "probe_disguise_enabled"    // "1"/"" 开关

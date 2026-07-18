@@ -85,6 +85,7 @@ type RemoteServerCreateRequest struct {
 	StealSelf         bool   `json:"steal_self"`          // 代理安装后自动安装xray+nginx
 	FrontService      string `json:"front_service"`       // xray | nginx 使用nginx还是xray做443前置（nginx 保留，尚未启用）
 	Domain            string `json:"domain"`              // 服务器域（443模式）
+	DomainV6          string `json:"domain_v6"`           // IPv6 专用域名(AAAA);v6 节点默认用它,空则回落 IPv6 字面地址
 	Use443            bool   `json:"use_443"`             // 使用 443 端口与 nginx 隧道
 	StealMode         string `json:"steal_mode"`          // "tunnel" | "fallback"，默认 tunnel
 	SiteType          string `json:"site_type"`           // "static" | "proxy"
@@ -143,6 +144,7 @@ type RemoteServerUpdateRequest struct {
 	ID              int64  `json:"id"`
 	Name            string `json:"name"`
 	Domain          string `json:"domain"`
+	DomainV6        string `json:"domain_v6"`
 	TrafficLimit    int64  `json:"traffic_limit"`
 	TrafficResetDay int    `json:"traffic_reset_day"`
 	TrafficUsed     *int64 `json:"traffic_used"`
@@ -544,6 +546,7 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		PullPort:          req.PullPort,
 		PullToken:         agentToken,
 		Domain:            strings.TrimSpace(req.Domain),
+		DomainV6:          strings.TrimSpace(req.DomainV6),
 		Use443:            req.Use443,
 		StealMode:         stealMode,
 		SiteType:          req.SiteType,
@@ -821,7 +824,7 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		oldDisplayForMigration = oldRaw + oldServer.TrafficUsedOffset
 	}
 
-	if err := h.repo.UpdateRemoteServer(ctx, req.ID, req.Name, req.Domain, req.TrafficLimit, req.TrafficResetDay, req.ConnectionMode, req.XrayMode, req.TrafficStatsMode, req.TrafficSource, req.IPv6Enabled); err != nil {
+	if err := h.repo.UpdateRemoteServer(ctx, req.ID, req.Name, req.Domain, strings.TrimSpace(req.DomainV6), req.TrafficLimit, req.TrafficResetDay, req.ConnectionMode, req.XrayMode, req.TrafficStatsMode, req.TrafficSource, req.IPv6Enabled); err != nil {
 		msg := "更新服务器失败"
 		if err == storage.ErrRemoteServerNotFound {
 			msg = "服务器不存在"

@@ -3274,7 +3274,7 @@ func (h *RemoteManageHandler) MatchRemoteServerByNodeHost(ctx context.Context, c
 	}
 	for i := range servers {
 		s := &servers[i]
-		for _, host := range []string{s.IPAddress, s.Domain, s.PullAddress} {
+		for _, host := range []string{s.IPAddress, s.IPAddressV6, s.Domain, s.DomainV6, s.PullAddress} {
 			if strings.TrimSpace(host) == "" {
 				continue
 			}
@@ -3295,7 +3295,7 @@ func (h *RemoteManageHandler) MatchRemoteServerByNodeHost(ctx context.Context, c
 // 都应该匹配到这台服务器,见 Issue: hk-n.2ha.me 多个节点只匹配到 1 个的反馈。
 func (h *RemoteManageHandler) tryClaimExternalNodeForSync(ctx context.Context, server *storage.RemoteServer, protocol string, port int, clashConfigJSON, inboundTag string) bool {
 	candidates := map[string]bool{}
-	for _, a := range []string{server.IPAddress, server.Domain, server.PullAddress} {
+	for _, a := range []string{server.IPAddress, server.IPAddressV6, server.Domain, server.DomainV6, server.PullAddress} {
 		a = strings.TrimSpace(a)
 		if a != "" {
 			candidates[a] = true

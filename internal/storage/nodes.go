@@ -357,7 +357,7 @@ func (r *TrafficRepository) CreateNode(ctx context.Context, node Node) (Node, er
 		enabled = 1
 	}
 
-	res, err := r.db.ExecContext(ctx, `INSERT INTO nodes (username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, tag, tags, original_server, original_domain, inbound_tag, chain_proxy_node_id, relay_orig_server, relay_orig_port) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, node.Username, node.RawURL, node.NodeName, node.Protocol, node.ParsedConfig, node.ClashConfig, enabled, node.Tag, tagsJSON, node.OriginalServer, node.OriginalDomain, node.InboundTag, node.ChainProxyNodeID, node.RelayOrigServer, node.RelayOrigPort)
+	res, err := r.db.ExecContext(ctx, `INSERT INTO nodes (username, raw_url, node_name, protocol, parsed_config, clash_config, enabled, tag, tags, original_server, original_domain, inbound_tag, chain_proxy_node_id, relay_orig_server, relay_orig_port, ip_family) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, node.Username, node.RawURL, node.NodeName, node.Protocol, node.ParsedConfig, node.ClashConfig, enabled, node.Tag, tagsJSON, node.OriginalServer, node.OriginalDomain, node.InboundTag, node.ChainProxyNodeID, node.RelayOrigServer, node.RelayOrigPort, strings.TrimSpace(node.IPFamily))
 	if err != nil {
 		return Node{}, fmt.Errorf("create node: %w", err)
 	}
@@ -738,8 +738,9 @@ func (r *TrafficRepository) RefreshNodesServerAddress(ctx context.Context, serve
 	if serverName == "" || newAddr == "" {
 		return 0, nil
 	}
-	// 只刷 v4/域名节点:clash server 不含 ':'(host-only 字段,v4 与域名都不含冒号);
-	// 含 ':' 的是 IPv6 节点,由 RefreshNodesServerAddressV6 单独按 v6 地址刷新,不在此被污染。
+	// 只刷 v4/域名/通用节点(ip_family != 'v6')。v6 节点(含用 v6 域名、server 不含冒号的)由
+	// RefreshNodesServerAddressV6 单独刷新,不在此被 v4 地址污染 —— 按 ip_family 列而非"是否含冒号"判定,
+	// 因为 v6 节点改用 v6 域名后 server 不再含冒号。
 	res, err := r.db.ExecContext(ctx, `
 		UPDATE nodes
 		SET clash_config = json_set(clash_config, '$.server', ?),
@@ -748,7 +749,7 @@ func (r *TrafficRepository) RefreshNodesServerAddress(ctx context.Context, serve
 		  AND clash_config IS NOT NULL
 		  AND json_valid(clash_config) = 1
 		  AND IFNULL(relay_orig_server, '') = ''
-		  AND IFNULL(json_extract(clash_config, '$.server'), '') NOT LIKE '%:%'
+		  AND IFNULL(ip_family, '') != 'v6'
 		  AND IFNULL(json_extract(clash_config, '$.server'), '') != ?
 	`, newAddr, serverName, newAddr)
 	if err != nil {
@@ -778,6 +779,7 @@ func (r *TrafficRepository) RefreshNodesServerAddressV6(ctx context.Context, ser
 		  AND clash_config IS NOT NULL
 		  AND json_valid(clash_config) = 1
 		  AND IFNULL(relay_orig_server, '') = ''
+		  AND IFNULL(ip_family, '') = 'v6'
 		  AND IFNULL(json_extract(clash_config, '$.server'), '') LIKE '%:%'
 		  AND IFNULL(json_extract(clash_config, '$.server'), '') != ?
 	`, newV6, serverName, newV6)
@@ -831,8 +833,8 @@ func (r *TrafficRepository) UpdateNodesByServerName(ctx context.Context, oldName
 }
 
 // 按服务器名称和入站标签更新节点配置。
-// family 限定只更新某一 IP 版本的节点(clash server 含 ':' 即 IPv6):
-//   "" → 全部(向后兼容);"v4" → 只更新 v4/域名节点;"v6" → 只更新 IPv6 节点。
+// family 限定只更新某一 IP 版本的节点(按 ip_family 列判定,不再靠 clash server 是否含冒号):
+//   "" → 全部(向后兼容);"v4" → 只更新 v4/域名/通用节点(ip_family != 'v6');"v6" → 只更新 IPv6 节点(ip_family = 'v6')。
 // v4/v6 双节点共享同一 inbound_tag,编辑入站时需各自用对应 server 的配置分别更新,避免互相覆盖。
 func (r *TrafficRepository) UpdateNodeByInboundTag(ctx context.Context, serverName, inboundTag, clashConfig, family string) error {
 	if r == nil || r.db == nil {
@@ -851,9 +853,9 @@ func (r *TrafficRepository) UpdateNodeByInboundTag(ctx context.Context, serverNa
 		WHERE original_server = ? AND inbound_tag = ?`
 	switch family {
 	case "v4":
-		query += ` AND IFNULL(json_extract(clash_config, '$.server'), '') NOT LIKE '%:%'`
+		query += ` AND IFNULL(ip_family, '') != 'v6'`
 	case "v6":
-		query += ` AND IFNULL(json_extract(clash_config, '$.server'), '') LIKE '%:%'`
+		query += ` AND IFNULL(ip_family, '') = 'v6'`
 	}
 
 	_, err := r.db.ExecContext(ctx, query, clashConfig, clashConfig, serverName, inboundTag)
@@ -862,6 +864,40 @@ func (r *TrafficRepository) UpdateNodeByInboundTag(ctx context.Context, serverNa
 	}
 
 	return nil
+}
+
+// HasOtherNodesOnInbound 判断某 (original_server, inbound_tag) 下,除 excludeIDs 之外是否还有别的节点。
+// 用于双栈删除守卫:v4/v6 双节点共享同一 inbound_tag,删其中一个时若还有兄弟节点,应只删节点、
+// 保留远程入站;两个都删了(都在 excludeIDs 里)才删入站。
+func (r *TrafficRepository) HasOtherNodesOnInbound(ctx context.Context, serverName, inboundTag string, excludeIDs []int64) (bool, error) {
+	if r == nil || r.db == nil {
+		return false, errors.New("traffic repository not initialized")
+	}
+	serverName = strings.TrimSpace(serverName)
+	inboundTag = strings.TrimSpace(inboundTag)
+	if serverName == "" || inboundTag == "" {
+		return false, nil
+	}
+	query := `SELECT 1 FROM nodes WHERE original_server = ? AND inbound_tag = ?`
+	args := []any{serverName, inboundTag}
+	if len(excludeIDs) > 0 {
+		placeholders := make([]string, len(excludeIDs))
+		for i, id := range excludeIDs {
+			placeholders[i] = "?"
+			args = append(args, id)
+		}
+		query += ` AND id NOT IN (` + strings.Join(placeholders, ",") + `)`
+	}
+	query += ` LIMIT 1`
+	var one int
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("has other nodes on inbound: %w", err)
+	}
+	return true, nil
 }
 
 // ===== 路由出站(routed node)专用 CRUD =====

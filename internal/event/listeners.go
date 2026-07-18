@@ -97,12 +97,14 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 		return
 	}
 	v4Host, _ := clashMap["server"].(string)
-	v6Host := strings.TrimSpace(server.IPAddressV6)
+	// v6 节点 host:优先 v6 专用域名(DomainV6),否则 IPv6 字面地址
+	v6Host := chooseClashServerHostV6(server)
 
-	// 按 ip_version / 中转 决定要建哪些节点(name + clash server host + 可选 port 覆盖 + 中转原值)
+	// 按 ip_version / 中转 决定要建哪些节点(name + clash server host + 可选 port 覆盖 + 中转原值 + IP 版本归属)
 	type nodePlan struct {
 		name          string
 		host          string
+		family        string // "v4"(v4/域名/中转/通用) | "v6"(IPv6 节点),写入 nodes.ip_family
 		port          int    // >0 覆盖 clash port(中转用);0=沿用原 port
 		relayOrigHost string // 非空=中转节点,记原服务器 host 到 relay_orig_server
 		relayOrigPort int
@@ -116,25 +118,25 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 		if relayPort <= 0 {
 			relayPort = origPort // 端口默认填节点端口
 		}
-		plans = []nodePlan{{name: nodeName, host: relayHost, port: relayPort, relayOrigHost: v4Host, relayOrigPort: origPort}}
+		plans = []nodePlan{{name: nodeName, host: relayHost, family: "v4", port: relayPort, relayOrigHost: v4Host, relayOrigPort: origPort}}
 	} else {
 		switch event.IPVersion {
 		case "v6":
-			// 勾 v6:强制用 IPv6 字面地址,忽略 Domain/PullAddress
+			// 勾 v6:用 v6 域名 / IPv6 字面地址
 			if v6Host == "" {
 				log.Printf("[NodeSync] server %s 无 IPv6,ip_version=v6 跳过创建", server.Name)
 				return
 			}
-			plans = []nodePlan{{name: nodeName, host: v6Host}}
+			plans = []nodePlan{{name: nodeName, host: v6Host, family: "v6"}}
 		case "both":
-			plans = []nodePlan{{name: nodeName, host: v4Host}}
+			plans = []nodePlan{{name: nodeName, host: v4Host, family: "v4"}}
 			if v6Host != "" {
-				plans = append(plans, nodePlan{name: nodeName + "(v6)", host: v6Host})
+				plans = append(plans, nodePlan{name: nodeName + "(v6)", host: v6Host, family: "v6"})
 			} else {
 				log.Printf("[NodeSync] server %s 无 IPv6,both 退化为仅 v4", server.Name)
 			}
 		default: // "" / "v4" —— 现状行为
-			plans = []nodePlan{{name: nodeName, host: v4Host}}
+			plans = []nodePlan{{name: nodeName, host: v4Host, family: "v4"}}
 		}
 	}
 
@@ -170,6 +172,7 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 			Tag:            fmt.Sprintf("远程:%s", server.Name),
 			OriginalServer: server.Name,
 			InboundTag:     event.Tag,
+			IPFamily:       p.family,
 		}
 		if p.relayOrigHost != "" {
 			node.RelayOrigServer = p.relayOrigHost
@@ -184,6 +187,15 @@ func (l *NodeSyncListener) handleAdded(ctx context.Context, event InboundEvent) 
 		log.Printf("[NodeSync] Created node: %s", name)
 		l.prependNodeOrder(ctx, sysOwner, created.ID)
 	}
+}
+
+// chooseClashServerHostV6 返回 IPv6 节点的 clash server host:优先用 v6 专用域名(DomainV6),
+// 否则回落到 IPv6 字面地址(IPAddressV6)。两者都空 → 返回空(该 server 无 v6,跳过建 v6 节点)。
+func chooseClashServerHostV6(server *storage.RemoteServer) string {
+	if d := strings.TrimSpace(server.DomainV6); d != "" {
+		return d
+	}
+	return strings.TrimSpace(server.IPAddressV6)
 }
 
 // cloneClashWithServer 浅拷贝 clash proxy map,覆盖顶层 name 与 server,返回 JSON。
@@ -465,9 +477,9 @@ func (l *NodeSyncListener) handleUpdated(ctx context.Context, event InboundEvent
 		log.Printf("[NodeSync] Failed to update v4 node: %v", err)
 	}
 
-	// IPv6 节点:同一 inbound_tag 下若存在 v6 节点,用相同入站配置但 server 改回 v6 字面地址更新,
-	// 避免被 base(v4)配置覆盖回 v4。server 无 v6 时无 v6 节点,跳过。
-	if v6Host := strings.TrimSpace(server.IPAddressV6); v6Host != "" {
+	// IPv6 节点:同一 inbound_tag 下若存在 v6 节点,用相同入站配置但 server 改回 v6 host(域名优先)更新,
+	// 避免被 base(v4)配置覆盖回 v4。server 无 v6(域名/字面地址都无)时无 v6 节点,跳过。
+	if v6Host := chooseClashServerHostV6(server); v6Host != "" {
 		var m map[string]any
 		if json.Unmarshal([]byte(clashConfig), &m) == nil {
 			name, _ := m["name"].(string)

@@ -1303,8 +1303,9 @@ func (h *nodesHandler) handleDelete(w http.ResponseWriter, r *http.Request, idSe
 	}
 
 	// 远程闭环:routed 清 rule+outbound+client,physical 清 inbound(并兜底刷 nginx)。单删 / 批删共用 helper。
+	// excludeIDs=[本节点]:双栈时若同入站还有兄弟节点,则只删本节点、保留远程入站(cleanup 在删节点前跑,兄弟仍在 DB)。
 	if !nodeNotFound {
-		h.cleanupRemoteForNode(r.Context(), &node)
+		h.cleanupRemoteForNode(r.Context(), &node, []int64{node.ID}, nil)
 	}
 
 	// 删除节点(按权限:管理员任意,普通用户仅自己的)
@@ -1387,8 +1388,14 @@ func (h *nodesHandler) handleClearAll(w http.ResponseWriter, r *http.Request) {
 	// 清空前先逐个清理 agent 侧残留(以该节点为出口的出站/路由、routed outbound、inbound clients),
 	// 否则只删 DB 会在 agent 端留下孤儿出站/路由/入站(handleDelete/handleBatchDelete 走 cleanupRemoteForNode,清空之前漏了)。
 	if nodes, err := h.repo.ListNodes(r.Context(), username); err == nil {
+		// 清空 = 整批全删,excludeIDs 为全部 ID,cleaned 去重(双栈两节点只发一次删入站)
+		ids := make([]int64, len(nodes))
 		for i := range nodes {
-			h.cleanupRemoteForNode(r.Context(), &nodes[i])
+			ids[i] = nodes[i].ID
+		}
+		cleaned := map[string]bool{}
+		for i := range nodes {
+			h.cleanupRemoteForNode(r.Context(), &nodes[i], ids, cleaned)
 		}
 	}
 
@@ -1442,8 +1449,10 @@ func (h *nodesHandler) handleBatchDelete(w http.ResponseWriter, r *http.Request)
 	// 撞上 N×M×(HTTP 30s 兜底)= 几分钟并超时失败。再逐节点清各自 OriginalServer 上的 inbound/routed
 	// 出站(外部节点 OriginalServer 为空,自动跳过,基本不发远程请求)。
 	h.cleanupOutboundsTargetingNodes(r.Context(), nodes)
+	// excludeIDs=整批 ID:双栈时同入站两节点都在批内才删入站,只删一个则保留;cleaned 去重同一入站的删除请求。
+	cleaned := map[string]bool{}
 	for i := range nodes {
-		h.cleanupRemoteInboundForNode(r.Context(), &nodes[i])
+		h.cleanupRemoteInboundForNode(r.Context(), &nodes[i], accessibleIDs, cleaned)
 	}
 
 	// 从数据库中删除节点(按权限)
@@ -1482,19 +1491,21 @@ func (h *nodesHandler) handleBatchDelete(w http.ResponseWriter, r *http.Request)
 //
 // 设计:本 helper 替代各调用方手抄 if-else 的旧模式,降低单删/批删行为分歧风险(批删之前漏判 routed)。
 // RoutedAdminEmail 不在 storage.Node 上(只在 RoutedNodeDetail),helper 内 routed 分支自动 fetch detail。
-func (h *nodesHandler) cleanupRemoteForNode(ctx context.Context, node *storage.Node) {
+// cleanupRemoteForNode 清节点的远程副作用。excludeIDs = 本次删除操作涉及的全部节点 ID(单删=[node.ID],
+// 批删/清空=整批 ID),用于双栈删除守卫;cleaned(可空)按 server::tag 去重,防同一入站在批内被删多次。
+func (h *nodesHandler) cleanupRemoteForNode(ctx context.Context, node *storage.Node, excludeIDs []int64, cleaned map[string]bool) {
 	if node == nil {
 		return
 	}
 	// 先清「以该节点为出口的出站」—— 这些 outbound + routing rule 可能在任意服务器上,与本节点的 OriginalServer 无关,
 	// 故放在 OriginalServer 守卫之前(外部/手动节点也可能被别的节点当落地出口)。
 	h.cleanupOutboundsTargetingNode(ctx, node)
-	h.cleanupRemoteInboundForNode(ctx, node)
+	h.cleanupRemoteInboundForNode(ctx, node, excludeIDs, cleaned)
 }
 
 // cleanupRemoteInboundForNode 清节点自身在其 OriginalServer 上的 inbound / routed 出站。
 // 外部/手动导入节点没有 OriginalServer,直接返回(不发远程请求)。
-func (h *nodesHandler) cleanupRemoteInboundForNode(ctx context.Context, node *storage.Node) {
+func (h *nodesHandler) cleanupRemoteInboundForNode(ctx context.Context, node *storage.Node, excludeIDs []int64, cleaned map[string]bool) {
 	if node == nil || node.OriginalServer == "" {
 		return
 	}
@@ -1507,6 +1518,18 @@ func (h *nodesHandler) cleanupRemoteInboundForNode(ctx context.Context, node *st
 		return
 	}
 	if node.InboundTag != "" {
+		// 双栈守卫:同 (server, inbound_tag) 下还有别的节点(不在本次删除集里)→ 只删节点,保留远程入站。
+		if other, err := h.repo.HasOtherNodesOnInbound(ctx, node.OriginalServer, node.InboundTag, excludeIDs); err == nil && other {
+			log.Printf("[Nodes] inbound %s/%s 仍有兄弟节点,保留远程入站(只删本节点)", node.OriginalServer, node.InboundTag)
+			return
+		}
+		key := node.OriginalServer + "::" + node.InboundTag
+		if cleaned != nil {
+			if cleaned[key] {
+				return // 本批已删过这个入站,避免重复远程请求
+			}
+			cleaned[key] = true
+		}
 		h.deleteRemoteInbound(ctx, node.OriginalServer, node.InboundTag)
 	}
 }

@@ -72,12 +72,20 @@ func (h *CertificateHandler) GetMasterCertStatus(w http.ResponseWriter, r *http.
 	masterURL, _ := h.repo.GetSystemSetting(ctx, "master_url")
 	domain := getDomainFromMasterURL(h.repo, ctx)
 
+	// HTTPS 是否已启用三取一:master_url 是 https:// / 请求经反代带 X-Forwarded-Proto=https /
+	// 用户手动勾了「外部已配 HTTPS」开关。后两者覆盖「用户自建反代、Go 后端仍以 http 对内服务」场景,
+	// 避免证书页一直误报「开启 HTTPS」。
+	externalHTTPS, _ := h.repo.GetSystemSetting(ctx, "external_https")
+	httpsEnabled := strings.HasPrefix(masterURL, "https://") ||
+		strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") ||
+		externalHTTPS == "1"
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"success":       true,
 		"pending":       pending == "true" && domain != "",
 		"domain":        domain,
-		"https_enabled": strings.HasPrefix(masterURL, "https://"),
+		"https_enabled": httpsEnabled,
 	})
 }
 
