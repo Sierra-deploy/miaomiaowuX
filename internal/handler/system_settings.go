@@ -142,6 +142,15 @@ const (
 	probeDisguiseTitleKey     = "probe_disguise_title"      // 伪装页标题(管理员自定义)
 	probeDisguiseServerIDsKey = "probe_disguise_server_ids" // JSON int64 数组:展示哪些服务器
 	probeDisguiseShowNameKey  = "probe_disguise_show_name"  // "1"/"" 是否显示服务器名
+	// 真探针数据后端:4 个采集子开关 + ping 目标 + ping 间隔。
+	// 新字段在 SetProbeDisguise 里用指针语义(nil=不改)——旧前端 PUT 不带这些字段时不会被冲成零值。
+	probeDisguiseMetricCPUKey    = "probe_disguise_metric_cpu"       // "1"/"" 采集 CPU
+	probeDisguiseMetricMemKey    = "probe_disguise_metric_mem"       // "1"/"" 采集内存
+	probeDisguiseMetricDiskKey   = "probe_disguise_metric_disk"      // "1"/"" 采集硬盘
+	probeDisguiseMetricPingKey   = "probe_disguise_metric_ping"      // "1"/"" 采集 ping
+	probeDisguisePingTargetsKey  = "probe_disguise_ping_targets"     // JSON [{key,label,isp,host,port}]
+	probeDisguisePingIntervalKey = "probe_disguise_ping_interval_ms" // int 字符串,默认 5000
+	probeCDNRegionsEndpointKey   = "probe_cdn_regions_endpoint"      // CDN 数据端点(可配置)
 )
 
 // GetProbeDisguise 返回伪装探针配置(管理端)。
@@ -161,13 +170,35 @@ func (h *SystemSettingsHandler) GetProbeDisguise(w http.ResponseWriter, r *http.
 		_ = json.Unmarshal([]byte(idsRaw), &ids)
 	}
 
+	metricCPU, _ := h.repo.GetSystemSetting(ctx, probeDisguiseMetricCPUKey)
+	metricMem, _ := h.repo.GetSystemSetting(ctx, probeDisguiseMetricMemKey)
+	metricDisk, _ := h.repo.GetSystemSetting(ctx, probeDisguiseMetricDiskKey)
+	metricPing, _ := h.repo.GetSystemSetting(ctx, probeDisguiseMetricPingKey)
+	pingTargetsRaw, _ := h.repo.GetSystemSetting(ctx, probeDisguisePingTargetsKey)
+	pingIntervalRaw, _ := h.repo.GetSystemSetting(ctx, probeDisguisePingIntervalKey)
+
+	pingTargets := []ProbePingTarget{}
+	if pingTargetsRaw != "" {
+		_ = json.Unmarshal([]byte(pingTargetsRaw), &pingTargets)
+	}
+	pingInterval := 5000
+	if n, err := strconv.Atoi(pingIntervalRaw); err == nil && n > 0 {
+		pingInterval = n
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"success":    true,
-		"enabled":    enabled == "1",
-		"title":      title,
-		"server_ids": ids,
-		"show_name":  showName == "1",
+		"success":          true,
+		"enabled":          enabled == "1",
+		"title":            title,
+		"server_ids":       ids,
+		"show_name":        showName == "1",
+		"metric_cpu":       metricCPU == "1",
+		"metric_mem":       metricMem == "1",
+		"metric_disk":      metricDisk == "1",
+		"metric_ping":      metricPing == "1",
+		"ping_targets":     pingTargets,
+		"ping_interval_ms": pingInterval,
 	})
 }
 
@@ -182,6 +213,13 @@ func (h *SystemSettingsHandler) SetProbeDisguise(w http.ResponseWriter, r *http.
 		Title     string  `json:"title"`
 		ServerIDs []int64 `json:"server_ids"`
 		ShowName  bool    `json:"show_name"`
+		// 新字段用指针:nil=不改。旧前端 PUT 不带这些字段时,它们保持原值不被冲成零值。
+		MetricCPU    *bool              `json:"metric_cpu"`
+		MetricMem    *bool              `json:"metric_mem"`
+		MetricDisk   *bool              `json:"metric_disk"`
+		MetricPing   *bool              `json:"metric_ping"`
+		PingTargets  *[]ProbePingTarget `json:"ping_targets"`
+		PingInterval *int               `json:"ping_interval_ms"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -197,11 +235,17 @@ func (h *SystemSettingsHandler) SetProbeDisguise(w http.ResponseWriter, r *http.
 		}
 		return ""
 	}
+	fail := func() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "保存失败"})
+	}
 	if req.ServerIDs == nil {
 		req.ServerIDs = []int64{}
 	}
 	idsJSON, _ := json.Marshal(req.ServerIDs)
 
+	// 现有 4 字段:值语义,每次写(兼容旧前端整对象 PUT)。
 	for _, kv := range []struct{ k, v string }{
 		{probeDisguiseEnabledKey, boolStr(req.Enabled)},
 		{probeDisguiseTitleKey, req.Title},
@@ -209,21 +253,68 @@ func (h *SystemSettingsHandler) SetProbeDisguise(w http.ResponseWriter, r *http.
 		{probeDisguiseServerIDsKey, string(idsJSON)},
 	} {
 		if err := h.repo.SetSystemSetting(ctx, kv.k, kv.v); err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "保存失败"})
+			fail()
 			return
 		}
+	}
+
+	// 新字段:指针语义,仅非 nil 才写。
+	setBoolPtr := func(key string, p *bool) bool {
+		if p == nil {
+			return true
+		}
+		return h.repo.SetSystemSetting(ctx, key, boolStr(*p)) == nil
+	}
+	if !setBoolPtr(probeDisguiseMetricCPUKey, req.MetricCPU) ||
+		!setBoolPtr(probeDisguiseMetricMemKey, req.MetricMem) ||
+		!setBoolPtr(probeDisguiseMetricDiskKey, req.MetricDisk) ||
+		!setBoolPtr(probeDisguiseMetricPingKey, req.MetricPing) {
+		fail()
+		return
+	}
+	if req.PingTargets != nil {
+		// 目标数上限,防 agent 拨测滥用(与 agent 侧限流呼应)。
+		targets := *req.PingTargets
+		if len(targets) > probePingMaxTargets {
+			targets = targets[:probePingMaxTargets]
+		}
+		tJSON, _ := json.Marshal(targets)
+		if h.repo.SetSystemSetting(ctx, probeDisguisePingTargetsKey, string(tJSON)) != nil {
+			fail()
+			return
+		}
+	}
+	if req.PingInterval != nil {
+		ms := *req.PingInterval
+		if ms < 2000 {
+			ms = 2000
+		}
+		if ms > 30000 {
+			ms = 30000
+		}
+		if h.repo.SetSystemSetting(ctx, probeDisguisePingIntervalKey, strconv.Itoa(ms)) != nil {
+			fail()
+			return
+		}
+	}
+
+	// 配置变更后把最新采集开关 + ping 目标下发给所有已连 agent。
+	if h.wsHandler != nil {
+		h.wsHandler.PushProbeConfigToAll(ctx)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "伪装探针配置已更新"})
 }
 
+// probePingMaxTargets ping 目标数上限,防止管理员配置把 agent 网络打满。
+const probePingMaxTargets = 30
+
 // defaultRedeemTemplate 兑换码复制文案的默认模板。占位符:
-//   {兑换码}     — 具体兑换码
-//   {机器人地址} — TG 机器人链接(由 tgbot miniapp 端按 getMe 自动注入,如 https://t.me/xxx_bot)
-//   {主控域名}   — master_url 完整 URL
+//
+//	{兑换码}     — 具体兑换码
+//	{机器人地址} — TG 机器人链接(由 tgbot miniapp 端按 getMe 自动注入,如 https://t.me/xxx_bot)
+//	{主控域名}   — master_url 完整 URL
 const defaultRedeemTemplate = `使用教程
 打开这个机器人 {机器人地址}
 点左下角我的面板，然后输入兑换码注册
@@ -725,9 +816,9 @@ func (h *SystemSettingsHandler) GetSilentMode(w http.ResponseWriter, r *http.Req
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"success":              true,
-		"silent_mode":          cfg.SilentMode,
-		"silent_mode_timeout":  cfg.SilentModeTimeout,
+		"success":             true,
+		"silent_mode":         cfg.SilentMode,
+		"silent_mode_timeout": cfg.SilentModeTimeout,
 	})
 }
 

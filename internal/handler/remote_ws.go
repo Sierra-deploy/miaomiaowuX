@@ -44,9 +44,9 @@ const (
 	WSMsgTypeHeartbeatAck        = "heartbeat_ack"         // Master -> Agent：心跳确认（含服务器时间）
 	WSMsgTypeLimiterConfig       = "limiter_config"        // Master -> Agent：限速配置下发
 	WSMsgTypeLicenseStatus       = "license_status"        // Master -> Agent：许可证状态下发
-	WSMsgTypeKeyExchange         = "key_exchange"           // Agent -> Master：密钥交换请求
-	WSMsgTypeKeyExchangeResp     = "key_exchange_resp"      // Master -> Agent：密钥交换响应
-	WSMsgTypeConfigUpdate        = "config_update"          // Master -> Agent：更新 agent 配置
+	WSMsgTypeKeyExchange         = "key_exchange"          // Agent -> Master：密钥交换请求
+	WSMsgTypeKeyExchangeResp     = "key_exchange_resp"     // Master -> Agent：密钥交换响应
+	WSMsgTypeConfigUpdate        = "config_update"         // Master -> Agent：更新 agent 配置
 )
 
 // WSMessage 表示 WebSocket 消息
@@ -111,6 +111,22 @@ type WSTrafficPayload struct {
 	// System 系统级网卡累计 RX/TX,跟 HTTP path 的 RemoteTrafficRequest.System 同构。
 	// 用于 server.traffic_source='system' 时累加 system_*_cycle;nil = 老 agent 不上报,跳过。
 	System *RemoteSystemTraffic `json:"system,omitempty"`
+	// 伪装探针真数据(agent 只在采集开启时上报)。nil/空 = 未采集或旧 agent,主控跳过。
+	Sysmetrics *ProbeSysWire        `json:"sysmetrics,omitempty"`
+	Latency    []ProbeLatencySample `json:"latency,omitempty"`
+}
+
+// ProbeSysWire 是 agent 上报的系统指标线格式(字段名与 agent sysmetrics.go 的 ProbeSysMetrics 对齐)。
+type ProbeSysWire struct {
+	CPUPct    float64 `json:"cpu_pct"`
+	LoadAvg   string  `json:"loadavg"`
+	MemUsed   int64   `json:"mem_used"`
+	MemTotal  int64   `json:"mem_total"`
+	DiskUsed  int64   `json:"disk_used"`
+	DiskTotal int64   `json:"disk_total"`
+	HasCPU    bool    `json:"has_cpu"`
+	HasMem    bool    `json:"has_mem"`
+	HasDisk   bool    `json:"has_disk"`
 }
 
 // connCountsByServer 存各 server 最近一次上报的 group→当前并发连接数(内存、非持久)。用户视图"当前连接数"用。
@@ -314,7 +330,8 @@ type RemoteWSHandler struct {
 	limiterPusher     *LimiterConfigPusher
 	licenseManager    *license.Manager
 	crypto            *CryptoConfig
-	userSpeedCache    sync.Map // key: "serverID:email" -> int64 (Bytes/s)
+	probeStore        *ProbeMetricsStore // 伪装探针真数据 ring(可选,SetProbeStore 注入)
+	userSpeedCache    sync.Map           // key: "serverID:email" -> int64 (Bytes/s)
 	// xrayConfigSyncCallback 在 auth 成功后异步触发(args: serverID + 上次 server.status),
 	// 实现见 RemoteManageHandler.SyncXrayConfigOnReconnect — 跨 handler 用 callback 注入避免循环依赖。
 	xrayConfigSyncCallback func(ctx context.Context, serverID int64, prevStatus string)
@@ -354,7 +371,7 @@ type tokenConflictRecord struct {
 type ipFailRecord struct {
 	mu             sync.Mutex
 	lastFailAt     time.Time
-	failsInWindow  int      // 当前聚合窗口内累计失败次数
+	failsInWindow  int // 当前聚合窗口内累计失败次数
 	windowStart    time.Time
 	rejectUntil    time.Time // 在此时间前直接拒绝 upgrade
 	suppressedLogs int       // 静默期内被压制的日志数量
@@ -383,6 +400,79 @@ func (h *RemoteWSHandler) SetLimiterPusher(p *LimiterConfigPusher) {
 	h.limiterPusher = p
 }
 
+// SetProbeStore 注入伪装探针真数据的内存 ring(接收 agent 上报的 sysmetrics/latency)。
+func (h *RemoteWSHandler) SetProbeStore(s *ProbeMetricsStore) {
+	h.probeStore = s
+}
+
+// PushProbeConfigToAgent 把伪装探针采集配置下发给一台 agent。
+//   - 该 server 被选进展示列表 且 总开关开 → 下发各子开关的真实状态 + ping 目标
+//   - 否则 → 全下发 "0"(停采),避免未展示的服务器白白采集上报
+//
+// 从 system_settings 读配置,由 SetProbeDisguise 保存后 + agent 上线(auth 后)调用。
+func (h *RemoteWSHandler) PushProbeConfigToAgent(ctx context.Context, serverID int64) {
+	get := func(k string) string { v, _ := h.repo.GetSystemSetting(ctx, k); return v }
+	enabled := get(probeDisguiseEnabledKey) == "1"
+
+	selected := false
+	if raw := get(probeDisguiseServerIDsKey); raw != "" {
+		var ids []int64
+		if json.Unmarshal([]byte(raw), &ids) == nil {
+			for _, id := range ids {
+				if id == serverID {
+					selected = true
+					break
+				}
+			}
+		}
+	}
+
+	updates := map[string]string{}
+	active := enabled && selected
+	b := func(key string) string {
+		if active && get(key) == "1" {
+			return "1"
+		}
+		return "0"
+	}
+	updates["probe_collect_cpu"] = b(probeDisguiseMetricCPUKey)
+	updates["probe_collect_mem"] = b(probeDisguiseMetricMemKey)
+	updates["probe_collect_disk"] = b(probeDisguiseMetricDiskKey)
+	updates["probe_collect_ping"] = b(probeDisguiseMetricPingKey)
+	if active {
+		// ping 目标只在启用时下发,且转成 agent 侧格式(仅 key/host/port,不带 label/isp)。
+		if raw := get(probeDisguisePingTargetsKey); raw != "" {
+			var targets []ProbePingTarget
+			if json.Unmarshal([]byte(raw), &targets) == nil {
+				agentTargets := make([]map[string]any, 0, len(targets))
+				for _, t := range targets {
+					agentTargets = append(agentTargets, map[string]any{"key": t.Key, "host": t.Host, "port": t.Port})
+				}
+				if tj, err := json.Marshal(agentTargets); err == nil {
+					updates["probe_ping_targets"] = string(tj)
+				}
+			}
+		}
+		if iv := get(probeDisguisePingIntervalKey); iv != "" {
+			updates["probe_ping_interval_ms"] = iv
+		}
+	}
+	_ = h.SendConfigUpdate(serverID, updates)
+}
+
+// PushProbeConfigToAll 对所有已连 agent 下发采集配置(配置变更后调)。
+func (h *RemoteWSHandler) PushProbeConfigToAll(ctx context.Context) {
+	servers, err := h.repo.ListRemoteServers(ctx)
+	if err != nil {
+		return
+	}
+	for i := range servers {
+		if _, ok := h.GetConnectionByServerID(servers[i].ID); ok {
+			h.PushProbeConfigToAgent(ctx, servers[i].ID)
+		}
+	}
+}
+
 func (h *RemoteWSHandler) SetCrypto(cc *CryptoConfig) {
 	h.crypto = cc
 }
@@ -402,9 +492,9 @@ func (h *RemoteWSHandler) SetXrayModeCorrectCallback(cb func(ctx context.Context
 // 失败 backoff 参数 — 保守取值,正常 agent 重连(5-10 秒)完全不受影响,
 // 只针对每秒数十次的死循环 agent(被删 server 后还在跑的孤儿 agent)生效。
 const (
-	wsFailCooldown      = 60 * time.Second  // 失败后 60 秒内同 IP 直接拒绝 upgrade
-	wsFailLogWindow     = 60 * time.Second  // 同 IP 失败日志聚合窗口
-	wsFailLogThreshold  = 3                 // 窗口内失败 >=3 次才进入"聚合模式"
+	wsFailCooldown     = 60 * time.Second // 失败后 60 秒内同 IP 直接拒绝 upgrade
+	wsFailLogWindow    = 60 * time.Second // 同 IP 失败日志聚合窗口
+	wsFailLogThreshold = 3                // 窗口内失败 >=3 次才进入"聚合模式"
 
 	// token 复用判定:旧 conn 最近 LastPing 比这个新就视为"还活着" — 异 IP 抢占算冲突。
 	// 比 collector 默认 90s offline 阈值小,确保只锁定真在线的 server。
@@ -780,8 +870,8 @@ func (h *RemoteWSHandler) handleKeyExchange(conn *websocket.Conn, remoteAddr str
 
 	// 创建临时 wsConn 持有 session，auth 后会绑定到正式连接
 	tempConn := &RemoteWSConnection{
-		Conn:    conn,
-		session: session,
+		Conn:      conn,
+		session:   session,
 		Encrypted: true,
 	}
 	*wsConnPtr = tempConn
@@ -1031,6 +1121,10 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 		}
 	}
 
+	// agent 上线 → 下发当前伪装探针采集配置(开关 + ping 目标)。新 agent 才认这些 key,
+	// 旧 agent 忽略。若伪装未开/该 server 未选中,下发全 "0" 让 agent 不采集。
+	go h.PushProbeConfigToAgent(context.Background(), server.ID)
+
 	// xray 配置 snapshot 同步: server.Status 在 UpdateRemoteServerHeartbeat 之前抓取的就是上次状态
 	// (上面 644 行 update 实际是异步,但 server 这个对象是 GetRemoteServerByToken 拿到的快照,字段不会被改写)。
 	// prevStatus == "offline" → 写 pending_recovery(VPS 跑路换机场景);其它 → upsert current(SSH 修复 / 首连)
@@ -1102,6 +1196,21 @@ func (h *RemoteWSHandler) handleTraffic(wsConn *RemoteWSConnection, payload json
 		if err := h.repo.UpsertRemoteServerSystemTraffic(ctx, wsConn.ServerID,
 			trafficPayload.System.RxTotal, trafficPayload.System.TxTotal, trafficPayload.System.BootTimeUnix); err != nil {
 			log.Printf("[Remote WS] Failed to upsert system traffic for server %s: %v", wsConn.ServerName, err)
+		}
+	}
+
+	// 伪装探针真数据 → 内存 ring(旧 agent 不上报这两个字段,自动跳过)。
+	if h.probeStore != nil {
+		if sm := trafficPayload.Sysmetrics; sm != nil {
+			h.probeStore.IngestSys(wsConn.ServerID, ProbeSysSnapshot{
+				CPUPct: sm.CPUPct, LoadAvg: sm.LoadAvg,
+				MemUsed: sm.MemUsed, MemTotal: sm.MemTotal,
+				DiskUsed: sm.DiskUsed, DiskTotal: sm.DiskTotal,
+				HasCPU: sm.HasCPU, HasMem: sm.HasMem, HasDisk: sm.HasDisk,
+			})
+		}
+		if len(trafficPayload.Latency) > 0 {
+			h.probeStore.IngestLatency(wsConn.ServerID, trafficPayload.Latency)
 		}
 	}
 

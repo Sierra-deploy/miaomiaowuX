@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"log"
@@ -12,7 +13,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"encoding/json"
 	"syscall"
 	"time"
 	_ "time/tzdata" // 嵌入时区库,LoadLocation 不依赖系统 zoneinfo(纠正缺 /etc/localtime 的机器)
@@ -20,15 +20,15 @@ import (
 	"miaomiaowux/internal/agentlog"
 	"miaomiaowux/internal/auth"
 	"miaomiaowux/internal/captcha"
-	"miaomiaowux/internal/notify"
-	"miaomiaowux/internal/patches"
 	"miaomiaowux/internal/child"
 	"miaomiaowux/internal/ddns"
 	"miaomiaowux/internal/event"
 	"miaomiaowux/internal/handler"
-	mcpserver "miaomiaowux/internal/mcp"
 	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/logger"
+	mcpserver "miaomiaowux/internal/mcp"
+	"miaomiaowux/internal/notify"
+	"miaomiaowux/internal/patches"
 	"miaomiaowux/internal/proxygroups"
 	"miaomiaowux/internal/securechan"
 	"miaomiaowux/internal/storage"
@@ -212,28 +212,28 @@ func main() {
 	agentlog.SetEnabled(systemConfig.AgentLogEnabled)
 
 	handler.InitNotifier(notify.Config{
-		Enabled:                       systemConfig.NotifyEnabled,
-		BotToken:                      systemConfig.TelegramBotToken,
-		ChatID:                        systemConfig.TelegramChatID,
-		NotifyLogin:                   systemConfig.NotifyLogin,
-		NotifySubscribeFetch:          systemConfig.NotifySubscribeFetch,
-		NotifyDailyTraffic:            systemConfig.NotifyDailyTraffic,
-		NotifyServerOffline:           systemConfig.NotifyServerOffline,
-		NotifyServerOnline:            systemConfig.NotifyServerOnline,
-		NotifyTrafficThreshold:        systemConfig.NotifyTrafficThreshold,
-		DailyTrafficTime:              systemConfig.NotifyDailyTrafficTime,
-		TrafficThresholdPercent:       systemConfig.NotifyTrafficThresholdPercent,
-		NotifyTrafficThreshold80:      systemConfig.NotifyTrafficThreshold80,
-		NotifyOverLimit:               systemConfig.NotifyOverLimit,
-		NotifyPackageExpiring:         systemConfig.NotifyPackageExpiring,
-		PackageExpiringDaysAhead:      systemConfig.NotifyPackageExpiringDays,
-		NotifyPackageExpired:          systemConfig.NotifyPackageExpired,
-		NotifyUserRegistered:          systemConfig.NotifyUserRegistered,
-		NotifyTelegramBound:           systemConfig.NotifyTelegramBound,
-		NotifyCertResult:              systemConfig.NotifyCertResult,
-		NotifyAgentLongOffline:        systemConfig.NotifyAgentLongOffline,
-		AgentLongOfflineMinutes:       systemConfig.NotifyAgentLongOfflineMinutes,
-		NotifyDeviceLimitExceeded:     systemConfig.NotifyDeviceLimitExceeded,
+		Enabled:                   systemConfig.NotifyEnabled,
+		BotToken:                  systemConfig.TelegramBotToken,
+		ChatID:                    systemConfig.TelegramChatID,
+		NotifyLogin:               systemConfig.NotifyLogin,
+		NotifySubscribeFetch:      systemConfig.NotifySubscribeFetch,
+		NotifyDailyTraffic:        systemConfig.NotifyDailyTraffic,
+		NotifyServerOffline:       systemConfig.NotifyServerOffline,
+		NotifyServerOnline:        systemConfig.NotifyServerOnline,
+		NotifyTrafficThreshold:    systemConfig.NotifyTrafficThreshold,
+		DailyTrafficTime:          systemConfig.NotifyDailyTrafficTime,
+		TrafficThresholdPercent:   systemConfig.NotifyTrafficThresholdPercent,
+		NotifyTrafficThreshold80:  systemConfig.NotifyTrafficThreshold80,
+		NotifyOverLimit:           systemConfig.NotifyOverLimit,
+		NotifyPackageExpiring:     systemConfig.NotifyPackageExpiring,
+		PackageExpiringDaysAhead:  systemConfig.NotifyPackageExpiringDays,
+		NotifyPackageExpired:      systemConfig.NotifyPackageExpired,
+		NotifyUserRegistered:      systemConfig.NotifyUserRegistered,
+		NotifyTelegramBound:       systemConfig.NotifyTelegramBound,
+		NotifyCertResult:          systemConfig.NotifyCertResult,
+		NotifyAgentLongOffline:    systemConfig.NotifyAgentLongOffline,
+		AgentLongOfflineMinutes:   systemConfig.NotifyAgentLongOfflineMinutes,
+		NotifyDeviceLimitExceeded: systemConfig.NotifyDeviceLimitExceeded,
 	})
 
 	// TG bot 已拆为独立项目 ../mmwX-tgbot,通过 /api/admin/tgbot/* HTTP 调主控。
@@ -831,9 +831,24 @@ func main() {
 	})))
 	mux.HandleFunc("/api/public/login-wallpaper", systemSettingsHandler.GetLoginWallpaperPublic)
 
+	// 真探针数据的内存 ring(cpu/mem/disk/ping,来自 agent 上报)。用户选「仅内存实时滚动」不建表。
+	// 单例:读侧给 ProbePublicHandler,写侧 P3 注入 remoteWSHandler。capN=60(5s 间隔约 5 分钟窗口)。
+	probeMetricsStore := handler.NewProbeMetricsStore(60)
+	remoteWSHandler.SetProbeStore(probeMetricsStore) // 写侧:接收 agent 上报的 sysmetrics/latency
+	go func() {
+		t := time.NewTicker(5 * time.Minute)
+		defer t.Stop()
+		for range t.C {
+			probeMetricsStore.Evict(10 * time.Minute) // 掉线 10min 的 server 清出,防内存无界
+		}
+	}()
+
 	// 公开端点:伪装探针的只读服务器状态(无鉴权)。伪装关闭时返回 {enabled:false},开启时只吐白名单字段。
 	// 走明文(前端 shouldEncrypt 已放行 /api/public/);此处 remoteWSHandler 已构造(见上文)。
-	mux.Handle("/api/public/probe-servers", handler.NewProbePublicHandler(repo, remoteWSHandler))
+	mux.Handle("/api/public/probe-servers", handler.NewProbePublicHandler(repo, remoteWSHandler, probeMetricsStore))
+
+	// CDN 省市 ping 目标列表(管理员配置伪装探针 ping 时勾选)。代理+缓存 lf3-ips.zstaticcdn.com,防 SSRF。
+	mux.Handle("/api/admin/probe/regions", auth.RequireAdmin(tokenStore, userRepo, handler.NewProbeCDNProxyHandler(repo)))
 
 	// 伪装探针配置(开关 + 标题 + 展示的服务器 + 是否显名)
 	mux.Handle("/api/admin/system-settings/probe-disguise", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1381,9 +1396,9 @@ func waitForShutdown(srv *http.Server, cancels ...context.CancelFunc) {
 }
 
 // backfillSystemSnapshotsForSwitchedServers 一次性修复上一轮 source 切换产生的两个 bug:
-//   1. daily snapshot baseline 缺失 → today/week/month 三个时间按钮显示同一固定值
-//   2. **更严重**:offset 锁在"oldDisplay - 小 system_raw"≈ xray total → 之后 cycle 被 SET 成 xray total
-//      又没动 offset → traffic_used = cycle + offset = 2 × xray total **翻倍**
+//  1. daily snapshot baseline 缺失 → today/week/month 三个时间按钮显示同一固定值
+//  2. **更严重**:offset 锁在"oldDisplay - 小 system_raw"≈ xray total → 之后 cycle 被 SET 成 xray total
+//     又没动 offset → traffic_used = cycle + offset = 2 × xray total **翻倍**
 //
 // MigrateXraySnapshotsToSystem 现在同时 reset offset = 0,所以本函数对全部 system source server 跑一次
 // 即可修复以上两 bug。**用 system_settings 表里的 marker 控制只跑一次** — 跑完写 marker,后续启动检测到
