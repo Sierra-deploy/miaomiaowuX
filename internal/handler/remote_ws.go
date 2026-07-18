@@ -270,6 +270,12 @@ type RemoteWSConnection struct {
 	session    *securechan.Session
 	Encrypted  bool
 	mu         sync.Mutex
+	// writeMu 串行化本连接上的所有 WriteMessage。gorilla/websocket 不允许并发写同一连接,
+	// 读循环里的响应(handleHeartbeat 的 ack、auth result、pong)与各推送 goroutine
+	// (SendConfigUpdate / 探针配置 / license 广播 …)会同时写 → "concurrent write to
+	// websocket connection" panic(曾致 docker 进程崩溃)。所有写统一走 sendEncryptedMessage,
+	// 由它加 writeMu;WriteControl(ping) 按 gorilla 文档与 WriteMessage 并发安全,无需此锁。
+	writeMu sync.Mutex
 	// Capabilities 从 auth payload 读到的 agent 能力位。RPC=true 时 forwardToRemoteServer 走 WS RPC,
 	// 否则走 HTTP(老 agent 兼容)。
 	Capabilities AgentCapabilities
@@ -740,7 +746,9 @@ func (h *RemoteWSHandler) handleConnection(conn *websocket.Conn, remoteAddr stri
 			conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
 
 		case WSMsgTypePing:
-			if wsConn != nil && wsConn.session != nil {
+			// 已注册的连接一律走 sendEncryptedMessage(内部加 writeMu 串行化);仅未建 wsConn 的
+			// 预认证阶段(单 goroutine,无并发写)才用裸 sendMessage。
+			if wsConn != nil {
 				h.sendEncryptedMessage(wsConn, WSMessage{Type: WSMsgTypePong})
 			} else {
 				h.sendMessage(conn, WSMessage{Type: WSMsgTypePong})
@@ -879,8 +887,13 @@ func (h *RemoteWSHandler) handleKeyExchange(conn *websocket.Conn, remoteAddr str
 	log.Printf("[Remote WS] Key exchange completed with %s", remoteAddr)
 }
 
-// 发送加密消息（如有 session 则加密，否则明文）
+// 发送加密消息（如有 session 则加密，否则明文）。
+// 这是本连接所有写的唯一入口(读循环响应 + 推送 goroutine),用 writeMu 串行化,
+// 防止 gorilla/websocket "concurrent write to websocket connection" panic。
 func (h *RemoteWSHandler) sendEncryptedMessage(wsConn *RemoteWSConnection, msg WSMessage) error {
+	wsConn.writeMu.Lock()
+	defer wsConn.writeMu.Unlock()
+
 	if wsConn.session != nil {
 		data, err := json.Marshal(msg)
 		if err != nil {
