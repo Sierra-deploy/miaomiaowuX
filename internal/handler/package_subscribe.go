@@ -260,6 +260,17 @@ func (h *PackageSubscribeHandler) loadTemplate(r *http.Request, pkg *storage.Pac
 	templatesDir := "rule_templates"
 
 	var candidates []string
+	// 最高优先:订阅所属用户若有模板管理权限且设了个人默认模板(且本人拥有该模板),用它覆盖套餐/系统默认。
+	// 归属校验不过(模板被删/改归属)时静默跳过,自动回退到下面的套餐/系统默认。
+	if username := strings.TrimSpace(auth.UsernameFromContext(r.Context())); username != "" {
+		if s, err := h.repo.GetUserSettings(r.Context(), username); err == nil {
+			if f := strings.TrimSpace(s.DefaultTemplateFilename); f != "" && userHasTemplatePermission(r.Context(), h.repo, username) {
+				if owner, _ := h.repo.GetRuleTemplateOwner(r.Context(), f); owner == username {
+					candidates = append(candidates, f)
+				}
+			}
+		}
+	}
 	if pkg != nil && strings.TrimSpace(pkg.TemplateFilename) != "" {
 		candidates = append(candidates, pkg.TemplateFilename)
 	}

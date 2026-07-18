@@ -616,6 +616,7 @@ func (h *nodesHandler) handleBatchCreate(w http.ResponseWriter, r *http.Request)
 			ClashConfig:  n.ClashConfig,
 			Enabled:      n.Enabled,
 			Tag:          n.Tag,
+			Tags:         n.Tags, // 多标签:导入时前端 multi-select 输出,serializeNodeTags 会以 Tags 为准
 			InboundTag:   n.InboundTag,
 		})
 		relayReqs = append(relayReqs, n)

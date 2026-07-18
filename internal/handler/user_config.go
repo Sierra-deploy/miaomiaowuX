@@ -251,28 +251,35 @@ func handleUpdateUserConfig(w http.ResponseWriter, r *http.Request, repo *storag
 	// node_order 用指针区分"未提供"与"显式清空":系统设置页等不管节点顺序的调用不会带 node_order,
 	// payload.NodeOrder==nil 时必须保留已存顺序,否则整行 upsert 会把它清空 → 节点管理页乱序(与旁边
 	// system_config "先读全量再改" 同理)。非 nil(节点管理页拖拽排序)才覆盖。
+	// node_order 与 default_template_filename 都不在本请求体里(或用指针表达"未提供"),
+	// upsert 是整行覆盖,必须先读回已存值带上,否则会被清空。default_template_filename 走独立端点维护。
 	nodeOrder := []int64{}
+	defaultTemplateFilename := ""
+	existing, existingErr := repo.GetUserSettings(r.Context(), username)
+	if existingErr == nil {
+		nodeOrder = existing.NodeOrder
+		defaultTemplateFilename = existing.DefaultTemplateFilename
+	}
 	if payload.NodeOrder != nil {
 		nodeOrder = *payload.NodeOrder
-	} else if existing, err := repo.GetUserSettings(r.Context(), username); err == nil {
-		nodeOrder = existing.NodeOrder
 	}
 
 	settings := storage.UserSettings{
-		Username:             username,
-		ForceSyncExternal:    payload.ForceSyncExternal,
-		MatchRule:            matchRule,
-		SyncScope:            syncScope,
-		KeepNodeName:         payload.KeepNodeName,
-		CacheExpireMinutes:   cacheExpireMinutes,
-		SyncTraffic:          payload.SyncTraffic,
-		NodeNameFilter:       payload.NodeNameFilter,
-		AppendSubInfo:        payload.AppendSubInfo,
-		CustomRulesEnabled:   true, // 自定义规则始终启用
-		EnableShortLink:      payload.EnableShortLink,
-		UseNewTemplateSystem: useNewTemplateSystem,
-		EnableProxyProvider:  payload.EnableProxyProvider,
-		NodeOrder:            nodeOrder,
+		Username:                username,
+		ForceSyncExternal:       payload.ForceSyncExternal,
+		MatchRule:               matchRule,
+		SyncScope:               syncScope,
+		KeepNodeName:            payload.KeepNodeName,
+		CacheExpireMinutes:      cacheExpireMinutes,
+		SyncTraffic:             payload.SyncTraffic,
+		NodeNameFilter:          payload.NodeNameFilter,
+		AppendSubInfo:           payload.AppendSubInfo,
+		CustomRulesEnabled:      true, // 自定义规则始终启用
+		EnableShortLink:         payload.EnableShortLink,
+		UseNewTemplateSystem:    useNewTemplateSystem,
+		EnableProxyProvider:     payload.EnableProxyProvider,
+		NodeOrder:               nodeOrder,
+		DefaultTemplateFilename: defaultTemplateFilename,
 	}
 
 	if err := repo.UpsertUserSettings(r.Context(), settings); err != nil {
