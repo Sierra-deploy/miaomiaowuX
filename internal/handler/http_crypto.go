@@ -3,11 +3,11 @@ package handler
 import (
 	"encoding/base64"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"sync/atomic"
 
+	"miaomiaowux/internal/agentlog"
 	"miaomiaowux/internal/securechan"
 )
 
@@ -74,7 +74,7 @@ func handleHTTPCrypto(r *http.Request, w http.ResponseWriter, cc *CryptoConfig) 
 			cache.Set(token, session)
 		}
 
-		log.Printf("[HTTP Crypto] Key exchange completed for token %s...%s", safePrefix(token, 8), safeSuffix(token, 4))
+		agentlog.Printf("[HTTP Crypto] Key exchange completed for token %s...%s", safePrefix(token, 8), safeSuffix(token, 4))
 
 		// 密钥交换阶段，响应用明文返回（Agent 尚未建立 session）
 		return &httpCryptoResult{Body: body, Session: nil, Token: token}, nil

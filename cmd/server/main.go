@@ -1145,6 +1145,15 @@ func main() {
 	)
 	subRateLimiter.SetSkipLocalIP(secCfg.SkipLocalIP)
 	go subRateLimiter.StartCleanup(context.Background())
+
+	// 自定义静态资源目录 data/public/(Docker 下随 data 卷持久化、二进制下就是工作目录旁)。
+	// 前端 dist 是编译进二进制的只读 embed.FS,用户无法往里放图片;这是唯一能在 Docker/二进制
+	// 部署里放自定义壁纸等图片的位置:把图片丢进 data/public/,再在设置里引用 /public/xxx.jpg。
+	// ServeMux 里 "/public/" 比 "/" 更具体 → 优先命中,不会被 SPA 兜底吞掉。
+	publicDir := filepath.Join("data", "public")
+	_ = os.MkdirAll(publicDir, 0755)
+	mux.Handle("/public/", http.StripPrefix("/public/", http.FileServer(http.Dir(publicDir))))
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		path := strings.Trim(r.URL.Path, "/")
 		clientIP := handler.GetClientIP(r)

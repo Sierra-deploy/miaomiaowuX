@@ -120,7 +120,9 @@ func cutLogfmtValue(s, key string) (string, string, bool) {
 			}
 			end++
 		}
-		val := unquoteLogfmt(after[:end+1])
+		// end 可能因引号未闭合(tailFile 切出的半行常见)或反斜杠结尾而 >= len(after);
+		// 必须夹到 len(after),否则 after[:end+1] 越界 panic → handler 崩 → nginx 502。
+		val := unquoteLogfmt(after[:min(end+1, len(after))])
 		return val, after[min(end+1, len(after)):], true
 	}
 	// 裸值：到下一个空格

@@ -888,7 +888,7 @@ func (h *RemoteWSHandler) handleKeyExchange(conn *websocket.Conn, remoteAddr str
 	}
 	*wsConnPtr = tempConn
 
-	log.Printf("[Remote WS] Key exchange completed with %s", remoteAddr)
+	agentlog.Printf("[Remote WS] Key exchange completed with %s", remoteAddr)
 }
 
 // 发送加密消息（如有 session 则加密，否则明文）。

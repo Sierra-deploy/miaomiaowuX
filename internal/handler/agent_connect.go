@@ -443,6 +443,30 @@ func (h *XrayServerHandler) masterPublicKeyBase64() string {
 	return ""
 }
 
+// validInstallToken 校验安装 token 字符集。token 会被写进 curl|bash 执行的安装脚本,
+// 必须白名单化,否则 $(...)/`...` 会被当命令替换执行(命令注入)。真实 token 是
+// base64.RawURLEncoding / hex,只落在 [A-Za-z0-9._-];空或含其它字符一律拒绝。
+func validInstallToken(s string) bool {
+	if s == "" || len(s) > 512 {
+		return false
+	}
+	for _, c := range s {
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			c == '.', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// shSingleQuote 把任意字符串安全包成 bash 单引号字面量(单引号内除 ' 外无特殊字符)。
+// 规则:整体套单引号,内部每个 ' 替换成 '\'' 序列。用于把外部输入写进安装脚本时防注入。
+func shSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
+}
+
 // 返回远程服务器的安装脚本
 func (h *XrayServerHandler) GetRemoteInstallScript(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
@@ -452,6 +476,11 @@ func (h *XrayServerHandler) GetRemoteInstallScript(w http.ResponseWriter, r *htt
 
 	// 从查询参数中获取令牌
 	token := r.URL.Query().Get("token")
+	// 安全:token 会被写进 curl|bash 执行的安装脚本,必须白名单校验,否则命令注入。
+	if !validInstallToken(token) {
+		http.Error(w, "invalid token", http.StatusBadRequest)
+		return
+	}
 	stealSelf := r.URL.Query().Get("steal_self") == "1"
 	xrayMode := r.URL.Query().Get("xray_mode")
 	if xrayMode != "embedded" {
@@ -521,16 +550,16 @@ func (h *XrayServerHandler) GetRemoteInstallScript(w http.ResponseWriter, r *htt
 
 set -e
 
-TOKEN="` + token + `"
-SERVER="` + scriptServer + `"
-SCRIPT_PROTOCOL="` + scriptProtocol + `"
+TOKEN=` + shSingleQuote(token) + `
+SERVER=` + shSingleQuote(scriptServer) + `
+SCRIPT_PROTOCOL=` + shSingleQuote(scriptProtocol) + `
 EXPLICIT_MASTER="` + explicitMaster + `"
 AUTO_STEAL_SELF="` + map[bool]string{true: "1", false: "0"}[stealSelf] + `"
-FRONT_SERVICE="` + frontService + `"
-XRAY_MODE="` + xrayMode + `"
-MASTER_PUBLIC_KEY="` + h.masterPublicKeyBase64() + `"
-MASTER_PORT="` + h.getMasterPort() + `"
-LISTEN_PORT="` + listenPortParam + `"
+FRONT_SERVICE=` + shSingleQuote(frontService) + `
+XRAY_MODE=` + shSingleQuote(xrayMode) + `
+MASTER_PUBLIC_KEY=` + shSingleQuote(h.masterPublicKeyBase64()) + `
+MASTER_PORT=` + shSingleQuote(h.getMasterPort()) + `
+LISTEN_PORT=` + shSingleQuote(listenPortParam) + `
 
 # 协议:优先用主控注入的 SCRIPT_PROTOCOL(来自系统设置 master_url 的 scheme),
 # 否则按 SERVER 是否带端口启发判断(开发场景常见 http)。
