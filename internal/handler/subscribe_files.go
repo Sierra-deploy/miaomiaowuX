@@ -113,6 +113,52 @@ func (h *subscribeFilesHandler) handleList(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+var errSubscribeFilenameTaken = errors.New("文件名已被其他用户占用")
+
+// sanitizeSubscribeFilename 校验订阅文件名安全并补全扩展名。
+// 防路径穿越:必须是纯基名(不含路径分隔符 / 反斜杠 / .. / 控制字符),否则拒绝;
+// 统一补 .yaml/.yml 扩展。所有把 filename 拼进 subscribes/<filename> 的入口都必须先过它。
+func sanitizeSubscribeFilename(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", errors.New("文件名不能为空")
+	}
+	if strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") || name != filepath.Base(name) {
+		return "", errors.New("文件名非法:不能包含路径分隔符或 ..")
+	}
+	for _, c := range name {
+		if c < 0x20 || c == 0x7f {
+			return "", errors.New("文件名含非法控制字符")
+		}
+	}
+	ext := filepath.Ext(name)
+	if ext != ".yaml" && ext != ".yml" {
+		name += ".yaml"
+	}
+	return name, nil
+}
+
+// ensureFilenameWritable 防跨用户覆盖:目标 filename 若已被【他人】的订阅占用则拒绝。
+// 无人占用 / 属于自己 / 调用者是 admin → 放行。写盘(WriteFile subscribes/<filename>)前必须调用。
+func (h *subscribeFilesHandler) ensureFilenameWritable(ctx context.Context, filename, username string) error {
+	existing, err := h.repo.GetSubscribeFileByFilename(ctx, filename)
+	if err != nil {
+		if errors.Is(err, storage.ErrSubscribeFileNotFound) {
+			return nil // 无人占用
+		}
+		return err
+	}
+	if existing.CreatedBy == username || userIsAdmin(ctx, h.repo, username) {
+		return nil
+	}
+	return errSubscribeFilenameTaken
+}
+
+func subscribeFileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
 func (h *subscribeFilesHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req subscribeFileRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -138,6 +184,20 @@ func (h *subscribeFilesHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 	}
 
 	username := auth.UsernameFromContext(r.Context())
+
+	// 安全:校验文件名(防路径穿越)+ 统一扩展名。
+	sanitizedName, serr := sanitizeSubscribeFilename(req.Filename)
+	if serr != nil {
+		writeBadRequest(w, serr.Error())
+		return
+	}
+	req.Filename = sanitizedName
+
+	// 跨用户占用防护:filename 已被他人订阅占用则拒绝(防后续 update-content 覆盖他人物理文件)。
+	if err := h.ensureFilenameWritable(r.Context(), req.Filename, username); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
 
 	// 配额校验:普通用户创建订阅受全局配额限制(admin 不限)。
 	if err := checkUserQuota(r.Context(), h.repo, username, "subscribe"); err != nil {
@@ -266,10 +326,26 @@ func (h *subscribeFilesHandler) handleImport(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	// 确保文件名有.yaml或.yml扩展名
-	ext := filepath.Ext(filename)
-	if ext != ".yaml" && ext != ".yml" {
-		filename = filename + ".yaml"
+	// 安全:校验文件名(防路径穿越)+ 统一扩展名
+	sanitizedName, serr := sanitizeSubscribeFilename(filename)
+	if serr != nil {
+		writeBadRequest(w, serr.Error())
+		return
+	}
+	filename = sanitizedName
+
+	username := auth.UsernameFromContext(r.Context())
+
+	// 跨用户覆盖防护:filename 已被他人订阅占用则拒绝(写盘前)。
+	if err := h.ensureFilenameWritable(r.Context(), filename, username); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+
+	// 配额校验:普通用户创建订阅受全局配额限制(admin 不限)。(写盘前校验,失败无需回滚文件)
+	if err := checkUserQuota(r.Context(), h.repo, username, "subscribe"); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
 	}
 
 	// 保存文件到subscribes目录
@@ -280,17 +356,9 @@ func (h *subscribeFilesHandler) handleImport(w http.ResponseWriter, r *http.Requ
 	}
 
 	filePath := filepath.Join(subscribesDir, filename)
+	fileExisted := subscribeFileExists(filePath)
 	if err := os.WriteFile(filePath, body, 0644); err != nil {
 		writeError(w, http.StatusInternalServerError, errors.New("保存订阅文件失败"))
-		return
-	}
-
-	username := auth.UsernameFromContext(r.Context())
-
-	// 配额校验:普通用户创建订阅受全局配额限制(admin 不限)。
-	if err := checkUserQuota(r.Context(), h.repo, username, "subscribe"); err != nil {
-		_ = os.Remove(filePath)
-		writeError(w, http.StatusForbidden, err)
 		return
 	}
 
@@ -306,8 +374,10 @@ func (h *subscribeFilesHandler) handleImport(w http.ResponseWriter, r *http.Requ
 
 	created, err := h.repo.CreateSubscribeFile(r.Context(), file)
 	if err != nil {
-		// 如果数据库保存失败，删除已保存的文件
-		_ = os.Remove(filePath)
+		// 数据库保存失败:仅删除本次新建的文件,不动已存在文件(避免误删)
+		if !fileExisted {
+			_ = os.Remove(filePath)
+		}
 		if errors.Is(err, storage.ErrCustomShortCodeExists) {
 			writeError(w, http.StatusConflict, err)
 			return
@@ -353,11 +423,13 @@ func (h *subscribeFilesHandler) handleUpload(w http.ResponseWriter, r *http.Requ
 		filename = header.Filename
 	}
 
-	// 确保文件名有.yaml或.yml扩展名
-	ext := filepath.Ext(filename)
-	if ext != ".yaml" && ext != ".yml" {
-		filename = filename + ".yaml"
+	// 安全:校验文件名(防路径穿越)+ 统一扩展名
+	sanitizedName, serr := sanitizeSubscribeFilename(filename)
+	if serr != nil {
+		writeBadRequest(w, serr.Error())
+		return
 	}
+	filename = sanitizedName
 
 	// 读取并验证YAML格式
 	content, err := io.ReadAll(file)
@@ -372,6 +444,20 @@ func (h *subscribeFilesHandler) handleUpload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	username := auth.UsernameFromContext(r.Context())
+
+	// 跨用户覆盖防护:filename 已被他人订阅占用则拒绝(写盘前)。
+	if err := h.ensureFilenameWritable(r.Context(), filename, username); err != nil {
+		writeError(w, http.StatusConflict, err)
+		return
+	}
+
+	// 配额校验:普通用户创建订阅受全局配额限制(admin 不限)。(写盘前校验,失败无需回滚文件)
+	if err := checkUserQuota(r.Context(), h.repo, username, "subscribe"); err != nil {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+
 	// 保存文件到subscribes目录
 	subscribesDir := "subscribes"
 	if err := os.MkdirAll(subscribesDir, 0755); err != nil {
@@ -380,17 +466,9 @@ func (h *subscribeFilesHandler) handleUpload(w http.ResponseWriter, r *http.Requ
 	}
 
 	filePath := filepath.Join(subscribesDir, filename)
+	fileExisted := subscribeFileExists(filePath)
 	if err := os.WriteFile(filePath, content, 0644); err != nil {
 		writeError(w, http.StatusInternalServerError, errors.New("保存订阅文件失败"))
-		return
-	}
-
-	username := auth.UsernameFromContext(r.Context())
-
-	// 配额校验:普通用户创建订阅受全局配额限制(admin 不限)。
-	if err := checkUserQuota(r.Context(), h.repo, username, "subscribe"); err != nil {
-		_ = os.Remove(filePath)
-		writeError(w, http.StatusForbidden, err)
 		return
 	}
 
@@ -406,8 +484,10 @@ func (h *subscribeFilesHandler) handleUpload(w http.ResponseWriter, r *http.Requ
 
 	created, err := h.repo.CreateSubscribeFile(r.Context(), subscribeFile)
 	if err != nil {
-		// 如果数据库保存失败，删除已保存的文件
-		_ = os.Remove(filePath)
+		// 数据库保存失败:仅删除本次新建的文件,不动已存在文件(避免误删)
+		if !fileExisted {
+			_ = os.Remove(filePath)
+		}
 		if errors.Is(err, storage.ErrCustomShortCodeExists) {
 			writeError(w, http.StatusConflict, err)
 			return
@@ -515,12 +595,13 @@ func (h *subscribeFilesHandler) handleUpdate(w http.ResponseWriter, r *http.Requ
 	oldFilename := existing.Filename
 	needRenameFile := false
 	if req.Filename != "" && req.Filename != existing.Filename {
-		// 验证新文件名
-		ext := filepath.Ext(req.Filename)
-		if ext != ".yaml" && ext != ".yml" {
-			writeError(w, http.StatusBadRequest, errors.New("文件名必须以 .yaml 或 .yml 结尾"))
+		// 安全:校验新文件名(防路径穿越)+ 统一扩展名
+		sanitizedName, serr := sanitizeSubscribeFilename(req.Filename)
+		if serr != nil {
+			writeError(w, http.StatusBadRequest, serr)
 			return
 		}
+		req.Filename = sanitizedName
 
 		// 检查新文件名是否已被其他订阅使用
 		if existingFile, err := h.repo.GetSubscribeFileByFilename(r.Context(), req.Filename); err == nil && existingFile.ID != id {
