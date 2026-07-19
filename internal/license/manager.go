@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"miaomiaowux/internal/version"
 	"net/http"
@@ -494,9 +493,5 @@ func (m *Manager) StatusForAgent() map[string]any {
 }
 
 func GetMachineID() string {
-	id, err := readMachineID()
-	if err != nil {
-		return fmt.Sprintf("mmwx-%d", time.Now().UnixNano())
-	}
-	return id
+	return persistentMachineID()
 }
