@@ -463,13 +463,8 @@ func (h *XrayServerHandler) CreateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 	if xrayMode != "embedded" {
 		xrayMode = "external"
 	}
-	// embedded 是 PRO feature — 没有许可证拒收。等价于 "external" 不受限。
-	if xrayMode == "embedded" && h.licenseManager != nil && !h.licenseManager.HasFeature("embedded") {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(stdhttp.StatusForbidden)
-		json.NewEncoder(w).Encode(RemoteServerResponse{Success: false, Message: "内嵌 Xray 是 PRO 功能,需要许可证"})
-		return
-	}
+	// 内联(embedded)Xray 本身不再要求许可证 — 无 license 也可创建并运行。
+	// 限速 / 限制连接数等仍是 PRO(见 remote_ws.go 的限速推送 gate),但不影响 embedded 节点的创建与基本运行。
 
 	// Agent 监听端口:有效范围 1024-65535;0 表示用 agent 内置默认 23889
 	listenPort := req.ListenPort
@@ -810,13 +805,7 @@ func (h *XrayServerHandler) UpdateRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		return
 	}
 
-	// embedded 是 PRO feature — update 路径也要拦,防止用户先 external 创建再 update 提权。
-	if req.XrayMode == "embedded" && oldServer.XrayMode != "embedded" && h.licenseManager != nil && !h.licenseManager.HasFeature("embedded") {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(stdhttp.StatusForbidden)
-		json.NewEncoder(w).Encode(RemoteServerResponse{Success: false, Message: "内嵌 Xray 是 PRO 功能,需要许可证"})
-		return
-	}
+	// 内联(embedded)Xray 不再要求许可证,update 路径同样放开(与创建保持一致)。
 
 	// 检测 traffic_source 是否变更 — 用于切换时自动迁移 offset,让 server.traffic_used 显示值连续,
 	// 避免用户从 xray 切到 system 时数字突然变小(只剩主控升级以来累积的几小时 system 流量),

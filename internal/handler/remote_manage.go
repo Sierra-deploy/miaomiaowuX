@@ -3656,6 +3656,8 @@ func (h *RemoteManageHandler) inboundToClashProxy(inbound map[string]interface{}
 		"name":   nodeName,
 		"server": serverHost,
 		"port":   nodePort,
+		// 默认开启 UDP 转发(clash/mihomo 里 udp:true 表示该代理支持 UDP relay)。
+		"udp": true,
 	}
 
 	switch protocol {
@@ -3809,6 +3811,9 @@ func (h *RemoteManageHandler) inboundToClashProxy(inbound map[string]interface{}
 			}
 			proxy["obfs-opts"] = obfsOpts
 		}
+		// snell 额外默认参数:端口复用 + TCP Fast Open。
+		proxy["reuse"] = true
+		proxy["tfo"] = true
 
 	default:
 		return nil, fmt.Errorf("unsupported protocol: %s", protocol)
