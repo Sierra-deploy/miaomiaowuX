@@ -566,11 +566,6 @@ type SystemConfig struct {
 	SilentModeTimeout           int    // 获取订阅后恢复访问的分钟数，默认15
 	EnableMiaomiaowuFeatures    bool   // 启用妙妙屋功能（模板、订阅管理等菜单）
 	DefaultTemplateFilename     string // 默认模板文件名（rule_templates/目录下）
-	// 兼容妙妙屋短链接:旧版 mmw 用 /<code> 形式,新版 mmwx 用 /x/<code>。
-	// 开启后,直接 GET /<code>(无 /x/ 前缀)会尝试匹配同 code 的 /x/ 短链;命中则放行,
-	// 未命中按安全规则计入暴力枚举失败计数。
-	EnableMmwShortLinkCompat bool
-
 	// 节点名称倍率前缀:订阅生成时,套餐内 multiplier != 1 的节点 name 前面加
 	// "{Left}{multiplier}{Right}" 前缀;Left/Right 默认 「」,用户可改。
 	NodeNameMultiplierPrefixEnabled bool
@@ -1896,9 +1891,6 @@ CREATE INDEX IF NOT EXISTS idx_override_scripts_hook ON override_scripts(hook);
 		return err
 	}
 	if err := r.ensureSystemConfigColumn("enable_miaomiaowu_features", "INTEGER NOT NULL DEFAULT 1"); err != nil {
-		return err
-	}
-	if err := r.ensureSystemConfigColumn("enable_mmw_short_link_compat", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := r.ensureSystemConfigColumn("default_template_filename", "TEXT NOT NULL DEFAULT ''"); err != nil {
@@ -3877,7 +3869,7 @@ func (r *TrafficRepository) GetOrCreateUserToken(ctx context.Context, username s
 		// 使用重试逻辑生成新令牌和用户短代码
 		newToken := uuid.NewString()
 		const maxRetries = 10
-		for i := 0; i < maxRetries; i++ {
+		for range maxRetries {
 			newUserShortCode, err := generateUserShortCode()
 			if err != nil {
 				return "", fmt.Errorf("generate user short code: %w", err)
@@ -3914,7 +3906,7 @@ func (r *TrafficRepository) ResetUserToken(ctx context.Context, username string)
 
 	// 生成具有重试逻辑的新用户短代码
 	const maxRetries = 10
-	for i := 0; i < maxRetries; i++ {
+	for range maxRetries {
 		newUserShortCode, err := generateUserShortCode()
 		if err != nil {
 			return "", fmt.Errorf("generate user short code: %w", err)
@@ -4027,7 +4019,7 @@ func (r *TrafficRepository) generateMissingFileShortCodes() error {
 	// 为每个文件生成文件短代码
 	for _, id := range fileIDs {
 		const maxRetries = 10
-		for i := 0; i < maxRetries; i++ {
+		for range maxRetries {
 			newShortCode, err := generateFileShortCode()
 			if err != nil {
 				return fmt.Errorf("generate file short code: %w", err)
@@ -4068,7 +4060,7 @@ func (r *TrafficRepository) generateMissingUserShortCodes() error {
 	// 为每个用户生成用户短代码
 	for _, username := range usernames {
 		const maxRetries = 10
-		for i := 0; i < maxRetries; i++ {
+		for range maxRetries {
 			newShortCode, err := generateUserShortCode()
 			if err != nil {
 				return fmt.Errorf("generate user short code: %w", err)
@@ -4110,7 +4102,7 @@ func (r *TrafficRepository) ensureAllUsersHaveTokens() error {
 	for _, username := range usernames {
 		token := uuid.NewString()
 		const maxRetries = 10
-		for i := 0; i < maxRetries; i++ {
+		for range maxRetries {
 			shortCode, err := generateUserShortCode()
 			if err != nil {
 				return fmt.Errorf("generate user short code: %w", err)
@@ -4163,7 +4155,7 @@ func (r *TrafficRepository) generateMissingPackageShortCodes() error {
 
 	for _, id := range ids {
 		const maxRetries = 10
-		for i := 0; i < maxRetries; i++ {
+		for range maxRetries {
 			code, err := generatePackageShortCode()
 			if err != nil {
 				return err
@@ -5634,10 +5626,7 @@ func (r *TrafficRepository) UpsertUserSettings(ctx context.Context, settings Use
 		syncScope = "saved_only"
 	}
 
-	cacheExpireMinutes := settings.CacheExpireMinutes
-	if cacheExpireMinutes < 0 {
-		cacheExpireMinutes = 0
-	}
+	cacheExpireMinutes := max(settings.CacheExpireMinutes, 0)
 
 	// 将node_order序列化为JSON
 	nodeOrderJSON := "[]"
@@ -5996,7 +5985,7 @@ func (r *TrafficRepository) ListCustomRules(ctx context.Context, ruleType string
 	}
 
 	var query string
-	var args []interface{}
+	var args []any
 
 	if ruleType != "" {
 		query = `SELECT id, name, type, mode, content, enabled, COALESCE(created_by,''), created_at, updated_at FROM custom_rules WHERE type = ? ORDER BY created_at DESC`
@@ -6219,7 +6208,7 @@ func (r *TrafficRepository) ListEnabledCustomRules(ctx context.Context, ruleType
 	}
 
 	var query string
-	var args []interface{}
+	var args []any
 
 	if ruleType != "" {
 		query = `SELECT id, name, type, mode, content, enabled, COALESCE(created_by, ''), created_at, updated_at FROM custom_rules WHERE type = ? AND enabled = 1 ORDER BY created_at DESC`
@@ -6767,7 +6756,6 @@ SELECT proxy_groups_source_url, client_compatibility_mode, COALESCE(enable_short
        COALESCE(subscription_output_format, 'yaml'),
        COALESCE(silent_mode, 0), COALESCE(silent_mode_timeout, 15),
        COALESCE(enable_miaomiaowu_features, 1), COALESCE(default_template_filename, ''),
-       COALESCE(enable_mmw_short_link_compat, 0),
        COALESCE(node_name_multiplier_prefix_enabled, 0),
        COALESCE(node_name_multiplier_left, '「'),
        COALESCE(node_name_multiplier_right, '」'),
@@ -6792,7 +6780,7 @@ WHERE id = 1
 	var notifyEnabled, notifyLogin, notifySubFetch, notifyDailyTraffic int
 	var notifyServerOffline, notifyServerOnline, notifyTrafficThreshold int
 	var enableOverrideScripts, silentMode, silentModeTimeout int
-	var enableMiaomiaowuFeatures, enableMmwShortLinkCompat int
+	var enableMiaomiaowuFeatures int
 	var nodeNameMultPrefixEnabled int
 	var notifyTH80, notifyOverLimit, notifyPkgExpiring, notifyPkgExpired int
 	var notifyUserReg, notifyTGBound, notifyCert, notifyAgentLO, notifyDeviceLimit, notifyIPBan int
@@ -6809,7 +6797,6 @@ WHERE id = 1
 		&cfg.SubscriptionOutputFormat,
 		&silentMode, &silentModeTimeout,
 		&enableMiaomiaowuFeatures, &cfg.DefaultTemplateFilename,
-		&enableMmwShortLinkCompat,
 		&nodeNameMultPrefixEnabled, &cfg.NodeNameMultiplierLeft, &cfg.NodeNameMultiplierRight,
 		&notifyTH80, &notifyOverLimit, &notifyPkgExpiring, &cfg.NotifyPackageExpiringDays,
 		&notifyPkgExpired, &notifyUserReg, &notifyTGBound, &notifyCert, &notifyAgentLO,
@@ -6842,7 +6829,6 @@ WHERE id = 1
 		cfg.SilentModeTimeout = 15
 	}
 	cfg.EnableMiaomiaowuFeatures = enableMiaomiaowuFeatures != 0
-	cfg.EnableMmwShortLinkCompat = enableMmwShortLinkCompat != 0
 	cfg.NodeNameMultiplierPrefixEnabled = nodeNameMultPrefixEnabled != 0
 	cfg.NotifyTrafficThreshold80 = notifyTH80 != 0
 	cfg.NotifyOverLimit = notifyOverLimit != 0
@@ -6893,7 +6879,6 @@ SET proxy_groups_source_url = ?,
     silent_mode_timeout = ?,
     enable_miaomiaowu_features = ?,
     default_template_filename = ?,
-    enable_mmw_short_link_compat = ?,
     node_name_multiplier_prefix_enabled = ?,
     node_name_multiplier_left = ?,
     node_name_multiplier_right = ?,
@@ -6975,7 +6960,6 @@ WHERE id = 1
 		subOutFmt,
 		boolToInt(cfg.SilentMode), silentModeTimeout,
 		boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename,
-		boolToInt(cfg.EnableMmwShortLinkCompat),
 		boolToInt(cfg.NodeNameMultiplierPrefixEnabled), nnmLeft, nnmRight,
 		boolToInt(cfg.NotifyTrafficThreshold80), boolToInt(cfg.NotifyOverLimit),
 		boolToInt(cfg.NotifyPackageExpiring), pkgExpiringDays,
@@ -7000,7 +6984,7 @@ INSERT INTO system_config (id, proxy_groups_source_url, client_compatibility_mod
     notify_daily_traffic, notify_server_offline, notify_server_online, notify_traffic_threshold,
     notify_daily_traffic_time, notify_traffic_threshold_percent, enable_override_scripts,
     subscription_output_format,
-    silent_mode, silent_mode_timeout, enable_miaomiaowu_features, default_template_filename, enable_mmw_short_link_compat,
+    silent_mode, silent_mode_timeout, enable_miaomiaowu_features, default_template_filename,
     node_name_multiplier_prefix_enabled, node_name_multiplier_left, node_name_multiplier_right,
     notify_traffic_threshold_80, notify_over_limit, notify_package_expiring, notify_package_expiring_days,
     notify_package_expired, notify_user_registered, notify_telegram_bound, notify_cert_result,
@@ -7017,7 +7001,6 @@ VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
 			subOutFmt,
 			boolToInt(cfg.SilentMode), silentModeTimeout,
 			boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename,
-			boolToInt(cfg.EnableMmwShortLinkCompat),
 			boolToInt(cfg.NodeNameMultiplierPrefixEnabled), nnmLeft, nnmRight,
 			boolToInt(cfg.NotifyTrafficThreshold80), boolToInt(cfg.NotifyOverLimit),
 			boolToInt(cfg.NotifyPackageExpiring), pkgExpiringDays,
@@ -11582,7 +11565,7 @@ func (r *TrafficRepository) GetTrafficSnapshots(ctx context.Context, serverID in
 	startDate := time.Now().AddDate(0, 0, -days).Format("2006-01-02")
 
 	var query string
-	var args []interface{}
+	var args []any
 	if serverID > 0 {
 		query = `SELECT id, server_id, date, inbound_uplink, inbound_downlink, outbound_uplink, outbound_downlink, user_uplink, user_downlink, created_at FROM traffic_snapshots WHERE server_id = ? AND date >= ? ORDER BY date ASC`
 		args = []interface{}{serverID, startDate}
