@@ -617,6 +617,7 @@ func main() {
 	mux.Handle("/api/admin/remote/xray/config/files", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleXrayConfigFiles)))
 	mux.Handle("/api/admin/remote/nginx/install", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleNginxInstall)))
 	mux.Handle("/api/admin/remote/nginx/remove", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleNginxRemove)))
+	mux.Handle("/api/admin/remote/proxy-master", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleProxyMaster)))
 	// Cloudflare WARP — 每个 agent 各自注册 + 注入 warp-v4 / warp-v6 双 outbound
 	mux.Handle("/api/admin/remote/warp/install", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleWarpInstall)))
 	mux.Handle("/api/admin/remote/warp/status", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleWarpStatus)))

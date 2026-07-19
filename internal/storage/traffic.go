@@ -739,6 +739,9 @@ type RemoteServer struct {
 	// WarpInstalled agent 已注册 Cloudflare WARP(warp.json 存在 + device_id 非空)。
 	// agent 在 auth + heartbeat 时上报;master 用来在 server 卡片渲染空心 W 图标 badge。
 	WarpInstalled        bool       `json:"warp_installed"`
+	// SameHostAsMaster agent 与主控同机(agent auth/heartbeat 上报)。前端据此 + 主控 is_docker 决定
+	// 是否显示「反代主控」入口(宿主机 agent 反代 Docker 主控开 HTTPS)。
+	SameHostAsMaster     bool       `json:"same_host_as_master"`
 	Domain               string     `json:"domain,omitempty"`
 	// DomainV6 给 IPv6 节点用的专用域名(AAAA 记录)。空则 v6 节点回落到 IPAddressV6 字面地址。
 	// 与 Domain(v4/通用)分开:双栈机 v4 走 Domain/IP、v6 走 DomainV6,互不干扰。
@@ -2136,6 +2139,10 @@ CREATE INDEX IF NOT EXISTS idx_remote_servers_status ON remote_servers(status);
 	}
 	// WARP 安装状态 — agent 在 auth/heartbeat 时上报,master 用于 server 卡片 W badge 显示
 	if err := r.ensureRemoteServerColumn("warp_installed", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	// 与主控同机 — agent 在 auth/heartbeat 时上报,前端据此 + is_docker 决定是否显示「反代主控」
+	if err := r.ensureRemoteServerColumn("same_host_as_master", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	// 双令牌系统字段
@@ -9461,6 +9468,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		COALESCE(traffic_stats_mode, 'both'),
 		COALESCE(traffic_source, 'xray'),
 		COALESCE(warp_installed, 0),
+		COALESCE(same_host_as_master, 0),
 		COALESCE(ddns_enabled, 0), COALESCE(ddns_provider_id, 0), ddns_last_synced_at, COALESCE(ddns_last_error, ''), COALESCE(ddns_pending, 0),
 		last_traffic_reset_at,
 		EXISTS(SELECT 1 FROM federated_servers fs WHERE fs.server_id = remote_servers.id),
@@ -9479,7 +9487,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		var lastHeartbeat, tokenExpiresAt, lastTokenRefresh, lastPullAt, lastPushFail, fallbackAt, speedUpdatedAt, xrayScannedAt sql.NullTime
 		var bootTime, xrayBootTime sql.NullString
 		var agentTokenExpiresAt, lastAgentTokenRefresh sql.NullTime
-		var fallbackToPull, xrayRunning, warpInstalledInt int
+		var fallbackToPull, xrayRunning, warpInstalledInt, sameHostInt int
 		var timeOffsetSeconds int64
 		var ddnsEnabledInt, ddnsPendingInt int
 		var ddnsLastSyncedAt sql.NullTime
@@ -9501,6 +9509,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 			&server.TrafficStatsMode,
 			&server.TrafficSource,
 			&warpInstalledInt,
+			&sameHostInt,
 			&ddnsEnabledInt, &server.DDNSProviderID, &ddnsLastSyncedAt, &server.DDNSLastError, &ddnsPendingInt,
 			&lastTrafficResetAt,
 			&server.IsFederated,
@@ -9551,6 +9560,7 @@ func (r *TrafficRepository) ListRemoteServers(ctx context.Context) ([]RemoteServ
 		server.FallbackToPull = fallbackToPull != 0
 		server.XrayRunning = xrayRunning != 0
 		server.WarpInstalled = warpInstalledInt != 0
+		server.SameHostAsMaster = sameHostInt != 0
 		if timeOffsetSeconds != 0 {
 			server.TimeOffsetSeconds = &timeOffsetSeconds
 		}
@@ -9590,6 +9600,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		COALESCE(traffic_stats_mode, 'both'),
 		COALESCE(traffic_source, 'xray'),
 		COALESCE(warp_installed, 0),
+		COALESCE(same_host_as_master, 0),
 		COALESCE(ddns_enabled, 0), COALESCE(ddns_provider_id, 0), ddns_last_synced_at, COALESCE(ddns_last_error, ''), COALESCE(ddns_pending, 0),
 		last_traffic_reset_at,
 		created_at, updated_at
@@ -9599,7 +9610,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 	var lastHeartbeat, tokenExpiresAt, lastTokenRefresh, lastPullAt sql.NullTime
 	var bootTime, xrayBootTime sql.NullString
 	var agentTokenExpiresAt, lastAgentTokenRefresh sql.NullTime
-	var xrayRunningInt, warpInstalledInt int
+	var xrayRunningInt, warpInstalledInt, sameHostInt int
 	var ddnsEnabledInt, ddnsPendingInt int
 	var ddnsLastSyncedAt sql.NullTime
 	var lastTrafficResetAt sql.NullTime
@@ -9619,6 +9630,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 		&server.TrafficStatsMode,
 		&server.TrafficSource,
 		&warpInstalledInt,
+		&sameHostInt,
 		&ddnsEnabledInt, &server.DDNSProviderID, &ddnsLastSyncedAt, &server.DDNSLastError, &ddnsPendingInt,
 		&lastTrafficResetAt,
 		&server.CreatedAt, &server.UpdatedAt)
@@ -9631,6 +9643,7 @@ func (r *TrafficRepository) GetRemoteServer(ctx context.Context, id int64) (*Rem
 
 	server.XrayRunning = xrayRunningInt != 0
 	server.WarpInstalled = warpInstalledInt != 0
+	server.SameHostAsMaster = sameHostInt != 0
 	server.DDNSEnabled = ddnsEnabledInt != 0
 	server.DDNSPending = ddnsPendingInt != 0
 	if ddnsLastSyncedAt.Valid {
@@ -9934,6 +9947,26 @@ func (r *TrafficRepository) UpdateRemoteServerWarpInstalled(ctx context.Context,
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE remote_servers SET warp_installed = ?, updated_at = CURRENT_TIMESTAMP WHERE token = ?`,
 		installedInt, token)
+	return err
+}
+
+// UpdateRemoteServerSameHost 单独同步 same_host_as_master 字段(auth/heartbeat 上报后调)。
+// 老 agent 不上报 → handler 不调本方法 → db 保留旧值(默认 0)。
+func (r *TrafficRepository) UpdateRemoteServerSameHost(ctx context.Context, token string, sameHost bool) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return errors.New("remote server token is required")
+	}
+	v := 0
+	if sameHost {
+		v = 1
+	}
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE remote_servers SET same_host_as_master = ?, updated_at = CURRENT_TIMESTAMP WHERE token = ?`,
+		v, token)
 	return err
 }
 

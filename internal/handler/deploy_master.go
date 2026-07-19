@@ -80,12 +80,21 @@ func (h *CertificateHandler) GetMasterCertStatus(w http.ResponseWriter, r *http.
 		strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https") ||
 		externalHTTPS == "1"
 
+	// is_docker / panel_port:前端据此决定是否显示「宿主机 agent 反代主控」入口
+	// (仅 Docker 部署的主控需要——直装主控自己内置 nginx 开 HTTPS)。
+	panelPort := os.Getenv("PORT")
+	if panelPort == "" {
+		panelPort = "12889"
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"success":       true,
 		"pending":       pending == "true" && domain != "",
 		"domain":        domain,
 		"https_enabled": httpsEnabled,
+		"is_docker":     isDocker(),
+		"panel_port":    panelPort,
 	})
 }
 

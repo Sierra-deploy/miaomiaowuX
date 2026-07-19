@@ -73,6 +73,8 @@ type WSAuthPayload struct {
 	// WarpInstalled agent 本机是否已注册 Cloudflare WARP(成功跑过 EnsureRegistered 且 warp.json 存在)。
 	// 老 agent 不发 = false → server 卡片 W badge 不显示,完全向后兼容。
 	WarpInstalled bool `json:"warp_installed,omitempty"`
+	// SameHostAsMaster agent 与主控同机(反代主控前提)。auth + heartbeat 都带。
+	SameHostAsMaster bool `json:"same_host_as_master,omitempty"`
 	// AgentVersion agent 自身版本号(随 auth 上报)。master 据此显示版本/判断可升级,
 	// 不再反向 HTTP 拉 /api/child/system/info —— 端口隐身(HidePortOnWS)关闭入站后仍可拿到。
 	// 老 agent 不发该字段 = 空串 → fallback 反向 HTTP(向后兼容)。
@@ -180,6 +182,8 @@ type WSHeartbeatPayload struct {
 	PublicIPv6 string `json:"public_ipv6,omitempty"`
 	// WarpInstalled 心跳里也带一份(同 WSAuthPayload),让 master 跟踪 agent 主动 install/remove 后的状态变化。
 	WarpInstalled bool `json:"warp_installed,omitempty"`
+	// SameHostAsMaster agent 与主控同机(反代主控前提)。auth + heartbeat 都带。
+	SameHostAsMaster bool `json:"same_host_as_master,omitempty"`
 }
 
 // WSSpeedPayload 表示实时速度数据负载
@@ -1072,6 +1076,9 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 	if err := h.repo.UpdateRemoteServerWarpInstalled(updateCtx, authPayload.Token, authPayload.WarpInstalled); err != nil {
 		log.Printf("[Remote WS] Failed to update warp_installed for %s: %v", server.Name, err)
 	}
+	if err := h.repo.UpdateRemoteServerSameHost(updateCtx, authPayload.Token, authPayload.SameHostAsMaster); err != nil {
+		log.Printf("[Remote WS] Failed to update same_host_as_master for %s: %v", server.Name, err)
+	}
 
 	// 通知策略:
 	//   - 抢占式重连(hadPrev=true):**不通知**。这是 supervise-daemon 双开 race / agent 升级 /
@@ -1340,6 +1347,9 @@ func (h *RemoteWSHandler) handleHeartbeat(wsConn *RemoteWSConnection, payload js
 	// 心跳里也带 warp_installed,跟踪 agent 主动 install/remove 后的状态变化
 	if err := h.repo.UpdateRemoteServerWarpInstalled(ctx, wsConn.Token, hbPayload.WarpInstalled); err != nil {
 		log.Printf("[Remote WS] Failed to update warp_installed for server %s: %v", wsConn.ServerName, err)
+	}
+	if err := h.repo.UpdateRemoteServerSameHost(ctx, wsConn.Token, hbPayload.SameHostAsMaster); err != nil {
+		log.Printf("[Remote WS] Failed to update same_host_as_master for server %s: %v", wsConn.ServerName, err)
 	}
 
 	ackPayload, _ := json.Marshal(map[string]int64{"server_time": time.Now().Unix()})

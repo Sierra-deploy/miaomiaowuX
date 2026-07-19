@@ -52,7 +52,9 @@ curl -sL https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/install.sh |
 
 ### 方式 2：Docker 部署
 
-> 默认使用 host 网络模式 — 妙妙屋X 需要管理 ACME 80/443、嵌入式 nginx/xray 多端口、agent 反向连接,host 模式比 bridge 端口映射更省心,也避免后续新增端口又要改 compose。
+> 默认使用 host 网络模式 — 便于 agent 反向连接、多端口场景,也避免后续新增端口又要改 compose。
+>
+> **Docker 下开启 HTTPS**:推荐在主控**宿主机**上装一个 agent,用它的 nginx 对外反代主控(容器内没有 systemd,容器内跑 nginx 维护性差)。主控容器只需提供 `12889` 的 http 面板。做法见下方「Docker 开启 HTTPS」。
 
 ```bash
 docker run -d \
@@ -84,6 +86,16 @@ services:
       - ./subscribes:/app/subscribes
       - ./rule_templates:/app/rule_templates
 ```
+
+#### Docker 开启 HTTPS（宿主机 agent 反代）
+
+Docker 主控自身开 HTTPS 推荐用宿主机 agent 反代（容器内无 systemd，内置 nginx 维护性差）：
+
+1. 在主控宿主机上装一个 agent，`master_url` 配成 `http://127.0.0.1:12889`（本机直连）；
+2. 在主控「服务管理」里给这台 agent 安装 nginx；
+3. 点「反代主控」按钮：主控自动申请证书并下发，agent 的 nginx 对外 443 反代到 `127.0.0.1:12889`，主控域名即可走 HTTPS。
+
+> 备选：容器内置 nginx 也能开 HTTPS（镜像已预装），但需 host 网络或额外映射 80/443，不推荐。
 
 ### 方式 3：二进制部署
 

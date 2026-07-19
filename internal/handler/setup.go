@@ -400,13 +400,9 @@ func deployLocalNginxWithCert(domain string, cert *storage.Certificate) error {
 	if nginxBin == "" {
 		return fmt.Errorf("未找到 nginx 可执行文件")
 	}
-	if err := exec.Command(nginxBin, "-s", "reload").Run(); err != nil {
-		logger.Warn("[本机Nginx] reload 失败，尝试启动", "error", err)
-		if startErr := exec.Command("systemctl", "start", "nginx").Run(); startErr != nil {
-			return fmt.Errorf("nginx 启动失败: %w", startErr)
-		}
-	}
-	return nil
+	// 统一走 ensureNginxRunning:先 reload,失败时 Docker 用裸 nginx 拉起、裸机才 systemctl。
+	// 之前这里直接 fallback systemctl,Docker 容器无 systemd → 报「systemctl 不在 $PATH」。
+	return ensureNginxRunning(nginxBin)
 }
 
 func deployCertToLocal(domain string, repo *storage.TrafficRepository) {
