@@ -668,6 +668,14 @@ func (h *SystemSettingsHandler) SetAgentLogEnabled(w http.ResponseWriter, r *htt
 		return
 	}
 	agentlog.SetEnabled(req.AgentLogEnabled)
+	// 同步下发给所有在线 agent —— agent 侧的流量上报等高频日志也受此开关控制(默认关闭)
+	if h.wsHandler != nil {
+		val := "0"
+		if req.AgentLogEnabled {
+			val = "1"
+		}
+		h.wsHandler.BroadcastConfigUpdate(map[string]string{"agent_log_enabled": val})
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{"success": true, "message": "Agent日志设置已更新"})
 }

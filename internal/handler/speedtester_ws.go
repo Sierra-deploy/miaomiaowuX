@@ -29,6 +29,7 @@ type stWSMsg struct {
 	Bytes       int64   `json:"bytes,omitempty"`
 	URL         string  `json:"url,omitempty"`
 	Threads     int     `json:"threads,omitempty"`      // 并发下载线程数(默认 1)
+	BufSize     int64   `json:"buf_size,omitempty"`     // 每次收发 buffer 字节数(默认 1MB;旧测速端忽略此字段)
 	LatencyOnly bool    `json:"latency_only,omitempty"` // true 仅测真连接延迟(Cloudflare 204)
 	DownMbps    float64 `json:"down_mbps,omitempty"`
 	LatencyMs   int64   `json:"latency_ms,omitempty"`
@@ -138,7 +139,7 @@ func (h *SpeedTesterWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 
 // Dispatch 把测速任务派给指定在线测速端,阻塞等结果(带超时)。
 // threads >= 2 时启用多线程下载;latencyOnly=true 时跳过下载只测 Cloudflare 204 真延迟。
-func (h *SpeedTesterWSHandler) Dispatch(ctx context.Context, testerID int64, clashConfig string, bytes int64, url string, threads int, latencyOnly bool) (speedtest.Result, error) {
+func (h *SpeedTesterWSHandler) Dispatch(ctx context.Context, testerID int64, clashConfig string, bytes int64, url string, threads int, bufSize int64, latencyOnly bool) (speedtest.Result, error) {
 	// 散布验签:测速端反连 WS 派发任务也是 speed_test 的运行时路径之一(无 handler 调用,只能在这里拦)。
 	// 错误消息复用 "测速端不在线" 避免泄露 license 校验失败 → 用户体验上跟"测速端真离线"一致。
 	if h.license != nil && !h.license.HasFeature("speed_test") {
@@ -156,7 +157,7 @@ func (h *SpeedTesterWSHandler) Dispatch(ctx context.Context, testerID int64, cla
 
 	if err := tc.send(stWSMsg{
 		Type: "run", JobID: jobID, ClashConfig: clashConfig,
-		Bytes: bytes, URL: url, Threads: threads, LatencyOnly: latencyOnly,
+		Bytes: bytes, URL: url, Threads: threads, BufSize: bufSize, LatencyOnly: latencyOnly,
 	}); err != nil {
 		return speedtest.Result{}, errors.New("下发任务失败: " + err.Error())
 	}

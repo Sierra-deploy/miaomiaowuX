@@ -716,6 +716,11 @@ func (h *XrayServerHandler) DeleteRemoteServer(w stdhttp.ResponseWriter, r *stdh
 		h.remoteManager.inboundCache.Invalidate(req.ID)
 	}
 
+	// 删除后名额顺移:原先超额的服务器可能顶上名额 → 重算并下发 xray 授权。
+	if h.wsHandler != nil {
+		go h.wsHandler.ReconcileServerQuota(context.Background())
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(RemoteServerResponse{
 		Success: true,
@@ -746,6 +751,10 @@ func (h *XrayServerHandler) ReorderRemoteServers(w stdhttp.ResponseWriter, r *st
 	if err := h.repo.ReorderRemoteServers(r.Context(), req.IDs); err != nil {
 		_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "message": err.Error()})
 		return
+	}
+	// 拖动改变 sort_order → 谁在配额内随之变化,重算并下发 xray 授权。
+	if h.wsHandler != nil {
+		go h.wsHandler.ReconcileServerQuota(context.Background())
 	}
 	_ = json.NewEncoder(w).Encode(map[string]any{"success": true})
 }

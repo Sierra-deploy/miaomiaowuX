@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"miaomiaowux/internal/agentlog"
 	"miaomiaowux/internal/storage"
 	"miaomiaowux/internal/taskrun"
 )
@@ -369,7 +370,7 @@ func (c *Collector) ProcessMetrics(ctx context.Context, serverID int64, metrics 
 	//   - _admin__ 前缀的占位 client,流量丢弃(管理员测试用,不属任何用户)
 	aggregateAndUpsertUserTraffic(ctx, c.repo, serverID, stats.User, isRestart)
 
-	log.Printf("[Traffic Collector] Processed metrics for server %d: %d inbounds, %d outbounds, %d users",
+	agentlog.Printf("[Traffic Collector] Processed metrics for server %d: %d inbounds, %d outbounds, %d users",
 		serverID, len(stats.Inbound), len(stats.Outbound), len(stats.User))
 
 	return nil
@@ -403,7 +404,7 @@ func (c *Collector) ProcessRemoteMetrics(ctx context.Context, serverID int64, st
 	// 用户流量同上 — 必须先按 username 聚合
 	aggregateAndUpsertUserTraffic(ctx, c.repo, serverID, stats.User, isRestart)
 
-	log.Printf("[Traffic Collector] Processed remote metrics for server %d: %d inbounds, %d outbounds, %d users",
+	agentlog.Printf("[Traffic Collector] Processed remote metrics for server %d: %d inbounds, %d outbounds, %d users",
 		serverID, len(stats.Inbound), len(stats.Outbound), len(stats.User))
 
 	return nil

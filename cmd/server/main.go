@@ -468,6 +468,20 @@ func main() {
 	licenseManager.SetOnRecover(func() {
 		limiterPusher.PushToAllEmbeddedServers(context.Background())
 	})
+	// license「服务器配额」变化(到期/降级/恢复)时,重算 per-server xray 授权并下发给在线 agent:
+	// 超额服务器停 xray、拿到名额的启 xray。
+	licenseManager.SetOnQuotaChange(func() {
+		remoteWSHandler.ReconcileServerQuota(context.Background())
+	})
+	// 5min 定期兜底:即便漏了某次事件触发(如下发时 agent 恰好离线),也能在下个周期把
+	// 授权重新对齐(agent 侧幂等,值没变不会反复启停 xray)。
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			remoteWSHandler.ReconcileServerQuota(context.Background())
+		}
+	}()
 	xrayServerHandler.SetLimiterPusher(limiterPusher)
 	xrayServerHandler.SetLicenseManager(licenseManager)
 

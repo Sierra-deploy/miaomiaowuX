@@ -90,12 +90,22 @@ type Manager struct {
 	cancel    context.CancelFunc
 	// onRecover 在 license 从 invalid→valid 恢复时异步触发(如重推 limiter — 失效期被 gate 漏下发的补上)。
 	onRecover func()
+	// onQuotaChange 在「有效服务器配额」变化(valid 翻转或 Plan.MaxServers 变化)时异步触发,
+	// 由 handler 注册为「重算 per-server 授权并下发给在线 agent」。
+	onQuotaChange func()
 }
 
 // SetOnRecover 注册 license 从失效恢复为有效时的回调(例如重推 limiter 配置)。启动前调一次。
 func (m *Manager) SetOnRecover(cb func()) {
 	m.mu.Lock()
 	m.onRecover = cb
+	m.mu.Unlock()
+}
+
+// SetOnQuotaChange 注册「有效服务器配额变化」时的回调(重算并下发 per-server xray 授权)。启动前调一次。
+func (m *Manager) SetOnQuotaChange(cb func()) {
+	m.mu.Lock()
+	m.onQuotaChange = cb
 	m.mu.Unlock()
 }
 
@@ -147,6 +157,11 @@ func (m *Manager) GetStatus() Status {
 func (m *Manager) IsValid() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	return m.isValidLocked()
+}
+
+// isValidLocked 是 IsValid 的无锁版,调用方须持有 m.mu(R 或 W)。
+func (m *Manager) isValidLocked() bool {
 	if m.status.HardRevoked {
 		// 服务器明确否决 → 立即失效,不进 grace。
 		return false
@@ -156,6 +171,25 @@ func (m *Manager) IsValid() bool {
 		return m.withinGracePeriod()
 	}
 	return true
+}
+
+// QuotaEnforced 仅在「配置了 license key」时为 true。
+// 无 key 的开源自建主控走 defaultStatus(MaxServers=1),不能拿它当配额执行——否则会把自建砍到只剩 1 台。
+func (m *Manager) QuotaEnforced() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.key != ""
+}
+
+// EffectiveServerQuota 返回当前生效的服务器配额:有效且有 Plan → Plan.MaxServers,否则 0。
+// 走 isValidLocked(含 24h grace / HardRevoked),天然继承 429/网络故障容错——临时拿不到 license 不会误判配额变少。
+func (m *Manager) EffectiveServerQuota() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if !m.isValidLocked() || m.status.Plan == nil {
+		return 0
+	}
+	return m.status.Plan.MaxServers
 }
 
 // HasFeature 校验当前 license 是否启用某 PRO feature。
@@ -368,6 +402,8 @@ func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce 
 
 	// 记录变更前是否有效,用于 invalid→valid 恢复回调(重推 limiter 等)。
 	wasValid := m.IsValid()
+	// 记录变更前的有效配额,用于「配额变化 → 重算下发 per-server 授权」回调。
+	oldQuota := m.EffectiveServerQuota()
 
 	m.mu.Lock()
 
@@ -392,6 +428,7 @@ func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce 
 	}
 
 	cb := m.onRecover
+	quotaCb := m.onQuotaChange
 	m.mu.Unlock()
 
 	m.persistStatus(ctx)
@@ -400,6 +437,11 @@ func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce 
 	// 否则限速要等 agent 下次重连/用户改配置才恢复)。
 	if result.Valid && !wasValid && cb != nil {
 		go cb()
+	}
+
+	// 有效配额变化(valid 翻转或 Plan.MaxServers 变化)→ 重算并下发 per-server xray 授权。
+	if quotaCb != nil && m.EffectiveServerQuota() != oldQuota {
+		go quotaCb()
 	}
 }
 

@@ -1124,6 +1124,21 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 		}
 	}
 
+	// 连接/重连时下发当前 debug 日志开关(agent_log_enabled)。agent 侧流量上报等高频日志受此开关控制,
+	// 默认关闭;新连/重连的 agent 据此立即采用现有配置(BroadcastConfigUpdate 只覆盖 admin 主动改动的场景)。
+	if h.repo != nil {
+		if cfg, cerr := h.repo.GetSystemConfig(context.Background()); cerr == nil {
+			logVal := "0"
+			if cfg.AgentLogEnabled {
+				logVal = "1"
+			}
+			go func(c *RemoteWSConnection, v string) {
+				payload, _ := json.Marshal(map[string]string{"agent_log_enabled": v})
+				_ = h.sendEncryptedMessage(c, WSMessage{Type: WSMsgTypeConfigUpdate, Payload: payload})
+			}(wsConn, logVal)
+		}
+	}
+
 	// embedded 模式：认证成功后推送限速配置
 	// 散布验签:WS auth 路径上再校验一次 embedded license。即便 Step A 入口被绕过、
 	// DB 里有 embedded server,连接成功推限速前再拦截一道(limiterPusher 内部 PushToServer
@@ -1137,6 +1152,10 @@ func (h *RemoteWSHandler) handleAuth(conn *websocket.Conn, preAuthConn *RemoteWS
 	// agent 上线 → 下发当前伪装探针采集配置(开关 + ping 目标)。新 agent 才认这些 key,
 	// 旧 agent 忽略。若伪装未开/该 server 未选中,下发全 "0" 让 agent 不采集。
 	go h.PushProbeConfigToAgent(context.Background(), server.ID)
+
+	// agent 上线 → 立即下发该 server 的 xray 授权(是否在许可证配额内)。超额 → agent 停 xray;
+	// 在配额内 → agent 启 xray。无 license key(开源自建)时 reconcileOne 内部直接跳过、不介入。
+	go h.reconcileOne(server.ID)
 
 	// xray 配置 snapshot 同步: server.Status 在 UpdateRemoteServerHeartbeat 之前抓取的就是上次状态
 	// (上面 644 行 update 实际是异步,但 server 这个对象是 GetRemoteServerByToken 拿到的快照,字段不会被改写)。
