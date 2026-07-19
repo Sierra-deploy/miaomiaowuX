@@ -211,7 +211,9 @@ func addDirToZip(zipWriter *zip.Writer, srcDir, baseInZip string) error {
 		if err != nil {
 			return err
 		}
-		header.Name = zipPath
+		// zip 规范用正斜杠作路径分隔符;Windows 上 filepath.Join 产出反斜杠,
+		// 若不转换,恢复端按 "data/" / "subscribes/" 前缀匹配不到 → 误判"备份无效"。
+		header.Name = filepath.ToSlash(zipPath)
 		header.Method = zip.Deflate
 
 		writer, err := zipWriter.CreateHeader(header)
@@ -245,10 +247,13 @@ func extractZipReader(reader *zip.Reader) error {
 	hasData := false
 	hasSubscribes := false
 	for _, f := range reader.File {
-		if strings.HasPrefix(f.Name, "data/") {
+		// 显式把反斜杠换成正斜杠:兼容旧版在 Windows 上生成的备份(zip 内路径为 data\...)。
+		// 注意不能用 filepath.ToSlash —— 它只在 Windows 生效,Linux 主控恢复 Windows 备份时不处理反斜杠。
+		name := strings.ReplaceAll(f.Name, "\\", "/")
+		if strings.HasPrefix(name, "data/") {
 			hasData = true
 		}
-		if strings.HasPrefix(f.Name, "subscribes/") {
+		if strings.HasPrefix(name, "subscribes/") {
 			hasSubscribes = true
 		}
 	}
@@ -258,17 +263,20 @@ func extractZipReader(reader *zip.Reader) error {
 	}
 
 	for _, f := range reader.File {
+		// 显式换掉反斜杠(兼容旧 Windows 备份);filepath.ToSlash 在 Linux 不处理反斜杠,故不能用。
+		name := strings.ReplaceAll(f.Name, "\\", "/")
+
 		// 安全检查：防止路径穿越
-		if strings.Contains(f.Name, "..") {
+		if strings.Contains(name, "..") {
 			continue
 		}
 
 		// 只提取 data/ 和 subscribes/ 目录
-		if !strings.HasPrefix(f.Name, "data/") && !strings.HasPrefix(f.Name, "subscribes/") {
+		if !strings.HasPrefix(name, "data/") && !strings.HasPrefix(name, "subscribes/") {
 			continue
 		}
 
-		destPath := f.Name
+		destPath := filepath.FromSlash(name)
 
 		if f.FileInfo().IsDir() {
 			if err := os.MkdirAll(destPath, 0755); err != nil {
