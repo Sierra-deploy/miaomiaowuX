@@ -478,6 +478,27 @@ func substituteNodesForUser(ctx context.Context, repo *storage.TrafficRepository
 	return out
 }
 
+// ensureUDPDefault 给 proxy-map JSON 补 udp:true(仅当未显式设置 udp 时)。
+// 空串或解析失败原样返回,避免凭空破坏配置。尊重用户显式写的 udp:false。
+func ensureUDPDefault(configJSON string) string {
+	if strings.TrimSpace(configJSON) == "" {
+		return configJSON
+	}
+	var proxy map[string]any
+	if err := json.Unmarshal([]byte(configJSON), &proxy); err != nil {
+		return configJSON
+	}
+	if _, ok := proxy["udp"]; ok {
+		return configJSON
+	}
+	proxy["udp"] = true
+	raw, err := json.Marshal(proxy)
+	if err != nil {
+		return configJSON
+	}
+	return string(raw)
+}
+
 func (h *nodesHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	username := auth.UsernameFromContext(r.Context())
 	if username == "" {
@@ -537,6 +558,11 @@ func (h *nodesHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger.Info("[节点创建] 校验通过 - 节点名称, 用户", "node_name", req.NodeName, "user", username)
+
+	// 新建节点默认开启 UDP 转发(clash/mihomo 里 udp:true)。用户手动创建/导入的节点
+	// 不像 agent 同步那样默认带 udp,这里补上;仅在未显式设置时补,尊重用户写的 udp:false。
+	req.ClashConfig = ensureUDPDefault(req.ClashConfig)
+	req.ParsedConfig = ensureUDPDefault(req.ParsedConfig)
 
 	node := storage.Node{
 		Username:     username,

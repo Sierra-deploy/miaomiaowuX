@@ -388,8 +388,26 @@ func tailFile(path string, n int) (string, error) {
 	}
 
 	content := buf.Bytes()
+
+	// 文件末尾没有换行符 = 最后一行正被写入(日志写盘与本次读取并发),
+	// 此时最后一段是不完整的半行(前端会看到 `"[Rem` 这种截断)。丢掉它 ——
+	// 下一次刷新(轮询/WS)时它已写完 \n,会作为完整行返回。
+	if len(content) > 0 && content[len(content)-1] != '\n' {
+		if i := bytes.LastIndexByte(content, '\n'); i >= 0 {
+			content = content[:i]
+		} else {
+			// 整个缓冲区里一个换行都没有(极端情况:单行超长且未写完)→ 无完整行可返回
+			content = nil
+		}
+	}
+
+	// 去掉末尾残留的换行,便于按 \n split
 	for len(content) > 0 && content[len(content)-1] == '\n' {
 		content = content[:len(content)-1]
+	}
+
+	if len(content) == 0 {
+		return "", nil
 	}
 
 	allLines := bytes.Split(content, []byte{'\n'})

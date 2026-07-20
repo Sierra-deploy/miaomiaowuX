@@ -858,8 +858,10 @@ func main() {
 	mux.HandleFunc("/api/public/login-wallpaper", systemSettingsHandler.GetLoginWallpaperPublic)
 
 	// 真探针数据的内存 ring(cpu/mem/disk/ping,来自 agent 上报)。用户选「仅内存实时滚动」不建表。
-	// 单例:读侧给 ProbePublicHandler,写侧 P3 注入 remoteWSHandler。capN=60(5s 间隔约 5 分钟窗口)。
-	probeMetricsStore := handler.NewProbeMetricsStore(60)
+	// 单例:读侧给 ProbePublicHandler,写侧 P3 注入 remoteWSHandler。
+	// capN=1440(1 分钟间隔约 1 天窗口):伪装页延迟折线图/24 小时色块条据此回溯。
+	// 内存量级:1440 点 × 16B × 目标数(≤30) × 服务器数,几十台机也就几 MB,可接受。
+	probeMetricsStore := handler.NewProbeMetricsStore(1440)
 	remoteWSHandler.SetProbeStore(probeMetricsStore) // 写侧:接收 agent 上报的 sysmetrics/latency
 	go func() {
 		t := time.NewTicker(5 * time.Minute)

@@ -326,6 +326,7 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	//   - 都没 → 走静态文件路径(原行为)
 	var data []byte
 	fromTemplate := false
+	fromSurgeTemplate := false // Surge 模板直出:data 已是 Surge 文本,跳过 convertSubscription
 	if hasSubscribeFile {
 		effectiveTemplate := subscribeFile.TemplateFilename
 		if effectiveTemplate == "" && h.repo != nil {
@@ -339,8 +340,17 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 				}
 			}
 		}
-		// 注意:不再回退到系统默认模板。订阅没绑模板 + 套餐也没模板 → 直接读原始文件,
-		// 避免用户精心配的原始 YAML 被系统默认模板"自动套上"覆盖。
+		// 注意:Clash 系不回退系统默认模板 —— 避免用户精心配的原始 YAML 被"自动套上"覆盖。
+		// 但 Surge 系例外:订阅原始文件是 Clash YAML,Surge 客户端本就要转换,没有"原样保留"诉求;
+		// 且 Surge 策略组/规则必须靠模板生成。故 Surge 请求在订阅/套餐都无模板时回落到系统 Surge 默认模板。
+		if effectiveTemplate == "" && h.repo != nil && isSurgeClientType(r.URL.Query().Get("t")) {
+			if cfg, cerr := h.repo.GetSystemConfig(r.Context()); cerr == nil {
+				if f := strings.TrimSpace(cfg.DefaultSurgeTemplateFilename); f != "" {
+					effectiveTemplate = f
+					logger.Info("[Subscription] Surge 订阅未绑定模板，回落到系统 Surge 默认模板", "template", effectiveTemplate)
+				}
+			}
+		}
 		if effectiveTemplate != "" {
 			stepStart = time.Now()
 			sfForGen := subscribeFile
@@ -351,6 +361,7 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			} else {
 				data = templateData
 				fromTemplate = true
+				fromSurgeTemplate = isSurgeTemplateFile(effectiveTemplate)
 				logger.Info("[⏱️ 耗时监测] 模板生成完成", "step", "template_generate", "duration_ms", time.Since(stepStart).Milliseconds(), "bytes", len(data))
 			}
 		}
@@ -619,8 +630,12 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		ext = ".yaml"
 	}
 
-	// clash 和 clashmeta 类型直接输出源文件, 不需要转换
-	if clientType != "" && clientType != "clash" && clientType != "clashmeta" {
+	// Surge 模板直出:data 已是完整 Surge 配置,不能再当 YAML 转换,直接文本输出。
+	if fromSurgeTemplate {
+		contentType = "text/plain; charset=utf-8"
+		ext = ".conf"
+	} else if clientType != "" && clientType != "clash" && clientType != "clashmeta" {
+		// clash 和 clashmeta 类型直接输出源文件, 不需要转换
 		// 使用子商店生产者转换订阅
 		convertedData, err := h.convertSubscription(r.Context(), data, clientType)
 		if err != nil {
@@ -978,6 +993,17 @@ func (h *SubscriptionHandler) generateFromTemplate(ctx context.Context, subscrib
 
 	if len(proxies) == 0 {
 		return nil, errors.New("无可用节点")
+	}
+
+	// Surge 模板(.conf):不走 Clash/YAML 处理器,直接把节点注入 [Proxy] 段后原样输出。
+	// 地区分组靠模板里的 policy-regex-filter + include-all-proxies=1 从注入的节点中筛选。
+	if isSurgeTemplateFile(subscribeFile.TemplateFilename) {
+		surgeResult, serr := injectProxiesIntoSurgeTemplate(string(templateContent), proxies)
+		if serr != nil {
+			return nil, fmt.Errorf("生成 Surge 配置失败: %w", serr)
+		}
+		logger.Info("[模板生成] Surge 完成", "subscribe", subscribeFile.Name, "template", subscribeFile.TemplateFilename, "bytes", len(surgeResult))
+		return []byte(surgeResult), nil
 	}
 
 	processor := substore.NewTemplateV3Processor(nil, nil)
@@ -1473,6 +1499,31 @@ func (h *SubscriptionHandler) convertSubscription(ctx context.Context, yamlData 
 		FullConfig:              config,
 		ClientCompatibilityMode: systemConfig.ClientCompatibilityMode,
 	}
+
+	// Surge 系客户端:逐节点探测被过滤的节点,打日志方便排查"订阅没节点"问题。
+	// Produce 内部静默 continue 跳过不支持的类型,不打任何日志。
+	if isSurgeClientType(clientType) {
+		surgeProducer := substore.NewSurgeProducer()
+		var filteredNodes []string
+		for _, p := range proxies {
+			if _, perr := surgeProducer.ProduceOne(p, "", &substore.ProduceOptions{}); perr != nil {
+				name, _ := p["name"].(string)
+				typ, _ := p["type"].(string)
+				filteredNodes = append(filteredNodes, fmt.Sprintf("%s(%s:%v)", name, typ, perr))
+			}
+		}
+		if len(filteredNodes) > 0 {
+			logger.Warn("[Surge订阅] 部分节点因类型不受 Surge 支持被过滤",
+				"filtered_count", len(filteredNodes), "total", len(proxies),
+				"client_type", clientType,
+				"nodes", strings.Join(filteredNodes, ", "))
+		}
+		if len(filteredNodes) == len(proxies) {
+			logger.Warn("[Surge订阅] 全部节点被过滤,订阅将没有任何节点",
+				"total", len(proxies), "client_type", clientType)
+		}
+	}
+
 	result, err := producer.Produce(proxies, "", opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to produce subscription: %w", err)
@@ -1610,6 +1661,24 @@ func (h *SubscriptionHandler) convertClashToSurge(config map[string]interface{},
 	}
 
 	// 使用 BuildCompleteSurgeConfig 生成完整 Surge 配置
+	// 先探测哪些节点会被过滤,打日志方便排查"订阅没节点"问题。
+	surgeProducerForLog := substore.NewSurgeProducer()
+	var clashToSurgeFiltered []string
+	for _, p := range proxies {
+		if _, perr := surgeProducerForLog.ProduceOne(p, "", &substore.ProduceOptions{}); perr != nil {
+			name, _ := p["name"].(string)
+			typ, _ := p["type"].(string)
+			clashToSurgeFiltered = append(clashToSurgeFiltered, fmt.Sprintf("%s(%s:%v)", name, typ, perr))
+		}
+	}
+	if len(clashToSurgeFiltered) > 0 {
+		logger.Warn("[clash-to-surge] 部分节点因类型不受 Surge 支持被过滤",
+			"filtered_count", len(clashToSurgeFiltered), "total", len(proxies),
+			"nodes", strings.Join(clashToSurgeFiltered, ", "))
+	}
+	if len(clashToSurgeFiltered) == len(proxies) {
+		logger.Warn("[clash-to-surge] 全部节点被过滤,订阅将没有任何节点", "total", len(proxies))
+	}
 	surgeConfig, err := substore.BuildCompleteSurgeConfig(clashConfig, proxies, nil, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build Surge config: %w", err)

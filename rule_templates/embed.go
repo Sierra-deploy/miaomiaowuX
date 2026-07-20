@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 )
 
-//go:embed *.yaml
+//go:embed *.yaml *.conf
 var files embed.FS
 
 // Ensure writes the embedded rule template files into the provided directory

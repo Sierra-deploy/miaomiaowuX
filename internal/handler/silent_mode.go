@@ -103,10 +103,10 @@ func (m *SilentModeManager) RecordSubscriptionAccessWithIP(username, ip string) 
 	m.lastGlobalActiveTime = now
 	m.globalActiveMu.Unlock()
 
+	// 不手动传 "time" —— slog 已自动加 time= 字段,重复会让一行出现两个 time=,污染日志解析。
 	logger.Info("🔓 [SILENT_MODE] 用户获取订阅，恢复所有IP访问权限",
 		"username", username,
 		"ip", ip,
-		"time", now.Format("2006-01-02 15:04:05"),
 	)
 }
 

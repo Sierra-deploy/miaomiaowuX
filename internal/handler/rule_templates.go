@@ -40,6 +40,12 @@ const (
 	ruleTemplateMaxFileSize = 2 << 20 // 单个模板文件最大 2MB
 )
 
+// isRuleTemplateFile 判断文件名是否为受支持的模板文件。
+// .yaml/.yml → Clash V3 模板;.conf → Surge 模板(前端按扩展名区分类型与编辑器)。
+func isRuleTemplateFile(name string) bool {
+	return strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") || strings.HasSuffix(name, ".conf")
+}
+
 // countRuleTemplates 统计 rule_templates 目录下的模板文件数量。
 func countRuleTemplates(dir string) int {
 	entries, err := os.ReadDir(dir)
@@ -48,7 +54,7 @@ func countRuleTemplates(dir string) int {
 	}
 	n := 0
 	for _, e := range entries {
-		if !e.IsDir() && (strings.HasSuffix(e.Name(), ".yaml") || strings.HasSuffix(e.Name(), ".yml")) {
+		if !e.IsDir() && isRuleTemplateFile(e.Name()) {
 			n++
 		}
 	}
@@ -119,10 +125,10 @@ func (h *RuleTemplatesHandler) handleListTemplates(w http.ResponseWriter, r *htt
 		return
 	}
 
-	// 过滤 YAML 文件
+	// 过滤模板文件(.yaml/.yml Clash + .conf Surge)
 	var templates []string
 	for _, entry := range entries {
-		if !entry.IsDir() && (strings.HasSuffix(entry.Name(), ".yaml") || strings.HasSuffix(entry.Name(), ".yml")) {
+		if !entry.IsDir() && isRuleTemplateFile(entry.Name()) {
 			templates = append(templates, entry.Name())
 		}
 	}
@@ -315,9 +321,13 @@ func (h *RuleTemplatesHandler) handleRenameTemplate(w http.ResponseWriter, r *ht
 		return
 	}
 
-	// 确保新名称具有 .yaml 或 .yml 扩展名
-	if !strings.HasSuffix(newName, ".yaml") && !strings.HasSuffix(newName, ".yml") {
-		newName = newName + ".yaml"
+	// 确保新名称保留合法扩展名;缺失时按原文件类型补全(.conf 保持 Surge,其余默认 .yaml)
+	if !isRuleTemplateFile(newName) {
+		if strings.HasSuffix(oldName, ".conf") {
+			newName = newName + ".conf"
+		} else {
+			newName = newName + ".yaml"
+		}
 	}
 
 	// 归属校验:仅管理员或模板所有者可重命名
@@ -380,13 +390,13 @@ func (h *RuleTemplatesHandler) handleUploadTemplate(w http.ResponseWriter, r *ht
 	}
 	defer file.Close()
 
-	// 验证文件扩展名
+	// 验证文件扩展名(.yaml/.yml Clash + .conf Surge)
 	filename := header.Filename
-	if !strings.HasSuffix(filename, ".yaml") && !strings.HasSuffix(filename, ".yml") {
+	if !isRuleTemplateFile(filename) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"error": "只支持 .yaml 或 .yml 文件",
+			"error": "只支持 .yaml、.yml 或 .conf 文件",
 		})
 		return
 	}

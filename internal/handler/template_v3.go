@@ -2,12 +2,14 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/logger"
 	"miaomiaowux/internal/storage"
 	"github.com/MMWOrg/mmwX-plugins/proxyparser/substore"
 
@@ -264,8 +266,13 @@ func (h *TemplateV3Handler) handlePreviewWithTags(w http.ResponseWriter, r *http
 	})
 }
 
-// processV3Template processes a v3 template with the given proxies
+// processV3Template processes a v3 template with the given proxies.
+// Surge 模板(内容含 [Proxy Group]/[General] 段头)走 Surge 注入,其余按 Clash YAML 处理。
 func (h *TemplateV3Handler) processV3Template(templateContent string, proxies []map[string]any) (string, error) {
+	if looksLikeSurgeTemplate(templateContent) {
+		return injectProxiesIntoSurgeTemplate(templateContent, proxies)
+	}
+
 	// Create processor with empty providers (v3 doesn't use external providers)
 	processor := substore.NewTemplateV3Processor(nil, nil)
 
@@ -282,6 +289,21 @@ func (h *TemplateV3Handler) processV3Template(templateContent string, proxies []
 	}
 
 	return result, nil
+}
+
+// looksLikeSurgeTemplate 通过 Surge 特有的段头判断内容是否为 Surge 配置(预览按内容判断时用)。
+func looksLikeSurgeTemplate(content string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		switch {
+		case strings.EqualFold(trimmed, "[General]"),
+			strings.EqualFold(trimmed, "[Proxy Group]"),
+			strings.EqualFold(trimmed, "[Proxy]"),
+			strings.EqualFold(trimmed, "[Rule]"):
+			return true
+		}
+	}
+	return false
 }
 
 // injectProxiesIntoTemplate injects proxy nodes into the template's proxies section
@@ -602,7 +624,8 @@ func (h *TemplateV3Handler) handleListTemplates(w http.ResponseWriter, r *http.R
 	type templateInfo struct {
 		Name      string            `json:"name"`                // 显示名称（去掉 _v3.yaml 后缀）
 		Filename  string            `json:"filename"`            // 完整文件名
-		Variables map[string]string `json:"variables,omitempty"` // 模板自定义变量
+		Type      string            `json:"type"`                // "clash"(.yaml/.yml) 或 "surge"(.conf)
+		Variables map[string]string `json:"variables,omitempty"` // 模板自定义变量(仅 Clash)
 	}
 
 	var templates []templateInfo
@@ -611,30 +634,132 @@ func (h *TemplateV3Handler) handleListTemplates(w http.ResponseWriter, r *http.R
 			continue
 		}
 		name := entry.Name()
-		// 返回所有 yaml 文件（rule_templates 目录下的都是 V3 模板）
-		if strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml") {
-			displayName := strings.TrimSuffix(name, ".yaml")
-			displayName = strings.TrimSuffix(displayName, ".yml")
-			displayName = strings.TrimSuffix(displayName, "_v3")
-			displayName = strings.TrimSuffix(displayName, "__v3")
-			displayName = strings.ReplaceAll(displayName, "_", " ")
-
-			// 提取模板自定义变量
-			var variables map[string]string
-			if content, err := os.ReadFile(filepath.Join(templatesDir, name)); err == nil {
-				variables = substore.ExtractTemplateVariables(string(content))
-			}
-
-			templates = append(templates, templateInfo{
-				Name:      displayName,
-				Filename:  name,
-				Variables: variables,
-			})
+		isClash := strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml")
+		isSurge := strings.HasSuffix(name, ".conf")
+		if !isClash && !isSurge {
+			continue
 		}
+
+		displayName := strings.TrimSuffix(name, ".yaml")
+		displayName = strings.TrimSuffix(displayName, ".yml")
+		displayName = strings.TrimSuffix(displayName, ".conf")
+		displayName = strings.TrimSuffix(displayName, "_v3")
+		displayName = strings.TrimSuffix(displayName, "__v3")
+		displayName = strings.TrimSuffix(displayName, "_surge")
+		displayName = strings.TrimSuffix(displayName, "__surge")
+		displayName = strings.ReplaceAll(displayName, "_", " ")
+
+		tmplType := "clash"
+		var variables map[string]string
+		if isSurge {
+			tmplType = "surge"
+		} else if content, err := os.ReadFile(filepath.Join(templatesDir, name)); err == nil {
+			// 仅 Clash 模板提取 YAML 自定义变量
+			variables = substore.ExtractTemplateVariables(string(content))
+		}
+
+		templates = append(templates, templateInfo{
+			Name:      displayName,
+			Filename:  name,
+			Type:      tmplType,
+			Variables: variables,
+		})
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"templates": templates,
 	})
+}
+
+// isSurgeTemplateFile 判断模板文件是否为 Surge 格式(.conf 扩展名)。
+func isSurgeTemplateFile(filename string) bool {
+	return strings.HasSuffix(strings.ToLower(filename), ".conf")
+}
+
+// isSurgeClientType 判断订阅请求的 ?t= 客户端类型是否属于 Surge 系
+// (走 Surge 文本输出、可套用 Surge 默认模板)。
+func isSurgeClientType(clientType string) bool {
+	switch strings.ToLower(strings.TrimSpace(clientType)) {
+	case "surge", "surgemac", "clash-to-surge":
+		return true
+	}
+	return false
+}
+
+// injectProxiesIntoSurgeTemplate 把节点列表序列化为 Surge [Proxy] 段的节点行,
+// 注入到模板 [Proxy] 段中(替换段内已有的非注释行,保留注释与其它段落原样)。
+// 地区分组靠模板里的 policy-regex-filter + include-all-proxies=1 从这些节点里筛选,
+// 因此这里只负责把节点写进 [Proxy] 段,不处理策略组展开。
+func injectProxiesIntoSurgeTemplate(templateContent string, proxies []map[string]any) (string, error) {
+	surgeProxies := make([]substore.Proxy, 0, len(proxies))
+	for _, p := range proxies {
+		surgeProxies = append(surgeProxies, substore.Proxy(p))
+	}
+
+	producer := substore.NewSurgeProducer()
+	produced, err := producer.Produce(surgeProxies, "", &substore.ProduceOptions{})
+	if err != nil {
+		return "", err
+	}
+	proxyLines, ok := produced.(string)
+	if !ok {
+		return "", fmt.Errorf("unexpected surge producer result type: %T", produced)
+	}
+	proxyLines = strings.TrimRight(proxyLines, "\n")
+
+	// Produce 会静默丢弃 Surge 不支持的节点类型(内部对失败节点 continue)。
+	// 这里逐个 ProduceOne 探测一遍,把被过滤的节点名+类型打进日志,方便排查
+	// "为什么订阅里少了几个节点"。仅用于日志,实际输出仍以上面 Produce 结果为准。
+	var filtered []string
+	for _, p := range surgeProxies {
+		if _, perr := producer.ProduceOne(p, "", &substore.ProduceOptions{}); perr != nil {
+			name, _ := p["name"].(string)
+			typ, _ := p["type"].(string)
+			filtered = append(filtered, fmt.Sprintf("%s(%s)", name, typ))
+		}
+	}
+	if len(filtered) > 0 {
+		logger.Info("[Surge模板] 部分节点因类型不受 Surge 支持被过滤",
+			"filtered_count", len(filtered), "total", len(surgeProxies), "nodes", strings.Join(filtered, ", "))
+	}
+
+	lines := strings.Split(templateContent, "\n")
+	var out []string
+	inProxySection := false
+	injected := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// 段落头:[Xxx]
+		if strings.HasPrefix(trimmed, "[") && strings.HasSuffix(trimmed, "]") {
+			inProxySection = strings.EqualFold(trimmed, "[Proxy]")
+			out = append(out, line)
+			if inProxySection {
+				// 进入 [Proxy] 段:先写入节点行,随后跳过段内原有的非注释内容
+				if proxyLines != "" {
+					out = append(out, proxyLines)
+				}
+				injected = true
+			}
+			continue
+		}
+		if inProxySection {
+			// 段内保留注释(占位说明),丢弃其它内容(避免残留占位节点)
+			if strings.HasPrefix(trimmed, "#") || trimmed == "" {
+				out = append(out, line)
+			}
+			continue
+		}
+		out = append(out, line)
+	}
+
+	// 模板里没有 [Proxy] 段:追加一个
+	if !injected {
+		out = append(out, "", "[Proxy]")
+		if proxyLines != "" {
+			out = append(out, proxyLines)
+		}
+	}
+
+	return strings.Join(out, "\n"), nil
 }

@@ -3811,9 +3811,10 @@ func (h *RemoteManageHandler) inboundToClashProxy(inbound map[string]interface{}
 			}
 			proxy["obfs-opts"] = obfsOpts
 		}
-		// snell 额外默认参数:端口复用 + TCP Fast Open。
+		// snell 额外默认参数:端口复用。
+		// 注意:tfo(TCP Fast Open)不在此写入存储配置 —— 它只对 Surge 客户端有意义,
+		// 写进 Clash 存储配置会泄漏到所有客户端。tfo=true 由 Surge producer 在输出时按需补(见 surge.go snell())。
 		proxy["reuse"] = true
-		proxy["tfo"] = true
 
 	default:
 		return nil, fmt.Errorf("unsupported protocol: %s", protocol)

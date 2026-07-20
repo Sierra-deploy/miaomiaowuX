@@ -132,9 +132,31 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Load template: 套餐模板 > 系统默认 > 目录第一个
-	templateContent, err := h.loadTemplate(r, pkg)
+	templateContent, templateName, err := h.loadTemplate(r, pkg)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	// Surge 模板(.conf):注入 [Proxy] 段后直接输出 Surge 文本,不走 Clash 处理器/格式转换。
+	if isSurgeTemplateFile(templateName) {
+		surgeResult, serr := injectProxiesIntoSurgeTemplate(templateContent, proxies)
+		if serr != nil {
+			writeError(w, http.StatusInternalServerError, serr)
+			return
+		}
+		ua := r.Header.Get("User-Agent")
+		if ua == "" {
+			ua = "unknown"
+		}
+		SendSubscribeFetchNotification(r.Context(), username, ua, GetClientIP(r))
+		if silentMgr := GetSilentModeManager(); silentMgr != nil {
+			silentMgr.RecordSubscriptionAccessWithIP(username, GetClientIP(r))
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		setSubscriptionName(w, pkg.Name, ".conf")
+		h.writeTrafficHeader(r.Context(), w, user, pkg)
+		w.Write([]byte(surgeResult))
 		return
 	}
 
@@ -256,7 +278,8 @@ func orderPackageNodes(ctx context.Context, repo *storage.TrafficRepository, use
 
 // loadTemplate 优先级:套餐绑的模板 → 系统默认模板 → rule_templates 目录第一个 yaml。
 // pkg 为 nil 时跳过套餐模板这一级(serveAllNodes 等无套餐上下文场景)。
-func (h *PackageSubscribeHandler) loadTemplate(r *http.Request, pkg *storage.Package) (string, error) {
+// loadTemplate 返回模板内容与文件名(文件名用于判断 Clash/Surge 格式)。
+func (h *PackageSubscribeHandler) loadTemplate(r *http.Request, pkg *storage.Package) (content string, filename string, err error) {
 	templatesDir := "rule_templates"
 
 	var candidates []string
@@ -278,25 +301,25 @@ func (h *PackageSubscribeHandler) loadTemplate(r *http.Request, pkg *storage.Pac
 		candidates = append(candidates, cfg.DefaultTemplateFilename)
 	}
 	for _, name := range candidates {
-		content, err := os.ReadFile(filepath.Join(templatesDir, name))
-		if err == nil {
-			return string(content), nil
+		data, rerr := os.ReadFile(filepath.Join(templatesDir, name))
+		if rerr == nil {
+			return string(data), name, nil
 		}
 	}
 
-	entries, err := os.ReadDir(templatesDir)
-	if err == nil {
+	entries, derr := os.ReadDir(templatesDir)
+	if derr == nil {
 		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			if e.IsDir() || !isRuleTemplateFile(e.Name()) {
 				continue
 			}
-			content, err := os.ReadFile(filepath.Join(templatesDir, e.Name()))
-			if err == nil {
-				return string(content), nil
+			data, rerr := os.ReadFile(filepath.Join(templatesDir, e.Name()))
+			if rerr == nil {
+				return string(data), e.Name(), nil
 			}
 		}
 	}
-	return "", errors.New("未找到可用模板，请管理员配置模板")
+	return "", "", errors.New("未找到可用模板，请管理员配置模板")
 }
 
 func (h *PackageSubscribeHandler) serveAllNodes(w http.ResponseWriter, r *http.Request, user storage.User) {
@@ -321,9 +344,19 @@ func (h *PackageSubscribeHandler) serveAllNodes(w http.ResponseWriter, r *http.R
 		return
 	}
 	// serveAllNodes 是"无套餐上下文,导出全部节点"的旁路调试入口 — 传 nil 走系统默认模板。
-	templateContent, err := h.loadTemplate(r, nil)
+	templateContent, templateName, err := h.loadTemplate(r, nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if isSurgeTemplateFile(templateName) {
+		surgeResult, serr := injectProxiesIntoSurgeTemplate(templateContent, proxies)
+		if serr != nil {
+			writeError(w, http.StatusInternalServerError, serr)
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte(surgeResult))
 		return
 	}
 	processor := substore.NewTemplateV3Processor(nil, nil)

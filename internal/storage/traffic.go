@@ -565,7 +565,8 @@ type SystemConfig struct {
 	SilentMode                  bool   // 静默模式：所有请求返回404，仅订阅接口可用
 	SilentModeTimeout           int    // 获取订阅后恢复访问的分钟数，默认15
 	EnableMiaomiaowuFeatures    bool   // 启用妙妙屋功能（模板、订阅管理等菜单）
-	DefaultTemplateFilename     string // 默认模板文件名（rule_templates/目录下）
+	DefaultTemplateFilename     string // 默认模板文件名（rule_templates/目录下），Clash 系客户端使用
+	DefaultSurgeTemplateFilename string // Surge 默认模板文件名（rule_templates/下 .conf），Surge 系客户端未绑模板时回落使用
 	// 节点名称倍率前缀:订阅生成时,套餐内 multiplier != 1 的节点 name 前面加
 	// "{Left}{multiplier}{Right}" 前缀;Left/Right 默认 「」,用户可改。
 	NodeNameMultiplierPrefixEnabled bool
@@ -1894,6 +1895,9 @@ CREATE INDEX IF NOT EXISTS idx_override_scripts_hook ON override_scripts(hook);
 		return err
 	}
 	if err := r.ensureSystemConfigColumn("default_template_filename", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("default_surge_template_filename", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
 	// 节点名称倍率前缀:订阅生成时把套餐内 multiplier != 1 的节点 name 前缀加上 "{left}{mult}{right}"
@@ -6756,6 +6760,7 @@ SELECT proxy_groups_source_url, client_compatibility_mode, COALESCE(enable_short
        COALESCE(subscription_output_format, 'yaml'),
        COALESCE(silent_mode, 0), COALESCE(silent_mode_timeout, 15),
        COALESCE(enable_miaomiaowu_features, 1), COALESCE(default_template_filename, ''),
+       COALESCE(default_surge_template_filename, ''),
        COALESCE(node_name_multiplier_prefix_enabled, 0),
        COALESCE(node_name_multiplier_left, '「'),
        COALESCE(node_name_multiplier_right, '」'),
@@ -6797,6 +6802,7 @@ WHERE id = 1
 		&cfg.SubscriptionOutputFormat,
 		&silentMode, &silentModeTimeout,
 		&enableMiaomiaowuFeatures, &cfg.DefaultTemplateFilename,
+		&cfg.DefaultSurgeTemplateFilename,
 		&nodeNameMultPrefixEnabled, &cfg.NodeNameMultiplierLeft, &cfg.NodeNameMultiplierRight,
 		&notifyTH80, &notifyOverLimit, &notifyPkgExpiring, &cfg.NotifyPackageExpiringDays,
 		&notifyPkgExpired, &notifyUserReg, &notifyTGBound, &notifyCert, &notifyAgentLO,
@@ -6879,6 +6885,7 @@ SET proxy_groups_source_url = ?,
     silent_mode_timeout = ?,
     enable_miaomiaowu_features = ?,
     default_template_filename = ?,
+    default_surge_template_filename = ?,
     node_name_multiplier_prefix_enabled = ?,
     node_name_multiplier_left = ?,
     node_name_multiplier_right = ?,
@@ -6960,6 +6967,7 @@ WHERE id = 1
 		subOutFmt,
 		boolToInt(cfg.SilentMode), silentModeTimeout,
 		boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename,
+		cfg.DefaultSurgeTemplateFilename,
 		boolToInt(cfg.NodeNameMultiplierPrefixEnabled), nnmLeft, nnmRight,
 		boolToInt(cfg.NotifyTrafficThreshold80), boolToInt(cfg.NotifyOverLimit),
 		boolToInt(cfg.NotifyPackageExpiring), pkgExpiringDays,
@@ -6985,11 +6993,12 @@ INSERT INTO system_config (id, proxy_groups_source_url, client_compatibility_mod
     notify_daily_traffic_time, notify_traffic_threshold_percent, enable_override_scripts,
     subscription_output_format,
     silent_mode, silent_mode_timeout, enable_miaomiaowu_features, default_template_filename,
+    default_surge_template_filename,
     node_name_multiplier_prefix_enabled, node_name_multiplier_left, node_name_multiplier_right,
     notify_traffic_threshold_80, notify_over_limit, notify_package_expiring, notify_package_expiring_days,
     notify_package_expired, notify_user_registered, notify_telegram_bound, notify_cert_result,
     notify_agent_long_offline, notify_agent_long_offline_minutes, notify_device_limit_exceeded, notify_ip_ban)
-VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 		if _, err := r.db.ExecContext(ctx, insertStmt, cfg.ProxyGroupsSourceURL, compatibilityMode, enableShortLink,
 			cfg.SpeedCollectInterval, cfg.TrafficCollectInterval, cfg.TrafficCheckInterval, cfg.HeartbeatInterval, agentLogEnabled,
@@ -7001,6 +7010,7 @@ VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
 			subOutFmt,
 			boolToInt(cfg.SilentMode), silentModeTimeout,
 			boolToInt(cfg.EnableMiaomiaowuFeatures), cfg.DefaultTemplateFilename,
+			cfg.DefaultSurgeTemplateFilename,
 			boolToInt(cfg.NodeNameMultiplierPrefixEnabled), nnmLeft, nnmRight,
 			boolToInt(cfg.NotifyTrafficThreshold80), boolToInt(cfg.NotifyOverLimit),
 			boolToInt(cfg.NotifyPackageExpiring), pkgExpiringDays,

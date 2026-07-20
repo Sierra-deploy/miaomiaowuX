@@ -188,6 +188,9 @@ const (
 	probeDisguiseMetricMemKey    = "probe_disguise_metric_mem"       // "1"/"" 采集内存
 	probeDisguiseMetricDiskKey   = "probe_disguise_metric_disk"      // "1"/"" 采集硬盘
 	probeDisguiseMetricPingKey   = "probe_disguise_metric_ping"      // "1"/"" 采集 ping
+	// 流量/网速是展示开关(数据来自主控实时,不需 agent 采集):"1"/"" 控制伪装页是否显示该块。
+	probeDisguiseMetricTrafficKey = "probe_disguise_metric_traffic" // "1"/"" 伪装页显示流量
+	probeDisguiseMetricSpeedKey   = "probe_disguise_metric_speed"   // "1"/"" 伪装页显示网速
 	probeDisguisePingTargetsKey  = "probe_disguise_ping_targets"     // JSON [{key,label,isp,host,port}]
 	probeDisguisePingIntervalKey = "probe_disguise_ping_interval_ms" // int 字符串,默认 5000
 	probeCDNRegionsEndpointKey   = "probe_cdn_regions_endpoint"      // CDN 数据端点(可配置)
@@ -214,6 +217,9 @@ func (h *SystemSettingsHandler) GetProbeDisguise(w http.ResponseWriter, r *http.
 	metricMem, _ := h.repo.GetSystemSetting(ctx, probeDisguiseMetricMemKey)
 	metricDisk, _ := h.repo.GetSystemSetting(ctx, probeDisguiseMetricDiskKey)
 	metricPing, _ := h.repo.GetSystemSetting(ctx, probeDisguiseMetricPingKey)
+	// 流量/网速默认显示(历史行为=一直显示):未设置("")视为开,仅显式 "0" 才关。
+	metricTraffic, _ := h.repo.GetSystemSetting(ctx, probeDisguiseMetricTrafficKey)
+	metricSpeed, _ := h.repo.GetSystemSetting(ctx, probeDisguiseMetricSpeedKey)
 	pingTargetsRaw, _ := h.repo.GetSystemSetting(ctx, probeDisguisePingTargetsKey)
 	pingIntervalRaw, _ := h.repo.GetSystemSetting(ctx, probeDisguisePingIntervalKey)
 
@@ -221,7 +227,7 @@ func (h *SystemSettingsHandler) GetProbeDisguise(w http.ResponseWriter, r *http.
 	if pingTargetsRaw != "" {
 		_ = json.Unmarshal([]byte(pingTargetsRaw), &pingTargets)
 	}
-	pingInterval := 5000
+	pingInterval := 60000 // 默认 60 秒探一次(配合 1 天保留窗口)
 	if n, err := strconv.Atoi(pingIntervalRaw); err == nil && n > 0 {
 		pingInterval = n
 	}
@@ -237,6 +243,8 @@ func (h *SystemSettingsHandler) GetProbeDisguise(w http.ResponseWriter, r *http.
 		"metric_mem":       metricMem == "1",
 		"metric_disk":      metricDisk == "1",
 		"metric_ping":      metricPing == "1",
+		"metric_traffic":   metricTraffic != "0", // 默认显示
+		"metric_speed":     metricSpeed != "0",   // 默认显示
 		"ping_targets":     pingTargets,
 		"ping_interval_ms": pingInterval,
 	})
@@ -254,12 +262,14 @@ func (h *SystemSettingsHandler) SetProbeDisguise(w http.ResponseWriter, r *http.
 		ServerIDs []int64 `json:"server_ids"`
 		ShowName  bool    `json:"show_name"`
 		// 新字段用指针:nil=不改。旧前端 PUT 不带这些字段时,它们保持原值不被冲成零值。
-		MetricCPU    *bool              `json:"metric_cpu"`
-		MetricMem    *bool              `json:"metric_mem"`
-		MetricDisk   *bool              `json:"metric_disk"`
-		MetricPing   *bool              `json:"metric_ping"`
-		PingTargets  *[]ProbePingTarget `json:"ping_targets"`
-		PingInterval *int               `json:"ping_interval_ms"`
+		MetricCPU     *bool              `json:"metric_cpu"`
+		MetricMem     *bool              `json:"metric_mem"`
+		MetricDisk    *bool              `json:"metric_disk"`
+		MetricPing    *bool              `json:"metric_ping"`
+		MetricTraffic *bool              `json:"metric_traffic"`
+		MetricSpeed   *bool              `json:"metric_speed"`
+		PingTargets   *[]ProbePingTarget `json:"ping_targets"`
+		PingInterval  *int               `json:"ping_interval_ms"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -312,6 +322,23 @@ func (h *SystemSettingsHandler) SetProbeDisguise(w http.ResponseWriter, r *http.
 		fail()
 		return
 	}
+	// 流量/网速是展示开关且默认开:必须存显式 "1"/"0"(不能用 setBoolPtr 的 "1"/"",
+	// 否则关闭时存 "" 会被 GET 的 `!= "0"` 当成"未设置=显示",关不掉)。
+	setDisplayPtr := func(key string, p *bool) bool {
+		if p == nil {
+			return true
+		}
+		v := "0"
+		if *p {
+			v = "1"
+		}
+		return h.repo.SetSystemSetting(ctx, key, v) == nil
+	}
+	if !setDisplayPtr(probeDisguiseMetricTrafficKey, req.MetricTraffic) ||
+		!setDisplayPtr(probeDisguiseMetricSpeedKey, req.MetricSpeed) {
+		fail()
+		return
+	}
 	if req.PingTargets != nil {
 		// 目标数上限,防 agent 拨测滥用(与 agent 侧限流呼应)。
 		targets := *req.PingTargets
@@ -329,8 +356,9 @@ func (h *SystemSettingsHandler) SetProbeDisguise(w http.ResponseWriter, r *http.
 		if ms < 2000 {
 			ms = 2000
 		}
-		if ms > 30000 {
-			ms = 30000
+		// 上限放宽到 5 分钟:配合 1 天保留窗口,支持 60 秒等更低频探测(默认 60 秒)。
+		if ms > 300000 {
+			ms = 300000
 		}
 		if h.repo.SetSystemSetting(ctx, probeDisguisePingIntervalKey, strconv.Itoa(ms)) != nil {
 			fail()
@@ -988,12 +1016,17 @@ func (h *SystemSettingsHandler) GetDefaultTemplate(w http.ResponseWriter, r *htt
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"success": true, "default_template_filename": cfg.DefaultTemplateFilename})
+	json.NewEncoder(w).Encode(map[string]any{
+		"success":                        true,
+		"default_template_filename":       cfg.DefaultTemplateFilename,
+		"default_surge_template_filename": cfg.DefaultSurgeTemplateFilename,
+	})
 }
 
 func (h *SystemSettingsHandler) SetDefaultTemplate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		DefaultTemplateFilename string `json:"default_template_filename"`
+		DefaultTemplateFilename      *string `json:"default_template_filename"`
+		DefaultSurgeTemplateFilename *string `json:"default_surge_template_filename"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -1002,14 +1035,25 @@ func (h *SystemSettingsHandler) SetDefaultTemplate(w http.ResponseWriter, r *htt
 		return
 	}
 
-	if req.DefaultTemplateFilename != "" {
-		filePath := filepath.Join("rule_templates", req.DefaultTemplateFilename)
-		if _, err := os.Stat(filePath); os.IsNotExist(err) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusBadRequest)
-			json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "模板文件不存在"})
-			return
+	// 指针语义:nil=本次不改该字段(clash/surge 可分别独立保存)。空串=清除默认模板。
+	checkExists := func(name string) bool {
+		if name == "" {
+			return true
 		}
+		_, err := os.Stat(filepath.Join("rule_templates", name))
+		return !os.IsNotExist(err)
+	}
+	if req.DefaultTemplateFilename != nil && !checkExists(*req.DefaultTemplateFilename) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "模板文件不存在"})
+		return
+	}
+	if req.DefaultSurgeTemplateFilename != nil && !checkExists(*req.DefaultSurgeTemplateFilename) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "Surge 模板文件不存在"})
+		return
 	}
 
 	cfg, err := h.repo.GetSystemConfig(r.Context())
@@ -1019,7 +1063,12 @@ func (h *SystemSettingsHandler) SetDefaultTemplate(w http.ResponseWriter, r *htt
 		json.NewEncoder(w).Encode(map[string]any{"success": false, "message": "获取设置失败"})
 		return
 	}
-	cfg.DefaultTemplateFilename = req.DefaultTemplateFilename
+	if req.DefaultTemplateFilename != nil {
+		cfg.DefaultTemplateFilename = *req.DefaultTemplateFilename
+	}
+	if req.DefaultSurgeTemplateFilename != nil {
+		cfg.DefaultSurgeTemplateFilename = *req.DefaultSurgeTemplateFilename
+	}
 	if err := h.repo.UpdateSystemConfig(r.Context(), cfg); err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)

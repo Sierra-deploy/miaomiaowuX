@@ -2,6 +2,8 @@ package handler
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -26,10 +28,11 @@ const systemLogPath = "data/logs/mmwx.log"
 
 // logRow 是解析后的一行结构化日志。解析失败时 Time/Level 为空、Raw 保留原文（不吞行）。
 type logRow struct {
-	Time  string `json:"time"`
-	Level string `json:"level"`
-	Msg   string `json:"msg"`
-	Raw   string `json:"raw,omitempty"`
+	Time   string `json:"time"`
+	Level  string `json:"level"`
+	Msg    string `json:"msg"`
+	Fields string `json:"fields,omitempty"` // msg 之后的结构化 k=v(如 nodes=... filtered_count=...),前端拼在 msg 后展示
+	Raw    string `json:"raw,omitempty"`
 }
 
 func (h *SystemLogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -47,12 +50,27 @@ func (h *SystemLogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	levelFilter := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("level")))
 	q := strings.TrimSpace(r.URL.Query().Get("q"))
 
-	// tailFile 多读一些，给筛选留余量：级别/关键字过滤会砍掉一部分行，
-	// 直接按 lines tail 再过滤会导致返回远少于 lines。上限 2000×4 仍在 8KB 反向分块的舒适区。
-	rawTail, err := tailFile(systemLogPath, lines*4)
+	// tailFile 读取窗口:
+	//   - 无筛选:多读一点(lines*4)给"空行/非目标行"留余量,最终仍只返回最后 lines 行。
+	//   - 有 level/q 筛选:必须在**大得多**的窗口里搜,否则高频日志(Remote WS / XraySync 等
+	//     每秒数条)会把想找的行刷出 lines*4 窗口 —— 表现为"服务器 grep 有、页面看不到"。
+	//     放大到 50000 行,覆盖数十分钟历史;反向 8KB 分块对本地文件仍是毫秒级。
+	scanLines := lines * 4
+	if levelFilter != "" || q != "" {
+		scanLines = 50000
+	}
+	rawTail, err := tailFile(systemLogPath, scanLines)
 	if err != nil {
-		// 文件不存在（全新部署还没写日志）不算错误，返回空列表
-		respondJSON(w, http.StatusOK, map[string]any{"rows": []logRow{}})
+		abs, _ := filepath.Abs(systemLogPath)
+		if os.IsNotExist(err) {
+			// 文件不存在（全新部署还没写日志）不算错误，返回空列表 —— 但带上绝对路径,
+			// 便于排查"服务器 journalctl 有日志但页面空"(通常是 systemd WorkingDirectory
+			// 与代码相对路径 data/logs 不一致,导致接口读的根本不是 lumberjack 写的那个文件)。
+			respondJSON(w, http.StatusOK, map[string]any{"rows": []logRow{}, "log_path": abs, "note": "日志文件不存在"})
+			return
+		}
+		// 其它错误(权限/IO)不再静默吞成空列表 —— 直接把路径和错误返回,让前端能看到真因。
+		respondJSON(w, http.StatusOK, map[string]any{"rows": []logRow{}, "log_path": abs, "error": err.Error()})
 		return
 	}
 
@@ -95,8 +113,10 @@ func parseLogfmtLine(line string) logRow {
 	}
 	// msg 走同一套引号配对逻辑（cutLogfmtValue）：带引号时正确识别右引号边界，
 	// 不能简单「取到行尾再 unquote」—— 那样 `msg="x" k=v` 会把整段当引号值。
-	msg, _, _ := cutLogfmtValue(rest2, "msg=")
-	return logRow{Time: time, Level: strings.TrimSpace(level), Msg: msg}
+	// rest3 = msg 之后剩下的结构化字段(如 filtered_count=8 nodes="🇭🇰..."),必须保留 ——
+	// 之前丢弃它导致「被过滤的节点名」这类关键信息在页面上完全看不到。
+	msg, rest3, _ := cutLogfmtValue(rest2, "msg=")
+	return logRow{Time: time, Level: strings.TrimSpace(level), Msg: msg, Fields: strings.TrimSpace(rest3)}
 }
 
 // cutLogfmtValue 从 s 中定位 key（形如 "time="），取其后的一个 logfmt 值，

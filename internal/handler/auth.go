@@ -118,10 +118,10 @@ func NewLoginHandler(manager *auth.Manager, tokens *auth.TokenStore, repo *stora
 				// Check 在已达锁定阈值时返回 ErrRateLimited —— 用它区分 login_fail / login_locked
 				locked = errors.Is(rateLimiter.Check(clientIP, username), ErrRateLimited)
 			}
+			// 不手动传 "time" —— slog 已自动加 time=,重复会污染日志解析。
 			logger.Warn("🔐 [LOGIN_FAIL] 登录失败",
 				"username", username,
-				"client_ip", clientIP,
-				"time", time.Now().Format("2006-01-02 15:04:05"))
+				"client_ip", clientIP)
 			// 登录暴破进安全事件流（与 brute_force 的封禁体系独立：只记事件、不进 ip_bans，
 			// 因为限流锁定 ≠ 封禁，生命周期不同）。best-effort，失败静默。
 			if repo != nil {
