@@ -40,8 +40,10 @@ type trafficSummaryMetrics struct {
 }
 
 type trafficDailyUsage struct {
-	Date   string  `json:"date"`
-	UsedGB float64 `json:"used_gb"`
+	Date string `json:"date"`
+	// 指针 + null:该日期没有任何记录(快照任务没跑成)时为 null,前端画断点。
+	// 用 0 会把"没采到"谎报成"当天真没跑流量",两者在排查时含义完全不同。
+	UsedGB *float64 `json:"used_gb"`
 }
 
 func NewTrafficSummaryHandler(repo *storage.TrafficRepository) *TrafficSummaryHandler {
@@ -94,6 +96,11 @@ func (h *TrafficSummaryHandler) ServeHTTP(w http.ResponseWriter, r *http.Request
 			for _, s := range servers {
 				aggregated, _ := h.repo.GetServerTrafficUsed(ctx, s.ID)
 				used := aggregated + s.TrafficUsedOffset
+				if used < 0 {
+					used = 0 // 与 RecordDailyUsage 保持一致:offset 设过头时兜底。
+					// 两个写入者都写同一行 traffic_records,公式不一致会让"谁最后写"决定值大小,
+					// 相邻两天写入者不同就会凭空造出负 delta。
+				}
 				if s.TrafficLimit > 0 {
 					totalLimit += s.TrafficLimit
 					totalUsed += used
@@ -411,6 +418,15 @@ func (h *TrafficSummaryHandler) loadHistory(ctx context.Context, days int) ([]tr
 		return nil, nil
 	}
 
+	// 优先用 per-server 快照差分 —— 它对月度重置免疫(见 ListServerDailyCumulative 的说明)。
+	// 快照表要等 daily_snapshot 任务跑过才有数据,所以拿不到时回落到老的
+	// traffic_records 总量差分(重置日会是断点,但至少正常日子的数字是对的)。
+	if usages, err := h.loadHistoryFromSnapshots(ctx, days); err == nil && len(usages) > 0 {
+		return usages, nil
+	} else if err != nil {
+		logger.Warn("[流量统计] 快照差分失败,回落总量差分", "error", err)
+	}
+
 	records, err := h.repo.ListRecent(ctx, days)
 	if err != nil {
 		return nil, err
@@ -433,20 +449,71 @@ func (h *TrafficSummaryHandler) loadHistory(ctx context.Context, days int) ([]tr
 		if hasPrev {
 			delta = record.TotalUsed - prevUsed
 			if delta < 0 {
-				delta = 0
+				// 累计值倒退 = 期间发生了流量重置(某台机的 offset 被改成 -aggregated)。
+				//
+				// 这一天的真实用量在累计值模型下**算不出来**:total_used 是所有服务器
+				// aggregated+offset 的总和,一台机重置只让总和下降一截,既无法从中分离出
+				// "重置掉多少",也就无法还原"当天实际用了多少"。
+				//
+				// 早先钳成 0 会谎称"当天没流量";换成 record.TotalUsed 更糟 ——
+				// 那是全部服务器的累计总量,会画出几百上千 GB 的假尖峰。
+				// 唯一诚实的做法是标记为不可用,让前端断线。
+				logger.Warn("[流量统计] 累计值倒退(疑似流量重置),当日用量不可计算",
+					"date", record.Date.Format("2006-01-02"),
+					"prev_used", prevUsed, "current_used", record.TotalUsed)
+				prevUsed = record.TotalUsed
+				hasPrev = true
+				usages = append(usages, trafficDailyUsage{
+					Date:   record.Date.Format("2006-01-02"),
+					UsedGB: nil,
+				})
+				continue
 			}
 		}
 
 		prevUsed = record.TotalUsed
 		hasPrev = true
 
+		gb := roundUpTwoDecimals(bytesToGigabytes(delta))
 		usages = append(usages, trafficDailyUsage{
 			Date:   record.Date.Format("2006-01-02"),
-			UsedGB: roundUpTwoDecimals(bytesToGigabytes(delta)),
+			UsedGB: &gb,
 		})
 	}
 
-	return usages, nil
+	return fillMissingDays(usages), nil
+}
+
+// fillMissingDays 把首尾之间缺失的日历日补成 UsedGB=nil 的空点。
+// 缺失 = 那天既没跑成定时快照、也没有 admin 访问过后台。原先这些日期直接从数组里消失,
+// X 轴悄悄跳过,看起来像"数据连续"实则有洞;补成 null 后图上是断点,一眼可辨。
+func fillMissingDays(usages []trafficDailyUsage) []trafficDailyUsage {
+	if len(usages) < 2 {
+		return usages
+	}
+	first, err1 := time.Parse("2006-01-02", usages[0].Date)
+	last, err2 := time.Parse("2006-01-02", usages[len(usages)-1].Date)
+	if err1 != nil || err2 != nil {
+		return usages
+	}
+	// 防御:异常跨度(如脏数据把日期写到几年前)时不展开,免得生成上万个空点。
+	if last.Sub(first) > 400*24*time.Hour {
+		return usages
+	}
+	byDate := make(map[string]trafficDailyUsage, len(usages))
+	for _, u := range usages {
+		byDate[u.Date] = u
+	}
+	out := make([]trafficDailyUsage, 0, len(usages))
+	for d := first; !d.After(last); d = d.AddDate(0, 0, 1) {
+		key := d.Format("2006-01-02")
+		if u, ok := byDate[key]; ok {
+			out = append(out, u)
+		} else {
+			out = append(out, trafficDailyUsage{Date: key, UsedGB: nil})
+		}
+	}
+	return out
 }
 
 func (h *TrafficSummaryHandler) loadUserHistory(ctx context.Context, username string, days int) ([]trafficDailyUsage, error) {
@@ -471,17 +538,25 @@ func (h *TrafficSummaryHandler) loadUserHistory(ctx context.Context, username st
 		if hasPrev {
 			delta = record.TotalUsed - prevUsed
 			if delta < 0 {
-				delta = 0
+				// 同 loadHistory:累计值倒退时当日用量不可计算,置 null 让前端断线。
+				prevUsed = record.TotalUsed
+				hasPrev = true
+				usages = append(usages, trafficDailyUsage{
+					Date:   record.Date.Format("2006-01-02"),
+					UsedGB: nil,
+				})
+				continue
 			}
 		}
 		prevUsed = record.TotalUsed
 		hasPrev = true
+		gb := roundUpTwoDecimals(bytesToGigabytes(delta))
 		usages = append(usages, trafficDailyUsage{
 			Date:   record.Date.Format("2006-01-02"),
-			UsedGB: roundUpTwoDecimals(bytesToGigabytes(delta)),
+			UsedGB: &gb,
 		})
 	}
-	return usages, nil
+	return fillMissingDays(usages), nil
 }
 
 // fetchExternalSubscriptionTraffic 从外部订阅中获取订阅文件中实际使用的流量
@@ -571,4 +646,58 @@ func (h *TrafficSummaryHandler) fetchExternalSubscriptionTraffic(ctx context.Con
 
 	logger.Info("[流量] 外部订阅流量总计", "limit", totalLimit, "used", totalUsed)
 	return totalLimit, totalUsed
+}
+
+// loadHistoryFromSnapshots 用 per-server 快照算每日流量:每台机各自做日间差分,再按天求和。
+//
+// 关键在"各自差分":某台机月度重置(或 agent 重装导致 node_traffic 归零)时,只有它那条
+// 序列会出现倒退,单独归零处理即可,不会像总量差分那样把整天的数据毁掉。
+func (h *TrafficSummaryHandler) loadHistoryFromSnapshots(ctx context.Context, days int) ([]trafficDailyUsage, error) {
+	rows, err := h.repo.ListServerDailyCumulative(ctx, days)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, nil
+	}
+
+	// serverID -> 上一天的累计值。rows 已按 (server_id, date) 排好序。
+	prev := make(map[int64]int64, 16)
+	seen := make(map[int64]bool, 16)
+	perDate := make(map[string]int64, days+1)
+
+	for _, r := range rows {
+		if !seen[r.ServerID] {
+			// 该服务器的第一条只作基线,不产生增量 —— 否则会把它的历史累计量
+			// 一次性算进这一天,又是一根假尖峰。
+			seen[r.ServerID] = true
+			prev[r.ServerID] = r.Used
+			continue
+		}
+		delta := r.Used - prev[r.ServerID]
+		prev[r.ServerID] = r.Used
+		if delta < 0 {
+			// 单机累计值倒退:agent 重装 / xray 重置计数器。当天该机的量无从还原,
+			// 计 0 而不是负数;影响面被限制在这一台机,不波及当天其它机器。
+			continue
+		}
+		perDate[r.Date] += delta
+	}
+
+	if len(perDate) == 0 {
+		return nil, nil
+	}
+
+	dates := make([]string, 0, len(perDate))
+	for d := range perDate {
+		dates = append(dates, d)
+	}
+	sort.Strings(dates)
+
+	usages := make([]trafficDailyUsage, 0, len(dates))
+	for _, d := range dates {
+		gb := roundUpTwoDecimals(bytesToGigabytes(perDate[d]))
+		usages = append(usages, trafficDailyUsage{Date: d, UsedGB: &gb})
+	}
+	return fillMissingDays(usages), nil
 }

@@ -451,17 +451,39 @@ func (h *RemoteWSHandler) PushProbeConfigToAgent(ctx context.Context, serverID i
 	updates["probe_collect_ping"] = b(probeDisguiseMetricPingKey)
 	if active {
 		// ping 目标只在启用时下发,且转成 agent 侧格式(仅 key/host/port,不带 label/isp)。
-		if raw := get(probeDisguisePingTargetsKey); raw != "" {
-			var targets []ProbePingTarget
-			if json.Unmarshal([]byte(raw), &targets) == nil {
-				agentTargets := make([]map[string]any, 0, len(targets))
-				for _, t := range targets {
-					agentTargets = append(agentTargets, map[string]any{"key": t.Key, "host": t.Host, "port": t.Port})
-				}
-				if tj, err := json.Marshal(agentTargets); err == nil {
-					updates["probe_ping_targets"] = string(tj)
-				}
+		// per-server 覆盖优先;该服务器没配覆盖才回落全局列表。
+		var targets []ProbePingTarget
+		resolved := false
+		if ov := parseProbePingTargetOverrides(get(probeDisguisePingTargetsOverrideKey)); ov != nil {
+			if t, ok := ov[serverID]; ok {
+				targets, resolved = t, true
 			}
+		}
+		if !resolved {
+			if raw := get(probeDisguisePingTargetsKey); raw != "" {
+				_ = json.Unmarshal([]byte(raw), &targets)
+			}
+		}
+		if len(targets) > probePingMaxTargets {
+			targets = targets[:probePingMaxTargets]
+		}
+		agentTargets := make([]map[string]any, 0, len(targets))
+		for _, t := range targets {
+			agentTargets = append(agentTargets, map[string]any{"key": t.Key, "host": t.Host, "port": t.Port, "type": t.Type})
+		}
+		// 即使为空也必须下发 "[]":agent 的 handleProbeConfigUpdate 只写入 present 的字段,
+		// 省略这个 key 会让它继续 ping 上一次的目标(清空/改回跟随全局时就再也停不下来)。
+		if tj, err := json.Marshal(agentTargets); err == nil {
+			updates["probe_ping_targets"] = string(tj)
+		}
+		// 目标列表缩减后,ring 里的孤儿 key 不会自己消失(只有整台服务器 Evict 才清)。
+		// 展示侧靠 targetMeta 白名单挡住了,但内存会一直占着。
+		if h.probeStore != nil {
+			keep := make(map[string]bool, len(targets))
+			for _, t := range targets {
+				keep[t.Key] = true
+			}
+			h.probeStore.PruneKeys(serverID, keep)
 		}
 		if iv := get(probeDisguisePingIntervalKey); iv != "" {
 			updates["probe_ping_interval_ms"] = iv

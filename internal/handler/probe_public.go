@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
 	"time"
 
 	"miaomiaowux/internal/storage"
@@ -22,20 +23,28 @@ func NewProbePublicHandler(repo *storage.TrafficRepository, ws *RemoteWSHandler,
 }
 
 // probePingSeries 是一条 ping 曲线的**聚合结果**(每目标一条):只带展示名(省市/运营商) +
-// 当前延迟 + 丢包率 + 24 小时桶。**绝不含目标 host/IP、agent 出口 IP**。
+// 当前延迟 + 丢包率 + 定宽时间桶。**绝不含目标 host/IP、agent 出口 IP**。
 //
-// 为什么不再返回原始点:ring 容量已到 1440(1 天),原始点全量返回会让每 5 秒轮询的公开端点
-// payload 爆炸(1440×目标数×服务器数)。故服务端聚合成 24 个小时桶 + 当前值 + 丢包率,payload 恒定小。
-// 折线图/色块条用这 24 个桶展示(小时粒度,匹配"24 小时每小时一格"的设计)。
+// 为什么不返回原始点:这个端点 5 秒一轮询,原始点全量返回会让 payload 随
+// 点数×目标数×服务器数爆炸。故服务端聚合成定宽桶 + 当前值 + 丢包率,payload 恒定小。
+// 列表视图给近 1 小时(probeListBuckets);更长的窗口走 /api/public/probe-series。
 type probePingSeries struct {
+	// Key 是目标标识(如 he-cu-v4),前端拿它去 /api/public/probe-series 拉详细曲线。
+	// 只是个标识符,不含 host/port,不违反本文件的白名单纪律。
+	Key       string            `json:"key,omitempty"`
 	Label     string            `json:"label"`
 	ISP       string            `json:"isp,omitempty"`
 	CurrentMs int64             `json:"current_ms"` // 最新一次延迟,-1=当前探测失败
 	LossPct   float64           `json:"loss_pct"`   // 整个窗口内失败占比(0~100)
-	Buckets   []probeHourBucket `json:"buckets"`    // 最近 24 小时,每小时一个桶(索引 0=23 小时前 … 23=最近 1 小时)
+	Buckets   []probeHourBucket `json:"buckets"`    // 按时间递增,末桶=当前;桶宽由调用方决定
 }
 
-// probeHourBucket 是某一小时的聚合。无数据的小时 Ms=-1、Loss=-1(前端据此画"无数据"格)。
+// probeListBuckets 是列表/卡片视图的桶数:12 × 5 分钟 = 近 1 小时。
+// 列表页是 5 秒一轮询的公开端点,窗口给小些,payload 才压得住;
+// 要看更长的历史走详细曲线端点(点开延迟弹窗时才请求)。
+const probeListBuckets = 12
+
+// probeHourBucket 是一个时间桶的聚合。无数据的桶 Ms=-1、Loss=-1(前端据此画"无数据"格)。
 type probeHourBucket struct {
 	Ms   int64   `json:"ms"`   // 该小时成功探测的平均延迟;-1=该小时无数据或全失败
 	Loss float64 `json:"loss"` // 该小时丢包率(0~100);-1=无数据
@@ -54,7 +63,7 @@ type probeServer struct {
 	// 其余为 0 → 前端隐藏该行。受 onTraffic 门控。
 	CumulativeUp   *int64 `json:"cumulative_up,omitempty"`   // 累计上行(SystemTxCycle)
 	CumulativeDown *int64 `json:"cumulative_down,omitempty"` // 累计下行(SystemRxCycle)
-	Online        bool   `json:"online"`
+	Online         bool   `json:"online"`
 	// 真探针字段(聚合数值,用户已接受公开;不含任何主机标识)
 	CPUPct    *float64          `json:"cpu_pct,omitempty"`
 	LoadAvg   string            `json:"loadavg,omitempty"`
@@ -81,6 +90,7 @@ func (h *ProbePublicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	title, _ := h.repo.GetSystemSetting(ctx, probeDisguiseTitleKey)
+	logo, _ := h.repo.GetSystemSetting(ctx, probeDisguiseLogoKey)
 	showName := func() bool { v, _ := h.repo.GetSystemSetting(ctx, probeDisguiseShowNameKey); return v == "1" }()
 
 	// 采集子开关:关掉的指标即使 ring 里还有陈旧数据也不展示。
@@ -95,16 +105,12 @@ func (h *ProbePublicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	onSpeed := speedRaw != "0"
 
 	// ping 目标的 Key→(Label,ISP) 映射,用于给 ring 里的 targetKey 配展示名(不回传 host/IP)。
-	targetMeta := map[string]ProbePingTarget{}
+	// 各服务器可单独指定目标,故按服务器解析。
+	var resolver *probeTargetResolver
 	if onPing {
-		if raw, _ := h.repo.GetSystemSetting(ctx, probeDisguisePingTargetsKey); raw != "" {
-			var ts []ProbePingTarget
-			if json.Unmarshal([]byte(raw), &ts) == nil {
-				for _, t := range ts {
-					targetMeta[t.Key] = t
-				}
-			}
-		}
+		globalRaw, _ := h.repo.GetSystemSetting(ctx, probeDisguisePingTargetsKey)
+		overrideRaw, _ := h.repo.GetSystemSetting(ctx, probeDisguisePingTargetsOverrideKey)
+		resolver = newProbeTargetResolver(globalRaw, overrideRaw)
 	}
 
 	idSet := map[int64]bool{}
@@ -146,8 +152,8 @@ func (h *ProbePublicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// 从 ring 填真探针字段(用 s.ID 查,s.ID 不入响应)。仅在「开关开 且 agent 报了该项」时才带。
 		if h.probeStore != nil {
-			if view, ok := h.probeStore.Snapshot(s.ID); ok {
-				fillProbeMetrics(&ps, view, onCPU, onMem, onDisk, onPing, targetMeta)
+			if view, ok := h.probeStore.Snapshot(s.ID, probeListBuckets); ok {
+				fillProbeMetrics(&ps, view, onCPU, onMem, onDisk, onPing, resolver.For(s.ID))
 			}
 		}
 		out = append(out, ps)
@@ -156,6 +162,7 @@ func (h *ProbePublicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{
 		"enabled":   true,
 		"title":     title,
+		"logo":      logo,
 		"show_name": showName,
 		"servers":   out,
 	})
@@ -187,71 +194,125 @@ func fillProbeMetrics(ps *probeServer, view *ProbeServerView, onCPU, onMem, onDi
 		}
 	}
 	if onPing && len(view.Latency) > 0 {
-		for key, pts := range view.Latency {
+		for key, series := range view.Latency {
 			meta, ok := targetMeta[key]
 			if !ok {
 				// 目标已从配置移除 → 不展示这条陈旧曲线
 				continue
 			}
-			ps.Ping = append(ps.Ping, aggregatePingSeries(meta.Label, meta.ISP, pts))
+			ps.Ping = append(ps.Ping, aggregatePingSeries(key, meta.Label, meta.ISP, series, probeListBuckets, probeAggSlotSec))
 		}
+		// view.Latency 是 map,遍历顺序随机 —— 不排序的话公开页每次 5s 轮询延迟行都会重排。
+		sort.Slice(ps.Ping, func(i, j int) bool {
+			if ps.Ping[i].Label != ps.Ping[j].Label {
+				return ps.Ping[i].Label < ps.Ping[j].Label
+			}
+			return ps.Ping[i].ISP < ps.Ping[j].ISP
+		})
 	}
 }
 
-// aggregatePingSeries 把一个目标的原始延迟点聚合成对外的 probePingSeries:
-// 当前延迟(最新点) + 全窗口丢包率 + 最近 24 小时每小时一个桶。
-// 纯函数,可单测。pts 已按时间递增(ingest 顺序)。
-func aggregatePingSeries(label, isp string, pts []probeLatencyPoint) probePingSeries {
-	s := probePingSeries{Label: label, ISP: isp, CurrentMs: -1, LossPct: 0}
+// probeTargetResolver 按服务器解析 ping 目标的展示元数据(Label/ISP)。
+//
+// 安全关键:只从 DB/settings 构建,**绝不**从 agent 上报的 view.Latency 的 key 构建。
+// fillProbeMetrics 里「未在本表中的 key 直接 continue」是防止被攻破的 agent 往公开页
+// 注入任意延迟序列的关键防线,per-server 化之后这条防线必须原样保留。
+type probeTargetResolver struct {
+	global    map[string]ProbePingTarget
+	perServer map[int64]map[string]ProbePingTarget
+}
 
-	// 当前延迟 = 最新一个点。
-	if len(pts) > 0 {
-		s.CurrentMs = pts[len(pts)-1].LatencyMs
-	}
-
-	// 全窗口丢包率 = 失败点(ms<0)占比。
-	if len(pts) > 0 {
-		fail := 0
-		for _, p := range pts {
-			if p.LatencyMs < 0 {
-				fail++
-			}
+func newProbeTargetResolver(globalRaw, overrideRaw string) *probeTargetResolver {
+	index := func(ts []ProbePingTarget) map[string]ProbePingTarget {
+		m := make(map[string]ProbePingTarget, len(ts))
+		for _, t := range ts {
+			m[t.Key] = t
 		}
-		s.LossPct = float64(fail) * 100 / float64(len(pts))
+		return m
 	}
 
-	// 24 小时桶:索引 0 = 23 小时前那一小时,23 = 最近一小时。
-	const buckets = 24
-	now := time.Now().Unix()
-	type acc struct {
-		sum, cnt, fail int64
+	r := &probeTargetResolver{global: map[string]ProbePingTarget{}}
+	if globalRaw != "" {
+		var ts []ProbePingTarget
+		if json.Unmarshal([]byte(globalRaw), &ts) == nil {
+			r.global = index(ts)
+		}
 	}
-	accs := make([]acc, buckets)
-	for _, p := range pts {
-		ageH := (now - p.Ts) / 3600 // 距今多少小时
-		if ageH < 0 || ageH >= buckets {
+	if ov := parseProbePingTargetOverrides(overrideRaw); ov != nil {
+		r.perServer = make(map[int64]map[string]ProbePingTarget, len(ov))
+		for id, ts := range ov {
+			r.perServer[id] = index(ts)
+		}
+	}
+	return r
+}
+
+// For 返回该服务器生效的 key→meta 表:配了覆盖用覆盖(空覆盖=该机不展示任何延迟),
+// 否则回落全局。nil receiver(未开启 ping 采集)返回 nil,调用方按空表处理。
+func (r *probeTargetResolver) For(serverID int64) map[string]ProbePingTarget {
+	if r == nil {
+		return nil
+	}
+	if m, ok := r.perServer[serverID]; ok {
+		return m
+	}
+	return r.global
+}
+
+// aggregatePingSeries 把一个目标的原始延迟点聚合成对外的 probePingSeries:
+// 当前延迟 + 全窗口丢包率 + 定宽时间桶。
+//
+// bucketCount × bucketSec 决定展示窗口(如 12×300 = 近 1 小时)。数据源是 store 里的
+// 5 分钟聚合槽,所以 bucketSec 必须是 probeAggSlotSec 的整数倍 —— 一个桶由若干个槽合并而成。
+// 缺数据的桶给 {-1,-1},前端据此画"无数据"格。纯函数,可单测。
+func aggregatePingSeries(key, label, isp string, series ProbeTargetSeries, bucketCount, bucketSec int) probePingSeries {
+	s := probePingSeries{Key: key, Label: label, ISP: isp, CurrentMs: series.CurrentMs, LossPct: 0}
+	if bucketCount <= 0 {
+		bucketCount = 12
+	}
+	if bucketSec < probeAggSlotSec {
+		bucketSec = probeAggSlotSec
+	}
+
+	// 全窗口丢包率:按槽内点数加权,不是按槽数平均 —— 否则采样稀疏的槽会被放大。
+	var totCnt, totFail int64
+	for _, sl := range series.Slots {
+		totCnt += sl.Cnt
+		totFail += sl.Fail
+	}
+	if totCnt+totFail > 0 {
+		s.LossPct = float64(totFail) * 100 / float64(totCnt+totFail)
+	}
+
+	// 桶索引:末桶 = 当前时刻所在桶,向前依次递减。
+	now := time.Now().Unix()
+	lastBucket := now - now%int64(bucketSec)
+	type acc struct{ sum, cnt, fail int64 }
+	accs := make([]acc, bucketCount)
+	for _, sl := range series.Slots {
+		bucketStart := sl.Slot - sl.Slot%int64(bucketSec)
+		age := (lastBucket - bucketStart) / int64(bucketSec)
+		if age < 0 || age >= int64(bucketCount) {
 			continue
 		}
-		idx := buckets - 1 - int(ageH)
-		accs[idx].cnt++
-		if p.LatencyMs < 0 {
-			accs[idx].fail++
-		} else {
-			accs[idx].sum += p.LatencyMs
-		}
+		idx := bucketCount - 1 - int(age)
+		accs[idx].sum += sl.Sum
+		accs[idx].cnt += sl.Cnt
+		accs[idx].fail += sl.Fail
 	}
-	s.Buckets = make([]probeHourBucket, buckets)
+
+	s.Buckets = make([]probeHourBucket, bucketCount)
 	for i := range accs {
-		if accs[i].cnt == 0 {
+		total := accs[i].cnt + accs[i].fail
+		if total == 0 {
 			s.Buckets[i] = probeHourBucket{Ms: -1, Loss: -1}
 			continue
 		}
-		ok := accs[i].cnt - accs[i].fail
 		ms := int64(-1)
-		if ok > 0 {
-			ms = accs[i].sum / ok
+		if accs[i].cnt > 0 {
+			ms = accs[i].sum / accs[i].cnt
 		}
-		s.Buckets[i] = probeHourBucket{Ms: ms, Loss: float64(accs[i].fail) * 100 / float64(accs[i].cnt)}
+		s.Buckets[i] = probeHourBucket{Ms: ms, Loss: float64(accs[i].fail) * 100 / float64(total)}
 	}
 	return s
 }

@@ -203,28 +203,28 @@ const (
 
 // Package代表流量包模板
 type Package struct {
-	ID                int64     `json:"id"`
-	Name              string    `json:"name"`
-	Description       string    `json:"description"`
-	TrafficLimitGB    float64   `json:"traffic_limit_gb"` // GB 流量限制
-	TrafficLimitBytes int64     `json:"-"`                // 流量限制（以字节为单位）（仅限内部使用）
-	CycleDays         int       `json:"cycle_days"`       // 包裹持续时间（天）
-	IsReset           bool      `json:"is_reset"`         // 流量是否按月重置
-	ResetDay          int       `json:"reset_day"`        // 重置的月份日期 (1-31)
-	Nodes             []int64   `json:"nodes"`              // 关联节点 ID
+	ID                int64             `json:"id"`
+	Name              string            `json:"name"`
+	Description       string            `json:"description"`
+	TrafficLimitGB    float64           `json:"traffic_limit_gb"`           // GB 流量限制
+	TrafficLimitBytes int64             `json:"-"`                          // 流量限制（以字节为单位）（仅限内部使用）
+	CycleDays         int               `json:"cycle_days"`                 // 包裹持续时间（天）
+	IsReset           bool              `json:"is_reset"`                   // 流量是否按月重置
+	ResetDay          int               `json:"reset_day"`                  // 重置的月份日期 (1-31)
+	Nodes             []int64           `json:"nodes"`                      // 关联节点 ID
 	NodeMultipliers   map[int64]float64 `json:"node_multipliers,omitempty"` // node_id → 倍率;遗留套餐为 nil = 全部按 1
-	SpeedLimitMbps    float64   `json:"speed_limit_mbps"`   // 限速 (Mbps)，0=不限
-	DeviceLimit       int       `json:"device_limit"`       // 设备数限制，0=不限
+	SpeedLimitMbps    float64           `json:"speed_limit_mbps"`           // 限速 (Mbps)，0=不限
+	DeviceLimit       int               `json:"device_limit"`               // 设备数限制，0=不限
 	// 套餐级 per-node 限速覆盖。map 含 key 即生效:0 = 显式不限速,>0 = 该值;不含 key = 继承 SpeedLimitMbps。
-	NodeSpeedLimits   map[int64]float64 `json:"node_speed_limits,omitempty"`
+	NodeSpeedLimits map[int64]float64 `json:"node_speed_limits,omitempty"`
 	// 套餐级 per-node 客户端数覆盖。语义同上。
-	NodeDeviceLimits  map[int64]int     `json:"node_device_limits,omitempty"`
-	AutoSpeedRules    []AutoSpeedLimitRule `json:"auto_speed_rules,omitempty"`
-	ShortCode         string    `json:"short_code"`
-	TrafficMode       string    `json:"traffic_mode"`
-	TemplateFilename  string    `json:"template_filename"` // 套餐绑的 V3 模板;空 = 走系统默认模板
-	CreatedAt         time.Time `json:"created_at"`
-	UpdatedAt         time.Time `json:"updated_at"`
+	NodeDeviceLimits map[int64]int        `json:"node_device_limits,omitempty"`
+	AutoSpeedRules   []AutoSpeedLimitRule `json:"auto_speed_rules,omitempty"`
+	ShortCode        string               `json:"short_code"`
+	TrafficMode      string               `json:"traffic_mode"`
+	TemplateFilename string               `json:"template_filename"` // 套餐绑的 V3 模板;空 = 走系统默认模板
+	CreatedAt        time.Time            `json:"created_at"`
+	UpdatedAt        time.Time            `json:"updated_at"`
 }
 
 func (p *Package) TrafficMultiplier() int64 {
@@ -425,31 +425,31 @@ func (p *Package) DeviceLimitForNode(nodeID int64, parentNodeID *int64) (int, bo
 }
 
 type AutoSpeedLimitRule struct {
-	Type             string  `json:"type"`               // "sustained" | "burst"
-	ThresholdMbps    float64 `json:"threshold_mbps"`     // 触发阈值 (Mbps)
-	SustainedSeconds int     `json:"sustained_seconds"`  // sustained: 持续时长; burst: 单次最短时长
-	WindowSeconds    int     `json:"window_seconds"`     // burst: 时间窗口
-	BurstCount       int     `json:"burst_count"`        // burst: 窗口内触发次数
-	LimitMbps        float64 `json:"limit_mbps"`         // 限速后速率 (Mbps)
-	LimitDuration    int     `json:"limit_duration"`     // 限速持续时间 (秒)
+	Type             string  `json:"type"`              // "sustained" | "burst"
+	ThresholdMbps    float64 `json:"threshold_mbps"`    // 触发阈值 (Mbps)
+	SustainedSeconds int     `json:"sustained_seconds"` // sustained: 持续时长; burst: 单次最短时长
+	WindowSeconds    int     `json:"window_seconds"`    // burst: 时间窗口
+	BurstCount       int     `json:"burst_count"`       // burst: 窗口内触发次数
+	LimitMbps        float64 `json:"limit_mbps"`        // 限速后速率 (Mbps)
+	LimitDuration    int     `json:"limit_duration"`    // 限速持续时间 (秒)
 }
 
 // Node代表存储在数据库中的代理节点。
 type Node struct {
-	ID             int64
-	Username       string
-	RawURL         string
-	NodeName       string
-	Protocol       string
-	ParsedConfig   string
-	ClashConfig    string
-	Enabled        bool
-	Tag            string
-	Tags           []string // 多标签支持（兼容旧版单Tag）
-	OriginalServer string
-	OriginalDomain   string // IP 解析功能专用：解析为 IP 前的原始域名（用于"恢复域名"）。与 OriginalServer（服务器名/路由键）严格区分
-	InboundTag       string // 关联入站标签（用于将节点链接到入站）
-	ChainProxyNodeID *int64 // 链式代理目标节点 ID
+	ID                int64
+	Username          string
+	RawURL            string
+	NodeName          string
+	Protocol          string
+	ParsedConfig      string
+	ClashConfig       string
+	Enabled           bool
+	Tag               string
+	Tags              []string // 多标签支持（兼容旧版单Tag）
+	OriginalServer    string
+	OriginalDomain    string // IP 解析功能专用：解析为 IP 前的原始域名（用于"恢复域名"）。与 OriginalServer（服务器名/路由键）严格区分
+	InboundTag        string // 关联入站标签（用于将节点链接到入站）
+	ChainProxyNodeID  *int64 // 链式代理目标节点 ID
 	NodeType          string // 'physical' (默认) 或 'routed' (路由出站虚拟节点)
 	ParentNodeID      *int64 // routed 节点指向其父物理节点
 	RoutedOutboundTag string // routed 节点专用:绑定的 outbound tag(空 = 非 routed 节点);常用查询展示
@@ -459,69 +459,69 @@ type Node struct {
 	// IPFamily 节点的 IP 版本归属:""/"v4"(v4/域名/通用) | "v6"(IPv6 节点)。取代旧的"靠 clash server
 	// 是否含冒号"判定 —— v6 节点改用 v6 域名后 server 不再含冒号,冒号判定会失效。IP 漂移刷新、
 	// 编辑入站按 family 更新都以此列为准。空值按 v4 处理(向后兼容 / 迁移回填)。
-	IPFamily          string
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	IPFamily  string
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // RoutedNodeDetail 路由出站节点的完整元数据,通过专用 GetRoutedNodeDetail 读取。
 // 包含 Node 基本字段 + routed_* 字段。
 type RoutedNodeDetail struct {
 	Node
-	RoutedOutboundTag      string
-	RoutedOutboundJSON     string
-	RoutedRuleMarktag      string
-	RoutedAdminEmail       string
-	RoutedAdminCredential  string
+	RoutedOutboundTag     string
+	RoutedOutboundJSON    string
+	RoutedRuleMarktag     string
+	RoutedAdminEmail      string
+	RoutedAdminCredential string
 }
 
 // SubscribeFile 表示订阅文件配置。
 type SubscribeFile struct {
-	ID                  int64
-	Name                string
-	Description         string
-	URL                 string
-	Type                string
-	Filename            string
-	FileShortCode       string   // 用于短链接的 3 字符代码（自动生成）
-	CustomShortCode     string   // 用户自定义短码（唯一，优先）
-	AutoSyncCustomRules bool
-	TemplateFilename    string   // 绑定的 V3 模板文件名
-	SelectedTags        []string // 选中的节点标签（DB 中 JSON 数组）— legacy,与 SelectedNodeIDs 二选一
-	SelectedNodeIDs     []int64  // 选中的节点 ID（DB 中 JSON 数组）— 优先于 SelectedTags;空 → 回退 tag 过滤
-	SelectedCustomRuleIDs     []int64 // 该订阅生效的覆写规则 ID（空=全部启用的生效）
-	SelectedOverrideScriptIDs []int64 // 该订阅生效的覆写脚本 ID（空=全部启用的生效）
-	StatsServerIDs      string   // 流量统计服务器 ID（逗号分隔 remote_servers.id）
-	TrafficLimit        *float64 // 手动流量上限(GB)，nil=跟随服务器
-	SortOrder           int
-	RawOutput           bool
-	CreatedBy           string // 创建者用户名
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	ID                        int64
+	Name                      string
+	Description               string
+	URL                       string
+	Type                      string
+	Filename                  string
+	FileShortCode             string // 用于短链接的 3 字符代码（自动生成）
+	CustomShortCode           string // 用户自定义短码（唯一，优先）
+	AutoSyncCustomRules       bool
+	TemplateFilename          string   // 绑定的 V3 模板文件名
+	SelectedTags              []string // 选中的节点标签（DB 中 JSON 数组）— legacy,与 SelectedNodeIDs 二选一
+	SelectedNodeIDs           []int64  // 选中的节点 ID（DB 中 JSON 数组）— 优先于 SelectedTags;空 → 回退 tag 过滤
+	SelectedCustomRuleIDs     []int64  // 该订阅生效的覆写规则 ID（空=全部启用的生效）
+	SelectedOverrideScriptIDs []int64  // 该订阅生效的覆写脚本 ID（空=全部启用的生效）
+	StatsServerIDs            string   // 流量统计服务器 ID（逗号分隔 remote_servers.id）
+	TrafficLimit              *float64 // 手动流量上限(GB)，nil=跟随服务器
+	SortOrder                 int
+	RawOutput                 bool
+	CreatedBy                 string // 创建者用户名
+	CreatedAt                 time.Time
+	UpdatedAt                 time.Time
 }
 
 // UserSettings 代表用户特定的配置。
 type UserSettings struct {
-	Username             string
-	ForceSyncExternal    bool
-	MatchRule            string     // "节点名称"或"服务器端口"
-	SyncScope            string     // "saved_only"或"all" - 同步外部订阅的范围
-	KeepNodeName         bool       // 同步时保留原始节点名称
-	CacheExpireMinutes   int        // 缓存过期时间（分钟）
-	SyncTraffic          bool       // 同步外部订阅的流量信息
-	NodeNameFilter       string     // 正则表达式过滤节点名称
-	AppendSubInfo        bool       // 同步外部订阅时把剩余流量/天数拼到节点名后(同步自 mmw v0.7.3)
-	CustomRulesEnabled   bool       // 启用自定义规则功能
-	EnableShortLink      bool       // 启用订阅短链接功能
-	UseNewTemplateSystem bool       // 使用新的模板系统（基于数据库），默认true
-	EnableProxyProvider  bool       // 启用代理提供商功能
-	NodeOrder            []int64    // 节点显示顺序（节点 ID 数组）
-	DefaultTemplateFilename string  // 用户个人默认模板文件名(rule_templates/下,仅本人拥有的模板);空=未设,套餐订阅走原优先级
-	DebugEnabled         bool       // 启用调试日志记录到文件
-	DebugLogPath         string     // 当前调试日志文件的路径
-	DebugStartedAt       *time.Time // 调试日志记录何时开始
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	Username                string
+	ForceSyncExternal       bool
+	MatchRule               string     // "节点名称"或"服务器端口"
+	SyncScope               string     // "saved_only"或"all" - 同步外部订阅的范围
+	KeepNodeName            bool       // 同步时保留原始节点名称
+	CacheExpireMinutes      int        // 缓存过期时间（分钟）
+	SyncTraffic             bool       // 同步外部订阅的流量信息
+	NodeNameFilter          string     // 正则表达式过滤节点名称
+	AppendSubInfo           bool       // 同步外部订阅时把剩余流量/天数拼到节点名后(同步自 mmw v0.7.3)
+	CustomRulesEnabled      bool       // 启用自定义规则功能
+	EnableShortLink         bool       // 启用订阅短链接功能
+	UseNewTemplateSystem    bool       // 使用新的模板系统（基于数据库），默认true
+	EnableProxyProvider     bool       // 启用代理提供商功能
+	NodeOrder               []int64    // 节点显示顺序（节点 ID 数组）
+	DefaultTemplateFilename string     // 用户个人默认模板文件名(rule_templates/下,仅本人拥有的模板);空=未设,套餐订阅走原优先级
+	DebugEnabled            bool       // 启用调试日志记录到文件
+	DebugLogPath            string     // 当前调试日志文件的路径
+	DebugStartedAt          *time.Time // 调试日志记录何时开始
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
 }
 
 // SystemConfig 代表所有用户共享的全局系统配置。
@@ -535,38 +535,38 @@ type SystemConfig struct {
 	HeartbeatInterval       int    // 心跳间隔（秒），默认 30
 	AgentLogEnabled         bool   // 是否打印 agent 交互日志，默认关闭
 
-	NotifyEnabled               bool
-	TelegramBotToken            string
-	TelegramChatID              string
-	NotifyLogin                 bool
-	NotifySubscribeFetch        bool
-	NotifyDailyTraffic          bool
-	NotifyServerOffline         bool
-	NotifyServerOnline          bool
-	NotifyTrafficThreshold      bool
-	NotifyDailyTrafficTime      string // "HH:MM"，默认 "08:00"
-	NotifyTrafficThresholdPercent int  // 0-100，默认 80
+	NotifyEnabled                 bool
+	TelegramBotToken              string
+	TelegramChatID                string
+	NotifyLogin                   bool
+	NotifySubscribeFetch          bool
+	NotifyDailyTraffic            bool
+	NotifyServerOffline           bool
+	NotifyServerOnline            bool
+	NotifyTrafficThreshold        bool
+	NotifyDailyTrafficTime        string // "HH:MM"，默认 "08:00"
+	NotifyTrafficThresholdPercent int    // 0-100，默认 80
 
 	// Phase 2: 9 个新通知开关 + 2 个参数(默认全 false / 0,需 admin 在系统设置主动开)
-	NotifyTrafficThreshold80     bool // 用户流量达 80% 预警
-	NotifyOverLimit              bool // 用户流量超 100%(已踢)
-	NotifyPackageExpiring        bool // 套餐 N 天内到期
-	NotifyPackageExpiringDays    int  // N 默认 3
-	NotifyPackageExpired         bool // 套餐已到期
-	NotifyUserRegistered         bool // 新用户注册
-	NotifyTelegramBound          bool // 用户首次绑定 TG
-	NotifyCertResult             bool // 证书申请成败
-	NotifyAgentLongOffline       bool // agent 长期离线
-	NotifyAgentLongOfflineMinutes int // 默认 30
-	NotifyDeviceLimitExceeded    bool // 设备数超限(agent 上报触发)
-	NotifyIPBan                  bool // IP 被暴力防护封禁
-	EnableOverrideScripts       bool   // 启用覆写脚本功能
-	SubscriptionOutputFormat    string // 订阅序列化格式: "yaml"(default) or "json"。仅影响 Clash 客户端输出。
-	SilentMode                  bool   // 静默模式：所有请求返回404，仅订阅接口可用
-	SilentModeTimeout           int    // 获取订阅后恢复访问的分钟数，默认15
-	EnableMiaomiaowuFeatures    bool   // 启用妙妙屋功能（模板、订阅管理等菜单）
-	DefaultTemplateFilename     string // 默认模板文件名（rule_templates/目录下），Clash 系客户端使用
-	DefaultSurgeTemplateFilename string // Surge 默认模板文件名（rule_templates/下 .conf），Surge 系客户端未绑模板时回落使用
+	NotifyTrafficThreshold80      bool   // 用户流量达 80% 预警
+	NotifyOverLimit               bool   // 用户流量超 100%(已踢)
+	NotifyPackageExpiring         bool   // 套餐 N 天内到期
+	NotifyPackageExpiringDays     int    // N 默认 3
+	NotifyPackageExpired          bool   // 套餐已到期
+	NotifyUserRegistered          bool   // 新用户注册
+	NotifyTelegramBound           bool   // 用户首次绑定 TG
+	NotifyCertResult              bool   // 证书申请成败
+	NotifyAgentLongOffline        bool   // agent 长期离线
+	NotifyAgentLongOfflineMinutes int    // 默认 30
+	NotifyDeviceLimitExceeded     bool   // 设备数超限(agent 上报触发)
+	NotifyIPBan                   bool   // IP 被暴力防护封禁
+	EnableOverrideScripts         bool   // 启用覆写脚本功能
+	SubscriptionOutputFormat      string // 订阅序列化格式: "yaml"(default) or "json"。仅影响 Clash 客户端输出。
+	SilentMode                    bool   // 静默模式：所有请求返回404，仅订阅接口可用
+	SilentModeTimeout             int    // 获取订阅后恢复访问的分钟数，默认15
+	EnableMiaomiaowuFeatures      bool   // 启用妙妙屋功能（模板、订阅管理等菜单）
+	DefaultTemplateFilename       string // 默认模板文件名（rule_templates/目录下），Clash 系客户端使用
+	DefaultSurgeTemplateFilename  string // Surge 默认模板文件名（rule_templates/下 .conf），Surge 系客户端未绑模板时回落使用
 	// 节点名称倍率前缀:订阅生成时,套餐内 multiplier != 1 的节点 name 前面加
 	// "{Left}{multiplier}{Right}" 前缀;Left/Right 默认 「」,用户可改。
 	NodeNameMultiplierPrefixEnabled bool
@@ -715,30 +715,30 @@ type BatchOutbound struct {
 
 // RemoteServer 代表远程服务器配置。
 type RemoteServer struct {
-	ID                   int64      `json:"id"`
-	Name                 string     `json:"name"`
-	Token                string     `json:"token"` // 服务器令牌（代理持有，用于推送到服务器）- 保留用于向后兼容
-	Status               string     `json:"status"`
-	LastHeartbeat        *time.Time `json:"last_heartbeat,omitempty"`
-	IPAddress            string     `json:"ip_address,omitempty"`
+	ID            int64      `json:"id"`
+	Name          string     `json:"name"`
+	Token         string     `json:"token"` // 服务器令牌（代理持有，用于推送到服务器）- 保留用于向后兼容
+	Status        string     `json:"status"`
+	LastHeartbeat *time.Time `json:"last_heartbeat,omitempty"`
+	IPAddress     string     `json:"ip_address,omitempty"`
 	// IPAddressV6 由 agent 在 dual-stack 服务器上单独探测后上报。
 	// 用途:master HTTP 反向请求时,v4 dial 失败 → fallback 试 v6。
 	// 空值 = agent 不支持上报 / 服务器无 v6 → 退化为只走 v4(与历史行为一致)。
-	IPAddressV6          string     `json:"ip_address_v6,omitempty"`
+	IPAddressV6 string `json:"ip_address_v6,omitempty"`
 	// IPv6Enabled 管理员开关(默认 true)。关闭后:服务管理不显示 v6、添加节点不可选 v6。
 	// 与 ip_address_v6 是否为空解耦 —— 因为 agent 上报空 v6 时后端 COALESCE 会保留旧地址,
 	// 单靠"地址是否为空"无法表达"用户主动关闭了 v6"。
-	IPv6Enabled          bool       `json:"ipv6_enabled"`
+	IPv6Enabled bool `json:"ipv6_enabled"`
 	// OfflineNotified 当前离线周期是否已发过下线通知。配合 offline_since 做"容忍阈值"防抖:
 	// 离线满阈值秒才发下线通知(offline_notified 置 1);重连时只有 offline_notified=1 才补发上线通知。
-	OfflineNotified      bool       `json:"offline_notified"`
+	OfflineNotified bool `json:"offline_notified"`
 	// WarpInstalled agent 已注册 Cloudflare WARP(warp.json 存在 + device_id 非空)。
 	// agent 在 auth + heartbeat 时上报;master 用来在 server 卡片渲染空心 W 图标 badge。
-	WarpInstalled        bool       `json:"warp_installed"`
+	WarpInstalled bool `json:"warp_installed"`
 	// SameHostAsMaster agent 与主控同机(agent auth/heartbeat 上报)。前端据此 + 主控 is_docker 决定
 	// 是否显示「反代主控」入口(宿主机 agent 反代 Docker 主控开 HTTPS)。
-	SameHostAsMaster     bool       `json:"same_host_as_master"`
-	Domain               string     `json:"domain,omitempty"`
+	SameHostAsMaster bool   `json:"same_host_as_master"`
+	Domain           string `json:"domain,omitempty"`
 	// DomainV6 给 IPv6 节点用的专用域名(AAAA 记录)。空则 v6 节点回落到 IPAddressV6 字面地址。
 	// 与 Domain(v4/通用)分开:双栈机 v4 走 Domain/IP、v6 走 DomainV6,互不干扰。
 	DomainV6             string     `json:"domain_v6,omitempty"`
@@ -771,11 +771,11 @@ type RemoteServer struct {
 	AgentToken            string     `json:"agent_token,omitempty"` // 代理令牌（服务器持有，用于从代理拉取）
 	AgentTokenExpiresAt   *time.Time `json:"agent_token_expires_at,omitempty"`
 	LastAgentTokenRefresh *time.Time `json:"last_agent_token_refresh,omitempty"`
-	Use443                bool       `json:"use_443"`                // 是否使用443端口与nginx+xray隧道
-	StealMode             string     `json:"steal_mode,omitempty"` // "tunnel" | "fallback"，默认 tunnel
-	SiteType              string     `json:"site_type,omitempty"`  // "static" | "proxy"
-	SiteValue             string     `json:"site_value,omitempty"` // 静态路径或反向代理地址
-	XrayMode              string     `json:"xray_mode"`            // "external" (默认) 或 "embedded"
+	Use443                bool       `json:"use_443"`                       // 是否使用443端口与nginx+xray隧道
+	StealMode             string     `json:"steal_mode,omitempty"`          // "tunnel" | "fallback"，默认 tunnel
+	SiteType              string     `json:"site_type,omitempty"`           // "static" | "proxy"
+	SiteValue             string     `json:"site_value,omitempty"`          // 静态路径或反向代理地址
+	XrayMode              string     `json:"xray_mode"`                     // "external" (默认) 或 "embedded"
 	TimeOffsetSeconds     *int64     `json:"time_offset_seconds,omitempty"` // agent 与主控的时钟偏差（秒）
 	TrafficUsedOffset     int64      `json:"traffic_used_offset"`
 	// 流量统计规则: "both"(默认,上行+下行) / "upload"(仅上行) / "download"(仅下行)
@@ -793,22 +793,22 @@ type RemoteServer struct {
 	// SystemLastSeenRx / SystemLastSeenTx 上次 agent 上报的 /proc/net/dev 累计值,
 	// 用于算 delta 与 reboot 检测:RX 倒退(同 boot_time 下)= /proc 异常,差跳过 1 次后续正常;
 	// SystemBootTimeUnix 跟 agent 上报的值对比变化 → 正常 reboot,基线重建不计 delta。
-	SystemLastSeenRx       int64 `json:"system_last_seen_rx"`
-	SystemLastSeenTx       int64 `json:"system_last_seen_tx"`
-	SystemBootTimeUnix     int64 `json:"system_boot_time_unix"`
+	SystemLastSeenRx       int64      `json:"system_last_seen_rx"`
+	SystemLastSeenTx       int64      `json:"system_last_seen_tx"`
+	SystemBootTimeUnix     int64      `json:"system_boot_time_unix"`
 	SystemTrafficUpdatedAt *time.Time `json:"system_traffic_updated_at,omitempty"`
 	// DDNS 自动同步:agent 心跳上报 IP 变化时,主控自动调 DNS provider API 更新 pull_address 域名的 A/AAAA 记录
-	DDNSEnabled        bool       `json:"ddns_enabled"`
-	DDNSProviderID     int64      `json:"ddns_provider_id"`               // 0=自动(按证书),>0=显式指定 dns_providers.id
-	DDNSLastSyncedAt   *time.Time `json:"ddns_last_synced_at,omitempty"`
-	DDNSLastError      string     `json:"ddns_last_error,omitempty"`
-	DDNSPending        bool       `json:"ddns_pending"`                   // 正在同步中
+	DDNSEnabled      bool       `json:"ddns_enabled"`
+	DDNSProviderID   int64      `json:"ddns_provider_id"` // 0=自动(按证书),>0=显式指定 dns_providers.id
+	DDNSLastSyncedAt *time.Time `json:"ddns_last_synced_at,omitempty"`
+	DDNSLastError    string     `json:"ddns_last_error,omitempty"`
+	DDNSPending      bool       `json:"ddns_pending"` // 正在同步中
 	// LastTrafficResetAt 最近一次按 traffic_reset_day 自动重置服务器流量的时间(防同月反复重置)
 	LastTrafficResetAt *time.Time `json:"last_traffic_reset_at,omitempty"`
-	IsFederated           bool       `json:"is_federated"`       // 是否为接入的"分享服务器"(联邦)，非持久化字段
-	FederationPrefix      string     `json:"federation_prefix"`  // 分享服务器上新增入站的 tag 前缀，非持久化字段
-	CreatedAt             time.Time  `json:"created_at"`
-	UpdatedAt             time.Time  `json:"updated_at"`
+	IsFederated        bool       `json:"is_federated"`      // 是否为接入的"分享服务器"(联邦)，非持久化字段
+	FederationPrefix   string     `json:"federation_prefix"` // 分享服务器上新增入站的 tag 前缀，非持久化字段
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 // NodeTraffic 表示节点的流量统计信息。
@@ -3712,7 +3712,11 @@ func (r *TrafficRepository) RecordDaily(ctx context.Context, date time.Time, tot
 		return errors.New("traffic repository not initialized")
 	}
 
-	normalized := date.UTC().Format("2006-01-02")
+	// 用**本地**日期,不能用 UTC:调度器在本地 00:00 触发(main.go 的 nextMidnight),
+	// collector.CreateDailySnapshots 也用本地日期。这里若转 UTC,UTC+8 下本地午夜
+	// = UTC 前一天 16:00,这一笔就写进了前一个日期,日界整体漂移一天,
+	// 且与 node/user 快照表对不上。三处必须同一个时区口径。
+	normalized := date.Format("2006-01-02")
 
 	const stmt = `
 INSERT INTO traffic_records (date, total_limit, total_used, total_remaining)
@@ -4624,9 +4628,9 @@ type User struct {
 	Role         string
 	IsActive     bool
 	Remark       string
-	PackageID           int64
-	IsReset             bool
-	ResetDay            int
+	PackageID    int64
+	IsReset      bool
+	ResetDay     int
 	// LastResetAt 记录上次按 reset_day 自动重置流量周期的时间。
 	// CheckAll 用它做"本月是否已重置"判定,避免 enforcer 每 5 min 跑一次时同一天反复 reset。
 	// 空 = 从未重置过(刚装 / 刚分配套餐),CheckAll 在 reset_day 到了之后会触发首次 reset。
@@ -4640,14 +4644,14 @@ type User struct {
 	// 生命周期:换套餐/解绑/过期时清除,纯续期保留(见 AssignPackageToUser / RemovePackageFromUser)。
 	TrafficLimitOverride *int64
 	// 用户级 per-node 限速覆盖。map 含 key 即生效:0 = 显式不限速;>0 = 该值;不含 key = 沿用上层。
-	NodeSpeedLimitOverrides  map[int64]float64
+	NodeSpeedLimitOverrides map[int64]float64
 	// 用户级 per-node 客户端数覆盖。语义同上。
 	NodeDeviceLimitOverrides map[int64]int
-	TOTPSecret          string
-	TOTPEnabled   bool
-	RecoveryCodes string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	TOTPSecret               string
+	TOTPEnabled              bool
+	RecoveryCodes            string
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
 }
 
 // UserProfileUpdate 捕获用户的可编辑配置文件字段。
@@ -8449,7 +8453,7 @@ UPDATE node_traffic       SET total_uplink = 0, total_downlink = 0, uplink = las
 //
 // 本函数:解析失败 → error(调用方据此放弃决策);不做 filterAliveNodeIDs(孤儿 id 由调用方
 // 按"跳过该节点"处理,语义更清晰,且不会因一次查询抖动而放大成整套餐的期望变化)。
-// 合法空(nodes 列为 NULL / '' / '[]')→ ([], nil):套餐确实没配节点,用户本就不该有 client。
+// 合法空(nodes 列为 NULL / ” / '[]')→ ([], nil):套餐确实没配节点,用户本就不该有 client。
 func (r *TrafficRepository) GetPackageNodesStrict(ctx context.Context, id int64) ([]int64, error) {
 	if r == nil || r.db == nil {
 		return nil, errors.New("traffic repository not initialized")
@@ -9410,9 +9414,10 @@ func (r *TrafficRepository) CountUserCustomRules(ctx context.Context, username s
 }
 
 // LicenseUsage 返回当前本机激活的"license usage 三联":
-//   servers — 在线远程服务器(用心跳判定,activated 但未离线即算占用一个 server 名额)
-//   nodes   — 启用中的节点条目
-//   users   — 启用中的非管理员用户(管理员不占 license 名额)
+//
+//	servers — 在线远程服务器(用心跳判定,activated 但未离线即算占用一个 server 名额)
+//	nodes   — 启用中的节点条目
+//	users   — 启用中的非管理员用户(管理员不占 license 名额)
 //
 // 设计意图:让 license 服务器看到的 used_* 跟"plan 限额检查"用到的口径一致,避免出现
 // "面板显示 used=N,但 enforce 时按 M 判定"的语义偏差。
@@ -9850,7 +9855,12 @@ func (r *TrafficRepository) CreateRemoteServer(ctx context.Context, server *Remo
 	// 将令牌有效期设置为从现在起 7 天
 	tokenExpiresAt := time.Now().Add(7 * 24 * time.Hour)
 
-	const stmt = `INSERT INTO remote_servers (name, token, status, ip_address, ip_address_v6, ipv6_enabled, domain, domain_v6, token_expires_at, last_token_refresh, connection_mode, listen_port, pull_address, pull_address_v6, pull_port, pull_token, use_443, steal_mode, site_type, site_value, xray_mode, traffic_limit, traffic_used_offset, traffic_reset_day, traffic_stats_mode, traffic_source, ddns_enabled, ddns_provider_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
+	// last_traffic_reset_at 必须初始化为「现在」,不能留 NULL:
+	// traffic_limit_enforcer 的 shouldResetThisMonth 把 NULL 当成"本月还没重置过",
+	// 于是新建服务器会在下一个 tick 就被 ResetRemoteServerTrafficCycle 把
+	// traffic_used_offset 覆写成 -aggregated(新机 aggregated=0 → offset 归零),
+	// 用户在「添加服务器」里填的已用流量随即消失。语义上"创建即视为本周期已重置"。
+	const stmt = `INSERT INTO remote_servers (name, token, status, ip_address, ip_address_v6, ipv6_enabled, domain, domain_v6, token_expires_at, last_token_refresh, connection_mode, listen_port, pull_address, pull_address_v6, pull_port, pull_token, use_443, steal_mode, site_type, site_value, xray_mode, traffic_limit, traffic_used_offset, traffic_reset_day, traffic_stats_mode, traffic_source, ddns_enabled, ddns_provider_id, last_traffic_reset_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
 
 	stealMode := server.StealMode
 	if stealMode == "" {
@@ -12653,15 +12663,15 @@ JOIN (
 //   - 服务器视图 today / week / month 三个时间按钮立即可用(每个日期都有 baseline)
 //
 // 三步事务:
-//   1. system_rx_cycle / system_tx_cycle = SUM(downlink) / SUM(uplink) FROM node_traffic
-//      → mode=both 时 cycle 和 = SUM(uplink+downlink) = xray total
-//   2. **traffic_used_offset = 0**(关键!): 历史 bug 防御 + 语义复位
-//      之前版本只 SET cycle 没动 offset → 切换瞬间 handler 算的 offset(基于"system 真实小累加")
-//      跟 migrate 后 cycle(= xray total)脱节 → traffic_used = cycle + offset 翻倍。
-//      reset offset = 0 意味着 server.traffic_used = cycle 单独,跟 xray 视角自然对齐。
-//      用户后续若要校准已用流量,通过 dialog 显式填入(handler 的 if req.TrafficUsed != nil 路径)。
-//   3. server_system_traffic_snapshots 按 node_traffic_snapshots 每日聚合填充
-//      → 之后 daily snapshot job 继续每天 00:00 拍新行
+//  1. system_rx_cycle / system_tx_cycle = SUM(downlink) / SUM(uplink) FROM node_traffic
+//     → mode=both 时 cycle 和 = SUM(uplink+downlink) = xray total
+//  2. **traffic_used_offset = 0**(关键!): 历史 bug 防御 + 语义复位
+//     之前版本只 SET cycle 没动 offset → 切换瞬间 handler 算的 offset(基于"system 真实小累加")
+//     跟 migrate 后 cycle(= xray total)脱节 → traffic_used = cycle + offset 翻倍。
+//     reset offset = 0 意味着 server.traffic_used = cycle 单独,跟 xray 视角自然对齐。
+//     用户后续若要校准已用流量,通过 dialog 显式填入(handler 的 if req.TrafficUsed != nil 路径)。
+//  3. server_system_traffic_snapshots 按 node_traffic_snapshots 每日聚合填充
+//     → 之后 daily snapshot job 继续每天 00:00 拍新行
 //
 // 上一轮切换的 server 缺少这步迁移 → daily snapshot baseline 全 0 + offset 错锁 → 翻倍 bug,
 // 启动 backfill goroutine 用本函数补齐。
@@ -12812,4 +12822,78 @@ func (r *TrafficRepository) DeleteOverrideScript(ctx context.Context, id int64, 
 	_, err := r.db.ExecContext(ctx,
 		`DELETE FROM override_scripts WHERE id = ? AND username = ?`, id, username)
 	return err
+}
+
+// ServerDailyCumulative 是某台服务器在某一天的**物理累计**流量(快照值,非增量)。
+type ServerDailyCumulative struct {
+	ServerID int64
+	Date     string // YYYY-MM-DD
+	Used     int64  // 按该服务器的 traffic_stats_mode/traffic_source 口径算出的累计已用
+}
+
+// ListServerDailyCumulative 返回最近 days 天、每服务器每天的累计已用流量。
+//
+// 为什么不用 traffic_records 差分:那张表存的是**所有服务器加总后**的累计值,
+// 一台机做月度重置就会让总和下降,既没法从中分离出"重置掉多少",也就算不出当天真实用量
+// (早先钳成 0 会谎称没流量,改用总量又会画出上千 GB 的假尖峰)。
+//
+// 这里改用 per-server 快照:traffic_snapshots 来自 node_traffic、
+// server_system_traffic_snapshots 来自 system rx/tx cycle —— 二者都是**物理累计量**,
+// ResetRemoteServerTrafficCycle 只改 traffic_used_offset,不动它们,所以单调递增,
+// 逐服务器差分永远非负。上层按服务器各自差分再求和,重置就影响不到别的机器。
+func (r *TrafficRepository) ListServerDailyCumulative(ctx context.Context, days int) ([]ServerDailyCumulative, error) {
+	if r == nil || r.db == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	if days <= 0 {
+		days = 30
+	}
+	// 多取一天:算第一天的增量需要它前一天的基线。
+	cutoff := time.Now().AddDate(0, 0, -(days + 1)).Format("2006-01-02")
+
+	// 口径必须与 GetServerTrafficUsed 完全一致,否则日流量加起来对不上"已用流量"。
+	//   xray  源:node_traffic 的 uplink/downlink(快照里按 inbound/outbound 拆开存,这里加回去)
+	//   system 源:system rx/tx cycle
+	const stmt = `
+SELECT s.id,
+       t.date,
+       CASE COALESCE(s.traffic_source, 'xray')
+         WHEN 'system' THEN
+           CASE COALESCE(s.traffic_stats_mode, 'both')
+             WHEN 'upload'   THEN COALESCE(y.tx_cycle, 0)
+             WHEN 'download' THEN COALESCE(y.rx_cycle, 0)
+             WHEN 'max'      THEN MAX(COALESCE(y.rx_cycle, 0), COALESCE(y.tx_cycle, 0))
+             ELSE COALESCE(y.rx_cycle, 0) + COALESCE(y.tx_cycle, 0)
+           END
+         ELSE
+           CASE COALESCE(s.traffic_stats_mode, 'both')
+             WHEN 'upload'   THEN COALESCE(t.inbound_uplink, 0) + COALESCE(t.outbound_uplink, 0)
+             WHEN 'download' THEN COALESCE(t.inbound_downlink, 0) + COALESCE(t.outbound_downlink, 0)
+             WHEN 'max'      THEN MAX(COALESCE(t.inbound_uplink, 0) + COALESCE(t.outbound_uplink, 0),
+                                      COALESCE(t.inbound_downlink, 0) + COALESCE(t.outbound_downlink, 0))
+             ELSE COALESCE(t.inbound_uplink, 0) + COALESCE(t.outbound_uplink, 0)
+                + COALESCE(t.inbound_downlink, 0) + COALESCE(t.outbound_downlink, 0)
+           END
+       END AS used
+FROM remote_servers s
+LEFT JOIN traffic_snapshots t ON t.server_id = s.id
+LEFT JOIN server_system_traffic_snapshots y ON y.server_id = s.id AND y.date = t.date
+WHERE t.date >= ?
+ORDER BY s.id ASC, t.date ASC`
+
+	rows, err := r.db.QueryContext(ctx, stmt, cutoff)
+	if err != nil {
+		return nil, fmt.Errorf("list server daily cumulative: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]ServerDailyCumulative, 0, 128)
+	for rows.Next() {
+		var rec ServerDailyCumulative
+		if err := rows.Scan(&rec.ServerID, &rec.Date, &rec.Used); err != nil {
+			return nil, fmt.Errorf("scan server daily cumulative: %w", err)
+		}
+		out = append(out, rec)
+	}
+	return out, rows.Err()
 }

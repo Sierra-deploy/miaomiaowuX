@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -635,6 +636,8 @@ func main() {
 	mux.Handle("/api/admin/remote/nginx/config/files", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleNginxConfigFiles)))
 	mux.Handle("/api/admin/remote/nginx/servers-list", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleNginxServersList)))
 	mux.Handle("/api/admin/remote/system/info", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleSystemInfo)))
+	// 出站 sendThrough 用:列服务器网卡地址。server_id 省略=主控本机。
+	mux.Handle("/api/admin/server-nics", auth.RequireAdmin(tokenStore, userRepo, handler.NewServerNICsHandler(remoteManageHandler)))
 	// 远程服务器Xray入站/出站/路由管理
 	mux.Handle("/api/admin/remote/inbounds", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleInbounds)))
 	mux.Handle("/api/admin/remote/outbounds", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(remoteManageHandler.HandleOutbounds)))
@@ -767,6 +770,7 @@ func main() {
 		mux.Handle("/api/child/nginx/config", http.HandlerFunc(childManageHandler.HandleNginxConfig))
 		mux.Handle("/api/child/nginx/config/files", http.HandlerFunc(childManageHandler.HandleNginxConfigFiles))
 		mux.Handle("/api/child/system/info", http.HandlerFunc(childManageHandler.HandleSystemInfo))
+		mux.Handle("/api/child/system/nics", http.HandlerFunc(childManageHandler.HandleSystemNICs))
 		// X射线入站/出站/路由管理
 		mux.Handle("/api/child/inbounds", http.HandlerFunc(childManageHandler.HandleInbounds))
 		mux.Handle("/api/child/outbounds", http.HandlerFunc(childManageHandler.HandleOutbounds))
@@ -874,6 +878,8 @@ func main() {
 	// 公开端点:伪装探针的只读服务器状态(无鉴权)。伪装关闭时返回 {enabled:false},开启时只吐白名单字段。
 	// 走明文(前端 shouldEncrypt 已放行 /api/public/);此处 remoteWSHandler 已构造(见上文)。
 	mux.Handle("/api/public/probe-servers", handler.NewProbePublicHandler(repo, remoteWSHandler, probeMetricsStore))
+	// 延迟弹窗按需拉的详细曲线(单服务器单目标),与列表端点分开:列表 5 秒轮询,给粗粒度小 payload。
+	mux.Handle("/api/public/probe-series", handler.NewProbeSeriesHandler(repo, probeMetricsStore))
 
 	// CDN 省市 ping 目标列表(管理员配置伪装探针 ping 时勾选)。代理+缓存 lf3-ips.zstaticcdn.com,防 SSRF。
 	mux.Handle("/api/admin/probe/regions", auth.RequireAdmin(tokenStore, userRepo, handler.NewProbeCDNProxyHandler(repo)))
@@ -1490,7 +1496,7 @@ func startDailySnapshotTask(ctx context.Context, trafficHandler *handler.Traffic
 	}
 
 	// 带重试的流量收集函数
-	runWithRetry := func() {
+	runWithRetry := func() error {
 		logger.Info("[流量收集器] 开始每日流量收集", "start_time", time.Now().Format("2006-01-02 15:04:05"))
 
 		maxRetries := 3
@@ -1513,7 +1519,7 @@ func startDailySnapshotTask(ctx context.Context, trafficHandler *handler.Traffic
 					}
 					snapCancel()
 				}
-				return
+				return nil
 			}
 
 			logger.Warn("[流量收集器] 每日流量收集失败", "attempt", attempt, "max_retries", maxRetries, "error", err)
@@ -1523,7 +1529,7 @@ func startDailySnapshotTask(ctx context.Context, trafficHandler *handler.Traffic
 				select {
 				case <-ctx.Done():
 					logger.Info("[流量收集器] 重试已取消（服务器关闭）")
-					return
+					return ctx.Err()
 				case <-time.After(retryDelay):
 					// 继续重试
 				}
@@ -1531,6 +1537,7 @@ func startDailySnapshotTask(ctx context.Context, trafficHandler *handler.Traffic
 		}
 
 		logger.Error("[流量收集器] 达到最大重试次数后仍失败", "max_retries", maxRetries)
+		return fmt.Errorf("每日流量收集重试 %d 次后仍失败", maxRetries)
 	}
 
 	// 启动后不立即跑,改为等到下一个 00:00:00 触发第一次,之后每 24h 一次。
@@ -1542,8 +1549,9 @@ func startDailySnapshotTask(ctx context.Context, trafficHandler *handler.Traffic
 
 	recorded := func() {
 		taskrun.Record(ctx, "daily_snapshot", func() (string, error) {
-			runWithRetry()
-			return "", nil
+			// 必须把错误透传给 taskrun,否则 task_runs 里这个任务永远是 ok,
+			// 失败只在日志里,DB 中零痕迹 —— 整个 taskrun 机制对它形同虚设。
+			return "", runWithRetry()
 		})
 	}
 

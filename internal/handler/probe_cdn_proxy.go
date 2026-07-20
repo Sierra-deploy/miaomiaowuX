@@ -72,6 +72,8 @@ type CityTarget struct {
 type CDNRegions struct {
 	Provinces []ProvinceGroup `json:"provinces"`
 	Cities    []CityTarget    `json:"cities"`
+	// International 是内置的国际目标(常量,不来自 CDN),独立分组避免与三网省市混淆。
+	International []IntlTarget `json:"international"`
 }
 
 // ispFromKey 从 key 的 -cu-/-cm-/-ct- 后缀推运营商。
@@ -186,7 +188,7 @@ func (h *ProbeCDNProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	if h.cache != nil && time.Since(h.cachedAt) < h.cacheTTL {
 		cached := h.cache
 		h.mu.Unlock()
-		respondJSON(w, http.StatusOK, map[string]any{"success": true, "regions": cached, "source": "cache"})
+		respondJSON(w, http.StatusOK, map[string]any{"success": true, "regions": withIntl(cached), "source": "cache"})
 		return
 	}
 	h.mu.Unlock()
@@ -198,7 +200,7 @@ func (h *ProbeCDNProxyHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 	h.cachedAt = time.Now()
 	h.mu.Unlock()
 
-	respondJSON(w, http.StatusOK, map[string]any{"success": true, "regions": regions, "source": source})
+	respondJSON(w, http.StatusOK, map[string]any{"success": true, "regions": withIntl(regions), "source": source})
 }
 
 // fetchAndParse 拉端点解析;失败回退内嵌快照。返回 (regions, source)。
@@ -219,4 +221,15 @@ func (h *ProbeCDNProxyHandler) fetchAndParse(r *http.Request) (*CDNRegions, stri
 	}
 	// 兜底:内嵌快照
 	return parseCDNNodes(embeddedCDNSnapshot), "embedded"
+}
+
+// withIntl 把内置国际目标挂进响应。不写进 h.cache —— 缓存的是 CDN 解析结果,
+// 国际目标是编译期常量,每次拼上即可,免得改常量后还要等缓存过期。
+func withIntl(r *CDNRegions) *CDNRegions {
+	if r == nil {
+		return &CDNRegions{Provinces: []ProvinceGroup{}, Cities: []CityTarget{}, International: builtinIntlTargets}
+	}
+	cp := *r
+	cp.International = builtinIntlTargets
+	return &cp
 }

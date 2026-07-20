@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"miaomiaowux/internal/util"
 	"miaomiaowux/internal/xrpc/client"
 
 	"github.com/xtls/xray-core/app/proxyman/command"
@@ -960,6 +961,31 @@ func (h *ChildManageHandler) HandleSystemInfo(w http.ResponseWriter, r *http.Req
 	}
 
 	childWriteJSON(w, http.StatusOK, info)
+}
+
+// HandleSystemNICs 列出本机可用于 xray 出站 sendThrough 绑定的网卡地址。
+// 与 agent 的 /api/child/system/nics 同形,让主控作为节点时走同一条转发路径。
+func (h *ChildManageHandler) HandleSystemNICs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		childWriteError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	if !h.authenticate(r) {
+		childWriteError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	nics, err := util.ListNICs()
+	if err != nil {
+		childWriteError(w, http.StatusInternalServerError, "列举网卡失败: "+err.Error())
+		return
+	}
+
+	childWriteJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"nics":    nics,
+	})
 }
 
 // ================== 配置文件管理 ==================

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -178,22 +179,29 @@ func (h *SystemSettingsHandler) SetExternalHTTPS(w http.ResponseWriter, r *http.
 
 // 伪装探针配置的 4 个 KV 键。
 const (
-	probeDisguiseEnabledKey   = "probe_disguise_enabled"    // "1"/"" 开关
-	probeDisguiseTitleKey     = "probe_disguise_title"      // 伪装页标题(管理员自定义)
+	probeDisguiseEnabledKey = "probe_disguise_enabled" // "1"/"" 开关
+	probeDisguiseTitleKey   = "probe_disguise_title"   // 伪装页标题(管理员自定义)
+	// 伪装页 logo:图片 URL 或 data: URI。空=只显示标题。
+	// data: URI 有大小上限(probeLogoMaxBytes)——公开端点每 5 秒轮询一次,大图会持续吃带宽。
+	probeDisguiseLogoKey      = "probe_disguise_logo"
 	probeDisguiseServerIDsKey = "probe_disguise_server_ids" // JSON int64 数组:展示哪些服务器
 	probeDisguiseShowNameKey  = "probe_disguise_show_name"  // "1"/"" 是否显示服务器名
 	// 真探针数据后端:4 个采集子开关 + ping 目标 + ping 间隔。
 	// 新字段在 SetProbeDisguise 里用指针语义(nil=不改)——旧前端 PUT 不带这些字段时不会被冲成零值。
-	probeDisguiseMetricCPUKey    = "probe_disguise_metric_cpu"       // "1"/"" 采集 CPU
-	probeDisguiseMetricMemKey    = "probe_disguise_metric_mem"       // "1"/"" 采集内存
-	probeDisguiseMetricDiskKey   = "probe_disguise_metric_disk"      // "1"/"" 采集硬盘
-	probeDisguiseMetricPingKey   = "probe_disguise_metric_ping"      // "1"/"" 采集 ping
+	probeDisguiseMetricCPUKey  = "probe_disguise_metric_cpu"  // "1"/"" 采集 CPU
+	probeDisguiseMetricMemKey  = "probe_disguise_metric_mem"  // "1"/"" 采集内存
+	probeDisguiseMetricDiskKey = "probe_disguise_metric_disk" // "1"/"" 采集硬盘
+	probeDisguiseMetricPingKey = "probe_disguise_metric_ping" // "1"/"" 采集 ping
 	// 流量/网速是展示开关(数据来自主控实时,不需 agent 采集):"1"/"" 控制伪装页是否显示该块。
 	probeDisguiseMetricTrafficKey = "probe_disguise_metric_traffic" // "1"/"" 伪装页显示流量
 	probeDisguiseMetricSpeedKey   = "probe_disguise_metric_speed"   // "1"/"" 伪装页显示网速
-	probeDisguisePingTargetsKey  = "probe_disguise_ping_targets"     // JSON [{key,label,isp,host,port}]
-	probeDisguisePingIntervalKey = "probe_disguise_ping_interval_ms" // int 字符串,默认 5000
-	probeCDNRegionsEndpointKey   = "probe_cdn_regions_endpoint"      // CDN 数据端点(可配置)
+	probeDisguisePingTargetsKey   = "probe_disguise_ping_targets"   // JSON [{key,label,isp,host,port}]
+	// per-server 覆盖:JSON {"<serverID>": [{key,label,isp,host,port}]}。
+	// key 存在且为 [] = 该机不做 ping 探测;key 不存在 = 跟随全局 probeDisguisePingTargetsKey。
+	// 这两种状态必须可区分,所以用 map 的键存在性而不是空数组来表达"跟随全局"。
+	probeDisguisePingTargetsOverrideKey = "probe_disguise_ping_targets_override"
+	probeDisguisePingIntervalKey        = "probe_disguise_ping_interval_ms" // int 字符串,默认 5000
+	probeCDNRegionsEndpointKey          = "probe_cdn_regions_endpoint"      // CDN 数据端点(可配置)
 )
 
 // GetProbeDisguise 返回伪装探针配置(管理端)。
@@ -205,6 +213,7 @@ func (h *SystemSettingsHandler) GetProbeDisguise(w http.ResponseWriter, r *http.
 	ctx := r.Context()
 	enabled, _ := h.repo.GetSystemSetting(ctx, probeDisguiseEnabledKey)
 	title, _ := h.repo.GetSystemSetting(ctx, probeDisguiseTitleKey)
+	logo, _ := h.repo.GetSystemSetting(ctx, probeDisguiseLogoKey)
 	showName, _ := h.repo.GetSystemSetting(ctx, probeDisguiseShowNameKey)
 	idsRaw, _ := h.repo.GetSystemSetting(ctx, probeDisguiseServerIDsKey)
 
@@ -227,6 +236,12 @@ func (h *SystemSettingsHandler) GetProbeDisguise(w http.ResponseWriter, r *http.
 	if pingTargetsRaw != "" {
 		_ = json.Unmarshal([]byte(pingTargetsRaw), &pingTargets)
 	}
+	// per-server 覆盖:回给前端时保持 {"<serverID>": [...]} 形态,键存在性=该机是否单独指定。
+	overrideRaw, _ := h.repo.GetSystemSetting(ctx, probeDisguisePingTargetsOverrideKey)
+	pingTargetsOverride := map[string][]ProbePingTarget{}
+	for id, ts := range parseProbePingTargetOverrides(overrideRaw) {
+		pingTargetsOverride[strconv.FormatInt(id, 10)] = ts
+	}
 	pingInterval := 60000 // 默认 60 秒探一次(配合 1 天保留窗口)
 	if n, err := strconv.Atoi(pingIntervalRaw); err == nil && n > 0 {
 		pingInterval = n
@@ -234,19 +249,21 @@ func (h *SystemSettingsHandler) GetProbeDisguise(w http.ResponseWriter, r *http.
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"success":          true,
-		"enabled":          enabled == "1",
-		"title":            title,
-		"server_ids":       ids,
-		"show_name":        showName == "1",
-		"metric_cpu":       metricCPU == "1",
-		"metric_mem":       metricMem == "1",
-		"metric_disk":      metricDisk == "1",
-		"metric_ping":      metricPing == "1",
-		"metric_traffic":   metricTraffic != "0", // 默认显示
-		"metric_speed":     metricSpeed != "0",   // 默认显示
-		"ping_targets":     pingTargets,
-		"ping_interval_ms": pingInterval,
+		"success":               true,
+		"enabled":               enabled == "1",
+		"title":                 title,
+		"logo":                  logo,
+		"server_ids":            ids,
+		"show_name":             showName == "1",
+		"metric_cpu":            metricCPU == "1",
+		"metric_mem":            metricMem == "1",
+		"metric_disk":           metricDisk == "1",
+		"metric_ping":           metricPing == "1",
+		"metric_traffic":        metricTraffic != "0", // 默认显示
+		"metric_speed":          metricSpeed != "0",   // 默认显示
+		"ping_targets":          pingTargets,
+		"ping_targets_override": pingTargetsOverride,
+		"ping_interval_ms":      pingInterval,
 	})
 }
 
@@ -257,8 +274,10 @@ func (h *SystemSettingsHandler) SetProbeDisguise(w http.ResponseWriter, r *http.
 		return
 	}
 	var req struct {
-		Enabled   bool    `json:"enabled"`
-		Title     string  `json:"title"`
+		Enabled bool   `json:"enabled"`
+		Title   string `json:"title"`
+		// 指针语义:nil=不改(旧前端 PUT 不带这个字段时不会被冲成空)。
+		Logo      *string `json:"logo"`
 		ServerIDs []int64 `json:"server_ids"`
 		ShowName  bool    `json:"show_name"`
 		// 新字段用指针:nil=不改。旧前端 PUT 不带这些字段时,它们保持原值不被冲成零值。
@@ -269,7 +288,10 @@ func (h *SystemSettingsHandler) SetProbeDisguise(w http.ResponseWriter, r *http.
 		MetricTraffic *bool              `json:"metric_traffic"`
 		MetricSpeed   *bool              `json:"metric_speed"`
 		PingTargets   *[]ProbePingTarget `json:"ping_targets"`
-		PingInterval  *int               `json:"ping_interval_ms"`
+		// per-server 覆盖:键为 serverID 字符串。键存在(值可为空数组)=该机单独指定,
+		// 不存在=跟随全局。整个字段为 nil 时不改(旧前端 PUT 不带它)。
+		PingTargetsOverride *map[string][]ProbePingTarget `json:"ping_targets_override"`
+		PingInterval        *int                          `json:"ping_interval_ms"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -303,6 +325,36 @@ func (h *SystemSettingsHandler) SetProbeDisguise(w http.ResponseWriter, r *http.
 		{probeDisguiseServerIDsKey, string(idsJSON)},
 	} {
 		if err := h.repo.SetSystemSetting(ctx, kv.k, kv.v); err != nil {
+			fail()
+			return
+		}
+	}
+
+	if req.Logo != nil {
+		logo := strings.TrimSpace(*req.Logo)
+		if len(logo) > probeLogoMaxBytes {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{
+				"success": false,
+				"message": fmt.Sprintf("logo 过大(上限 %d KB),请压缩图片或改用图片 URL", probeLogoMaxBytes/1024),
+			})
+			return
+		}
+		// 只放行 http(s)、data:image 和站内相对路径。挡掉 javascript: 这类会在公开页
+		// 变成 XSS 的 scheme —— 这个值最终原样进伪装页的 <img src>。
+		if logo != "" && !strings.HasPrefix(logo, "/") &&
+			!strings.HasPrefix(logo, "http://") && !strings.HasPrefix(logo, "https://") &&
+			!strings.HasPrefix(logo, "data:image/") {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{
+				"success": false,
+				"message": "logo 只支持 http(s) 链接、data:image 或站内相对路径",
+			})
+			return
+		}
+		if h.repo.SetSystemSetting(ctx, probeDisguiseLogoKey, logo) != nil {
 			fail()
 			return
 		}
@@ -345,8 +397,47 @@ func (h *SystemSettingsHandler) SetProbeDisguise(w http.ResponseWriter, r *http.
 		if len(targets) > probePingMaxTargets {
 			targets = targets[:probePingMaxTargets]
 		}
+		if err := validatePingTargetList(targets); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]any{"success": false, "message": err.Error()})
+			return
+		}
 		tJSON, _ := json.Marshal(targets)
 		if h.repo.SetSystemSetting(ctx, probeDisguisePingTargetsKey, string(tJSON)) != nil {
+			fail()
+			return
+		}
+	}
+	if req.PingTargetsOverride != nil {
+		// 只保留仍在展示列表里的服务器,顺带清掉已删服务器的残留(KV 没有 FK 级联)。
+		keep := make(map[int64]bool, len(req.ServerIDs))
+		for _, id := range req.ServerIDs {
+			keep[id] = true
+		}
+		cleaned := make(map[string][]ProbePingTarget, len(*req.PingTargetsOverride))
+		for k, targets := range *req.PingTargetsOverride {
+			id, err := strconv.ParseInt(k, 10, 64)
+			if err != nil || !keep[id] {
+				continue
+			}
+			// 与全局同样的上限,防止绕过 SetProbeDisguise 的全局校验给单机塞几百个目标。
+			if len(targets) > probePingMaxTargets {
+				targets = targets[:probePingMaxTargets]
+			}
+			if targets == nil {
+				targets = []ProbePingTarget{}
+			}
+			if err := validatePingTargetList(targets); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]any{"success": false, "message": err.Error()})
+				return
+			}
+			cleaned[k] = targets
+		}
+		oJSON, _ := json.Marshal(cleaned)
+		if h.repo.SetSystemSetting(ctx, probeDisguisePingTargetsOverrideKey, string(oJSON)) != nil {
 			fail()
 			return
 		}
@@ -377,6 +468,10 @@ func (h *SystemSettingsHandler) SetProbeDisguise(w http.ResponseWriter, r *http.
 
 // probePingMaxTargets ping 目标数上限,防止管理员配置把 agent 网络打满。
 const probePingMaxTargets = 30
+
+// probeLogoMaxBytes 是伪装页 logo 的大小上限。URL 远达不到;
+// 这个限制是给 data: URI 的 —— 公开端点 5 秒一轮询,大图会变成持续的带宽浪费。
+const probeLogoMaxBytes = 128 * 1024
 
 // defaultRedeemTemplate 兑换码复制文案的默认模板。占位符:
 //
@@ -1017,7 +1112,7 @@ func (h *SystemSettingsHandler) GetDefaultTemplate(w http.ResponseWriter, r *htt
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
-		"success":                        true,
+		"success":                         true,
 		"default_template_filename":       cfg.DefaultTemplateFilename,
 		"default_surge_template_filename": cfg.DefaultSurgeTemplateFilename,
 	})
