@@ -54,3 +54,4 @@ data
 deploy.sh
 miaomiaowux-frontend
 MCP_PLAN.md
+*_test.go

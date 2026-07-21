@@ -548,28 +548,28 @@ type SystemConfig struct {
 	NotifyTrafficThresholdPercent int    // 0-100，默认 80
 
 	// Phase 2: 9 个新通知开关 + 2 个参数(默认全 false / 0,需 admin 在系统设置主动开)
-	NotifyTrafficThreshold80      bool   // 用户流量达 80% 预警
-	NotifyOverLimit               bool   // 用户流量超 100%(已踢)
-	NotifyPackageExpiring         bool   // 套餐 N 天内到期
-	NotifyPackageExpiringDays     int    // N 默认 3
-	NotifyPackageExpired          bool   // 套餐已到期
-	NotifyUserRegistered          bool   // 新用户注册
-	NotifyTelegramBound           bool   // 用户首次绑定 TG
-	NotifyCertResult              bool   // 证书申请成败
-	NotifyAgentLongOffline        bool   // agent 长期离线
-	NotifyAgentLongOfflineMinutes int    // 默认 30
-	NotifyDeviceLimitExceeded     bool   // 设备数超限(agent 上报触发)
-	NotifyIPBan                   bool   // IP 被暴力防护封禁
+	NotifyTrafficThreshold80      bool // 用户流量达 80% 预警
+	NotifyOverLimit               bool // 用户流量超 100%(已踢)
+	NotifyPackageExpiring         bool // 套餐 N 天内到期
+	NotifyPackageExpiringDays     int  // N 默认 3
+	NotifyPackageExpired          bool // 套餐已到期
+	NotifyUserRegistered          bool // 新用户注册
+	NotifyTelegramBound           bool // 用户首次绑定 TG
+	NotifyCertResult              bool // 证书申请成败
+	NotifyAgentLongOffline        bool // agent 长期离线
+	NotifyAgentLongOfflineMinutes int  // 默认 30
+	NotifyDeviceLimitExceeded     bool // 设备数超限(agent 上报触发)
+	NotifyIPBan                   bool // IP 被暴力防护封禁
 	// NotifyServerRenewal 服务器续费提醒:按 traffic_reset_day 在到期前 7/3 天提醒,
 	// 重置日次日仍在线则发续费成功。一个开关同时管这两条——它们是同一件事的两端。
-	NotifyServerRenewal bool
-	EnableOverrideScripts         bool   // 启用覆写脚本功能
-	SubscriptionOutputFormat      string // 订阅序列化格式: "yaml"(default) or "json"。仅影响 Clash 客户端输出。
-	SilentMode                    bool   // 静默模式：所有请求返回404，仅订阅接口可用
-	SilentModeTimeout             int    // 获取订阅后恢复访问的分钟数，默认15
-	EnableMiaomiaowuFeatures      bool   // 启用妙妙屋功能（模板、订阅管理等菜单）
-	DefaultTemplateFilename       string // 默认模板文件名（rule_templates/目录下），Clash 系客户端使用
-	DefaultSurgeTemplateFilename  string // Surge 默认模板文件名（rule_templates/下 .conf），Surge 系客户端未绑模板时回落使用
+	NotifyServerRenewal          bool
+	EnableOverrideScripts        bool   // 启用覆写脚本功能
+	SubscriptionOutputFormat     string // 订阅序列化格式: "yaml"(default) or "json"。仅影响 Clash 客户端输出。
+	SilentMode                   bool   // 静默模式：所有请求返回404，仅订阅接口可用
+	SilentModeTimeout            int    // 获取订阅后恢复访问的分钟数，默认15
+	EnableMiaomiaowuFeatures     bool   // 启用妙妙屋功能（模板、订阅管理等菜单）
+	DefaultTemplateFilename      string // 默认模板文件名（rule_templates/目录下），Clash 系客户端使用
+	DefaultSurgeTemplateFilename string // Surge 默认模板文件名（rule_templates/下 .conf），Surge 系客户端未绑模板时回落使用
 	// 节点名称倍率前缀:订阅生成时,套餐内 multiplier != 1 的节点 name 前面加
 	// "{Left}{multiplier}{Right}" 前缀;Left/Right 默认 「」,用户可改。
 	NodeNameMultiplierPrefixEnabled bool
@@ -8602,6 +8602,101 @@ func (r *TrafficRepository) BackfillWeightedTraffic(ctx context.Context) (n int6
 	}
 	if cerr := tx.Commit(); cerr != nil {
 		return 0, false, fmt.Errorf("commit backfill: %w", cerr)
+	}
+	return n, false, nil
+}
+
+// RepairWeightedAttribution 一次性修复「归因丢失」的历史行。
+//
+// 背景:v0.3.5 的 BackfillWeightedTraffic 在 email 所属服务器**已被删除**时,
+// Classify 直接返回空归因 → attributed_username 写成空串、weight 退化成 1.0,
+// 连套餐 oneway/twoway 倍率一起丢掉。twoway 用户的历史计费用量因此腰斩。
+// 归因层已修(见 traffic_attrib.go 的 Classify/EmailWeight),但**存量数据已经写坏**,
+// 改代码不会自愈,必须回过头把这些行重算一遍。
+//
+// 只碰「当前没有归属」的行:
+//   - 谓词严格限定 attributed_username IS NULL OR = ”
+//   - 重算后仍解析不出用户名的(真脏 email:outbound tag 等)原样跳过
+//
+// 刻意**不做整表重跑**:重算用的是今天的套餐配置,升级后改过倍率/换过套餐的用户,
+// 历史计费会被改写成新倍率。只修无归属的行就没有这个风险 —— 它们本来就没有可保护的值。
+//
+// 已知局限:均分分母 bug(tag 无对应节点导致权重偏小)造成的偏差**修不到** ——
+// 那些行有正常的 attributed_username,与正确行无法区分。彻底纠正需要整表重跑,
+// 由管理员按需决定,不在此自动执行。
+//
+// 返回修复行数 + flag 是否已存在。
+func (r *TrafficRepository) RepairWeightedAttribution(ctx context.Context) (n int64, alreadyDone bool, err error) {
+	if r == nil || r.db == nil {
+		return 0, false, errors.New("traffic repository not initialized")
+	}
+	const flagKey = "weighted_attrib_repair_v1_done"
+	if v, gerr := r.GetSystemSetting(ctx, flagKey); gerr == nil && v == "1" {
+		return 0, true, nil
+	}
+
+	attr, aerr := r.BuildEmailAttributor(ctx)
+	if aerr != nil {
+		return 0, false, fmt.Errorf("build attributor for repair: %w", aerr)
+	}
+
+	type row struct {
+		id       int64
+		serverID int64
+		email    string
+	}
+	var rowsToFix []row
+	qRows, qerr := r.db.QueryContext(ctx,
+		`SELECT id, server_id, email FROM user_email_traffic
+		  WHERE attributed_username IS NULL OR attributed_username = ''`)
+	if qerr != nil {
+		return 0, false, fmt.Errorf("query damaged rows: %w", qerr)
+	}
+	for qRows.Next() {
+		var rw row
+		if serr := qRows.Scan(&rw.id, &rw.serverID, &rw.email); serr != nil {
+			qRows.Close()
+			return 0, false, fmt.Errorf("scan damaged row: %w", serr)
+		}
+		rowsToFix = append(rowsToFix, rw)
+	}
+	qRows.Close()
+	if rerr := qRows.Err(); rerr != nil {
+		return 0, false, fmt.Errorf("iterate damaged rows: %w", rerr)
+	}
+
+	tx, terr := r.db.BeginTx(ctx, nil)
+	if terr != nil {
+		return 0, false, fmt.Errorf("begin repair: %w", terr)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	const stmt = `UPDATE user_email_traffic
+		SET weighted_uplink = uplink * ?, weighted_downlink = downlink * ?,
+		    cycle_base_weighted_uplink = cycle_base_uplink * ?, cycle_base_weighted_downlink = cycle_base_downlink * ?,
+		    attributed_username = ?
+		WHERE id = ?`
+	for _, rw := range rowsToFix {
+		username := attr.Classify(rw.email, rw.serverID).Username
+		if username == "" {
+			continue // 真脏 email,保持原样
+		}
+		w := attr.EmailWeight(rw.email, rw.serverID)
+		if _, eerr := tx.ExecContext(ctx, stmt, w, w, w, w, username, rw.id); eerr != nil {
+			return 0, false, fmt.Errorf("repair row %d: %w", rw.id, eerr)
+		}
+		n++
+	}
+
+	// flag 与数据同事务:同 BackfillWeightedTraffic —— 写不进 flag 就整体回滚,
+	// 宁可下次重跑一次干净的修复,也不能留下"已修但 flag 没写"。
+	if _, serr := tx.ExecContext(ctx,
+		`INSERT INTO system_settings (key, value, updated_at) VALUES (?, '1', CURRENT_TIMESTAMP)
+		 ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = CURRENT_TIMESTAMP`, flagKey); serr != nil {
+		return 0, false, fmt.Errorf("set repair flag: %w", serr)
+	}
+	if cerr := tx.Commit(); cerr != nil {
+		return 0, false, fmt.Errorf("commit repair: %w", cerr)
 	}
 	return n, false, nil
 }

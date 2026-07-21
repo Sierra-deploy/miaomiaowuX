@@ -1315,6 +1315,22 @@ func main() {
 		log.Printf("[Startup] BackfillWeightedTraffic: backfilled %d user_email_traffic row(s)", n)
 	}
 
+	// 修复上面那次回填留下的坏数据:服务器已被删除时,旧版 Classify 返回空归因,
+	// attributed_username 被写成空串、套餐 oneway/twoway 倍率一并丢失(twoway 用户计费腰斩)。
+	// 归因层已修,但存量行不会自愈,这里把"没有归属"的行重算一遍。
+	// 只碰无归属的行 —— 不整表重跑,避免用今天的倍率改写已正确的历史。
+	// flag = weighted_attrib_repair_v1_done。
+	if n, alreadyDone, err := repo.RepairWeightedAttribution(context.Background()); err != nil {
+		log.Printf("[Startup] RepairWeightedAttribution failed: %v", err)
+	} else if alreadyDone {
+		log.Printf("[Startup] RepairWeightedAttribution: already done, skip")
+	} else if n > 0 {
+		log.Printf("[Startup] RepairWeightedAttribution: repaired %d row(s) that lost user attribution; "+
+			"注意:均分分母 bug 造成的权重偏小无法自动识别,如需彻底纠正请手动整表重跑", n)
+	} else {
+		log.Printf("[Startup] RepairWeightedAttribution: nothing to repair")
+	}
+
 	// 紧急修复:reset migration 把 node_traffic.uplink/downlink 改成了 last_*(很小),snapshot
 	// baseline 还是历史累计 → 服务器视图算"已用 = current - snapshot"全负数 → clamp 0 → "流量丢失"。
 	// 真正修复:从 node_traffic_snapshots 反推恢复 node_traffic 到 reset 前的累计值。

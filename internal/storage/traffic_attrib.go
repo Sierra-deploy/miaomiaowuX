@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"sort"
 	"strings"
 )
 
@@ -41,13 +42,16 @@ type EmailAttribution struct {
 type EmailAttributor struct {
 	routedByEmail   map[string]NodeShare // #1+#2: email → routed 节点
 	routedEmailUser map[string]string    // email → 归属 username
-	inbNodeByKey    map[string]Node
-	serverNameByID  map[int64]string
-	userServerTags  map[string]map[int64][]string // username → serverID → []inbound_tag
-	serverInbTags   map[string][]string           // serverName → 该 server 物理入站 tags(admin 自用兜底)
-	usersEmail      map[string]string             // users.email → username
-	realUsernames   map[string]bool
-	pkgByUsername   map[string]*Package // 计费权重用:username → 其当前套餐(无套餐则不存在)
+	// inbNodesByKey 同一 (server, tag) 下的**全部**候选物理节点,按 ID 升序。
+	// 曾是 map[string]Node —— 同 server+tag 存在多个节点时后写覆盖先写,
+	// 选中谁取决于 ListAllNodes 的返回顺序,同一个库可能算出不同的 NodeMultiplier。
+	inbNodesByKey  map[string][]Node
+	serverNameByID map[int64]string
+	userServerTags map[string]map[int64][]string // username → serverID → []inbound_tag
+	serverInbTags  map[string][]string           // serverName → 该 server 物理入站 tags(admin 自用兜底)
+	usersEmail     map[string]string             // users.email → username
+	realUsernames  map[string]bool
+	pkgByUsername  map[string]*Package // 计费权重用:username → 其当前套餐(无套餐则不存在)
 }
 
 // BuildEmailAttributor 一次性加载归因所需全部映射。
@@ -55,7 +59,7 @@ func (r *TrafficRepository) BuildEmailAttributor(ctx context.Context) (*EmailAtt
 	a := &EmailAttributor{
 		routedByEmail:   map[string]NodeShare{},
 		routedEmailUser: map[string]string{},
-		inbNodeByKey:    map[string]Node{},
+		inbNodesByKey:   map[string][]Node{},
 		serverNameByID:  map[int64]string{},
 		userServerTags:  map[string]map[int64][]string{},
 		serverInbTags:   map[string][]string{},
@@ -69,12 +73,25 @@ func (r *TrafficRepository) BuildEmailAttributor(ctx context.Context) (*EmailAtt
 		return nil, err
 	}
 	nodesByID := make(map[int64]Node, len(nodes))
+	// seenServerTag 给 serverInbTags 去重:同 server+tag 有多个节点时,tag 只能进一次。
+	// 否则它会被当成均分分母 len(tags) 的一员重复计数,把权重稀释掉(流量凭空蒸发)。
+	seenServerTag := map[string]bool{}
 	for _, n := range nodes {
 		nodesByID[n.ID] = n
 		if n.NodeType != "routed" && n.InboundTag != "" {
-			a.inbNodeByKey[n.OriginalServer+"::"+n.InboundTag] = n
-			a.serverInbTags[n.OriginalServer] = append(a.serverInbTags[n.OriginalServer], n.InboundTag)
+			key := n.OriginalServer + "::" + n.InboundTag
+			a.inbNodesByKey[key] = append(a.inbNodesByKey[key], n)
+			if !seenServerTag[key] {
+				seenServerTag[key] = true
+				a.serverInbTags[n.OriginalServer] = append(a.serverInbTags[n.OriginalServer], n.InboundTag)
+			}
 		}
+	}
+	// 候选按 ID 升序:pickNode 的"最小 ID 兜底"靠它保证结果稳定,不受查询顺序影响。
+	for k := range a.inbNodesByKey {
+		sort.Slice(a.inbNodesByKey[k], func(i, j int) bool {
+			return a.inbNodesByKey[k][i].ID < a.inbNodesByKey[k][j].ID
+		})
 	}
 
 	// #1 user_subaccounts(全部,忽略 is_active)→ routed 节点
@@ -170,13 +187,16 @@ func (a *EmailAttributor) Classify(email string, serverID int64) EmailAttributio
 	}
 	serverName := a.serverNameByID[serverID]
 	if serverName == "" {
-		return EmailAttribution{}
+		// 服务器已被删除(历史流量行仍在)。节点无从确定,但**用户归属与套餐倍率跟服务器无关**,
+		// 必须保住 —— 以前这里直接返回空归因,连带把 username 和 pkg.TrafficMultiplier() 一起丢了,
+		// 回填时 twoway 用户的计费用量直接腰斩。
+		return EmailAttribution{Username: username}
 	}
 	// email 形如 <username>__<inbound_tag>:后段就是采集时的 inbound tag。
 	// 能凭它精确命中本 server 的某个物理入站节点时,直接归该节点(scale=1),不再在用户的多个
 	// 入站间均分 —— 均分只是无法定位到具体 tag 时的兜底(email==username、或 tag 已无对应节点)。
 	if strings.HasPrefix(email, username+"__") {
-		if n, ok := a.inbNodeByKey[serverName+"::"+email[len(username)+2:]]; ok {
+		if n, ok := a.pickNode(serverName, email[len(username)+2:], username); ok {
 			return EmailAttribution{Username: username, Shares: []NodeShare{{NodeID: n.ID, NodeName: n.NodeName, ServerName: serverName, Scale: 1}}}
 		}
 	}
@@ -185,21 +205,51 @@ func (a *EmailAttributor) Classify(email string, serverID int64) EmailAttributio
 		// admin 自用 inbound(email==username、没走绑套餐注册)→ 摊到该 server 所有物理入站。
 		// routed email 已在 #1/#2 拦截,这里只会是真实物理流量,不会污染。
 		tags = a.serverInbTags[serverName]
-		if len(tags) == 0 {
-			return EmailAttribution{}
-		}
 	}
-	scale := len(tags)
-	var shares []NodeShare
+	// 两趟:先解析出真正存在的节点,再用它的数量当均分分母。
+	// 以前分母取 len(tags) —— 但只有"能解析出节点"的 tag 才产生 share,绑定了却没有对应节点的
+	// tag(节点被删但 user_inbound_configs 残留)白占分母,那一份权重直接蒸发 → 持续少计费。
+	resolved := make([]Node, 0, len(tags))
 	for _, tag := range tags {
-		if n, ok := a.inbNodeByKey[serverName+"::"+tag]; ok {
-			shares = append(shares, NodeShare{NodeID: n.ID, NodeName: n.NodeName, ServerName: serverName, Scale: scale})
+		if n, ok := a.pickNode(serverName, tag, username); ok {
+			resolved = append(resolved, n)
 		}
 	}
-	if len(shares) == 0 {
-		return EmailAttribution{}
+	if len(resolved) == 0 {
+		// 一个节点都定位不到:仍保留用户归属,让套餐倍率照常生效(同上面服务器已删除的处理)。
+		return EmailAttribution{Username: username}
+	}
+	scale := len(resolved)
+	shares := make([]NodeShare, 0, scale)
+	for _, n := range resolved {
+		shares = append(shares, NodeShare{NodeID: n.ID, NodeName: n.NodeName, ServerName: serverName, Scale: scale})
 	}
 	return EmailAttribution{Username: username, Shares: shares}
+}
+
+// pickNode 从同 (server, tag) 的候选节点里挑一个。
+//
+// 候选多于一个时(同 server 同 tag 建了多个物理节点),优先选用户当前套餐内的那个 ——
+// 选错节点就会用错 NodeMultiplier,直接算错钱。都不在套餐里则取最小 ID:
+// 候选已按 ID 升序,取第一个即可,保证同一个库每次算出的结果一致。
+func (a *EmailAttributor) pickNode(serverName, tag, username string) (Node, bool) {
+	cands := a.inbNodesByKey[serverName+"::"+tag]
+	if len(cands) == 0 {
+		return Node{}, false
+	}
+	if len(cands) == 1 {
+		return cands[0], true // 绝大多数情况,免去下面的套餐比对
+	}
+	if pkg := a.pkgByUsername[username]; pkg != nil && len(pkg.Nodes) > 0 {
+		for _, n := range cands {
+			for _, id := range pkg.Nodes {
+				if id == n.ID {
+					return n, true
+				}
+			}
+		}
+	}
+	return cands[0], true
 }
 
 // EmailWeight 返回该 email 的**计费权重**,供采集时把 delta 折算成计费流量:
@@ -219,16 +269,22 @@ func (a *EmailAttributor) EmailWeight(email string, serverID int64) float64 {
 	if pkg == nil {
 		return 1.0
 	}
-	var w float64
-	for _, ns := range at.Shares {
-		scale := ns.Scale
-		if scale < 1 {
-			scale = 1
+	// 节点无从确定(服务器已删 / 绑定的 tag 都没有对应节点)时,节点倍率按 1 处理,
+	// 但**套餐 oneway/twoway 倍率照常应用** —— 它只依赖 username,与节点、服务器都无关。
+	// 以前这里返回裸 1.0,把套餐倍率一起吞掉了。
+	w := 1.0
+	if len(at.Shares) > 0 {
+		w = 0
+		for _, ns := range at.Shares {
+			scale := ns.Scale
+			if scale < 1 {
+				scale = 1
+			}
+			w += pkg.MultiplierForNode(ns.NodeID) / float64(scale)
 		}
-		w += pkg.MultiplierForNode(ns.NodeID) / float64(scale)
-	}
-	if w == 0 {
-		return 1.0
+		if w == 0 {
+			w = 1.0
+		}
 	}
 	return w * float64(pkg.TrafficMultiplier())
 }
