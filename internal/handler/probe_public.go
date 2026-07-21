@@ -84,9 +84,24 @@ func (h *ProbePublicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	w.Header().Set("Content-Type", "application/json")
 
-	if v, _ := h.repo.GetSystemSetting(ctx, probeDisguiseEnabledKey); v != "1" {
+	payload, err := h.buildPayload(ctx)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]any{"enabled": false})
 		return
+	}
+	json.NewEncoder(w).Encode(payload)
+}
+
+// buildPayload 组装伪装页数据。HTTP 端点和 WS 推送共用 —— 两条路径必须给出完全一样的结构,
+// 否则前端要维护两套解析。ctx 为 nil 时用 Background(WS 广播没有请求上下文)。
+func (h *ProbePublicHandler) buildPayload(ctx context.Context) (map[string]any, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if v, _ := h.repo.GetSystemSetting(ctx, probeDisguiseEnabledKey); v != "1" {
+		return map[string]any{"enabled": false}, nil
 	}
 
 	title, _ := h.repo.GetSystemSetting(ctx, probeDisguiseTitleKey)
@@ -159,13 +174,13 @@ func (h *ProbePublicHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		out = append(out, ps)
 	}
 
-	json.NewEncoder(w).Encode(map[string]any{
+	return map[string]any{
 		"enabled":   true,
 		"title":     title,
 		"logo":      logo,
 		"show_name": showName,
 		"servers":   out,
-	})
+	}, nil
 }
 
 func (h *ProbePublicHandler) setting(ctx context.Context, key string) bool {

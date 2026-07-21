@@ -877,7 +877,11 @@ func main() {
 
 	// 公开端点:伪装探针的只读服务器状态(无鉴权)。伪装关闭时返回 {enabled:false},开启时只吐白名单字段。
 	// 走明文(前端 shouldEncrypt 已放行 /api/public/);此处 remoteWSHandler 已构造(见上文)。
-	mux.Handle("/api/public/probe-servers", handler.NewProbePublicHandler(repo, remoteWSHandler, probeMetricsStore))
+	probePublicHandler := handler.NewProbePublicHandler(repo, remoteWSHandler, probeMetricsStore)
+	mux.Handle("/api/public/probe-servers", probePublicHandler)
+	// WS 推送版:一次计算广播给所有访客,替代每客户端 5 秒一次的 HTTP 轮询。
+	// 前端优先连它,连不上(反代没配 upgrade / 连接数超限)自动回落上面的 HTTP 端点。
+	mux.Handle("/api/public/probe-ws", handler.NewProbeWSHandler(probePublicHandler))
 	// 延迟弹窗按需拉的详细曲线(单服务器单目标),与列表端点分开:列表 5 秒轮询,给粗粒度小 payload。
 	mux.Handle("/api/public/probe-series", handler.NewProbeSeriesHandler(repo, probeMetricsStore))
 
