@@ -73,11 +73,13 @@ func (h *RemoteManageHandler) HandleRealityDomains(w http.ResponseWriter, r *htt
 		}
 	}
 
-	candidates, domainServerMap, err := h.collectRealityDomainCandidates(r.Context())
+	inventory, err := h.collectRealityDomainInventory(r.Context())
 	if err != nil {
 		remoteWriteError(w, http.StatusInternalServerError, fmt.Sprintf("failed to collect domain candidates: %v", err))
 		return
 	}
+	candidates := inventory.Domains
+	domainServerMap := inventory.ServerMap
 
 	if len(candidates) == 0 {
 		remoteWriteJSON(w, http.StatusOK, map[string]any{
@@ -86,6 +88,8 @@ func (h *RemoteManageHandler) HandleRealityDomains(w http.ResponseWriter, r *htt
 			"probe_server_id":  serverID,
 			"total_candidates": 0,
 			"domains":          []realityDomainLatencyProbeResult{},
+			"domain_sources":   inventory.Sources,
+			"blocked_domains":  inventory.Blocked,
 		})
 		return
 	}
@@ -140,6 +144,8 @@ func (h *RemoteManageHandler) HandleRealityDomains(w http.ResponseWriter, r *htt
 				"total_candidates": len(candidates),
 				"domains":          failedResults,
 				"domain_servers":   domainServerMap,
+				"domain_sources":   inventory.Sources,
+				"blocked_domains":  inventory.Blocked,
 				"warning":          fmt.Sprintf("探测失败: %v", err),
 			})
 			return
@@ -169,39 +175,43 @@ func (h *RemoteManageHandler) HandleRealityDomains(w http.ResponseWriter, r *htt
 		"total_candidates": len(candidates),
 		"domains":          probeResults,
 		"domain_servers":   domainServerMap,
+		"domain_sources":   inventory.Sources,
+		"blocked_domains":  inventory.Blocked,
 	})
 }
 
+// collectRealityDomainCandidates 是 collectRealityDomainInventory 的兼容包装,
+// 保留原有三返回值签名供既有调用方使用。
 func (h *RemoteManageHandler) collectRealityDomainCandidates(ctx context.Context) ([]string, map[string]domainServerInfo, error) {
-	servers, err := h.repo.ListRemoteServers(ctx)
+	inv, err := h.collectRealityDomainInventory(ctx)
 	if err != nil {
 		return nil, nil, err
 	}
+	return inv.Domains, inv.ServerMap, nil
+}
 
-	seen := make(map[string]struct{})
-	out := make([]string, 0, 64)
+// collectRealityDomainInventory 收集全部候选域名,并记录每个域名的来源。
+//
+// 来源信息有两个用途:①前端展示,让用户知道某个域名是哪来的;②共享功能据此区分
+// 「客户自有域名」和「公共偷取目标」,只有后者才允许上报(见 reality_domain_inventory.go)。
+//
+// 返回的 Domains 已剔除屏蔽名单——屏蔽在**出口统一做**,这样不论域名来自主控 URL、
+// 服务器配置还是 agent 实配,删掉之后都不会在下次刷新时复活。
+func (h *RemoteManageHandler) collectRealityDomainInventory(ctx context.Context) (*realityDomainInventory, error) {
+	servers, err := h.repo.ListRemoteServers(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	acc := newDomainAccumulator()
 	domainServerMap := make(map[string]domainServerInfo)
 
 	if masterDomain := getDomainFromMasterURL(h.repo, ctx); masterDomain != "" {
-		if d := normalizeDomainCandidate(masterDomain); d != "" {
-			seen[d] = struct{}{}
-			out = append(out, d)
-		}
+		acc.add(masterDomain, domainSourceMaster)
 	}
 
-	customJSON, _ := h.repo.GetSystemSetting(ctx, "reality_domains")
-	if customJSON != "" {
-		var customDomains []string
-		if json.Unmarshal([]byte(customJSON), &customDomains) == nil {
-			for _, raw := range customDomains {
-				if d := normalizeDomainCandidate(raw); d != "" {
-					if _, exists := seen[d]; !exists {
-						seen[d] = struct{}{}
-						out = append(out, d)
-					}
-				}
-			}
-		}
+	for _, raw := range loadDomainListSetting(ctx, h.repo, realityDomainsSettingKey) {
+		acc.add(raw, domainSourceCustom)
 	}
 
 	for _, server := range servers {
@@ -211,13 +221,9 @@ func (h *RemoteManageHandler) collectRealityDomainCandidates(ctx context.Context
 				continue
 			}
 			for _, raw := range strings.Split(source, ",") {
-				d := normalizeDomainCandidate(raw)
+				d := acc.add(raw, domainSourceServer)
 				if d == "" {
 					continue
-				}
-				if _, exists := seen[d]; !exists {
-					seen[d] = struct{}{}
-					out = append(out, d)
 				}
 				domainServerMap[d] = domainServerInfo{
 					ServerID:   server.ID,
@@ -249,13 +255,49 @@ func (h *RemoteManageHandler) collectRealityDomainCandidates(ctx context.Context
 			continue
 		}
 
+		// steal-self 服务器偷的是自己的域名,它的 dest 必须整台排除,不能当公共站共享出去
+		stealSelf := isStealSelfServer(server)
 		for _, inbound := range inboundsResp.Inbounds {
-			extractDomainsFromInbound(inbound, seen, &out)
+			extractDomainsFromInbound(inbound, acc, stealSelf)
 		}
 	}
 
+	// 共享池:开启共享的用户可以拿到别人贡献并经服务端验证过的域名。
+	// 标 shared_pool 来源,selectShareableDomains 会据此排除它们再上报,
+	// 避免池内域名在用户之间来回传导致贡献计数虚高。
+	if h.shareEnabled(ctx) && h.realityPoolLicensed() {
+		if pool, poolErr := h.licenseManager.ListRealityDomains(ctx); poolErr == nil {
+			for _, p := range pool {
+				acc.add(p.Domain, domainSourceSharedPool)
+			}
+		} else {
+			log.Printf("[reality-share] 拉取共享池失败(不影响本地候选): %v", poolErr)
+		}
+	}
+
+	blocked := blockedDomainSet(ctx, h.repo)
+	out := make([]string, 0, len(acc.order))
+	for _, d := range acc.order {
+		if _, isBlocked := blocked[d]; isBlocked {
+			continue
+		}
+		out = append(out, d)
+	}
 	sort.Strings(out)
-	return out, domainServerMap, nil
+
+	blockedList := make([]string, 0, len(blocked))
+	for d := range blocked {
+		blockedList = append(blockedList, d)
+	}
+	sort.Strings(blockedList)
+
+	return &realityDomainInventory{
+		Domains:   out,
+		Sources:   acc.sources,
+		ServerMap: domainServerMap,
+		SelfOwned: acc.selfOwned,
+		Blocked:   blockedList,
+	}, nil
 }
 
 // 配置 nginx SSL (443) + 在远程服务器上部署证书。
@@ -430,48 +472,50 @@ func (h *RemoteManageHandler) deployDefaultConfigManual(ctx context.Context, ser
 	return nil
 }
 
-func extractDomainsFromInbound(inbound map[string]interface{}, seen map[string]struct{}, out *[]string) {
+// extractDomainsFromInbound 从一个入站配置里抽取域名候选。
+//
+// 关键区分:realitySettings 里的 dest/serverNames 是**偷取目标**(可能是公共站),
+// 而 tlsSettings.serverName 是这个入站自己的**证书域名**(必定是客户自有)。两者来源
+// 必须分开标记,否则共享功能会把客户域名当公共站上报出去。
+//
+// stealSelf=true 时该服务器偷的是自己的域名,其 dest/serverNames 一并标为自有。
+func extractDomainsFromInbound(inbound map[string]interface{}, acc *domainAccumulator, stealSelf bool) {
 	streamSettings, _ := inbound["streamSettings"].(map[string]interface{})
 	if streamSettings == nil {
 		return
 	}
 
+	addReality := func(raw string) {
+		d := acc.add(raw, domainSourceRealityDest)
+		if d != "" && stealSelf {
+			acc.markSelfOwned(d)
+		}
+	}
+
 	if realitySettings, _ := streamSettings["realitySettings"].(map[string]interface{}); realitySettings != nil {
 		if dest, ok := realitySettings["dest"].(string); ok {
-			addDomainCandidate(dest, seen, out)
+			addReality(dest)
 		}
 
 		switch v := realitySettings["serverNames"].(type) {
 		case []interface{}:
 			for _, item := range v {
 				if name, ok := item.(string); ok {
-					addDomainCandidate(name, seen, out)
+					addReality(name)
 				}
 			}
 		case string:
 			for _, item := range strings.Split(v, ",") {
-				addDomainCandidate(item, seen, out)
+				addReality(item)
 			}
 		}
 	}
 
 	if tlsSettings, _ := streamSettings["tlsSettings"].(map[string]interface{}); tlsSettings != nil {
 		if serverName, ok := tlsSettings["serverName"].(string); ok {
-			addDomainCandidate(serverName, seen, out)
+			acc.add(serverName, domainSourceTLSSNI)
 		}
 	}
-}
-
-func addDomainCandidate(raw string, seen map[string]struct{}, out *[]string) {
-	domain := normalizeDomainCandidate(raw)
-	if domain == "" {
-		return
-	}
-	if _, exists := seen[domain]; exists {
-		return
-	}
-	seen[domain] = struct{}{}
-	*out = append(*out, domain)
 }
 
 func normalizeDomainCandidate(raw string) string {
@@ -551,10 +595,7 @@ func (h *RemoteManageHandler) HandleAddCustomRealityDomain(w http.ResponseWriter
 
 	ctx := r.Context()
 
-	var existing []string
-	if raw, _ := h.repo.GetSystemSetting(ctx, "reality_domains"); raw != "" {
-		_ = json.Unmarshal([]byte(raw), &existing)
-	}
+	existing := loadDomainListSetting(ctx, h.repo, realityDomainsSettingKey)
 	found := false
 	for _, d := range existing {
 		if d == domain {
@@ -563,11 +604,12 @@ func (h *RemoteManageHandler) HandleAddCustomRealityDomain(w http.ResponseWriter
 		}
 	}
 	if !found {
-		existing = append(existing, domain)
-		if data, err := json.Marshal(existing); err == nil {
-			_ = h.repo.SetSystemSetting(ctx, "reality_domains", string(data))
-		}
+		_ = saveDomainListSetting(ctx, h.repo, realityDomainsSettingKey, append(existing, domain))
 	}
+
+	// 手工添加视为「撤销屏蔽」:否则用户删过这个域名后再加回来会被屏蔽名单拦住,
+	// 表现为"加了但列表里没有",无从排查。
+	h.unblockRealityDomain(ctx, domain)
 
 	result := map[string]any{
 		"success":    true,
@@ -614,21 +656,77 @@ func (h *RemoteManageHandler) HandleDeleteCustomRealityDomain(w http.ResponseWri
 	}
 
 	ctx := r.Context()
-	var existing []string
-	if raw, _ := h.repo.GetSystemSetting(ctx, "reality_domains"); raw != "" {
-		_ = json.Unmarshal([]byte(raw), &existing)
-	}
 
+	// 两步都要做:
+	//  1. 从自定义列表移除 —— 处理用户手工加的域名
+	//  2. 写入屏蔽名单 —— 处理主控 URL / 服务器域名 / agent 实配扫出来的域名。
+	//     这些来源每次探测都会重新扫出来,不进屏蔽名单的话删了等于没删。
+	existing := loadDomainListSetting(ctx, h.repo, realityDomainsSettingKey)
 	filtered := make([]string, 0, len(existing))
 	for _, d := range existing {
 		if d != domain {
 			filtered = append(filtered, d)
 		}
 	}
+	_ = saveDomainListSetting(ctx, h.repo, realityDomainsSettingKey, filtered)
 
-	if data, err := json.Marshal(filtered); err == nil {
-		_ = h.repo.SetSystemSetting(ctx, "reality_domains", string(data))
+	blocked := loadDomainListSetting(ctx, h.repo, realityDomainsBlockedSettingKey)
+	if err := saveDomainListSetting(ctx, h.repo, realityDomainsBlockedSettingKey, append(blocked, domain)); err != nil {
+		remoteWriteError(w, http.StatusInternalServerError, fmt.Sprintf("写入屏蔽名单失败: %v", err))
+		return
 	}
 
 	remoteWriteJSON(w, http.StatusOK, map[string]any{"success": true, "message": "已删除"})
+}
+
+// HandleListBlockedRealityDomains 返回当前屏蔽名单,供前端展示「已屏蔽」区域。
+func (h *RemoteManageHandler) HandleListBlockedRealityDomains(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		remoteWriteError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+	domains := loadDomainListSetting(r.Context(), h.repo, realityDomainsBlockedSettingKey)
+	if domains == nil {
+		domains = []string{}
+	}
+	remoteWriteJSON(w, http.StatusOK, map[string]any{"success": true, "domains": domains})
+}
+
+// HandleRestoreRealityDomain 把域名移出屏蔽名单。误删必须能找回,否则用户只能去改数据库。
+func (h *RemoteManageHandler) HandleRestoreRealityDomain(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		remoteWriteError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	var req struct {
+		Domain string `json:"domain"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		remoteWriteError(w, http.StatusBadRequest, "invalid request")
+		return
+	}
+
+	domain := normalizeDomainCandidate(req.Domain)
+	if domain == "" {
+		remoteWriteError(w, http.StatusBadRequest, "域名不能为空")
+		return
+	}
+
+	h.unblockRealityDomain(r.Context(), domain)
+	remoteWriteJSON(w, http.StatusOK, map[string]any{"success": true, "message": "已恢复"})
+}
+
+// unblockRealityDomain 把域名移出屏蔽名单(不存在则无副作用)。
+func (h *RemoteManageHandler) unblockRealityDomain(ctx context.Context, domain string) {
+	blocked := loadDomainListSetting(ctx, h.repo, realityDomainsBlockedSettingKey)
+	filtered := make([]string, 0, len(blocked))
+	for _, d := range blocked {
+		if normalizeDomainCandidate(d) != domain {
+			filtered = append(filtered, d)
+		}
+	}
+	if len(filtered) != len(blocked) {
+		_ = saveDomainListSetting(ctx, h.repo, realityDomainsBlockedSettingKey, filtered)
+	}
 }
