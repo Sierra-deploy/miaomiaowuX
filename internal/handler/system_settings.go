@@ -183,9 +183,12 @@ const (
 	probeDisguiseTitleKey   = "probe_disguise_title"   // 伪装页标题(管理员自定义)
 	// 伪装页 logo:图片 URL 或 data: URI。空=只显示标题。
 	// data: URI 有大小上限(probeLogoMaxBytes)——公开端点每 5 秒轮询一次,大图会持续吃带宽。
-	probeDisguiseLogoKey      = "probe_disguise_logo"
-	probeDisguiseServerIDsKey = "probe_disguise_server_ids" // JSON int64 数组:展示哪些服务器
-	probeDisguiseShowNameKey  = "probe_disguise_show_name"  // "1"/"" 是否显示服务器名
+	probeDisguiseLogoKey = "probe_disguise_logo"
+	// 禁止访问原登录页:开启后未登录访客访问 /login 会被弹回探针页。
+	// 仅前端路由层生效(登录 API 不关闭,否则管理员无法从隐蔽入口登录)。
+	probeDisguiseBlockLoginKey = "probe_disguise_block_login"
+	probeDisguiseServerIDsKey  = "probe_disguise_server_ids" // JSON int64 数组:展示哪些服务器
+	probeDisguiseShowNameKey   = "probe_disguise_show_name"  // "1"/"" 是否显示服务器名
 	// 真探针数据后端:4 个采集子开关 + ping 目标 + ping 间隔。
 	// 新字段在 SetProbeDisguise 里用指针语义(nil=不改)——旧前端 PUT 不带这些字段时不会被冲成零值。
 	probeDisguiseMetricCPUKey  = "probe_disguise_metric_cpu"  // "1"/"" 采集 CPU
@@ -214,6 +217,7 @@ func (h *SystemSettingsHandler) GetProbeDisguise(w http.ResponseWriter, r *http.
 	enabled, _ := h.repo.GetSystemSetting(ctx, probeDisguiseEnabledKey)
 	title, _ := h.repo.GetSystemSetting(ctx, probeDisguiseTitleKey)
 	logo, _ := h.repo.GetSystemSetting(ctx, probeDisguiseLogoKey)
+	blockLogin, _ := h.repo.GetSystemSetting(ctx, probeDisguiseBlockLoginKey)
 	showName, _ := h.repo.GetSystemSetting(ctx, probeDisguiseShowNameKey)
 	idsRaw, _ := h.repo.GetSystemSetting(ctx, probeDisguiseServerIDsKey)
 
@@ -253,6 +257,7 @@ func (h *SystemSettingsHandler) GetProbeDisguise(w http.ResponseWriter, r *http.
 		"enabled":               enabled == "1",
 		"title":                 title,
 		"logo":                  logo,
+		"block_login":           blockLogin == "1",
 		"server_ids":            ids,
 		"show_name":             showName == "1",
 		"metric_cpu":            metricCPU == "1",
@@ -277,9 +282,10 @@ func (h *SystemSettingsHandler) SetProbeDisguise(w http.ResponseWriter, r *http.
 		Enabled bool   `json:"enabled"`
 		Title   string `json:"title"`
 		// 指针语义:nil=不改(旧前端 PUT 不带这个字段时不会被冲成空)。
-		Logo      *string `json:"logo"`
-		ServerIDs []int64 `json:"server_ids"`
-		ShowName  bool    `json:"show_name"`
+		Logo       *string `json:"logo"`
+		BlockLogin *bool   `json:"block_login"`
+		ServerIDs  []int64 `json:"server_ids"`
+		ShowName   bool    `json:"show_name"`
 		// 新字段用指针:nil=不改。旧前端 PUT 不带这些字段时,它们保持原值不被冲成零值。
 		MetricCPU     *bool              `json:"metric_cpu"`
 		MetricMem     *bool              `json:"metric_mem"`
@@ -355,6 +361,17 @@ func (h *SystemSettingsHandler) SetProbeDisguise(w http.ResponseWriter, r *http.
 			return
 		}
 		if h.repo.SetSystemSetting(ctx, probeDisguiseLogoKey, logo) != nil {
+			fail()
+			return
+		}
+	}
+
+	if req.BlockLogin != nil {
+		v := ""
+		if *req.BlockLogin {
+			v = "1"
+		}
+		if h.repo.SetSystemSetting(ctx, probeDisguiseBlockLoginKey, v) != nil {
 			fail()
 			return
 		}

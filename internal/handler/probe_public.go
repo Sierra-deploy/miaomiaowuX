@@ -106,6 +106,8 @@ func (h *ProbePublicHandler) buildPayload(ctx context.Context) (map[string]any, 
 
 	title, _ := h.repo.GetSystemSetting(ctx, probeDisguiseTitleKey)
 	logo, _ := h.repo.GetSystemSetting(ctx, probeDisguiseLogoKey)
+	// 未登录访客要据此决定 /login 是否放行,所以必须走公开端点
+	blockLogin, _ := h.repo.GetSystemSetting(ctx, probeDisguiseBlockLoginKey)
 	showName := func() bool { v, _ := h.repo.GetSystemSetting(ctx, probeDisguiseShowNameKey); return v == "1" }()
 
 	// 采集子开关:关掉的指标即使 ring 里还有陈旧数据也不展示。
@@ -175,11 +177,12 @@ func (h *ProbePublicHandler) buildPayload(ctx context.Context) (map[string]any, 
 	}
 
 	return map[string]any{
-		"enabled":   true,
-		"title":     title,
-		"logo":      logo,
-		"show_name": showName,
-		"servers":   out,
+		"enabled":     true,
+		"title":       title,
+		"logo":        logo,
+		"block_login": blockLogin == "1",
+		"show_name":   showName,
+		"servers":     out,
 	}, nil
 }
 
