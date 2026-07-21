@@ -25,10 +25,39 @@ func collectInboundClientAddItem(ctx context.Context, cache *InboundCache, repo 
 		return nil, false, fmt.Errorf("inbound cache miss for server=%d tag=%s", serverID, inboundTag)
 	}
 
-	// 续费 / 重复绑定 → 跳过(用户已经在 user_inbound_configs 有记录,credential 复用)
+	// DB 有记录 **不等于** agent 上真有这个 client。
+	//
+	// 入站被删除后又用同 tag 重建时,agent 侧是全新的空入站,而 user_inbound_configs 里的旧行
+	// 没有被级联清理(孤儿凭据)。早先这里只看 DB 就判定"已添加"并跳过下发,结果:订阅从 DB 读到
+	// 孤儿凭据、发出一个 xray 里根本不存在的 UUID —— 表现为 TCPing 通(端口在)但真实连接握手失败。
+	//
+	// 所以 DB 命中后还要拿 agent 实配核对一次。ib.Settings 来自 InboundCache,其数据源是
+	// server_xray_config_snapshots.current(agent 真实配置),且含 clients/users/accounts 列表。
 	existing, _ := repo.GetUserInboundConfig(ctx, user.Username, serverID, inboundTag)
 	if existing != nil && existing.Protocol == ib.Protocol {
-		return nil, false, nil
+		email := user.Username + "__" + inboundTag
+		// ib.Settings == nil 表示拿不到该入站的实配(理论上 cache 命中即有,这里防御性处理):
+		// 无从判断就维持旧行为跳过,避免每次绑定都无谓重发。
+		if ib.Settings == nil || extractClientByEmail(ib.Settings, email) != nil {
+			return nil, false, nil // 两边都有(或无从判断)→ 真·续费/重复绑定,跳过
+		}
+		// agent 缺这个 client → 用 DB 里**已有的**凭据补下发(不重新生成):
+		// 订阅里的 UUID 保持不变,用户无需重新导入订阅即可恢复连接。
+		// add-client 按 id 幂等;SaveUserInboundConfig 是 ON CONFLICT DO NOTHING,重复写不产生新行。
+		var cred map[string]interface{}
+		if json.Unmarshal([]byte(existing.CredentialJSON), &cred) == nil && cred != nil {
+			log.Printf("[InboundBatch] DB 有凭据但 agent 缺 client,补下发 user=%s server=%d tag=%s",
+				user.Username, serverID, inboundTag)
+			return &InboundClientAddItem{
+				Username:       user.Username,
+				ServerID:       serverID,
+				InboundTag:     inboundTag,
+				Protocol:       existing.Protocol,
+				Credential:     cred,
+				CredentialJSON: existing.CredentialJSON,
+			}, true, nil
+		}
+		// 凭据 JSON 损坏 → 落到下面重新生成一份
 	}
 
 	// DB 无记录 → 走 getOrCreateInboundCredential:全局锁内按 email 复用 agent 已有 client / 生成新凭据 + 立即写 DB。

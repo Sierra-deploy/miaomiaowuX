@@ -1352,15 +1352,30 @@ func getOrCreateInboundCredential(ctx context.Context, repo *storage.TrafficRepo
 	lock.Lock()
 	defer lock.Unlock()
 
-	// 1) DB 复用
+	email := user.Username + "__" + inboundTag
+
+	// 1) DB 复用。
+	//
+	// 注意 reused 的语义:它表示"凭据是复用的"(调用方据此决定是否仍需下发)。
+	// 入站删除后重建同 tag 时,DB 会留下孤儿凭据而 agent 上并没有对应 client;此时若直接
+	// reused=true 返回,调用方会跳过下发 → 订阅发出 xray 里不存在的 UUID(TCPing 通但连不上)。
+	// 所以这里要拿 agent 实配(settings)核对:agent 缺 client 时仍复用 DB 凭据(订阅 UUID 不变),
+	// 但 reused=false 让调用方照常下发一次(add-client 幂等,安全)。
 	if existing, _ := repo.GetUserInboundConfig(ctx, user.Username, serverID, inboundTag); existing != nil && existing.Protocol == protocol {
 		var cred map[string]interface{}
 		if json.Unmarshal([]byte(existing.CredentialJSON), &cred) == nil && cred != nil {
+			// settings == nil 表示调用方没拿到 agent 实配(cache miss 等),无从判断 → 维持
+			// "DB 有即复用"的旧行为。只有确实拿到实配、且其中没有该 email 的 client 时,
+			// 才认定 agent 侧缺失:此时仍复用 DB 凭据(订阅 UUID 不变),但 reused=false
+			// 让调用方照常下发一次。
+			if settings != nil && extractClientByEmail(settings, email) == nil {
+				log.Printf("[InboundCred] DB 有凭据但 agent 缺 client,复用凭据并重新下发 user=%s server=%d tag=%s",
+					user.Username, serverID, inboundTag)
+				return cred, existing.CredentialJSON, false, nil
+			}
 			return cred, existing.CredentialJSON, true, nil
 		}
 	}
-
-	email := user.Username + "__" + inboundTag
 
 	// 2) agent 已有同 email → 复用并回写 DB(主控与 agent 重新对齐,下次直接走步骤 1)
 	if reuse := extractClientByEmail(settings, email); reuse != nil {

@@ -8180,6 +8180,30 @@ func (r *TrafficRepository) DeleteUserInboundConfig(ctx context.Context, usernam
 	return err
 }
 
+// DeleteUserInboundConfigsByInbound 清掉某个 (server, inbound) 下所有用户的凭据绑定,返回删除行数。
+//
+// 用于删除入站时级联清理:早先删入站只清 agent 侧的 xray client,DB 里的行留下成为孤儿。
+// 之后若用**同 tag** 重建入站,套餐绑定会因为"DB 已有记录"而跳过下发,订阅却仍从 DB 读到
+// 那份旧凭据 —— 结果订阅发出的 UUID 在 xray 里根本不存在(TCPing 通但握手失败)。
+//
+// ⚠ 调用方必须确认远程 inbound 确实被删除了才调用:双栈等场景下同一 inbound 可能被兄弟节点
+// 共用而被保留,那时清 DB 会误删仍在生效的绑定。
+func (r *TrafficRepository) DeleteUserInboundConfigsByInbound(ctx context.Context, serverID int64, inboundTag string) (int64, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	if serverID <= 0 || strings.TrimSpace(inboundTag) == "" {
+		return 0, nil // 参数不全时静默不删,避免误伤全表
+	}
+	res, err := r.db.ExecContext(ctx,
+		`DELETE FROM user_inbound_configs WHERE server_id = ? AND inbound_tag = ?`, serverID, inboundTag)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // EnsureAdminInboundClient 把一个 xray inbound client 凭据登记给 admin。
 // 按 (username, server_id, inbound_tag, credential_json) 四元组去重 — 已存在则跳过,
 // 不存在才插入。返回 wasNew=true 表示本次新插入。

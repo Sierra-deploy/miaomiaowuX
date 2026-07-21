@@ -539,6 +539,12 @@ func main() {
 	// 触发场景:用户删除时 server 离线 → push remove 失败 → db 已清但 xray config 仍残留。
 	handler.NewOrphanXrayClientCleaner(repo, remoteManageHandler).Start(context.Background())
 
+	// 凌晨 04:00(排在上面的清理之后)扫一次,补回「DB 登记了绑定但 agent xray 上没有」的 client。
+	// 触发场景:入站删除后用同 tag 重建 → agent 侧空入站 + DB 孤儿凭据 → 订阅发出的 UUID
+	// 在 xray 里不存在(TCPing 通但连不上);以及 agent 重装 / 配置回滚等漂移。
+	// 与上面的 cleaner 方向相反、互补;补发用 DB 原凭据,订阅 UUID 不变。
+	handler.NewInboundClientReconciler(repo, remoteManageHandler).Start(context.Background())
+
 	// 依赖 limiterPusher 的端点
 	packageUpdateHandler := handler.NewPackageUpdateHandler(repo, remoteManageHandler, limiterPusher)
 	packageUpdateHandler.SetLicenseManager(licenseManager)

@@ -1557,6 +1557,21 @@ func (h *nodesHandler) cleanupRemoteInboundForNode(ctx context.Context, node *st
 			cleaned[key] = true
 		}
 		h.deleteRemoteInbound(ctx, node.OriginalServer, node.InboundTag)
+
+		// 远程入站确实被删了(上面的双栈守卫已放行)→ 级联清掉 DB 里这个入站的用户凭据绑定。
+		//
+		// 不清就会留下孤儿:之后若用**同 tag** 重建入站,套餐绑定会因为"DB 已有记录"而跳过下发,
+		// 订阅却仍从 DB 读到那份旧凭据 —— 发出的 UUID 在新 xray 里不存在,表现为 TCPing 通但握手失败。
+		// (routed 分支不走这里:它共享 inbound、只清自己的 client,其子账户在 user_subaccounts 表。)
+		if srv, err := h.repo.GetRemoteServerByName(ctx, node.OriginalServer); err == nil {
+			if n, derr := h.repo.DeleteUserInboundConfigsByInbound(ctx, srv.ID, node.InboundTag); derr != nil {
+				log.Printf("[Nodes] 级联清理 user_inbound_configs 失败 server=%s tag=%s: %v",
+					node.OriginalServer, node.InboundTag, derr)
+			} else if n > 0 {
+				log.Printf("[Nodes] 已级联清理 %d 条用户入站绑定 server=%s tag=%s",
+					n, node.OriginalServer, node.InboundTag)
+			}
+		}
 	}
 }
 
