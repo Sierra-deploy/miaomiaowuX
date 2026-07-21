@@ -444,13 +444,23 @@ func (h *XrayServerHandler) masterPublicKeyBase64() string {
 }
 
 // validInstallToken 校验安装 token 字符集。token 会被写进 curl|bash 执行的安装脚本,
-// 必须白名单化,否则 $(...)/`...` 会被当命令替换执行(命令注入)。真实 token 是
-// base64.RawURLEncoding / hex,只落在 [A-Za-z0-9._-];空或含其它字符一律拒绝。
+// 必须白名单化,否则 $(...)/`...` 会被当命令替换执行(命令注入)。
+//
+// 字符集 [A-Za-z0-9._-],外加**结尾**最多两个 '=' 的 base64 padding。
+//
+// padding 这条不能少:generateSecureToken 用的是 base64.URLEncoding(带 padding)而非
+// RawURLEncoding,32 字节固定编成 44 字符且结尾必有一个 '='。早先这里漏掉 '=' 导致
+// **所有**生成的 token 都被判非法,一键安装脚本一律返回 400(见同名回归测试)。
+// '=' 只允许出现在结尾:中间出现的 '=' 不是合法 base64,没有放行的理由。
 func validInstallToken(s string) bool {
 	if s == "" || len(s) > 512 {
 		return false
 	}
-	for _, c := range s {
+	body := strings.TrimRight(s, "=")
+	if len(s)-len(body) > 2 || body == "" {
+		return false
+	}
+	for _, c := range body {
 		switch {
 		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
 			c == '.', c == '_', c == '-':
