@@ -880,6 +880,22 @@ if [ "$XRAY_MODE" != "embedded" ]; then
         echo "[Auto] Xray already installed, skip."
     else
         echo "[Auto] Installing Xray..."
+        # 先落一份占位配置再装:Xray-install 装完会立刻 systemctl enable --now xray,
+        # 而这一刻 mmw-agent 往往还没连上主控、没来得及写出真实 config.json,
+        # xray 便会以 "failed to load config files ... no such file or directory" 启动失败,
+        # 在全新安装的最后留下一条刺眼的红色报错(功能其实不受影响,agent 随后会写配置并重启它)。
+        # 占位配置只保证 xray 能起来,agent 一旦下发真实配置就会整份覆盖。
+        # 只在文件不存在时创建 —— 重装/已有配置的机器绝不能被覆盖。
+        mkdir -p /usr/local/etc/xray
+        if [ ! -f /usr/local/etc/xray/config.json ]; then
+            cat > /usr/local/etc/xray/config.json <<'XRAYPLACEHOLDERCFG'
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [],
+  "outbounds": [ { "protocol": "freedom", "tag": "direct" } ]
+}
+XRAYPLACEHOLDERCFG
+        fi
         bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
     fi
 fi
