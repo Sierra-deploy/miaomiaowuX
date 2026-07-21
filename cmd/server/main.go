@@ -1129,8 +1129,13 @@ func main() {
 	// 创建订阅处理程序（在端点和短链接之间共享）
 	subscriptionHandler := handler.NewSubscriptionHandlerConcrete(repo, subscribeDir)
 
-	// 短链接重置端点（已验证）
-	mux.Handle("/api/user/short-link", auth.RequireToken(tokenStore, userRepo, handler.NewShortLinkResetHandler(repo)))
+	// 短链接重置端点。
+	//
+	// 曾经挂在 RequireToken 下、且前端「个人设置」里给每个用户都放了按钮 —— 但
+	// ResetAllSubscriptionShortURLs 是 `SELECT id FROM subscribe_files` 全表重置、
+	// handler 取了 username 却根本不用,任何一个普通用户点一下就会把**全系统所有人**的
+	// 订阅短链接冲掉。现已收归管理员;自定义短码请走订阅管理里的按文件设置入口。
+	mux.Handle("/api/user/short-link", auth.RequireAdmin(tokenStore, userRepo, handler.NewShortLinkResetHandler(repo)))
 	mux.Handle("/api/user/custom-short-code", auth.RequireToken(tokenStore, userRepo, handler.NewUserCustomShortCodeSelfHandler(repo)))
 
 	// 临时订阅端点
