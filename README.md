@@ -170,6 +170,38 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.3.5 (2026-07-21)
+- Change license to Miaomiaowu X Source Available License
+- 🌈 tg通知支持配置文本
+- 🌈 增加共享 reality 域名池
+- 🌈 增加日志管理
+- 🌈 探针功能优化
+- 🌈 探针支持系统指标
+- 🌈 支持修改节点部分配置
+- 🌈 支持用户设置默认模板
+- 🌈 调整系统设置与增加公告
+- 🌈 部分显示优化
+- 🛠️ fix: agent安装接口命令注入#10
+- 🛠️ fix: docker主控无法开启https
+- 🛠️ fix: socks5节点无法复制uri
+- 🛠️ fix: tg注册改为备注用户名与id
+- 🛠️ fix: websocket并发写导致的panic
+- 🛠️ fix: 增加ddns状态显示图标
+- 🛠️ fix: 增加伪装探针时原登录页的开关
+- 🛠️ fix: 增加用户流量限制覆写
+- 🛠️ fix: 增加许可证失效容忍度，防止许可证服务不可用导致失效
+- 🛠️ fix: 备份功能不可用
+- 🛠️ fix: 套餐用户绑定同步
+- 🛠️ fix: 接口ssrf漏洞
+- 🛠️ fix: 移除兼容妙妙屋短链接
+- 🛠️ fix: 管理员查看用户流量未计算倍率
+- 🛠️ fix: 节点X无法确定所属服务器
+- 🛠️ fix: 获取订阅订阅名称不正确
+- 🛠️ fix: 订阅文件接口没有按用户鉴权
+- 🛠️ fix: 路由出站匹配节点失败
+- 🛠️ fix: 链式隧道优化
+- 🛠️ fix: 首次安装时 Xray 启动报错 config.json not found #14
+- 🛠️ fix: 默认开启udp=true参数
 ### v0.3.4 (2026-07-15)
 - 🌈 增加二次元主题
 - 🌈 增加伪装探针模式
