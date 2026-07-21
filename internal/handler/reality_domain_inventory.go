@@ -49,6 +49,8 @@ type realityDomainInventory struct {
 	ServerMap map[string]domainServerInfo
 	// SelfOwned 判定为客户自有的域名(含 steal-self 服务器的 dest)
 	SelfOwned map[string]struct{}
+	// RealityDest 曾以 reality dest 身份出现过的域名(与首次来源无关)
+	RealityDest map[string]struct{}
 	// Blocked 当前屏蔽名单(已从 Domains 中剔除)
 	Blocked []string
 }
@@ -59,14 +61,22 @@ type domainAccumulator struct {
 	order     []string
 	sources   map[string]string
 	selfOwned map[string]struct{}
+	// realityDest 记录「曾以 reality dest 身份出现过」的域名。
+	//
+	// 不能拿 sources[d] == reality_dest 来判:sources 是首次命中即定,而收集顺序是
+	// master → custom → server → inbound。用户在向导里手动加过的偷取目标会先以
+	// custom 记下来,之后即使在入站里真的作为 dest 出现,来源也不会被改写 ——
+	// 共享过滤器据此判定就会把这些域名全部漏掉(用户反馈"有些域名看不见"的真因)。
+	realityDest map[string]struct{}
 }
 
 func newDomainAccumulator() *domainAccumulator {
 	return &domainAccumulator{
-		seen:      make(map[string]struct{}),
-		order:     make([]string, 0, 64),
-		sources:   make(map[string]string, 64),
-		selfOwned: make(map[string]struct{}, 16),
+		seen:        make(map[string]struct{}),
+		order:       make([]string, 0, 64),
+		sources:     make(map[string]string, 64),
+		selfOwned:   make(map[string]struct{}, 16),
+		realityDest: make(map[string]struct{}, 32),
 	}
 }
 
@@ -86,6 +96,9 @@ func (a *domainAccumulator) add(raw, source string) string {
 	}
 	if isSelfOwnedDomainSource(source) {
 		a.selfOwned[d] = struct{}{}
+	}
+	if source == domainSourceRealityDest {
+		a.realityDest[d] = struct{}{}
 	}
 	return d
 }

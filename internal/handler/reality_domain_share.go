@@ -28,8 +28,12 @@ const (
 type shareFilterInput struct {
 	// Domains 候选域名(通常取 realityDomainInventory.Domains)
 	Domains []string
-	// Sources 域名 -> 来源标记
-	Sources map[string]string
+	// RealityDest 曾以 reality dest 身份出现过的域名。
+	//
+	// 不用 Sources[d] == reality_dest 判定:Sources 首次命中即定,而收集顺序是
+	// master → custom → server → inbound。用户在向导里手动加过的偷取目标会先被记成
+	// custom,之后即使在入站里确实作为 dest 出现也不会改写来源,于是整批漏掉。
+	RealityDest map[string]struct{}
 	// SelfOwned 收集阶段已判定为自有的域名(含 steal-self 的 dest)
 	SelfOwned map[string]struct{}
 	// CertDomains 证书库里的域名:在本系统申请过证书 ⇒ 是客户自己的
@@ -42,10 +46,9 @@ type shareFilterInput struct {
 //
 // 判定是**白名单式**的:默认全部不可共享,只有同时满足下列全部条件才放行——
 //
-//  1. 来源必须是 domainSourceRealityDest(真正在偷的目标)。
-//     master / server / tls_sni / custom / shared_pool 一律排除:
-//     前三者是客户自有;custom 是用户手输的,无法确认是不是自有;
-//     shared_pool 是从池子里拉回来的,再传回去会让贡献计数虚高。
+//  1. 必须**曾以 reality dest 身份出现过**(即真的挂在某个入站上偷)。
+//     只在自定义列表里手输、却没有任何入站真正使用的域名不共享——无从确认它是不是自有;
+//     从共享池拉回来的域名也不回传,否则贡献计数会在用户之间循环放大。
 //  2. 不在 SelfOwned 集合里(steal-self 的 dest、与服务器域名重名的 dest)。
 //  3. 域名本身及其根域都不在「自有根域」集合里。根域比对是必须的:
 //     服务器域名是 us1.example.com、而 dest 写成 example.com 时,
@@ -84,7 +87,7 @@ func selectShareableDomains(in shareFilterInput) []string {
 		if d == "" {
 			continue
 		}
-		if in.Sources[d] != domainSourceRealityDest {
+		if _, isDest := in.RealityDest[d]; !isDest {
 			continue
 		}
 		if _, self := in.SelfOwned[d]; self {
@@ -137,7 +140,7 @@ func (h *RemoteManageHandler) buildShareCandidates(ctx context.Context) ([]strin
 
 	return selectShareableDomains(shareFilterInput{
 		Domains:     inv.Domains,
-		Sources:     inv.Sources,
+		RealityDest: inv.RealityDest,
 		SelfOwned:   inv.SelfOwned,
 		CertDomains: certDomains,
 		OptOut:      loadDomainListSetting(ctx, h.repo, realityShareOptOutSettingKey),

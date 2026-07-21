@@ -106,7 +106,8 @@ func StartNotifyScheduler(ctx context.Context, repo *storage.TrafficRepository) 
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 	var lastDailyRun string
-	var lastPkgExpiringRun string // 跨日去重(YYYY-MM-DD)避免同天重复扫
+	var lastPkgExpiringRun string   // 跨日去重(YYYY-MM-DD)避免同天重复扫
+	var lastServerRenewalRun string // 同上,服务器续费提醒
 
 	for {
 		select {
@@ -145,6 +146,15 @@ func StartNotifyScheduler(ctx context.Context, repo *storage.TrafficRepository) 
 				if now.Format("15:04") == "09:00" && lastPkgExpiringRun != today {
 					lastPkgExpiringRun = today
 					go checkPackageExpiring(ctx, repo, cfg.PackageExpiringDaysAhead)
+				}
+			}
+
+			// 服务器续费提醒 — 与套餐到期同一时段(每天 09:00 扫一次),内存 lastServerRenewalRun 防同日重复
+			if cfg.NotifyServerRenewal {
+				today := now.Format("2006-01-02")
+				if now.Format("15:04") == "09:00" && lastServerRenewalRun != today {
+					lastServerRenewalRun = today
+					go checkServerRenewal(ctx, repo)
 				}
 			}
 

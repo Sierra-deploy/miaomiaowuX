@@ -818,7 +818,20 @@ type RemoteTrafficHandler struct {
 	repo      *storage.TrafficRepository
 	collector *traffic.Collector
 	crypto    *CryptoConfig
+	// probeStore 伪装探针指标 ring。HTTP/pull 模式的 agent 没有 WS 连接,
+	// 指标只能从这条 traffic POST 进来 —— 不注入的话这些 agent 的
+	// CPU/内存/硬盘/延迟永远进不了 ring,伪装页上只剩流量和网速。
+	probeStore *ProbeMetricsStore
+	// wsHandler 仅用于复用它的探针采集配置组装(HTTP 模式要把同一份配置
+	// 捎带在 traffic 响应里下发,否则 agent 根本不会开始采集)。
+	wsHandler *RemoteWSHandler
 }
+
+// SetProbeStore 注入探针指标 ring(与 WS 侧同一实例)。
+func (h *RemoteTrafficHandler) SetProbeStore(s *ProbeMetricsStore) { h.probeStore = s }
+
+// SetWSHandler 注入 WS handler,借用其探针配置组装逻辑。
+func (h *RemoteTrafficHandler) SetWSHandler(w *RemoteWSHandler) { h.wsHandler = w }
 
 // 创建一个新的远程流量处理程序
 func NewRemoteTrafficHandler(repo *storage.TrafficRepository, collector *traffic.Collector, crypto *CryptoConfig) *RemoteTrafficHandler {
@@ -835,6 +848,10 @@ type RemoteTrafficRequest struct {
 	// System 系统级网卡累计 RX/TX(来自 agent /proc/net/dev),用于 server.traffic_source='system' 路径。
 	// nil = 老 agent 不支持上报,server 视图自动回退 xray 数据源。
 	System *RemoteSystemTraffic `json:"system,omitempty"`
+	// Sysmetrics / Latency 伪装探针真数据。字段名与 WS 线格式(WSTrafficPayload)完全一致 ——
+	// agent 两条上报路径发的是同一份结构,主控这边也必须两条都收。
+	Sysmetrics *ProbeSysWire        `json:"sysmetrics,omitempty"`
+	Latency    []ProbeLatencySample `json:"latency,omitempty"`
 }
 
 // RemoteSystemTraffic 内嵌于 RemoteTrafficRequest,跟 agent 端 sendTrafficData / sendTrafficHTTP 的字段对齐。
@@ -940,11 +957,34 @@ func (h *RemoteTrafficHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
+	// 伪装探针真数据 → 内存 ring。与 WS 分支(remote_ws.go)同一套 ingest,
+	// 否则 HTTP/pull 模式的服务器在伪装页上只有流量/网速、没有 CPU/内存/硬盘/延迟。
+	if h.probeStore != nil {
+		if sm := req.Sysmetrics; sm != nil {
+			h.probeStore.IngestSys(serverID, ProbeSysSnapshot{
+				CPUPct: sm.CPUPct, LoadAvg: sm.LoadAvg,
+				MemUsed: sm.MemUsed, MemTotal: sm.MemTotal,
+				DiskUsed: sm.DiskUsed, DiskTotal: sm.DiskTotal,
+				HasCPU: sm.HasCPU, HasMem: sm.HasMem, HasDisk: sm.HasDisk,
+			})
+		}
+		if len(req.Latency) > 0 {
+			h.probeStore.IngestLatency(serverID, req.Latency)
+		}
+	}
+
 	// 在 traffic 上报响应里捎带最新的 config 更新(HTTP-mode agent 没有持久连接,
 	// 走 traffic POST 的 response 把变化推回去,agent 收到后调 handleConfigUpdate 应用)。
 	configUpdates := map[string]string{}
 	if val, _ := h.repo.GetSystemSetting(ctx, "dashboard_refresh_interval_ms"); val != "" {
 		configUpdates["traffic_report_interval_ms"] = val
+	}
+	// 探针采集开关 + ping 目标:WS 模式靠 SendConfigUpdate 主动推,HTTP 模式没有持久连接,
+	// 必须搭这趟响应车。不下发的话 agent 的 probeAnyEnabled() 恒为 false,压根不采集。
+	if h.wsHandler != nil {
+		for k, v := range h.wsHandler.buildProbeConfigUpdates(ctx, serverID) {
+			configUpdates[k] = v
+		}
 	}
 	respData, _ := json.Marshal(map[string]interface{}{
 		"success":        true,

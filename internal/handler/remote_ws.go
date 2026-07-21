@@ -421,6 +421,15 @@ func (h *RemoteWSHandler) SetProbeStore(s *ProbeMetricsStore) {
 //
 // 从 system_settings 读配置,由 SetProbeDisguise 保存后 + agent 上线(auth 后)调用。
 func (h *RemoteWSHandler) PushProbeConfigToAgent(ctx context.Context, serverID int64) {
+	_ = h.SendConfigUpdate(serverID, h.buildProbeConfigUpdates(ctx, serverID))
+}
+
+// buildProbeConfigUpdates 组装一台 agent 的探针采集配置(不负责发送)。
+//
+// 拆出来是因为两条下发通道形态不同:WS 走 SendConfigUpdate 主动推,
+// HTTP/pull 模式没有持久连接、只能搭 traffic 响应的车(见 RemoteTrafficHandler)。
+// 组装逻辑必须只有一份 —— 各写一份迟早会让两种连接模式的 agent 采集行为不一致。
+func (h *RemoteWSHandler) buildProbeConfigUpdates(ctx context.Context, serverID int64) map[string]string {
 	get := func(k string) string { v, _ := h.repo.GetSystemSetting(ctx, k); return v }
 	enabled := get(probeDisguiseEnabledKey) == "1"
 
@@ -489,7 +498,7 @@ func (h *RemoteWSHandler) PushProbeConfigToAgent(ctx context.Context, serverID i
 			updates["probe_ping_interval_ms"] = iv
 		}
 	}
-	_ = h.SendConfigUpdate(serverID, updates)
+	return updates
 }
 
 // PushProbeConfigToAll 对所有已连 agent 下发采集配置(配置变更后调)。

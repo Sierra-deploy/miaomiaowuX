@@ -880,6 +880,10 @@ func main() {
 	// 内存量级:1440 点 × 16B × 目标数(≤30) × 服务器数,几十台机也就几 MB,可接受。
 	probeMetricsStore := handler.NewProbeMetricsStore(1440)
 	remoteWSHandler.SetProbeStore(probeMetricsStore) // 写侧:接收 agent 上报的 sysmetrics/latency
+	// HTTP/pull 模式的 agent 没有 WS 连接,探针指标只能从 /api/remote/traffic 这条 POST 进来;
+	// 采集开关也只能搭该请求的响应车下发。两者都注入后,两种连接模式的探针数据才一致。
+	remoteTrafficHandler.SetProbeStore(probeMetricsStore)
+	remoteTrafficHandler.SetWSHandler(remoteWSHandler)
 	go func() {
 		t := time.NewTicker(5 * time.Minute)
 		defer t.Stop()

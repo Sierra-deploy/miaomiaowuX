@@ -91,6 +91,8 @@ func (n *Notifier) CheckEnabled(eventType EventType) (bool, SkipReason) {
 		on = n.cfg.NotifyCertResult
 	case EventAgentLongOffline:
 		on = n.cfg.NotifyAgentLongOffline
+	case EventServerRenewalDue, EventServerRenewed:
+		on = n.cfg.NotifyServerRenewal
 	case EventDeviceLimitExceeded:
 		on = n.cfg.NotifyDeviceLimitExceeded
 	case EventIPBan:

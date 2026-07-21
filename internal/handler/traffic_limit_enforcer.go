@@ -56,16 +56,25 @@ func (e *TrafficLimitEnforcer) recordedCheck(ctx context.Context) {
 //  4. lastResetAt 为 nil(从未重置过)或不在本月 → 应该重置;否则跳过(避免同月反复)
 //
 // 注:用 now 的本地时区(time.Now() 默认)。生产环境 server 时区需配为本地时区,否则用户感知的"7号"会偏移。
+// effectiveResetDay 返回 resetDay 在 t 所属月份的实际生效日:短月份夹到月末。
+// 例如 resetDay=31 在 2 月 → 28(闰年 29)。
+//
+// 抽出来共用:续费提醒(notify_scheduler.go)必须和真正的流量重置落在同一天,
+// 各写一份夹取逻辑迟早会算出不同的日子,提醒就发错了。
+func effectiveResetDay(t time.Time, resetDay int) int {
+	// 当月最后一天 = 下月第 0 天
+	lastDayOfMonth := time.Date(t.Year(), t.Month()+1, 0, 0, 0, 0, 0, t.Location()).Day()
+	if resetDay > lastDayOfMonth {
+		return lastDayOfMonth
+	}
+	return resetDay
+}
+
 func shouldResetThisMonth(now time.Time, isReset bool, resetDay int, lastResetAt *time.Time) bool {
 	if !isReset || resetDay <= 0 || resetDay > 31 {
 		return false
 	}
-	// 当月最后一天 = 下月第 0 天
-	lastDayOfMonth := time.Date(now.Year(), now.Month()+1, 0, 0, 0, 0, 0, now.Location()).Day()
-	effectiveDay := resetDay
-	if effectiveDay > lastDayOfMonth {
-		effectiveDay = lastDayOfMonth
-	}
+	effectiveDay := effectiveResetDay(now, resetDay)
 	if now.Day() < effectiveDay {
 		return false
 	}

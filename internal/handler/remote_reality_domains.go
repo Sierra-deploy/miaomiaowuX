@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"miaomiaowux/internal/storage"
 	"miaomiaowux/templates"
 )
 
@@ -233,31 +234,11 @@ func (h *RemoteManageHandler) collectRealityDomainInventory(ctx context.Context)
 			}
 		}
 
-		if server.Status != "connected" {
-			continue
-		}
-
-		result, err := h.forwardToRemoteServer(ctx, server.ID, http.MethodGet, "/api/child/inbounds", nil)
-		if err != nil {
-			log.Printf("[Remote Manage] Skip domain collection for server %d (%s): %v", server.ID, server.Name, err)
-			continue
-		}
-
-		var inboundsResp struct {
-			Success  bool                     `json:"success"`
-			Inbounds []map[string]interface{} `json:"inbounds"`
-		}
-		if err := json.Unmarshal(result, &inboundsResp); err != nil {
-			log.Printf("[Remote Manage] Invalid inbounds response from server %d (%s): %v", server.ID, server.Name, err)
-			continue
-		}
-		if !inboundsResp.Success {
-			continue
-		}
-
 		// steal-self 服务器偷的是自己的域名,它的 dest 必须整台排除,不能当公共站共享出去
 		stealSelf := isStealSelfServer(server)
-		for _, inbound := range inboundsResp.Inbounds {
+
+		inbounds := h.fetchInboundsForDomainScan(ctx, server)
+		for _, inbound := range inbounds {
 			extractDomainsFromInbound(inbound, acc, stealSelf)
 		}
 	}
@@ -292,12 +273,49 @@ func (h *RemoteManageHandler) collectRealityDomainInventory(ctx context.Context)
 	sort.Strings(blockedList)
 
 	return &realityDomainInventory{
-		Domains:   out,
-		Sources:   acc.sources,
-		ServerMap: domainServerMap,
-		SelfOwned: acc.selfOwned,
-		Blocked:   blockedList,
+		Domains:     out,
+		Sources:     acc.sources,
+		ServerMap:   domainServerMap,
+		SelfOwned:   acc.selfOwned,
+		RealityDest: acc.realityDest,
+		Blocked:     blockedList,
 	}, nil
+}
+
+// fetchInboundsForDomainScan 取一台服务器上的入站配置,供域名扫描使用。
+//
+// 在线时问 agent 要实配;离线/失败时回落到 server_xray_config_snapshots 里的最后一份快照。
+// 有回落才能扫全:否则一台服务器只要当下不在线,它上面所有 reality 偷取目标就整批消失,
+// 表现为共享清单里"有些域名看不见"。
+func (h *RemoteManageHandler) fetchInboundsForDomainScan(ctx context.Context, server storage.RemoteServer) []map[string]interface{} {
+	if server.Status == "connected" {
+		result, err := h.forwardToRemoteServer(ctx, server.ID, http.MethodGet, "/api/child/inbounds", nil)
+		if err == nil {
+			var resp struct {
+				Success  bool                     `json:"success"`
+				Inbounds []map[string]interface{} `json:"inbounds"`
+			}
+			if jsonErr := json.Unmarshal(result, &resp); jsonErr == nil && resp.Success {
+				return resp.Inbounds
+			}
+			log.Printf("[Remote Manage] Invalid inbounds response from server %d (%s), falling back to snapshot", server.ID, server.Name)
+		} else {
+			log.Printf("[Remote Manage] Live inbounds fetch failed for server %d (%s), falling back to snapshot: %v", server.ID, server.Name, err)
+		}
+	}
+
+	snap, err := h.repo.GetCurrentXraySnapshot(ctx, server.ID)
+	if err != nil || snap == nil || strings.TrimSpace(snap.ConfigJSON) == "" {
+		return nil
+	}
+	var cfg struct {
+		Inbounds []map[string]interface{} `json:"inbounds"`
+	}
+	if err := json.Unmarshal([]byte(snap.ConfigJSON), &cfg); err != nil {
+		log.Printf("[Remote Manage] Parse snapshot for server %d (%s) failed: %v", server.ID, server.Name, err)
+		return nil
+	}
+	return cfg.Inbounds
 }
 
 // 配置 nginx SSL (443) + 在远程服务器上部署证书。

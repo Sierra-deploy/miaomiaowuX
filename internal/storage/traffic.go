@@ -560,6 +560,9 @@ type SystemConfig struct {
 	NotifyAgentLongOfflineMinutes int    // 默认 30
 	NotifyDeviceLimitExceeded     bool   // 设备数超限(agent 上报触发)
 	NotifyIPBan                   bool   // IP 被暴力防护封禁
+	// NotifyServerRenewal 服务器续费提醒:按 traffic_reset_day 在到期前 7/3 天提醒,
+	// 重置日次日仍在线则发续费成功。一个开关同时管这两条——它们是同一件事的两端。
+	NotifyServerRenewal bool
 	EnableOverrideScripts         bool   // 启用覆写脚本功能
 	SubscriptionOutputFormat      string // 订阅序列化格式: "yaml"(default) or "json"。仅影响 Clash 客户端输出。
 	SilentMode                    bool   // 静默模式：所有请求返回404，仅订阅接口可用
@@ -1756,6 +1759,9 @@ WHERE NOT EXISTS (SELECT 1 FROM system_config WHERE id = 1);
 		return err
 	}
 	if err := r.ensureSystemConfigColumn("notify_device_limit_exceeded", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := r.ensureSystemConfigColumn("notify_server_renewal", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := r.ensureSystemConfigColumn("notify_ip_ban", "INTEGER NOT NULL DEFAULT 0"); err != nil {
@@ -6779,13 +6785,15 @@ SELECT proxy_groups_source_url, client_compatibility_mode, COALESCE(enable_short
        COALESCE(notify_agent_long_offline, 0),
        COALESCE(notify_agent_long_offline_minutes, 30),
        COALESCE(notify_device_limit_exceeded, 0),
-       COALESCE(notify_ip_ban, 0)
+       COALESCE(notify_ip_ban, 0),
+       COALESCE(notify_server_renewal, 0)
 FROM system_config
 WHERE id = 1
 `
 
 	var cfg SystemConfig
 	var compatibilityMode, enableShortLink, agentLogEnabled int
+	var notifyServerRenewal int
 	var notifyEnabled, notifyLogin, notifySubFetch, notifyDailyTraffic int
 	var notifyServerOffline, notifyServerOnline, notifyTrafficThreshold int
 	var enableOverrideScripts, silentMode, silentModeTimeout int
@@ -6811,6 +6819,7 @@ WHERE id = 1
 		&notifyTH80, &notifyOverLimit, &notifyPkgExpiring, &cfg.NotifyPackageExpiringDays,
 		&notifyPkgExpired, &notifyUserReg, &notifyTGBound, &notifyCert, &notifyAgentLO,
 		&cfg.NotifyAgentLongOfflineMinutes, &notifyDeviceLimit, &notifyIPBan,
+		&notifyServerRenewal,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -6848,6 +6857,7 @@ WHERE id = 1
 	cfg.NotifyTelegramBound = notifyTGBound != 0
 	cfg.NotifyCertResult = notifyCert != 0
 	cfg.NotifyAgentLongOffline = notifyAgentLO != 0
+	cfg.NotifyServerRenewal = notifyServerRenewal != 0
 	cfg.NotifyDeviceLimitExceeded = notifyDeviceLimit != 0
 	cfg.NotifyIPBan = notifyIPBan != 0
 	if cfg.NotifyPackageExpiringDays <= 0 {
@@ -6905,6 +6915,7 @@ SET proxy_groups_source_url = ?,
     notify_agent_long_offline_minutes = ?,
     notify_device_limit_exceeded = ?,
     notify_ip_ban = ?,
+    notify_server_renewal = ?,
     updated_at = CURRENT_TIMESTAMP
 WHERE id = 1
 `
@@ -6978,7 +6989,8 @@ WHERE id = 1
 		boolToInt(cfg.NotifyPackageExpired), boolToInt(cfg.NotifyUserRegistered),
 		boolToInt(cfg.NotifyTelegramBound), boolToInt(cfg.NotifyCertResult),
 		boolToInt(cfg.NotifyAgentLongOffline), agentLOMinutes,
-		boolToInt(cfg.NotifyDeviceLimitExceeded), boolToInt(cfg.NotifyIPBan))
+		boolToInt(cfg.NotifyDeviceLimitExceeded), boolToInt(cfg.NotifyIPBan),
+		boolToInt(cfg.NotifyServerRenewal))
 	if err != nil {
 		return fmt.Errorf("update system config: %w", err)
 	}
@@ -7001,8 +7013,9 @@ INSERT INTO system_config (id, proxy_groups_source_url, client_compatibility_mod
     node_name_multiplier_prefix_enabled, node_name_multiplier_left, node_name_multiplier_right,
     notify_traffic_threshold_80, notify_over_limit, notify_package_expiring, notify_package_expiring_days,
     notify_package_expired, notify_user_registered, notify_telegram_bound, notify_cert_result,
-    notify_agent_long_offline, notify_agent_long_offline_minutes, notify_device_limit_exceeded, notify_ip_ban)
-VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    notify_agent_long_offline, notify_agent_long_offline_minutes, notify_device_limit_exceeded, notify_ip_ban,
+    notify_server_renewal)
+VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `
 		if _, err := r.db.ExecContext(ctx, insertStmt, cfg.ProxyGroupsSourceURL, compatibilityMode, enableShortLink,
 			cfg.SpeedCollectInterval, cfg.TrafficCollectInterval, cfg.TrafficCheckInterval, cfg.HeartbeatInterval, agentLogEnabled,
@@ -7021,7 +7034,8 @@ VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 
 			boolToInt(cfg.NotifyPackageExpired), boolToInt(cfg.NotifyUserRegistered),
 			boolToInt(cfg.NotifyTelegramBound), boolToInt(cfg.NotifyCertResult),
 			boolToInt(cfg.NotifyAgentLongOffline), agentLOMinutes,
-			boolToInt(cfg.NotifyDeviceLimitExceeded), boolToInt(cfg.NotifyIPBan)); err != nil {
+			boolToInt(cfg.NotifyDeviceLimitExceeded), boolToInt(cfg.NotifyIPBan),
+			boolToInt(cfg.NotifyServerRenewal)); err != nil {
 			return fmt.Errorf("insert system config: %w", err)
 		}
 	}

@@ -11,17 +11,17 @@ import (
 )
 
 type notifyConfigResponse struct {
-	NotifyEnabled               bool   `json:"notify_enabled"`
-	TelegramBotToken            string `json:"telegram_bot_token"`
-	TelegramChatID              string `json:"telegram_chat_id"`
-	NotifyLogin                 bool   `json:"notify_login"`
-	NotifySubscribeFetch        bool   `json:"notify_subscribe_fetch"`
-	NotifyDailyTraffic          bool   `json:"notify_daily_traffic"`
-	NotifyServerOffline         bool   `json:"notify_server_offline"`
-	NotifyServerOnline          bool   `json:"notify_server_online"`
-	NotifyTrafficThreshold      bool   `json:"notify_traffic_threshold"`
-	NotifyDailyTrafficTime      string `json:"notify_daily_traffic_time"`
-	NotifyTrafficThresholdPct   int    `json:"notify_traffic_threshold_percent"`
+	NotifyEnabled             bool   `json:"notify_enabled"`
+	TelegramBotToken          string `json:"telegram_bot_token"`
+	TelegramChatID            string `json:"telegram_chat_id"`
+	NotifyLogin               bool   `json:"notify_login"`
+	NotifySubscribeFetch      bool   `json:"notify_subscribe_fetch"`
+	NotifyDailyTraffic        bool   `json:"notify_daily_traffic"`
+	NotifyServerOffline       bool   `json:"notify_server_offline"`
+	NotifyServerOnline        bool   `json:"notify_server_online"`
+	NotifyTrafficThreshold    bool   `json:"notify_traffic_threshold"`
+	NotifyDailyTrafficTime    string `json:"notify_daily_traffic_time"`
+	NotifyTrafficThresholdPct int    `json:"notify_traffic_threshold_percent"`
 	// Phase 2 新增 9 个通知开关 + 2 个参数
 	NotifyTrafficThreshold80      bool `json:"notify_traffic_threshold_80"`
 	NotifyOverLimit               bool `json:"notify_over_limit"`
@@ -31,6 +31,7 @@ type notifyConfigResponse struct {
 	NotifyUserRegistered          bool `json:"notify_user_registered"`
 	NotifyTelegramBound           bool `json:"notify_telegram_bound"`
 	NotifyCertResult              bool `json:"notify_cert_result"`
+	NotifyServerRenewal           bool `json:"notify_server_renewal"`
 	NotifyAgentLongOffline        bool `json:"notify_agent_long_offline"`
 	NotifyAgentLongOfflineMinutes int  `json:"notify_agent_long_offline_minutes"`
 	NotifyDeviceLimitExceeded     bool `json:"notify_device_limit_exceeded"`
@@ -47,29 +48,30 @@ type notifyConfigResponse struct {
 }
 
 type notifyConfigRequest struct {
-	NotifyEnabled               bool   `json:"notify_enabled"`
-	TelegramBotToken            string `json:"telegram_bot_token"`
-	TelegramChatID              string `json:"telegram_chat_id"`
-	NotifyLogin                 bool   `json:"notify_login"`
-	NotifySubscribeFetch        bool   `json:"notify_subscribe_fetch"`
-	NotifyDailyTraffic          bool   `json:"notify_daily_traffic"`
-	NotifyServerOffline         bool   `json:"notify_server_offline"`
-	NotifyServerOnline          bool   `json:"notify_server_online"`
-	NotifyTrafficThreshold      bool   `json:"notify_traffic_threshold"`
-	NotifyDailyTrafficTime      string `json:"notify_daily_traffic_time"`
-	NotifyTrafficThresholdPct   int    `json:"notify_traffic_threshold_percent"`
-	NotifyTrafficThreshold80      bool `json:"notify_traffic_threshold_80"`
-	NotifyOverLimit               bool `json:"notify_over_limit"`
-	NotifyPackageExpiring         bool `json:"notify_package_expiring"`
-	NotifyPackageExpiringDays     int  `json:"notify_package_expiring_days"`
-	NotifyPackageExpired          bool `json:"notify_package_expired"`
-	NotifyUserRegistered          bool `json:"notify_user_registered"`
-	NotifyTelegramBound           bool `json:"notify_telegram_bound"`
-	NotifyCertResult              bool `json:"notify_cert_result"`
-	NotifyAgentLongOffline        bool `json:"notify_agent_long_offline"`
-	NotifyAgentLongOfflineMinutes int  `json:"notify_agent_long_offline_minutes"`
-	NotifyDeviceLimitExceeded     bool `json:"notify_device_limit_exceeded"`
-	NotifyIPBan                   bool `json:"notify_ip_ban"`
+	NotifyEnabled                 bool   `json:"notify_enabled"`
+	TelegramBotToken              string `json:"telegram_bot_token"`
+	TelegramChatID                string `json:"telegram_chat_id"`
+	NotifyLogin                   bool   `json:"notify_login"`
+	NotifySubscribeFetch          bool   `json:"notify_subscribe_fetch"`
+	NotifyDailyTraffic            bool   `json:"notify_daily_traffic"`
+	NotifyServerOffline           bool   `json:"notify_server_offline"`
+	NotifyServerOnline            bool   `json:"notify_server_online"`
+	NotifyTrafficThreshold        bool   `json:"notify_traffic_threshold"`
+	NotifyDailyTrafficTime        string `json:"notify_daily_traffic_time"`
+	NotifyTrafficThresholdPct     int    `json:"notify_traffic_threshold_percent"`
+	NotifyTrafficThreshold80      bool   `json:"notify_traffic_threshold_80"`
+	NotifyOverLimit               bool   `json:"notify_over_limit"`
+	NotifyPackageExpiring         bool   `json:"notify_package_expiring"`
+	NotifyPackageExpiringDays     int    `json:"notify_package_expiring_days"`
+	NotifyPackageExpired          bool   `json:"notify_package_expired"`
+	NotifyUserRegistered          bool   `json:"notify_user_registered"`
+	NotifyTelegramBound           bool   `json:"notify_telegram_bound"`
+	NotifyCertResult              bool   `json:"notify_cert_result"`
+	NotifyServerRenewal           bool   `json:"notify_server_renewal"`
+	NotifyAgentLongOffline        bool   `json:"notify_agent_long_offline"`
+	NotifyAgentLongOfflineMinutes int    `json:"notify_agent_long_offline_minutes"`
+	NotifyDeviceLimitExceeded     bool   `json:"notify_device_limit_exceeded"`
+	NotifyIPBan                   bool   `json:"notify_ip_ban"`
 	// 指针:nil=不改;非 nil=写入(0 合法,表示关闭容忍)。
 	NotifyServerToleranceSeconds *int `json:"notify_server_tolerance_seconds"`
 	// 指针:nil=不改;非 nil=写入(空字符串合法,表示恢复默认模板)。
@@ -142,6 +144,7 @@ func (h *NotifyConfigHandler) handleGet(w http.ResponseWriter, r *http.Request) 
 		NotifyUserRegistered:          sysCfg.NotifyUserRegistered,
 		NotifyTelegramBound:           sysCfg.NotifyTelegramBound,
 		NotifyCertResult:              sysCfg.NotifyCertResult,
+		NotifyServerRenewal:           sysCfg.NotifyServerRenewal,
 		NotifyAgentLongOffline:        sysCfg.NotifyAgentLongOffline,
 		NotifyAgentLongOfflineMinutes: sysCfg.NotifyAgentLongOfflineMinutes,
 		NotifyDeviceLimitExceeded:     sysCfg.NotifyDeviceLimitExceeded,
@@ -198,6 +201,7 @@ func (h *NotifyConfigHandler) handleUpdate(w http.ResponseWriter, r *http.Reques
 	sysCfg.NotifyUserRegistered = req.NotifyUserRegistered
 	sysCfg.NotifyTelegramBound = req.NotifyTelegramBound
 	sysCfg.NotifyCertResult = req.NotifyCertResult
+	sysCfg.NotifyServerRenewal = req.NotifyServerRenewal
 	sysCfg.NotifyAgentLongOffline = req.NotifyAgentLongOffline
 	if req.NotifyAgentLongOfflineMinutes > 0 && req.NotifyAgentLongOfflineMinutes <= 1440 {
 		sysCfg.NotifyAgentLongOfflineMinutes = req.NotifyAgentLongOfflineMinutes
@@ -234,29 +238,30 @@ func (h *NotifyConfigHandler) handleUpdate(w http.ResponseWriter, r *http.Reques
 
 	if n := GetNotifier(); n != nil {
 		n.UpdateConfig(notify.Config{
-			Enabled:                       sysCfg.NotifyEnabled,
-			BotToken:                      sysCfg.TelegramBotToken,
-			ChatID:                        sysCfg.TelegramChatID,
-			NotifyLogin:                   sysCfg.NotifyLogin,
-			NotifySubscribeFetch:          sysCfg.NotifySubscribeFetch,
-			NotifyDailyTraffic:            sysCfg.NotifyDailyTraffic,
-			NotifyServerOffline:           sysCfg.NotifyServerOffline,
-			NotifyServerOnline:            sysCfg.NotifyServerOnline,
-			NotifyTrafficThreshold:        sysCfg.NotifyTrafficThreshold,
-			DailyTrafficTime:              sysCfg.NotifyDailyTrafficTime,
-			TrafficThresholdPercent:       sysCfg.NotifyTrafficThresholdPercent,
-			NotifyTrafficThreshold80:      sysCfg.NotifyTrafficThreshold80,
-			NotifyOverLimit:               sysCfg.NotifyOverLimit,
-			NotifyPackageExpiring:         sysCfg.NotifyPackageExpiring,
-			PackageExpiringDaysAhead:      sysCfg.NotifyPackageExpiringDays,
-			NotifyPackageExpired:          sysCfg.NotifyPackageExpired,
-			NotifyUserRegistered:          sysCfg.NotifyUserRegistered,
-			NotifyTelegramBound:           sysCfg.NotifyTelegramBound,
-			NotifyCertResult:              sysCfg.NotifyCertResult,
-			NotifyAgentLongOffline:        sysCfg.NotifyAgentLongOffline,
-			AgentLongOfflineMinutes:       sysCfg.NotifyAgentLongOfflineMinutes,
-			NotifyDeviceLimitExceeded:     sysCfg.NotifyDeviceLimitExceeded,
-			NotifyIPBan:                   sysCfg.NotifyIPBan,
+			Enabled:                   sysCfg.NotifyEnabled,
+			BotToken:                  sysCfg.TelegramBotToken,
+			ChatID:                    sysCfg.TelegramChatID,
+			NotifyLogin:               sysCfg.NotifyLogin,
+			NotifySubscribeFetch:      sysCfg.NotifySubscribeFetch,
+			NotifyDailyTraffic:        sysCfg.NotifyDailyTraffic,
+			NotifyServerOffline:       sysCfg.NotifyServerOffline,
+			NotifyServerOnline:        sysCfg.NotifyServerOnline,
+			NotifyTrafficThreshold:    sysCfg.NotifyTrafficThreshold,
+			DailyTrafficTime:          sysCfg.NotifyDailyTrafficTime,
+			TrafficThresholdPercent:   sysCfg.NotifyTrafficThresholdPercent,
+			NotifyTrafficThreshold80:  sysCfg.NotifyTrafficThreshold80,
+			NotifyOverLimit:           sysCfg.NotifyOverLimit,
+			NotifyPackageExpiring:     sysCfg.NotifyPackageExpiring,
+			PackageExpiringDaysAhead:  sysCfg.NotifyPackageExpiringDays,
+			NotifyPackageExpired:      sysCfg.NotifyPackageExpired,
+			NotifyUserRegistered:      sysCfg.NotifyUserRegistered,
+			NotifyTelegramBound:       sysCfg.NotifyTelegramBound,
+			NotifyCertResult:          sysCfg.NotifyCertResult,
+			NotifyServerRenewal:       sysCfg.NotifyServerRenewal,
+			NotifyAgentLongOffline:    sysCfg.NotifyAgentLongOffline,
+			AgentLongOfflineMinutes:   sysCfg.NotifyAgentLongOfflineMinutes,
+			NotifyDeviceLimitExceeded: sysCfg.NotifyDeviceLimitExceeded,
+			NotifyIPBan:               sysCfg.NotifyIPBan,
 		})
 	}
 

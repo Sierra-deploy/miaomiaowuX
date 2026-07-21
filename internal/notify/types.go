@@ -12,45 +12,50 @@ const (
 	EventIPBan            EventType = "ip_ban"
 
 	// Phase 2 新增 9 个事件
-	EventTrafficThreshold80   EventType = "traffic_threshold_80"  // 用户流量达 80%(预警)
-	EventOverLimit            EventType = "over_limit"            // 用户流量超 100%(已踢)
-	EventPackageExpiring      EventType = "package_expiring"      // 套餐 N 天内到期
-	EventPackageExpired       EventType = "package_expired"       // 套餐已到期(清理时点)
-	EventUserRegistered       EventType = "user_registered"       // 新用户注册
-	EventTelegramBound        EventType = "telegram_bound"        // 用户首次绑定 TG
-	EventCertResult           EventType = "cert_result"           // 证书申请成功/失败
-	EventAgentLongOffline     EventType = "agent_long_offline"    // agent 长期离线(N 分钟无心跳)
-	EventDeviceLimitExceeded  EventType = "device_limit_exceeded" // 用户触发设备数超限(agent 踢最旧)
+	EventTrafficThreshold80  EventType = "traffic_threshold_80"  // 用户流量达 80%(预警)
+	EventOverLimit           EventType = "over_limit"            // 用户流量超 100%(已踢)
+	EventPackageExpiring     EventType = "package_expiring"      // 套餐 N 天内到期
+	EventPackageExpired      EventType = "package_expired"       // 套餐已到期(清理时点)
+	EventUserRegistered      EventType = "user_registered"       // 新用户注册
+	EventTelegramBound       EventType = "telegram_bound"        // 用户首次绑定 TG
+	EventCertResult          EventType = "cert_result"           // 证书申请成功/失败
+	EventAgentLongOffline    EventType = "agent_long_offline"    // agent 长期离线(N 分钟无心跳)
+	EventDeviceLimitExceeded EventType = "device_limit_exceeded" // 用户触发设备数超限(agent 踢最旧)
+	EventServerRenewalDue    EventType = "server_renewal_due"    // 服务器流量重置日(=续费日)将至
+	EventServerRenewed       EventType = "server_renewed"        // 重置日次日仍在线,视为续费成功
 )
 
 type Config struct {
-	Enabled                      bool
-	BotToken                     string
-	ChatID                       string
-	NotifyLogin                  bool
-	NotifySubscribeFetch         bool
-	NotifyDailyTraffic           bool
-	NotifyServerOffline          bool
-	NotifyServerOnline           bool
-	NotifyTrafficThreshold       bool
-	DailyTrafficTime             string // "HH:MM"
-	TrafficThresholdPercent      int    // 0-100
+	Enabled                 bool
+	BotToken                string
+	ChatID                  string
+	NotifyLogin             bool
+	NotifySubscribeFetch    bool
+	NotifyDailyTraffic      bool
+	NotifyServerOffline     bool
+	NotifyServerOnline      bool
+	NotifyTrafficThreshold  bool
+	DailyTrafficTime        string // "HH:MM"
+	TrafficThresholdPercent int    // 0-100
 
 	// Phase 2 新增 9 个开关 + 2 个参数
-	NotifyTrafficThreshold80   bool
-	NotifyOverLimit            bool
-	NotifyPackageExpiring      bool
-	PackageExpiringDaysAhead   int // 默认 3
-	NotifyPackageExpired       bool
-	NotifyUserRegistered       bool
-	NotifyTelegramBound        bool
-	NotifyCertResult           bool
-	NotifyAgentLongOffline     bool
-	AgentLongOfflineMinutes    int // 默认 30
-	NotifyDeviceLimitExceeded  bool
+	NotifyTrafficThreshold80  bool
+	NotifyOverLimit           bool
+	NotifyPackageExpiring     bool
+	PackageExpiringDaysAhead  int // 默认 3
+	NotifyPackageExpired      bool
+	NotifyUserRegistered      bool
+	NotifyTelegramBound       bool
+	NotifyCertResult          bool
+	NotifyAgentLongOffline    bool
+	AgentLongOfflineMinutes   int // 默认 30
+	NotifyDeviceLimitExceeded bool
 	// NotifyIPBan：IP 被暴力防护封禁时通知。历史上 EventIPBan 有触发点(brute_force.go)但
 	// CheckEnabled 没有对应 case → 通知永远发不出。补上字段 + case + 配置读写修复它。
 	NotifyIPBan bool
+	// NotifyServerRenewal 同时管「续费将至」和「续费成功」两个事件 —— 它们是同一件事的
+	// 两端,拆成两个开关只会让通知设置面板更长,没有单独关掉其中一个的实际场景。
+	NotifyServerRenewal bool
 }
 
 type Event struct {
