@@ -260,6 +260,8 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	} else {
 		// TODO: 订阅链接已经配置到客户端，管理员修改文件名后，原订阅链接无法使用
 		// 1.0 版本时改为与表里的ID关联，暂时先不改
+		// 这里的 t 是**遗留的订阅文件名**语义(不是客户端类型),所以刻意读原始值、
+		// 不走 resolveClientType —— auto 模式对它没有意义,翻译过反而会拿客户端名去查订阅。
 		legacyName := strings.TrimSpace(r.URL.Query().Get("t"))
 		link, err := h.resolveSubscription(r.Context(), legacyName)
 		if err != nil {
@@ -343,7 +345,7 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		// 注意:Clash 系不回退系统默认模板 —— 避免用户精心配的原始 YAML 被"自动套上"覆盖。
 		// 但 Surge 系例外:订阅原始文件是 Clash YAML,Surge 客户端本就要转换,没有"原样保留"诉求;
 		// 且 Surge 策略组/规则必须靠模板生成。故 Surge 请求在订阅/套餐都无模板时回落到系统 Surge 默认模板。
-		if effectiveTemplate == "" && h.repo != nil && isSurgeClientType(r.URL.Query().Get("t")) {
+		if effectiveTemplate == "" && h.repo != nil && isSurgeClientType(resolveClientType(r)) {
 			if cfg, cerr := h.repo.GetSystemConfig(r.Context()); cerr == nil {
 				if f := strings.TrimSpace(cfg.DefaultSurgeTemplateFilename); f != "" {
 					effectiveTemplate = f
@@ -622,7 +624,7 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	// 格式转换
 	stepStart = time.Now()
 	// 根据参数t的类型调用substore的转换代码
-	clientType := strings.TrimSpace(r.URL.Query().Get("t"))
+	clientType := resolveClientType(r)
 	// 默认浏览器打开时直接输入文本, 不再下载问卷
 	contentType := "text/yaml; charset=utf-8; charset=UTF-8"
 	ext := filepath.Ext(filename)
@@ -1330,7 +1332,7 @@ func (h *SubscriptionHandler) serveTokenInvalidResponse(w http.ResponseWriter, r
 	data := h.loadTokenInvalidContent()
 
 	// 根据参数t的类型调用substore的转换代码
-	clientType := strings.TrimSpace(r.URL.Query().Get("t"))
+	clientType := resolveClientType(r)
 	contentType := "text/yaml; charset=utf-8"
 	ext := ".yaml"
 
