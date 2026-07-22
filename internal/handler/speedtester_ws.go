@@ -37,6 +37,21 @@ type stWSMsg struct {
 	Status      string  `json:"status,omitempty"`
 	Error       string  `json:"error,omitempty"`
 	Name        string  `json:"name,omitempty"`
+
+	// ---- 可达性探测(被墙判定)。字段名与测速端客户端 wsMsg 逐一对齐。
+	Version   string              `json:"version,omitempty"` // hello 携带
+	Caps      []string            `json:"caps,omitempty"`    // hello 携带;老版本无此字段
+	Targets   []string            `json:"targets,omitempty"` // master→tester
+	TimeoutMS int                 `json:"timeout_ms,omitempty"`
+	Results   []TesterProbeResult `json:"results,omitempty"` // tester→master
+}
+
+// TesterProbeResult 单个目标的拨测结果(测速端回传)。
+type TesterProbeResult struct {
+	Target    string `json:"target"`
+	OK        bool   `json:"ok"`
+	LatencyMs int64  `json:"latency_ms,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 type testerConn struct {
@@ -123,7 +138,8 @@ func (h *SpeedTesterWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			continue
 		}
 		switch msg.Type {
-		case "result":
+		case "result", "probe_result":
+			// 两类任务共用 pending 通道:jobID 全局唯一,不会串。
 			if ch, ok := tc.pending.Load(msg.JobID); ok {
 				select {
 				case ch.(chan stWSMsg) <- msg:
@@ -132,6 +148,12 @@ func (h *SpeedTesterWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request)
 			}
 		case "hello", "ping":
 			h.repo.TouchSpeedTester(context.Background(), tester.ID)
+			// hello 带能力集才落库。ping 不带,若无条件写会把已知能力清空。
+			if msg.Type == "hello" && len(msg.Caps) > 0 {
+				if err := h.repo.UpdateSpeedTesterCaps(context.Background(), tester.ID, msg.Caps, msg.Version); err != nil {
+					log.Printf("[SpeedTester] 记录 tester %d 能力失败: %v", tester.ID, err)
+				}
+			}
 			_ = tc.send(stWSMsg{Type: "pong"})
 		}
 	}

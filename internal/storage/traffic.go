@@ -1045,6 +1045,14 @@ CREATE TABLE IF NOT EXISTS speed_testers (
 	if _, err := r.db.Exec(speedTestersSchema); err != nil {
 		return fmt.Errorf("migrate speed_testers: %w", err)
 	}
+	// caps / version:测速端 hello 上报的能力集与版本。老版本(v0.1.x)不上报 → 保持空,
+	// 主控据此判定它不支持可达性探测,不会把它列进探测源候选。
+	if err := r.ensureTableColumn("speed_testers", "caps", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := r.ensureTableColumn("speed_testers", "version", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
 
 	const userTrafficRecordsSchema = `
 CREATE TABLE IF NOT EXISTS user_traffic_records (

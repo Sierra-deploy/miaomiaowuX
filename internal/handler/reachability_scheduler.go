@@ -3,13 +3,14 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"net"
-	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
 )
 
@@ -18,20 +19,19 @@ import (
 // 只在状态翻转时产公告(announced_blocked 去抖),不刷屏。探测源为空则从主控本机拨测(只能发现彻底挂,探不准被墙)。
 
 const (
-	reachabilityInterval  = 5 * time.Minute
-	reachabilityFailK     = 2 // 连续 K 次失败才判被墙(去抖瞬断)
-	reachabilityTimeoutMS = 5000
+	reachabilityInterval = 5 * time.Minute
+	reachabilityFailK    = 2 // 连续 K 次失败才判被墙(去抖瞬断)
 )
 
 // StartReachabilityScheduler 启动节点被墙探测后台循环。
-func StartReachabilityScheduler(ctx context.Context, repo *storage.TrafficRepository, rm *RemoteManageHandler, ah *AnnouncementHandler) {
+func StartReachabilityScheduler(ctx context.Context, repo *storage.TrafficRepository, st *SpeedTesterWSHandler, ah *AnnouncementHandler) {
 	go func() {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(30 * time.Second): // 启动后缓一会,避开启动风暴
 		}
-		runReachabilityCycle(ctx, repo, rm, ah)
+		runReachabilityCycle(ctx, repo, st, ah)
 		ticker := time.NewTicker(reachabilityInterval)
 		defer ticker.Stop()
 		for {
@@ -39,22 +39,22 @@ func StartReachabilityScheduler(ctx context.Context, repo *storage.TrafficReposi
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				runReachabilityCycle(ctx, repo, rm, ah)
+				runReachabilityCycle(ctx, repo, st, ah)
 			}
 		}
 	}()
 }
 
-func runReachabilityCycle(ctx context.Context, repo *storage.TrafficRepository, rm *RemoteManageHandler, ah *AnnouncementHandler) {
+func runReachabilityCycle(ctx context.Context, repo *storage.TrafficRepository, st *SpeedTesterWSHandler, ah *AnnouncementHandler) {
 	cfg := ah.mergedAnnounceConfig(ctx)
 	blockedCfg := cfg.Types[AnnounceTypeNodeBlocked]
 	recoveredCfg := cfg.Types[AnnounceTypeNodeRecovered]
 	if !blockedCfg.Enabled { // node_blocked 关 = 整个被墙探测停用
 		return
 	}
-	// 未配置探测源 → 不探。主控在机房,探不准「被墙」(还会把外部/落地节点误判被墙),
-	// 必须配国内 agent 作探测源才启用被墙探测,避免误报。
-	if len(ah.probeServerIDs(ctx)) == 0 {
+	// 未配置任何探测源 → 不探。主控和 agent 都在机房,探不准「被墙」(还会把外部/落地节点
+	// 误判被墙),必须有国内观测点(自建家用测速端,或 PRO 的官方探测)才启用,避免误报。
+	if len(ah.probeTesterIDs(ctx)) == 0 && !ah.officialProbeEnabled(ctx) {
 		return
 	}
 	// 只探「主控管理的节点」——original_server 匹配某个远程服务器。外部导入节点(original_server 为空
@@ -94,7 +94,10 @@ func runReachabilityCycle(ctx context.Context, repo *storage.TrafficRepository, 
 	for t := range targetSet {
 		targets = append(targets, t)
 	}
-	reachable := probeTargets(ctx, rm, ah, targets)
+	reachable, probed := probeTargets(ctx, st, ah, targets)
+	if !probed {
+		return // 无可用探测源,本轮不判定(否则会把所有节点误报成被墙)
+	}
 	now := time.Now().Format("2006-01-02 15:04")
 
 	for nodeID, tgt := range nodeTarget {
@@ -138,68 +141,74 @@ func publishNodeAnnouncement(ctx context.Context, repo *storage.TrafficRepositor
 	})
 }
 
-// probeTargets 返回每个 target(host:port)是否可达。探测源为空则主控本机拨测;
-// 否则从每个探测源 agent 拨测,任一可达即视为可达(最小化误判被墙)。
-func probeTargets(ctx context.Context, rm *RemoteManageHandler, ah *AnnouncementHandler, targets []string) map[string]bool {
+// probeTargets 返回每个 target(host:port)是否可达。第二个返回值为 false 表示
+// **本轮没有任何探测源可用**,结果不可信,调用方必须整轮跳过而不是当成"全部不可达"。
+//
+// 探测源是**家用测速端**(部署在国内家庭网络),不再是机房 agent —— 从机房拨测探不出
+// 「被墙」,反而会把落地节点误判成被墙。判定沿用「任一源可达即可达」,最小化误判。
+//
+// 只有「在线 且 上报了 probe 能力」的测速端才会被派发:老版本收到未知消息会静默丢弃,
+// 派给它只会白等一个超时。全部不可用时**不做主控本机兜底** —— 主控同样在机房,
+// 拿它的结论去判被墙比不判更糟(会产生误报公告)。
+//
+// PRO 用户还可以叠加「官方探测」(许可证服务派发到官方部署的国内探测端),
+// 与本地测速端的结果取并集,语义仍是「任一源可达即可达」。
+func probeTargets(ctx context.Context, st *SpeedTesterWSHandler, ah *AnnouncementHandler, targets []string) (map[string]bool, bool) {
 	res := make(map[string]bool, len(targets))
-	probeIDs := ah.probeServerIDs(ctx)
-	if len(probeIDs) == 0 {
-		for _, t := range targets {
-			res[t] = masterDial(t)
-		}
-		return res
-	}
 	for _, t := range targets {
 		res[t] = false
 	}
-	body, _ := json.Marshal(map[string]any{"domains": targets, "timeout_ms": reachabilityTimeoutMS})
-	for _, sid := range probeIDs {
-		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		out, err := rm.ForwardToServer(cctx, sid, http.MethodPost, "/api/child/domains/latency", body)
-		cancel()
-		if err != nil {
-			continue
-		}
-		var resp struct {
-			Results []struct {
-				Domain  string `json:"domain"`
-				Target  string `json:"target"`
-				Success bool   `json:"success"`
-			} `json:"results"`
-		}
-		if json.Unmarshal(out, &resp) != nil {
-			continue
-		}
-		okSet := map[string]bool{}
-		for _, r := range resp.Results {
-			if r.Success {
-				okSet[r.Target] = true
-				okSet[r.Domain] = true
-			}
-		}
-		for _, t := range targets {
-			if res[t] {
-				continue
-			}
-			host := t
-			if h, _, err := net.SplitHostPort(t); err == nil {
-				host = h
-			}
-			if okSet[t] || okSet[host] {
-				res[t] = true
-			}
-		}
-	}
-	return res
-}
 
-func masterDial(target string) bool {
-	conn, err := net.DialTimeout("tcp", target, time.Duration(reachabilityTimeoutMS)*time.Millisecond)
-	if err != nil {
-		return false
+	localSrc, officialSrc := 0, 0
+	if st != nil {
+		if testerIDs := st.ProbeCapableTesterIDs(ctx, ah.probeTesterIDs(ctx)); len(testerIDs) > 0 {
+			localSrc = len(testerIDs)
+			for tgt, ok := range st.ProbeTargets(ctx, testerIDs, targets) {
+				if ok {
+					res[tgt] = true
+				}
+			}
+		}
 	}
-	_ = conn.Close()
-	return true
+
+	// 官方探测源不可用(无 PRO / 服务端未开放)时静默跳过 —— 它只是一个可选的额外视角,
+	// 不该让整轮探测失败。真出错才记日志,便于排查配额用尽这类问题。
+	if ah.officialProbeEnabled(ctx) && ah.license != nil {
+		official, err := ah.license.ProbeReachability(ctx, targets)
+		switch {
+		case errors.Is(err, license.ErrOfficialProbeUnavailable):
+			// 静默
+		case err != nil:
+			log.Printf("[reachability] 官方探测源本轮不可用: %v", err)
+		default:
+			officialSrc = 1
+			for tgt, ok := range official {
+				if ok {
+					res[tgt] = true
+				}
+			}
+		}
+	}
+
+	// 一个源都没跑成 → 这一轮**没有结论**,不能当成"全部不可达"。
+	// 家用测速端离线是常态(断电、重启、宽带掉线),照全 false 记下去两轮就会把
+	// 所有节点误报成被墙 —— 宁可这一轮不判,也不能给出错误结论。
+	if localSrc == 0 && officialSrc == 0 {
+		log.Printf("[reachability] 本轮无可用探测源(测速端离线或版本过旧,官方探测未启用/不可用),跳过 %d 个目标", len(targets))
+		return nil, false
+	}
+
+	// 每轮一行汇总:没有这行就无法判断"探测到底在不在跑、哪个源在起作用"——
+	// 被墙判定只在状态翻转时才打日志,一切正常时日志里什么都看不到。
+	okN := 0
+	for _, ok := range res {
+		if ok {
+			okN++
+		}
+	}
+	log.Printf("[reachability] 本轮探测 %d 个目标,可达 %d(测速端 %d 个 + 官方探测 %v)",
+		len(targets), okN, localSrc, officialSrc == 1)
+	return res, true
 }
 
 // parseNodeTarget 从节点 clash_config 取 server:port(有效的连接目标;中转节点取中转地址)。

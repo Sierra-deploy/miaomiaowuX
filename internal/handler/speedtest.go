@@ -187,9 +187,16 @@ func (h *SpeedTestHandler) handleTestersList(w http.ResponseWriter, r *http.Requ
 	out := make([]map[string]any, 0, len(list))
 	for _, t := range list {
 		online := h.testerWS != nil && h.testerWS.Online(t.ID)
+		// caps/version 来自测速端 hello 上报。前端据 caps 是否含 "probe" 决定该测速端
+		// 能否被选作被墙探测源 —— 不回传的话所有测速端都会被判成"需升级"。
+		caps := t.Caps
+		if caps == nil {
+			caps = []string{}
+		}
 		out = append(out, map[string]any{
 			"id": t.ID, "name": t.Name, "created_by": t.CreatedBy,
 			"last_seen": t.LastSeen, "created_at": t.CreatedAt, "online": online,
+			"caps": caps, "version": t.Version,
 		})
 	}
 	respondJSON(w, http.StatusOK, map[string]any{"success": true, "testers": out})

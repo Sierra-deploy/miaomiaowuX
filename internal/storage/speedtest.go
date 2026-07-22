@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -13,6 +14,53 @@ type SpeedTester struct {
 	CreatedBy string     `json:"created_by"`
 	LastSeen  *time.Time `json:"last_seen,omitempty"`
 	CreatedAt time.Time  `json:"created_at"`
+	// Caps / Version 由测速端在 hello 时上报。
+	//
+	// 老版本(v0.1.x)的 hello 只带 name,这两个字段会是空 —— 主控据此判断它**不支持**
+	// 可达性探测:给不支持的测速端派 probe 会被静默丢弃,调用方只能干等超时。
+	// 所以探测源选择必须过滤 caps,不能只看在线状态。
+	Caps    []string `json:"caps"`
+	Version string   `json:"version"`
+}
+
+// CapProbe 是「可承担可达性探测」的能力标识,与测速端客户端 hello 里上报的字符串一致。
+const CapProbe = "probe"
+
+// HasCap 判断测速端是否具备某能力。
+func (t SpeedTester) HasCap(cap string) bool {
+	for _, c := range t.Caps {
+		if c == cap {
+			return true
+		}
+	}
+	return false
+}
+
+// decodeCaps 把逗号分隔的能力串解析成切片。空串 → nil(老版本测速端never上报)。
+func decodeCaps(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// UpdateSpeedTesterCaps 记录测速端 hello 上报的能力与版本。
+//
+// 每次 hello 都覆写而不是只写一次:测速端升级后能力会变多,降级/回滚会变少,
+// 只认首次上报会让能力表永久停留在旧状态。
+func (r *TrafficRepository) UpdateSpeedTesterCaps(ctx context.Context, id int64, caps []string, version string) error {
+	_, err := r.db.ExecContext(ctx,
+		`UPDATE speed_testers SET caps = ?, version = ? WHERE id = ?`,
+		strings.Join(caps, ","), version, id)
+	return err
 }
 
 // CreateSpeedTester 新建测速端记录(token 由调用方哈希后传入),返回 id。
@@ -30,12 +78,14 @@ func (r *TrafficRepository) CreateSpeedTester(ctx context.Context, name, tokenHa
 func (r *TrafficRepository) GetSpeedTesterByTokenHash(ctx context.Context, tokenHash string) (SpeedTester, error) {
 	var t SpeedTester
 	var last sql.NullTime
+	var capsRaw, ver sql.NullString
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, name, created_by, last_seen, created_at FROM speed_testers WHERE token_hash = ?`, tokenHash).
-		Scan(&t.ID, &t.Name, &t.CreatedBy, &last, &t.CreatedAt)
+		`SELECT id, name, created_by, last_seen, created_at, caps, version FROM speed_testers WHERE token_hash = ?`, tokenHash).
+		Scan(&t.ID, &t.Name, &t.CreatedBy, &last, &t.CreatedAt, &capsRaw, &ver)
 	if err != nil {
 		return SpeedTester{}, err
 	}
+	t.Caps, t.Version = decodeCaps(capsRaw.String), ver.String
 	if last.Valid {
 		t.LastSeen = &last.Time
 	}
@@ -45,7 +95,7 @@ func (r *TrafficRepository) GetSpeedTesterByTokenHash(ctx context.Context, token
 // ListSpeedTesters 列出所有测速端。
 func (r *TrafficRepository) ListSpeedTesters(ctx context.Context) ([]SpeedTester, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT id, name, created_by, last_seen, created_at FROM speed_testers ORDER BY id DESC`)
+		`SELECT id, name, created_by, last_seen, created_at, caps, version FROM speed_testers ORDER BY id DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -54,9 +104,11 @@ func (r *TrafficRepository) ListSpeedTesters(ctx context.Context) ([]SpeedTester
 	for rows.Next() {
 		var t SpeedTester
 		var last sql.NullTime
-		if err := rows.Scan(&t.ID, &t.Name, &t.CreatedBy, &last, &t.CreatedAt); err != nil {
+		var capsRaw, ver sql.NullString
+		if err := rows.Scan(&t.ID, &t.Name, &t.CreatedBy, &last, &t.CreatedAt, &capsRaw, &ver); err != nil {
 			return nil, err
 		}
+		t.Caps, t.Version = decodeCaps(capsRaw.String), ver.String
 		if last.Valid {
 			t.LastSeen = &last.Time
 		}

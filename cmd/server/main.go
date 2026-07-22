@@ -931,7 +931,7 @@ func main() {
 		}
 	})))
 	// 公告系统:模板配置(admin GET/PUT)、公告实例 CRUD(admin)、生效公告(登录可读)
-	announcementHandler := handler.NewAnnouncementHandler(repo)
+	announcementHandler := handler.NewAnnouncementHandler(repo, licenseManager)
 	mux.Handle("/api/admin/system-settings/announcements", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -945,8 +945,11 @@ func main() {
 	mux.Handle("/api/admin/announcements", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(announcementHandler.ServeAdmin)))
 	mux.Handle("/api/admin/announcements/blocked-nodes", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(announcementHandler.GetBlockedNodes)))
 	mux.Handle("/api/announcements/active", auth.RequireToken(tokenStore, userRepo, http.HandlerFunc(announcementHandler.GetActive)))
-	// 节点被墙自动探测循环(探测源可在系统设置里配国内 agent)
-	handler.StartReachabilityScheduler(context.Background(), repo, remoteManageHandler, announcementHandler)
+	// 节点被墙自动探测循环。探测源是**家用测速端**(部署在国内家庭网络)——
+	// 机房 agent / 主控本机都探不准被墙,会把落地节点误判成被墙。
+	handler.StartReachabilityScheduler(context.Background(), repo, speedTesterWS, announcementHandler)
+	// 从旧版本升上来、还没重新配探测源的实例会静默停用被墙探测,启动时明确告警一次。
+	announcementHandler.WarnLegacyProbeSource(context.Background())
 
 	mux.Handle("/api/admin/system-settings/short-link", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {

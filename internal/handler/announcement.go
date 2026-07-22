@@ -4,22 +4,33 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
 )
 
 // 公告系统:
 //   - 模板配置(KV announcement_config):每类型 enabled/标题/文案模板/是否发 bot/是否显示 miniapp。
 //   - 公告实例(announcements 表):手动发布或节点被墙自动触发,miniapp 横幅 + bot 广播读它。
-//   - 探测源(KV announce_probe_server_ids):被墙探测从哪些远程服务器视角探(见 Step2)。
+//   - 探测源(KV announce_probe_tester_ids):被墙探测从哪些**家用测速端**视角探。
+//     机房 agent 探不准被墙,故改用部署在国内家庭网络的测速端。
 
 const (
-	AnnouncementConfigKey     = "announcement_config"
+	AnnouncementConfigKey = "announcement_config"
+	// AnnounceProbeServerIDsKey 旧的探测源配置(值是 remote server id)。已废弃 ——
+	// agent 都在机房,从机房拨测探不准「被墙」。仅保留 key 名用于启动时检测遗留配置并告警。
 	AnnounceProbeServerIDsKey = "announce_probe_server_ids"
+	// AnnounceProbeTesterIDsKey 新的探测源配置,值是**家用测速端 id**。
+	// 刻意不复用旧 key:语义从 server id 变成 tester id,复用会把旧值当成 tester id 误读。
+	AnnounceProbeTesterIDsKey = "announce_probe_tester_ids"
+	// AnnounceOfficialProbeKey 是否额外使用官方探测源(PRO)。开启后由许可证服务派发到
+	// 官方部署在国内家庭网络的探测端,结果与本地测速端**取并集**(任一可达即可达)。
+	AnnounceOfficialProbeKey = "announce_official_probe"
 )
 
 // 公告类型
@@ -71,24 +82,32 @@ func (h *AnnouncementHandler) mergedAnnounceConfig(ctx context.Context) announce
 
 type AnnouncementHandler struct {
 	repo *storage.TrafficRepository
+	// license 用于官方探测源的 PRO 门控与请求下发;为 nil 时官方探测源不可用。
+	license *license.Manager
 }
 
-func NewAnnouncementHandler(repo *storage.TrafficRepository) *AnnouncementHandler {
-	return &AnnouncementHandler{repo: repo}
+func NewAnnouncementHandler(repo *storage.TrafficRepository, lic *license.Manager) *AnnouncementHandler {
+	return &AnnouncementHandler{repo: repo, license: lic}
 }
 
 // ===== 模板配置(admin) GET/PUT /api/admin/system-settings/announcements =====
 
 func (h *AnnouncementHandler) GetConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := h.mergedAnnounceConfig(r.Context())
-	probeIDs := h.probeServerIDs(r.Context())
-	respondJSON(w, http.StatusOK, map[string]any{"success": true, "config": cfg, "probe_server_ids": probeIDs})
+	probeIDs := h.probeTesterIDs(r.Context())
+	respondJSON(w, http.StatusOK, map[string]any{
+		"success": true, "config": cfg, "probe_tester_ids": probeIDs,
+		"official_probe": h.officialProbeEnabled(r.Context()),
+		// 前端据此决定「官方探测(PRO)」开关是否可用
+		"official_probe_available": h.license != nil && h.license.HasFeature(license.FeatureSpeedTest),
+	})
 }
 
 func (h *AnnouncementHandler) SetConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Config         announceConfig `json:"config"`
-		ProbeServerIDs *[]int64       `json:"probe_server_ids"`
+		ProbeTesterIDs *[]int64       `json:"probe_tester_ids"`
+		OfficialProbe  *bool          `json:"official_probe"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, errors.New("请求格式错误"))
@@ -99,20 +118,51 @@ func (h *AnnouncementHandler) SetConfig(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	if req.ProbeServerIDs != nil {
-		ids, _ := json.Marshal(*req.ProbeServerIDs)
-		_ = h.repo.SetSystemSetting(r.Context(), AnnounceProbeServerIDsKey, string(ids))
+	if req.ProbeTesterIDs != nil {
+		ids, _ := json.Marshal(*req.ProbeTesterIDs)
+		_ = h.repo.SetSystemSetting(r.Context(), AnnounceProbeTesterIDsKey, string(ids))
+	}
+	if req.OfficialProbe != nil {
+		v := "0"
+		if *req.OfficialProbe {
+			v = "1"
+		}
+		_ = h.repo.SetSystemSetting(r.Context(), AnnounceOfficialProbeKey, v)
 	}
 	respondJSON(w, http.StatusOK, map[string]any{"success": true, "message": "公告配置已更新"})
 }
 
-func (h *AnnouncementHandler) probeServerIDs(ctx context.Context) []int64 {
-	raw, _ := h.repo.GetSystemSetting(ctx, AnnounceProbeServerIDsKey)
+// probeTesterIDs 返回被选作被墙探测源的家用测速端 id 列表。
+func (h *AnnouncementHandler) probeTesterIDs(ctx context.Context) []int64 {
+	raw, _ := h.repo.GetSystemSetting(ctx, AnnounceProbeTesterIDsKey)
 	out := []int64{}
 	if strings.TrimSpace(raw) != "" {
 		_ = json.Unmarshal([]byte(raw), &out)
 	}
 	return out
+}
+
+// officialProbeEnabled 是否启用官方探测源(PRO)。只读配置,PRO 校验在实际探测时做 ——
+// 许可证可能在配置之后过期,此处返回 true 不代表这一轮真能用。
+func (h *AnnouncementHandler) officialProbeEnabled(ctx context.Context) bool {
+	v, _ := h.repo.GetSystemSetting(ctx, AnnounceOfficialProbeKey)
+	return v == "1"
+}
+
+// WarnLegacyProbeSource 启动时检查:旧的 agent 探测源有值、而新的测速端探测源为空 →
+// 说明这是一个从旧版本升上来、还没重新配过的实例,被墙探测会静默停用。打一条明确的
+// WARN 提示重新配置 —— 不自动迁移,因为 server id 和 tester id 之间没有任何对应关系。
+func (h *AnnouncementHandler) WarnLegacyProbeSource(ctx context.Context) {
+	legacy, _ := h.repo.GetSystemSetting(ctx, AnnounceProbeServerIDsKey)
+	if strings.TrimSpace(legacy) == "" || strings.TrimSpace(legacy) == "[]" {
+		return
+	}
+	if len(h.probeTesterIDs(ctx)) > 0 {
+		return
+	}
+	log.Printf("[Announce] 被墙探测已停用:探测源改用「家用测速端」,但当前未选择任何测速端"+
+		"(检测到旧的 agent 探测源配置 %s)。请在 系统设置 → 公告 里重新选择测速端作为探测源,"+
+		"并确保测速端已升级到支持可达性探测的版本。", legacy)
 }
 
 // ===== 公告实例(admin) /api/admin/announcements =====

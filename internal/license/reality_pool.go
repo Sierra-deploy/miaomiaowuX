@@ -26,15 +26,22 @@ type RealityPoolDomain struct {
 // ErrRealityPoolUnavailable 表示当前许可证不具备共享池能力(未激活或无 PRO 特性)。
 var ErrRealityPoolUnavailable = errors.New("共享域名池不可用:许可证无效或未包含该特性")
 
-// realityPoolRequest 发一次共享池请求。三件套(key/machine_id/nonce)与心跳一致,
-// 服务端用同一套校验;这里不复用 parseResponse——那个是解析许可证状态的,
-// 共享池响应是普通业务数据,没有许可证签名字段。
+// realityPoolRequest 发一次共享池请求。
 func (m *Manager) realityPoolRequest(ctx context.Context, path string, extra map[string]any, out any) error {
+	return m.featureRequest(ctx, FeatureRealityPool, path, extra, out, ErrRealityPoolUnavailable)
+}
+
+// featureRequest 发一次「需要某 PRO 特性」的业务请求。三件套(key/machine_id/nonce)与心跳一致,
+// 服务端用同一套校验;这里不复用 parseResponse——那个是解析许可证状态的,
+// 业务响应是普通数据,没有许可证签名字段。
+//
+// unavailable 是特性缺失/未激活时返回的哨兵错误,调用方据此静默跳过而不是报错。
+func (m *Manager) featureRequest(ctx context.Context, feature, path string, extra map[string]any, out any, unavailable error) error {
 	if m.key == "" || m.serverURL == "" {
-		return ErrRealityPoolUnavailable
+		return unavailable
 	}
-	if !m.HasFeature(FeatureRealityPool) {
-		return ErrRealityPoolUnavailable
+	if !m.HasFeature(feature) {
+		return unavailable
 	}
 
 	payload := map[string]any{
@@ -62,8 +69,10 @@ func (m *Manager) realityPoolRequest(ctx context.Context, path string, extra map
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode == http.StatusForbidden {
-		return ErrRealityPoolUnavailable
+	// 403 = 没这个特性;503 = 服务端把该能力临时下线了。两者调用方都该静默跳过,
+	// 不是"出错了"。
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusServiceUnavailable {
+		return unavailable
 	}
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("许可证服务器返回 %d", resp.StatusCode)
