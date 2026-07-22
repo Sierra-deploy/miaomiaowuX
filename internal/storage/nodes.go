@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 )
@@ -159,11 +160,11 @@ func (r *TrafficRepository) CountNodes(ctx context.Context) (int64, error) {
 //
 // 计入:
 //   - routed + routed_owner='shared'(admin 在出站管理里创建 + 同步入站自动识别)— 占用 server 上实际 xray 资源
-//   - physical + original_server != ''(节点已 claim 到某台已注册 server)— 用户手动导入或外部订阅
+//   - physical + original_server != ”(节点已 claim 到某台已注册 server)— 用户手动导入或外部订阅
 //     指向 mmwx 管理的 server 时,handleCreate 会自动 claim 并把 original_server 填上,等于"伪装的 routed"
 //
 // 不计入:
-//   - physical + original_server = ''(指向真外部 vps,跟 mmwx 资源无关)
+//   - physical + original_server = ”(指向真外部 vps,跟 mmwx 资源无关)
 //   - routed + routed_owner='user'(普通用户私有路由出站,有 user_permissions quota)
 //
 // 这套语义堵了"用户通过手动导入 vless:// 绕过 license"的口子 — 只要节点 server 指向已注册 server,
@@ -756,7 +757,66 @@ func (r *TrafficRepository) RefreshNodesServerAddress(ctx context.Context, serve
 		return 0, fmt.Errorf("refresh node server address: %w", err)
 	}
 	affected, _ := res.RowsAffected()
+
+	// 上面的 UPDATE 刻意跳过了配中转的节点(它们的 clash.server 是**中转地址**,不能动),
+	// 但那些节点记录的「原始地址」relay_orig_server 同样指向本服务器,IP 漂移后一样会失效
+	// —— 取消中转时会把节点还原成一个早已不通的旧 IP。这里补上它。
+	if n, rerr := r.refreshRelayOrigServerAddress(ctx, serverName, newAddr); rerr != nil {
+		return affected, rerr
+	} else {
+		affected += n
+	}
 	return affected, nil
+}
+
+// refreshRelayOrigServerAddress 把配了中转的节点的「原始地址」(relay_orig_server)同步到 newAddr。
+//
+// 只动 **IP 形态** 的原始地址:域名本来就免疫 IP 漂移,按"配了域名的无需修改"的约定保持不变。
+// IP/域名判定放在 Go 层用 net.ParseIP 做 —— SQL 里靠 GLOB 猜 IPv4 形态既不准也覆盖不到 IPv6。
+// 配中转的节点通常只有个位数,逐行更新的开销可以忽略。
+func (r *TrafficRepository) refreshRelayOrigServerAddress(ctx context.Context, serverName, newAddr string) (int64, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id, IFNULL(relay_orig_server, '') FROM nodes
+		 WHERE original_server = ? AND IFNULL(relay_orig_server, '') != '' AND IFNULL(relay_orig_server, '') != ?`,
+		serverName, newAddr)
+	if err != nil {
+		return 0, fmt.Errorf("list relay nodes: %w", err)
+	}
+	type relayNode struct {
+		id   int64
+		orig string
+	}
+	var targets []relayNode
+	for rows.Next() {
+		var n relayNode
+		if err := rows.Scan(&n.id, &n.orig); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("scan relay node: %w", err)
+		}
+		// 域名不动 —— 它不受 IP 漂移影响,改成新 IP 反而是降级。
+		if net.ParseIP(strings.TrimSpace(n.orig)) == nil {
+			continue
+		}
+		targets = append(targets, n)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, fmt.Errorf("iterate relay nodes: %w", err)
+	}
+	rows.Close()
+
+	var updated int64
+	for _, t := range targets {
+		res, uerr := r.db.ExecContext(ctx,
+			`UPDATE nodes SET relay_orig_server = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+			newAddr, t.id)
+		if uerr != nil {
+			return updated, fmt.Errorf("update relay_orig_server for node %d: %w", t.id, uerr)
+		}
+		n, _ := res.RowsAffected()
+		updated += n
+	}
+	return updated, nil
 }
 
 // RefreshNodesServerAddressV6 把指定服务器下「IPv6 节点」(clash server 含 ':')的 server 字段
@@ -834,7 +894,9 @@ func (r *TrafficRepository) UpdateNodesByServerName(ctx context.Context, oldName
 
 // 按服务器名称和入站标签更新节点配置。
 // family 限定只更新某一 IP 版本的节点(按 ip_family 列判定,不再靠 clash server 是否含冒号):
-//   "" → 全部(向后兼容);"v4" → 只更新 v4/域名/通用节点(ip_family != 'v6');"v6" → 只更新 IPv6 节点(ip_family = 'v6')。
+//
+//	"" → 全部(向后兼容);"v4" → 只更新 v4/域名/通用节点(ip_family != 'v6');"v6" → 只更新 IPv6 节点(ip_family = 'v6')。
+//
 // v4/v6 双节点共享同一 inbound_tag,编辑入站时需各自用对应 server 的配置分别更新,避免互相覆盖。
 func (r *TrafficRepository) UpdateNodeByInboundTag(ctx context.Context, serverName, inboundTag, clashConfig, family string) error {
 	if r == nil || r.db == nil {
@@ -1152,7 +1214,7 @@ func (r *TrafficRepository) UpdateNodeInboundTag(ctx context.Context, nodeID int
 	return err
 }
 
-// ClaimExternalNode 把一个"外部节点"(original_server='' AND inbound_tag='')升级为受管节点:
+// ClaimExternalNode 把一个"外部节点"(original_server=” AND inbound_tag=”)升级为受管节点:
 // 填上 original_server / inbound_tag / tag / clash_config(用 agent 转出来的新 config 覆盖)。
 // 用于迁移场景下,把 mmw 时代手工录入的节点跟 agent 扫描出来的同 server:port 入站绑定。
 func (r *TrafficRepository) ClaimExternalNode(ctx context.Context, nodeID int64, originalServer, inboundTag, tag, clashConfig string) error {
