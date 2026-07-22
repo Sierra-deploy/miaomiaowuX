@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
@@ -136,5 +137,110 @@ func (h *LicenseHandler) GetUsage(w http.ResponseWriter, r *http.Request) {
 			"nodes":   map[string]any{"current": nodeCount, "max": maxNodes},
 			"users":   map[string]any{"current": userCount, "max": maxUsers},
 		},
+	})
+}
+
+// 许可证称号的展示位开关。每个位置独立,默认值见 defaultLicenseBadgeDisplay。
+//
+// 探针页两个位置默认**关闭**:那是对外的伪装页面,挂上「妙妙屋X 许可证称号」
+// 等于自曝身份,伪装就白做了 —— 要开由管理员自己权衡。
+const LicenseBadgeDisplayKey = "license_badge_display"
+
+// 合法位置。前端传 pos 时必须命中其一,否则一律不返回名字。
+var licenseBadgePositions = []string{"login", "about", "probe_login", "probe_footer"}
+
+func defaultLicenseBadgeDisplay() map[string]bool {
+	return map[string]bool{
+		"login":        true,
+		"about":        true,
+		"probe_login":  false, // 伪装页,默认不暴露
+		"probe_footer": false, // 同上
+	}
+}
+
+// loadLicenseBadgeDisplay 读开关,缺失的位置用默认值补齐(新增位置时老配置不会漏键)。
+func loadLicenseBadgeDisplay(ctx context.Context, repo *storage.TrafficRepository) map[string]bool {
+	out := defaultLicenseBadgeDisplay()
+	if repo == nil {
+		return out
+	}
+	raw, _ := repo.GetSystemSetting(ctx, LicenseBadgeDisplayKey)
+	if strings.TrimSpace(raw) == "" {
+		return out
+	}
+	var stored map[string]bool
+	if json.Unmarshal([]byte(raw), &stored) != nil {
+		return out
+	}
+	for _, p := range licenseBadgePositions {
+		if v, ok := stored[p]; ok {
+			out[p] = v
+		}
+	}
+	return out
+}
+
+// NewLicenseBadgePublicHandler GET /api/public/license-badge[?pos=login]
+//
+// **免鉴权**,所以只暴露 name / display_name / valid —— 刻意不含配额、features、
+// 到期时间、许可证 key:登录页和伪装探针页是任何人都能打开的,多一个字段就多一分暴露面。
+//
+// 两种用法:
+//   - 带 pos:该位置开关**打开**时才返回名字,关闭则只回 valid:false —— 把授权判断放在
+//     服务端,而不是"先发下去再让前端决定显不显示"(那样关了开关也能从网络面板看到)。
+//   - 不带 pos:只返回各位置开关状态,不含任何名字。供已登录页面(关于弹窗)取开关用。
+func NewLicenseBadgePublicHandler(repo *storage.TrafficRepository, mgr *license.Manager) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		show := loadLicenseBadgeDisplay(r.Context(), repo)
+		w.Header().Set("Content-Type", "application/json")
+
+		pos := strings.TrimSpace(r.URL.Query().Get("pos"))
+		if pos == "" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"show": show})
+			return
+		}
+		resp := map[string]any{"valid": false}
+		if show[pos] && mgr != nil {
+			st := mgr.GetStatus()
+			if st.Plan != nil {
+				resp["name"] = st.Plan.Name
+				resp["display_name"] = st.Plan.DisplayName
+			}
+			resp["valid"] = st.Valid
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+}
+
+// NewLicenseBadgeDisplayHandler GET/PUT /api/admin/system-settings/license-badge —— 读写展示位开关。
+func NewLicenseBadgeDisplayHandler(repo *storage.TrafficRepository) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			respondJSON(w, http.StatusOK, map[string]any{"success": true, "show": loadLicenseBadgeDisplay(r.Context(), repo)})
+		case http.MethodPut:
+			var req struct {
+				Show map[string]bool `json:"show"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				writeBadRequest(w, "请求格式不正确")
+				return
+			}
+			cur := loadLicenseBadgeDisplay(r.Context(), repo)
+			// 只认已知位置,忽略请求里的任何多余键
+			for _, p := range licenseBadgePositions {
+				if v, ok := req.Show[p]; ok {
+					cur[p] = v
+				}
+			}
+			b, _ := json.Marshal(cur)
+			if err := repo.SetSystemSetting(r.Context(), LicenseBadgeDisplayKey, string(b)); err != nil {
+				writeError(w, http.StatusInternalServerError, err)
+				return
+			}
+			respondJSON(w, http.StatusOK, map[string]any{"success": true, "show": cur})
+		default:
+			methodNotAllowed(w, http.MethodGet, http.MethodPut)
+		}
 	})
 }

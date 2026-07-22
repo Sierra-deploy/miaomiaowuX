@@ -886,6 +886,9 @@ func main() {
 		}
 	})))
 	mux.HandleFunc("/api/public/login-wallpaper", systemSettingsHandler.GetLoginWallpaperPublic)
+	// 登录页展示许可证称号:免鉴权,仅 name/display_name/valid(见 handler 注释)
+	mux.Handle("/api/public/license-badge", handler.NewLicenseBadgePublicHandler(repo, licenseManager))
+	mux.Handle("/api/admin/system-settings/license-badge", auth.RequireAdmin(tokenStore, userRepo, handler.NewLicenseBadgeDisplayHandler(repo)))
 
 	// 真探针数据的内存 ring(cpu/mem/disk/ping,来自 agent 上报)。用户选「仅内存实时滚动」不建表。
 	// 单例:读侧给 ProbePublicHandler,写侧 P3 注入 remoteWSHandler。
