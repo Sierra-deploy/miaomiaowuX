@@ -138,8 +138,16 @@ func sanitizeSubscribeFilename(name string) (string, error) {
 	return name, nil
 }
 
-// ensureFilenameWritable 防跨用户覆盖:目标 filename 若已被【他人】的订阅占用则拒绝。
-// 无人占用 / 属于自己 / 调用者是 admin → 放行。写盘(WriteFile subscribes/<filename>)前必须调用。
+// ensureFilenameWritable 供**新建订阅**的三条路径(create / import / upload)调用:
+// 目标 filename 只要已被任何一条订阅占用就拒绝。写盘(WriteFile subscribes/<filename>)前必须调用。
+//
+// 早期这里只拦「他人占用」,同用户或 admin 重名直接放行。但 subscribe_files.filename
+// 没有唯一约束,放行的结果是**两条独立的订阅记录指向磁盘上同一个文件** ——
+// 编辑其中一条的内容,另一条跟着变(表现为"两个订阅内容一致")。
+// 一份物理文件不该被两条订阅共享,所以这里不再区分属主。
+//
+// 与 handleUpdate 改名时的判定对齐:那边按 `existingFile.ID != id` 比对,本来就是对的;
+// 新建没有自身 ID,占用即冲突。
 func (h *subscribeFilesHandler) ensureFilenameWritable(ctx context.Context, filename, username string) error {
 	existing, err := h.repo.GetSubscribeFileByFilename(ctx, filename)
 	if err != nil {
@@ -148,10 +156,11 @@ func (h *subscribeFilesHandler) ensureFilenameWritable(ctx context.Context, file
 		}
 		return err
 	}
-	if existing.CreatedBy == username || userIsAdmin(ctx, h.repo, username) {
-		return nil
+	// 占用者名字带进错误里,否则用户只看到"已被占用"却不知道是哪条订阅,无从改起。
+	if existing.CreatedBy != username && !userIsAdmin(ctx, h.repo, username) {
+		return errSubscribeFilenameTaken
 	}
-	return errSubscribeFilenameTaken
+	return fmt.Errorf("文件名 %s 已被订阅「%s」使用,请换一个文件名", filename, existing.Name)
 }
 
 func subscribeFileExists(p string) bool {
