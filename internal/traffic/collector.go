@@ -420,13 +420,18 @@ func aggregateAndUpsertUserTraffic(ctx context.Context, repo userTrafficRepo, se
 	// 采集时计价:每 tick 预载一次归因器,按当时的倍率把 delta 折算成计费流量写进 weighted_*。
 	// 之后改倍率只影响后续 tick —— 历史不再被追溯重算。
 	// 预载失败不能让采集停摆:退化为 weight=1(裸量),该 tick 的计价偏差上界 1 个采集周期。
-	attr, aerr := repo.BuildEmailAttributor(ctx)
+	// 用带缓存的版本:归因表是**全局**的(与 serverID 无关),而这里是 per-server 并发调用。
+	// 几十台 agent 同时上报时,不缓存就会各建一份一模一样的表(每份 7 个全表查询),
+	// 这些长读事务会一直钉住 WAL,让 checkpoint 永远抢不到窗口。见 attributorCacheTTL 注释。
+	attr, aerr := repo.BuildEmailAttributorCached(ctx)
 	if aerr != nil {
 		log.Printf("[Traffic Collector] build email attributor failed on server %d, this tick bills at weight=1: %v", serverID, aerr)
 	}
 
 	type sum struct{ uplink, downlink int64 }
 	byUsername := make(map[string]*sum)
+	emailRows := make([]storage.UserEmailTrafficUpsert, 0, len(userStats))
+
 	for emailKey, data := range userStats {
 		weight, attributed := 1.0, ""
 		if attr != nil {
@@ -436,13 +441,20 @@ func aggregateAndUpsertUserTraffic(ctx context.Context, repo userTrafficRepo, se
 		// 双写新表 — email 维度原样保留,即使解析不到 username 也写
 		// (野 client 也算"该 server 的 email 流量",前端可显示成"未识别节点";
 		//  attributed_username 为空 → 不进任何用户的计费)
-		if err := repo.UpsertUserEmailTraffic(ctx, serverID, emailKey, data.Uplink, data.Downlink, isXrayRestarted, weight, attributed); err != nil {
-			log.Printf("[Traffic Collector] Failed to upsert user email traffic for %s on server %d: %v", emailKey, serverID, err)
-		}
+		emailRows = append(emailRows, storage.UserEmailTrafficUpsert{
+			Email:              emailKey,
+			Uplink:             data.Uplink,
+			Downlink:           data.Downlink,
+			Weight:             weight,
+			AttributedUsername: attributed,
+		})
 
 		// user_traffic 仍按 ResolveUsernameByEmail 聚合(它是 per-server 视图/快照/limiter 的数据源,
 		// 不再是计费源)。换成 attributor 会改变它的聚合语义,单独灰度。
-		username := repo.ResolveUsernameByEmail(ctx, emailKey)
+		// 走带缓存的解析:原方法单次最多查 4 张表(含一次对 users 的全表 instr 扫描),
+		// 而采集是 per-server 并发的高频路径 —— 100 台 × 每台数百 email,不缓存就是每轮
+		// 数万次读查询,这些读会一直钉住 WAL read mark 让 checkpoint 抢不到窗口。
+		username := repo.ResolveUsernameByEmailCached(ctx, emailKey)
 		if username == "" {
 			continue
 		}
@@ -453,19 +465,32 @@ func aggregateAndUpsertUserTraffic(ctx context.Context, repo userTrafficRepo, se
 			byUsername[username] = &sum{uplink: data.Uplink, downlink: data.Downlink}
 		}
 	}
+
+	userRows := make([]storage.UserTrafficUpsert, 0, len(byUsername))
 	for username, s := range byUsername {
-		if err := repo.UpsertUserTraffic(ctx, serverID, username, s.uplink, s.downlink, isXrayRestarted); err != nil {
-			log.Printf("[Traffic Collector] Failed to upsert user traffic for %s on server %d: %v", username, serverID, err)
-		}
+		userRows = append(userRows, storage.UserTrafficUpsert{Username: username, Uplink: s.uplink, Downlink: s.downlink})
+	}
+
+	// 一个事务写完两张表。此前是每条一个自动提交事务(几百个/轮),把 WAL 撑爆、
+	// 也让 checkpoint 抢不到窗口。整批失败就整批回滚,下一轮靠 cumulative 计数器补回来。
+	if err := repo.UpsertTrafficBatch(ctx, serverID, emailRows, userRows, isXrayRestarted); err != nil {
+		log.Printf("[Traffic Collector] Failed to upsert traffic batch on server %d (%d emails, %d users): %v",
+			serverID, len(emailRows), len(userRows), err)
 	}
 }
 
 // userTrafficRepo 只取 collector 实际用到的方法,避免去 import 整个 storage 接口
 type userTrafficRepo interface {
-	ResolveUsernameByEmail(ctx context.Context, email string) string
-	BuildEmailAttributor(ctx context.Context) (*storage.EmailAttributor, error)
+	// ResolveUsernameByEmailCached:采集热路径专用(带缓存)。非热路径请用 storage 上不带缓存的原方法。
+	ResolveUsernameByEmailCached(ctx context.Context, email string) string
+	// BuildEmailAttributorCached:采集是 per-server 并发的高频路径,必须走缓存版,
+	// 否则几十台服务器会各自重建同一份全局归因表。
+	BuildEmailAttributorCached(ctx context.Context) (*storage.EmailAttributor, error)
 	UpsertUserTraffic(ctx context.Context, serverID int64, username string, uplink, downlink int64, isXrayRestarted bool) error
 	UpsertUserEmailTraffic(ctx context.Context, serverID int64, email string, uplink, downlink int64, isXrayRestarted bool, weight float64, attributedUsername string) error
+	// UpsertTrafficBatch 单事务写完一轮的两张表 —— 采集热路径实际走的是它,
+	// 上面两个单条方法保留给其它调用方(以及测试)。
+	UpsertTrafficBatch(ctx context.Context, serverID int64, emails []storage.UserEmailTrafficUpsert, users []storage.UserTrafficUpsert, isXrayRestarted bool) error
 }
 
 // 为所有服务器创建每日快照

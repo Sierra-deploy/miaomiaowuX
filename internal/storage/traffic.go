@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -74,7 +75,29 @@ type TrafficRecord struct {
 // TrafficRepository 管理流量使用快照的持久性。
 type TrafficRepository struct {
 	db *sql.DB
+	// attrCache 缓存 BuildEmailAttributor 的结果,见 BuildEmailAttributorCached。
+	attrCache attributorCache
+	// emailUserCache 缓存 email → username 解析结果,见 ResolveUsernameByEmailCached。
+	emailUserCache emailUserCache
 }
+
+// emailUserCache 是 email → username 的解析缓存。
+//
+// ResolveUsernameByEmail 单次最多查 4 张表,其中最后一条是
+// `SELECT username FROM users WHERE instr(?, username || '__') = 1 ORDER BY length(username) DESC`
+// —— 对每个 email 做一次全表扫描 + instr + 排序。采集热路径对**每个 email 每轮**都调一次,
+// 100 台服务器 × 每台约 250 个 email ≈ 每轮 5 万次读查询。这些读事务持续持有 WAL read mark,
+// 是 wal_checkpoint(TRUNCATE) 一直 busy、WAL 无限膨胀的主要来源之一。
+type emailUserCache struct {
+	mu      sync.RWMutex
+	m       map[string]string
+	builtAt time.Time
+}
+
+// emailUserCacheTTL:email→username 的映射只在「建/删子账号、改用户邮箱」时变化,属低频事件。
+// 60 秒的滞后意味着这类变更最迟 1 分钟后才影响流量归属,下一轮自愈;
+// 换来的是把每轮数万次全表扫描降到接近 0。
+const emailUserCacheTTL = 60 * time.Second
 
 // SubscriptionLink 表示向客户端公开的可配置订阅条目。
 type SubscriptionLink struct {
@@ -960,8 +983,19 @@ func (r *TrafficRepository) Checkpoint() error {
 	if r == nil || r.db == nil {
 		return nil
 	}
-	_, err := r.db.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
-	return err
+	// 必须用 QueryRow 读回 (busy, log, checkpointed) —— PRAGMA wal_checkpoint **不会**
+	// 因为没做成而返回 error:抢不到窗口时它照样"成功"返回,只是 busy=1。
+	// 早前这里用 Exec 丢掉了这一行,于是 WAL 涨到几十 GiB 而日志里一片干净,
+	// 完全看不出 checkpoint 从未推进过。
+	var busy, logFrames, checkpointed int
+	if err := r.db.QueryRow("PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return fmt.Errorf("wal checkpoint: %w", err)
+	}
+	if busy != 0 {
+		return fmt.Errorf("wal checkpoint busy: 未能截断(wal 仍有 %d 帧,本次写回 %d 帧)——"+
+			"通常是持续的读/写事务没给出窗口,WAL 会继续增长", logFrames, checkpointed)
+	}
+	return nil
 }
 
 func (r *TrafficRepository) migrate() error {
@@ -11302,7 +11336,14 @@ func (r *TrafficRepository) UpsertUserTraffic(ctx context.Context, serverID int6
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
 	}
+	return upsertUserTrafficOn(ctx, r.db, serverID, username, uplink, downlink, isXrayRestarted)
+}
 
+// upsertUserTrafficOn 是 UpsertUserTraffic 的实现体,执行目标由 ex 决定:
+// 传 *sql.DB 就是原来的"每条一个自动提交事务";传 *sql.Tx 则整批共用一个事务。
+// 抽出来是为了让批量写复用**同一份**语义(重启累计、delta 计算、首见 baseline),
+// 而不是另写一份平行实现 —— 那种平行实现迟早会和这份漂移。
+func upsertUserTrafficOn(ctx context.Context, ex sqlExecutor, serverID int64, username string, uplink, downlink int64, isXrayRestarted bool) error {
 	if serverID <= 0 {
 		return errors.New("server id is required")
 	}
@@ -11313,7 +11354,7 @@ func (r *TrafficRepository) UpsertUserTraffic(ctx context.Context, serverID int6
 	// 首先，尝试获取现有记录
 	var existing UserTraffic
 	var exists bool
-	row := r.db.QueryRowContext(ctx, `SELECT id, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink FROM user_traffic WHERE server_id = ? AND username = ?`, serverID, username)
+	row := ex.QueryRowContext(ctx, `SELECT id, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink FROM user_traffic WHERE server_id = ? AND username = ?`, serverID, username)
 	err := row.Scan(&existing.ID, &existing.Uplink, &existing.Downlink, &existing.TotalUplink, &existing.TotalDownlink, &existing.LastUplink, &existing.LastDownlink)
 	if err == nil {
 		exists = true
@@ -11326,7 +11367,7 @@ func (r *TrafficRepository) UpsertUserTraffic(ctx context.Context, serverID int6
 		// 累计字段(uplink/downlink/total_*)从 0 起步,raw 仅作 last baseline,
 		// 否则套餐已用流量在首次见到一个用户时会被 xray 已有累计灌满。
 		const insertStmt = `INSERT INTO user_traffic (server_id, username, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, cycle_start, updated_at) VALUES (?, ?, 0, 0, 0, 0, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-		_, err := r.db.ExecContext(ctx, insertStmt, serverID, username, uplink, downlink)
+		_, err := ex.ExecContext(ctx, insertStmt, serverID, username, uplink, downlink)
 		if err != nil {
 			return fmt.Errorf("insert user traffic: %w", err)
 		}
@@ -11361,7 +11402,7 @@ func (r *TrafficRepository) UpsertUserTraffic(ctx context.Context, serverID int6
 
 	// 更新记录
 	const updateStmt = `UPDATE user_traffic SET uplink = uplink + ?, downlink = downlink + ?, total_uplink = ?, total_downlink = ?, last_uplink = ?, last_downlink = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-	_, err = r.db.ExecContext(ctx, updateStmt, deltaUplink, deltaDownlink, newTotalUplink, newTotalDownlink, uplink, downlink, existing.ID)
+	_, err = ex.ExecContext(ctx, updateStmt, deltaUplink, deltaDownlink, newTotalUplink, newTotalDownlink, uplink, downlink, existing.ID)
 	if err != nil {
 		return fmt.Errorf("update user traffic: %w", err)
 	}
@@ -11395,6 +11436,11 @@ func (r *TrafficRepository) UpsertUserEmailTraffic(ctx context.Context, serverID
 	if r == nil || r.db == nil {
 		return errors.New("traffic repository not initialized")
 	}
+	return upsertUserEmailTrafficOn(ctx, r.db, serverID, email, uplink, downlink, isXrayRestarted, weight, attributedUsername)
+}
+
+// upsertUserEmailTrafficOn 同 upsertUserTrafficOn:实现体与执行目标解耦,供批量事务复用。
+func upsertUserEmailTrafficOn(ctx context.Context, ex sqlExecutor, serverID int64, email string, uplink, downlink int64, isXrayRestarted bool, weight float64, attributedUsername string) error {
 	if serverID <= 0 {
 		return errors.New("server id is required")
 	}
@@ -11407,7 +11453,7 @@ func (r *TrafficRepository) UpsertUserEmailTraffic(ctx context.Context, serverID
 
 	var existing UserEmailTraffic
 	var exists bool
-	row := r.db.QueryRowContext(ctx, `SELECT id, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink FROM user_email_traffic WHERE server_id = ? AND email = ?`, serverID, email)
+	row := ex.QueryRowContext(ctx, `SELECT id, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink FROM user_email_traffic WHERE server_id = ? AND email = ?`, serverID, email)
 	err := row.Scan(&existing.ID, &existing.Uplink, &existing.Downlink, &existing.TotalUplink, &existing.TotalDownlink, &existing.LastUplink, &existing.LastDownlink)
 	if err == nil {
 		exists = true
@@ -11419,7 +11465,7 @@ func (r *TrafficRepository) UpsertUserEmailTraffic(ctx context.Context, serverID
 		// 首次见到 (server, email):见 UpsertNodeTraffic 同款注释 —— raw 仅作 baseline,
 		// 累计字段从 0 起步,避免历史累计灌入当期。weighted_* 同理从 0 起步。
 		const insertStmt = `INSERT INTO user_email_traffic (server_id, email, uplink, downlink, total_uplink, total_downlink, last_uplink, last_downlink, weighted_uplink, weighted_downlink, cycle_base_weighted_uplink, cycle_base_weighted_downlink, attributed_username, cycle_start, updated_at) VALUES (?, ?, 0, 0, 0, 0, ?, ?, 0, 0, 0, 0, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
-		if _, err := r.db.ExecContext(ctx, insertStmt, serverID, email, uplink, downlink, attributedUsername); err != nil {
+		if _, err := ex.ExecContext(ctx, insertStmt, serverID, email, uplink, downlink, attributedUsername); err != nil {
 			return fmt.Errorf("insert user email traffic: %w", err)
 		}
 		return nil
@@ -11452,7 +11498,7 @@ func (r *TrafficRepository) UpsertUserEmailTraffic(ctx context.Context, serverID
 	// attributed_username 每 tick 刷新:归因数据变了(如新建节点)下一 tick 自愈;
 	// 但已计入 weighted_* 的历史不受影响 —— 这正是"不追溯"的含义。
 	const updateStmt = `UPDATE user_email_traffic SET uplink = uplink + ?, downlink = downlink + ?, weighted_uplink = weighted_uplink + ?, weighted_downlink = weighted_downlink + ?, total_uplink = ?, total_downlink = ?, last_uplink = ?, last_downlink = ?, attributed_username = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
-	if _, err := r.db.ExecContext(ctx, updateStmt,
+	if _, err := ex.ExecContext(ctx, updateStmt,
 		deltaUplink, deltaDownlink,
 		float64(deltaUplink)*weight, float64(deltaDownlink)*weight,
 		newTotalUplink, newTotalDownlink, uplink, downlink, attributedUsername, existing.ID); err != nil {
@@ -13044,4 +13090,108 @@ ORDER BY s.id ASC, t.date ASC`
 		out = append(out, rec)
 	}
 	return out, rows.Err()
+}
+
+// sqlExecutor 让同一份 upsert 实现既能跑在 *sql.DB(每条自动提交)上,
+// 也能跑在 *sql.Tx(整批一个事务)里。两者都满足这个方法集。
+type sqlExecutor interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// UserEmailTrafficUpsert / UserTrafficUpsert 是批量写的入参。
+type UserEmailTrafficUpsert struct {
+	Email              string
+	Uplink             int64
+	Downlink           int64
+	Weight             float64
+	AttributedUsername string
+}
+
+type UserTrafficUpsert struct {
+	Username string
+	Uplink   int64
+	Downlink int64
+}
+
+// UpsertTrafficBatch 在**单个事务**里写完一台服务器本轮的全部用户流量(email 维度 + username 维度)。
+//
+// 为什么必须批量:此前每条 upsert 都是一个自动提交事务。一台服务器几百个 email/user,
+// 3 秒一轮就是每秒数百个写事务 —— WAL 被高速追加、writer 锁几乎从不空闲,
+// 于是 `wal_checkpoint(TRUNCATE)` 永远抢不到窗口,WAL 一路涨到几十 GiB(线上实测 53 GiB / 主库仅 17 MiB),
+// CPU 也被事务开销吃满。合并成一个事务后,同样的数据量只产生 1 次提交。
+//
+// 失败语义:**整批回滚,下一轮重来**。流量是 cumulative 计数器,漏写一轮不会丢数据 ——
+// 下一轮读到的 raw 值仍是累计值,delta 会把这一轮的量一并算进去。
+func (r *TrafficRepository) UpsertTrafficBatch(ctx context.Context, serverID int64, emails []UserEmailTrafficUpsert, users []UserTrafficUpsert, isXrayRestarted bool) error {
+	if r == nil || r.db == nil {
+		return errors.New("traffic repository not initialized")
+	}
+	if serverID <= 0 {
+		return errors.New("server id is required")
+	}
+	if len(emails) == 0 && len(users) == 0 {
+		return nil
+	}
+
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin traffic batch: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // 已 Commit 后再 Rollback 是 no-op
+
+	for _, e := range emails {
+		if e.Email == "" {
+			continue
+		}
+		if err := upsertUserEmailTrafficOn(ctx, tx, serverID, e.Email, e.Uplink, e.Downlink, isXrayRestarted, e.Weight, e.AttributedUsername); err != nil {
+			return fmt.Errorf("batch upsert user email traffic (%s): %w", e.Email, err)
+		}
+	}
+	for _, u := range users {
+		if u.Username == "" {
+			continue
+		}
+		if err := upsertUserTrafficOn(ctx, tx, serverID, u.Username, u.Uplink, u.Downlink, isXrayRestarted); err != nil {
+			return fmt.Errorf("batch upsert user traffic (%s): %w", u.Username, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit traffic batch: %w", err)
+	}
+	return nil
+}
+
+// ResolveUsernameByEmailCached 是 ResolveUsernameByEmail 的带缓存版本,供**高频并发**的
+// 采集热路径使用。低频调用方(通知、管理端查询)继续用不带缓存的原方法,读到的永远是最新映射。
+//
+// 缓存整体按 emailUserCacheTTL 过期(不做 per-entry 过期,简单且够用)。未命中才查库,
+// 所以新出现的 email(新建子账号)当轮即可正确解析,不受 TTL 影响 —— TTL 只影响
+// 「已解析过的 email 归属发生改变」这种罕见场景。
+func (r *TrafficRepository) ResolveUsernameByEmailCached(ctx context.Context, email string) string {
+	if r == nil || email == "" {
+		return ""
+	}
+	c := &r.emailUserCache
+
+	c.mu.RLock()
+	if c.m != nil && time.Since(c.builtAt) < emailUserCacheTTL {
+		if v, ok := c.m[email]; ok {
+			c.mu.RUnlock()
+			return v
+		}
+	}
+	c.mu.RUnlock()
+
+	// 未命中(或已过期)→ 查库。查询放在锁外,避免几十台服务器并发时互相阻塞。
+	v := r.ResolveUsernameByEmail(ctx, email)
+
+	c.mu.Lock()
+	if c.m == nil || time.Since(c.builtAt) >= emailUserCacheTTL {
+		c.m = make(map[string]string, 512)
+		c.builtAt = time.Now()
+	}
+	c.m[email] = v
+	c.mu.Unlock()
+	return v
 }

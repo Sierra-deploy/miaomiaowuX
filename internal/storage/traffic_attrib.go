@@ -2,8 +2,11 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 )
 
 // 流量归因(email → 恰好一个用户 + 一/多个节点)。三个流量视图(节点视图 / 用户视图 / 节点列表)
@@ -320,4 +323,55 @@ func ScaledEmailTraffic(uet UserEmailTraffic, scale int) UserEmailTraffic {
 	uet.LastUplink /= int64(scale)
 	uet.LastDownlink /= int64(scale)
 	return uet
+}
+
+// attributorCacheTTL 是归因器的缓存有效期。
+//
+// 为什么需要缓存:BuildEmailAttributor 要跑 7 个全表查询(nodes / subaccounts / routed-admin /
+// remote_servers / user_inbound_configs / users / packages),而它构建的是**全局**归因表 ——
+// 签名里根本没有 serverID,每台服务器拿到的是完全相同的一份。
+//
+// 采集热路径是 per-server 并发的(每个 agent 的 WS 上报各一个 goroutine),所以几十台服务器
+// 会在同一瞬间各建一份一模一样的表:50 台 × 7 次全表查询 / 每个上报周期。这些长读事务持续
+// 持有 WAL read mark,导致 wal_checkpoint(TRUNCATE) 永远等不到"所有 reader 都读到最新",
+// 一直返回 busy → WAL 无限膨胀(线上实测 53 GiB,而主库只有 17 MiB)。
+//
+// 5 秒的取值:与默认上报周期(main.go reportMs 默认 5000ms)对齐。
+// 取 2 秒时 TTL 短于常见周期(3~5s),等于每轮都要重建 —— 缓存只在"同一轮里几十台并发"
+// 这个窗口内生效;放宽到 5 秒后跨轮也能命中,3 秒周期下重建频率再降约 40%。
+//
+// 代价是倍率/节点变更的生效延迟 ≤5s,但改动前的行为本就是"每 tick 重建"(即 ≤1 个上报周期,
+// 默认正是 5s),所以这里没有任何退化。
+const attributorCacheTTL = 5 * time.Second
+
+type attributorCache struct {
+	mu      sync.Mutex
+	val     *EmailAttributor
+	builtAt time.Time
+}
+
+// BuildEmailAttributorCached 是 BuildEmailAttributor 的带 TTL 缓存版本,供**高频并发**的采集
+// 热路径使用。低频调用方(面板查询、测试)继续用不带缓存的原方法,以免读到滞后数据。
+//
+// 并发安全:持锁重建 —— 缓存刚过期时几十个 goroutine 同时进来,只有第一个真正查库,
+// 其余等它建完直接复用(等价 singleflight)。返回的 *EmailAttributor 只被读
+// (Classify / EmailWeight / pickNode / resolveUser 都不写内部 map),可安全共享。
+func (r *TrafficRepository) BuildEmailAttributorCached(ctx context.Context) (*EmailAttributor, error) {
+	if r == nil {
+		return nil, errors.New("traffic repository not initialized")
+	}
+	r.attrCache.mu.Lock()
+	defer r.attrCache.mu.Unlock()
+
+	if r.attrCache.val != nil && time.Since(r.attrCache.builtAt) < attributorCacheTTL {
+		return r.attrCache.val, nil
+	}
+	a, err := r.BuildEmailAttributor(ctx)
+	if err != nil {
+		// 不缓存失败:下一次调用照常重试,避免一次抖动把错误状态钉住 TTL 那么久。
+		return nil, err
+	}
+	r.attrCache.val = a
+	r.attrCache.builtAt = time.Now()
+	return a, nil
 }
