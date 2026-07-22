@@ -240,6 +240,11 @@ func (h *nodesHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleBatchRename(w, r)
 	case path == "tags" && r.Method == http.MethodGet:
 		h.handleListTags(w, r)
+	case path == "user-imported" && r.Method == http.MethodGet:
+		if denyNonAdmin() {
+			return
+		}
+		h.handleListUserImported(w, r)
 	default:
 		allowed := []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete}
 		methodNotAllowed(w, allowed...)
@@ -2340,6 +2345,24 @@ func looksLikeProxy(m map[string]any) bool {
 	_, hasType := m["type"]
 	_, hasServer := m["server"]
 	return hasName && (hasType || hasServer)
+}
+
+// handleListUserImported 列出指定用户自己导入的节点(管理员在用户管理里查看 / 一键清空)。
+//
+// 范围刻意就是 nodes.username = 该用户,即他本人导入的外部节点;
+// 套餐分配的共享节点挂在 admin 名下,不会出现在这里 —— 清空时不能误删那些。
+func (h *nodesHandler) handleListUserImported(w http.ResponseWriter, r *http.Request) {
+	username := strings.TrimSpace(r.URL.Query().Get("username"))
+	if username == "" {
+		writeError(w, http.StatusBadRequest, errors.New("username 不能为空"))
+		return
+	}
+	nodes, err := h.repo.ListNodes(r.Context(), username)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	respondJSON(w, http.StatusOK, map[string]any{"nodes": convertNodes(nodes)})
 }
 
 func (h *nodesHandler) handleListTags(w http.ResponseWriter, r *http.Request) {

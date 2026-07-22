@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"miaomiaowux/internal/auth"
+	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
 
 	"golang.org/x/crypto/bcrypt"
@@ -39,10 +40,17 @@ import (
 type TGBotAPIHandler struct {
 	repo   *storage.TrafficRepository
 	assign *PackageAssignHandler // 套餐绑定+下发(与 web /api/admin/packages/assign 共用),由 main.go 注入
+	// licenseManager 用于 TG 注册时的用户数配额校验。为 nil 时不校验(未接许可证的自建部署)。
+	licenseManager *license.Manager
 }
 
 func NewTGBotAPIHandler(repo *storage.TrafficRepository) *TGBotAPIHandler {
 	return &TGBotAPIHandler{repo: repo}
+}
+
+// SetLicenseManager 注入许可证管理器,让 TG 注册也受用户数配额限制(与管理员建号同一口径)。
+func (h *TGBotAPIHandler) SetLicenseManager(m *license.Manager) {
+	h.licenseManager = m
 }
 
 // SetPackageAssign 注入套餐下发器,让 TGBOT 注册/兑换的套餐真正生效(下发节点凭据/推送)。
@@ -489,6 +497,12 @@ func (h *TGBotAPIHandler) bindNew(ctx context.Context, w http.ResponseWriter,
 	}
 	if _, err := h.repo.GetUser(ctx, requestedUsername); err == nil {
 		writeJSONError(w, http.StatusConflict, "用户名已被占用")
+		return
+	}
+	// 用户数配额:必须在 ConsumeInviteCode **之前**拦下。
+	// 放到创建用户那一步才检查的话,邀请码已经被消耗掉了,用户白白损失一个码却没注册成功。
+	if msg, exceeded := licenseUserQuotaExceeded(ctx, h.repo, h.licenseManager); exceeded {
+		writeJSONError(w, http.StatusForbidden, msg)
 		return
 	}
 

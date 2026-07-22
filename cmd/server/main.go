@@ -240,6 +240,8 @@ func main() {
 	// TG bot 已拆为独立项目 ../mmwX-tgbot,通过 /api/admin/tgbot/* HTTP 调主控。
 	// 主控仅保留 admin REST handler + 邀请码 web UI + storage 字段 + notify 裸 HTTP 通知。
 	tgbotAPIHandler := handler.NewTGBotAPIHandler(repo)
+	// TG 邀请码注册也要受许可证用户数配额限制(此前这条路径完全绕过配额)
+	tgbotAPIHandler.SetLicenseManager(licenseManager)
 
 	// 从远程拉取配置
 	data, resolvedURL, fetchErr := proxygroups.FetchConfig(systemConfig.ProxyGroupsSourceURL)
@@ -473,6 +475,14 @@ func main() {
 	// 超额服务器停 xray、拿到名额的启 xray。
 	licenseManager.SetOnQuotaChange(func() {
 		remoteWSHandler.ReconcileServerQuota(context.Background())
+	})
+	// PRO 特性丢失(降级/到期/解绑)时撤销已下发到 agent 的配置。
+	// 与 SetOnRecover 成对:恢复时补推,丢失时清零。agent 侧限速是内存态,
+	// 只"停止下发"不会让存量限速失效 —— 必须主动推一份清零配置覆盖掉。
+	licenseManager.SetOnFeatureLost(func(feature string) {
+		if feature == "limiter" {
+			limiterPusher.RevokeAllEmbeddedServers(context.Background())
+		}
 	})
 	// 5min 定期兜底:即便漏了某次事件触发(如下发时 agent 恰好离线),也能在下个周期把
 	// 授权重新对齐(agent 侧幂等,值没变不会反复启停 xray)。
@@ -824,6 +834,9 @@ func main() {
 	mux.Handle("/api/admin/tasks/", auth.RequireAdmin(tokenStore, userRepo, taskLogHandler))
 	// Agent 日志:转发到指定 agent 拉取远程机器日志(agent 自身/xray/nginx)。旧版 agent 降级提示。
 	mux.Handle("/api/admin/logs/agent", auth.RequireAdmin(tokenStore, userRepo, handler.NewAgentLogHandler(remoteManageHandler)))
+	// 日志文件管理:主控自身的日志目录,以及转发到 agent 的同名能力。
+	mux.Handle("/api/admin/logs/files", auth.RequireAdmin(tokenStore, userRepo, handler.NewLogFilesHandler()))
+	mux.Handle("/api/admin/logs/agent/files", auth.RequireAdmin(tokenStore, userRepo, handler.NewAgentLogFilesHandler(remoteManageHandler)))
 	// 自定义安全阈值(登录/暴力防护/订阅频率)— 写入后 handler 内部热更新 3 个 limiter 单例,无需重启
 	mux.Handle("/api/admin/security-settings", auth.RequireAdmin(tokenStore, userRepo, handler.NewSecuritySettingsHandler(repo)))
 	// Turnstile 配置自测:前端 widget 验完拿 token,后端用 DB 已存 secret 调 cloudflare siteverify,

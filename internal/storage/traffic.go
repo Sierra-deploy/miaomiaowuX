@@ -9517,17 +9517,6 @@ func (r *TrafficRepository) CountRemoteServers(ctx context.Context) (int64, erro
 	return count, nil
 }
 
-func (r *TrafficRepository) CountUsers(ctx context.Context) (int64, error) {
-	if r == nil || r.db == nil {
-		return 0, errors.New("traffic repository not initialized")
-	}
-	var count int64
-	if err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM users`).Scan(&count); err != nil {
-		return 0, fmt.Errorf("count users: %w", err)
-	}
-	return count, nil
-}
-
 // CountUserTemplates / CountUserOverrideScripts / CountUserSubscribeFiles
 // 统计某用户创建的资源数量,用于"普通用户配额"校验。created_by/username 空串视为 admin 创建。
 func (r *TrafficRepository) CountUserTemplates(ctx context.Context, username string) (int, error) {
@@ -9575,11 +9564,29 @@ func (r *TrafficRepository) LicenseUsage(ctx context.Context) (servers, nodes, u
 		`SELECT COUNT(1) FROM nodes WHERE enabled = 1`).Scan(&nodes); err != nil {
 		return 0, 0, 0, fmt.Errorf("count enabled nodes: %w", err)
 	}
-	if err = r.db.QueryRowContext(ctx,
-		`SELECT COUNT(1) FROM users WHERE is_active = 1 AND role != 'admin'`).Scan(&users); err != nil {
-		return 0, 0, 0, fmt.Errorf("count active non-admin users: %w", err)
+	users, err = r.CountLicensedUsers(ctx)
+	if err != nil {
+		return 0, 0, 0, err
 	}
 	return servers, nodes, users, nil
+}
+
+// CountLicensedUsers 返回**占用 license 名额**的用户数:启用中的非管理员。
+//
+// 这是全系统唯一的用户配额口径,面板展示、创建用户时的限额判定、以及上报给
+// license 服务器的 used_users 都必须走它 —— 三处曾经各写各的(另外两处用
+// `COUNT(1) FROM users` 全表,把管理员和已停用用户也算进去),导致主控面板
+// 显示的数字比许可证后台大,且"看到的"和"能建的"对不上。
+func (r *TrafficRepository) CountLicensedUsers(ctx context.Context) (int, error) {
+	if r == nil || r.db == nil {
+		return 0, errors.New("traffic repository not initialized")
+	}
+	var n int
+	if err := r.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM users WHERE is_active = 1 AND role != 'admin'`).Scan(&n); err != nil {
+		return 0, fmt.Errorf("count active non-admin users: %w", err)
+	}
+	return n, nil
 }
 
 // 远程服务器CRUD操作

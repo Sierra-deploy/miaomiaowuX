@@ -92,7 +92,19 @@ type Manager struct {
 	// onQuotaChange 在「有效服务器配额」变化(valid 翻转或 Plan.MaxServers 变化)时异步触发,
 	// 由 handler 注册为「重算 per-server 授权并下发给在线 agent」。
 	onQuotaChange func()
+	// onFeatureLost 在某个 PRO 特性由「有」变「无」时异步触发,参数是丢失的特性名。
+	//
+	// 与 onRecover 成对存在,补的是**降级方向**:此前只有「失效→恢复时补推」,
+	// 没有「有效→失效时撤销」。而 agent 侧的限速是纯内存态,主控不推新配置 ≠ 限速消失 ——
+	// 降级后 agent 上那份 PRO 时期的限速配置会一直生效到进程重启。
+	onFeatureLost func(feature string)
 }
+
+// watchedFeatures 是需要在丢失时通知 handler 主动撤销已下发配置的特性。
+//
+// 只列「已经推到 agent、且 agent 会一直沿用」的能力。像 speed_test 这种每次都由主控
+// 现场发起的,不推就没有,不需要撤销。
+var watchedFeatures = []string{"limiter"}
 
 // SetOnRecover 注册 license 从失效恢复为有效时的回调(例如重推 limiter 配置)。启动前调一次。
 func (m *Manager) SetOnRecover(cb func()) {
@@ -108,13 +120,29 @@ func (m *Manager) SetOnQuotaChange(cb func()) {
 	m.mu.Unlock()
 }
 
+// SetOnFeatureLost 注册「PRO 特性丢失」回调(例如降级后撤销已下发到 agent 的限速)。启动前调一次。
+func (m *Manager) SetOnFeatureLost(cb func(feature string)) {
+	m.mu.Lock()
+	m.onFeatureLost = cb
+	m.mu.Unlock()
+}
+
+// snapshotWatchedFeatures 记录当前 watchedFeatures 的持有状态,用于前后比对。
+// 必须在持锁之外调用 —— HasFeature 内部会取读锁。
+func (m *Manager) snapshotWatchedFeatures() map[string]bool {
+	out := make(map[string]bool, len(watchedFeatures))
+	for _, f := range watchedFeatures {
+		out[f] = m.HasFeature(f)
+	}
+	return out
+}
+
 // SetUsageReporter 注入 usage 来源,启动前调一次。nil 时 heartbeat payload 不带 used_* 字段。
 func (m *Manager) SetUsageReporter(r UsageReporter) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.usage = r
 }
-
 
 const DefaultServerURL = "https://license.miaomiaowux.com"
 
@@ -403,6 +431,7 @@ func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce 
 	wasValid := m.IsValid()
 	// 记录变更前的有效配额,用于「配额变化 → 重算下发 per-server 授权」回调。
 	oldQuota := m.EffectiveServerQuota()
+	oldFeatures := m.snapshotWatchedFeatures()
 
 	m.mu.Lock()
 
@@ -428,6 +457,7 @@ func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce 
 
 	cb := m.onRecover
 	quotaCb := m.onQuotaChange
+	lostCb := m.onFeatureLost
 	m.mu.Unlock()
 
 	m.persistStatus(ctx)
@@ -441,6 +471,17 @@ func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce 
 	// 有效配额变化(valid 翻转或 Plan.MaxServers 变化)→ 重算并下发 per-server xray 授权。
 	if quotaCb != nil && m.EffectiveServerQuota() != oldQuota {
 		go quotaCb()
+	}
+
+	// PRO 特性由「有」变「无」(降级 / 到期 / 解绑)→ 通知 handler 撤销已下发到 agent 的配置。
+	// 光靠"不再推新配置"是不够的:agent 侧限速是内存态,不撤销就会一直沿用旧值。
+	if lostCb != nil {
+		for _, f := range watchedFeatures {
+			if oldFeatures[f] && !m.HasFeature(f) {
+				log.Printf("[license] feature %q lost, revoking pushed config", f)
+				go lostCb(f)
+			}
+		}
 	}
 }
 

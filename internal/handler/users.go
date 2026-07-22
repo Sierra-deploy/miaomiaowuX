@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"regexp"
@@ -366,17 +365,9 @@ func (h *userCreateHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.licenseManager != nil {
-		status := h.licenseManager.GetStatus()
-		maxUsers := 10
-		if status.Plan != nil {
-			maxUsers = status.Plan.MaxUsers
-		}
-		count, err := h.repo.CountUsers(r.Context())
-		if err == nil && count >= int64(maxUsers) {
-			writeJSONError(w, http.StatusForbidden, fmt.Sprintf("已达到用户数量上限 (%d/%d)，请升级许可证", count, maxUsers))
-			return
-		}
+	if msg, exceeded := licenseUserQuotaExceeded(r.Context(), h.repo, h.licenseManager); exceeded {
+		writeJSONError(w, http.StatusForbidden, msg)
+		return
 	}
 
 	var payload userCreateRequest

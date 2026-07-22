@@ -327,6 +327,62 @@ func (p *LimiterConfigPusher) PushToServer(ctx context.Context, serverID int64) 
 	p.pushViaHTTP(ctx, server, configs)
 }
 
+// RevokeAllEmbeddedServers 给所有 embedded 服务器下发**清零**的限速配置。
+//
+// 用于 limiter 特性丢失时(降级 / 到期 / 解绑)。这是 PushToAllEmbeddedServers 的反向操作,
+// 补的是长期缺失的撤销路径:此前降级只是让 PushToServer 静默 return,而 agent 侧限速是
+// 纯内存态(HandleLimiter → l.AddInboundLimiter),**不推新配置 ≠ 限速失效** ——
+// PRO 时期推下去的那份会一直生效到 agent 进程重启。
+//
+// 刻意**不走** PushToServer:那里有 limiter/embedded 的 PRO gate,而本函数恰恰是在
+// 「已经没有该特性」时调用的,走它会被自己拦掉,等于什么都没做。
+func (p *LimiterConfigPusher) RevokeAllEmbeddedServers(ctx context.Context) {
+	servers, err := p.repo.ListRemoteServers(ctx)
+	if err != nil {
+		log.Printf("[LimiterPush] revoke: ListRemoteServers failed: %v", err)
+		return
+	}
+	for _, s := range servers {
+		if s.XrayMode != "embedded" {
+			continue
+		}
+		configs, berr := p.BuildLimiterConfigForServer(ctx, s.ID)
+		if berr != nil {
+			log.Printf("[LimiterPush] revoke: build config for server %d failed: %v", s.ID, berr)
+			continue
+		}
+		// 保留 inbound_tag 与用户名单,只把限速值清零 —— agent 侧 AddInboundLimiter 是按
+		// inbound_tag 整体替换的,必须把每个已下发过的 tag 都覆盖一遍才算真正撤销。
+		zeroed := make([]WSLimiterConfigPayload, 0, len(configs))
+		for _, c := range configs {
+			users := make([]WSUserLimitInfo, len(c.Users))
+			for i, u := range c.Users {
+				// 保留 Email/ConnGroup(agent 按它们索引),只清限速与连接数上限
+				users[i] = WSUserLimitInfo{Email: u.Email, ConnGroup: u.ConnGroup, SpeedLimit: 0, DeviceLimit: 0}
+			}
+			zeroed = append(zeroed, WSLimiterConfigPayload{
+				InboundTag: c.InboundTag,
+				NodeLimit:  0,
+				Users:      users,
+				// 自动限速规则一并清空,否则 SpeedMonitor 会继续按旧规则压限速
+				AutoSpeedRules: nil,
+			})
+		}
+		if len(zeroed) == 0 {
+			continue
+		}
+		if _, ok := p.wsHandler.GetConnectionByServerID(s.ID); ok {
+			if err := p.wsHandler.SendLimiterConfig(s.ID, zeroed); err == nil {
+				log.Printf("[LimiterPush] revoked limiter on server %s (license feature lost)", s.Name)
+				continue
+			}
+		}
+		srv := s
+		p.pushViaHTTP(ctx, &srv, zeroed)
+		log.Printf("[LimiterPush] revoked limiter on server %s via HTTP (license feature lost)", s.Name)
+	}
+}
+
 func (p *LimiterConfigPusher) pushViaHTTP(ctx context.Context, server *storage.RemoteServer, configs []WSLimiterConfigPayload) {
 	hdr := http.Header{}
 	hdr.Set("Content-Type", "application/json")

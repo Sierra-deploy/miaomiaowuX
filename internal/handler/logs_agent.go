@@ -4,13 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 )
 
 // AgentLogHandler 转发「拉取远程机器日志」请求到指定 agent，admin 专用。
-//   GET /api/admin/logs/agent?server_id=&service=&lines=
+//
+//	GET /api/admin/logs/agent?server_id=&service=&lines=
 //
 // service: agent（读 agent 自身日志文件）/ xray / nginx（journalctl）。
 // 旧版 agent 没有 /api/child/logs 路由 → 返回 404，本 handler 据此给出「版本过低」的明确提示，
@@ -21,6 +23,55 @@ type AgentLogHandler struct {
 
 func NewAgentLogHandler(rm *RemoteManageHandler) *AgentLogHandler {
 	return &AgentLogHandler{rm: rm}
+}
+
+// NewAgentLogFilesHandler 转发 agent 的日志文件管理请求(列表 / 删除 / 清空)。
+//
+//	GET    /api/admin/logs/agent/files?server_id=
+//	DELETE /api/admin/logs/agent/files?server_id=&name=   (或 &all=1)
+//
+// 与拉日志同样的降级策略:旧版 agent 无该路由 → 404 → 前端提示"需升级 agent"。
+func NewAgentLogFilesHandler(rm *RemoteManageHandler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodDelete {
+			methodNotAllowed(w, http.MethodGet, http.MethodDelete)
+			return
+		}
+		serverID, err := strconv.ParseInt(strings.TrimSpace(r.URL.Query().Get("server_id")), 10, 64)
+		if err != nil || serverID <= 0 {
+			writeBadRequest(w, "server_id is required")
+			return
+		}
+
+		// 只透传本端点认识的参数,不把整个 RawQuery 转过去 —— 那会把 server_id 之外的
+		// 任意查询串带到 agent 上。
+		q := url.Values{}
+		if name := strings.TrimSpace(r.URL.Query().Get("name")); name != "" {
+			q.Set("name", name)
+		}
+		if r.URL.Query().Get("all") == "1" {
+			q.Set("all", "1")
+		}
+		childPath := "/api/child/logs/files"
+		if len(q) > 0 {
+			childPath += "?" + q.Encode()
+		}
+
+		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+		defer cancel()
+		body, ferr := rm.forwardToRemoteServer(ctx, serverID, r.Method, childPath, nil)
+		if ferr != nil {
+			reason, msg := classifyAgentLogError(ferr.Error())
+			respondJSON(w, http.StatusOK, map[string]any{"success": false, "reason": reason, "message": msg})
+			return
+		}
+		var parsed map[string]any
+		if json.Unmarshal(body, &parsed) == nil {
+			respondJSON(w, http.StatusOK, parsed)
+			return
+		}
+		respondJSON(w, http.StatusOK, map[string]any{"success": true})
+	})
 }
 
 func (h *AgentLogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
