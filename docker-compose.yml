@@ -15,6 +15,9 @@ services:
 
     volumes:
       - ./data:/app/data
+      # subscribes 必须挂出来:Dockerfile 里 VOLUME 声明了 /app/subscribes,不做 bind mount
+      # 就会落到**匿名卷**上 —— 容器重建时换一个新匿名卷,用户的订阅文件全部丢失。
+      - ./subscribes:/app/subscribes
       - ./rule_templates:/app/rule_templates
       # 让容器继承宿主时区,否则进程按 UTC 运行,「每日流量通知」等按本地时间的功能会差 8 小时
       - /etc/localtime:/etc/localtime:ro
