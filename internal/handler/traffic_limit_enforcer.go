@@ -198,15 +198,26 @@ func (e *TrafficLimitEnforcer) CheckAll(ctx context.Context) {
 		wasOverLimit, _ := e.repo.IsUserOverLimit(ctx, user.Username)
 		isOverLimit := usedWeighted >= limitBytes
 
-		// 流量 80% 预警(在没超限的 ramp 期触发一次,用 user_overflag 复用记忆易混淆,
-		// 借现有 IsTrafficThresholdNotified 同款表会跟 server 阈值冲突 → 简单:每次都判断,Send 端节流即可
-		// 实际重复触发会有,5min log throttle 兜底;若用户报"被打扰",再加专用记忆表)
+		// 流量 80% 预警:同一次越线只发一条。用专用 traffic_warned_80 标记去重(与 is_over_limit
+		// 边沿语义对称、跨进程重启不重复):首次 >=80% 发一条并置位;掉回 80% 以下(含月度重置使
+		// usedWeighted 归零)清位,下次再越线可再次预警。此前无去重 → enforcer 每个周期(默认 5min,
+		// 部署可调 2min)都发,用户收到刷屏。
 		if !isOverLimit {
 			pct := float64(usedWeighted) / float64(limitBytes) * 100
+			wasWarned80, _ := e.repo.IsUserTrafficWarned80(ctx, user.Username)
 			if pct >= 80 {
-				usedGB := float64(usedWeighted) / (1024 * 1024 * 1024)
-				limitGB := float64(limitBytes) / (1024 * 1024 * 1024)
-				SendTrafficThreshold80Notification(ctx, user.Username, usedGB, limitGB)
+				if !wasWarned80 {
+					usedGB := float64(usedWeighted) / (1024 * 1024 * 1024)
+					limitGB := float64(limitBytes) / (1024 * 1024 * 1024)
+					SendTrafficThreshold80Notification(ctx, user.Username, usedGB, limitGB)
+					if err := e.repo.UpdateUserTrafficWarned80(ctx, user.Username, true); err != nil {
+						log.Printf("[TrafficLimitEnforcer] Failed to mark traffic_warned_80 for %s: %v", user.Username, err)
+					}
+				}
+			} else if wasWarned80 {
+				if err := e.repo.UpdateUserTrafficWarned80(ctx, user.Username, false); err != nil {
+					log.Printf("[TrafficLimitEnforcer] Failed to clear traffic_warned_80 for %s: %v", user.Username, err)
+				}
 			}
 		}
 
