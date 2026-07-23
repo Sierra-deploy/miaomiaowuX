@@ -337,6 +337,29 @@ func (h *TrafficHandler) handleNodeTotals(w http.ResponseWriter, r *http.Request
 	byNode := make(map[int64]*item)
 	emailSumByServer := make(map[int64]int64) // 对账用:每 server 归因成功的 email 总和
 
+	// ===== 三段式归因(见 plan)。=====
+	// 旧实现对**所有**节点走 email 归因,email=纯 username 时落到均分兜底 → 同 server 多节点平摊。
+	// xray 上报本就是 inbound-tag 维度(node_traffic 精确),物理节点直接用它,只有 routed 节点才需要 email。
+
+	// (a) name→id:物理节点 OriginalServer 是名字,node_traffic 是 server_id。
+	nameToID := make(map[string]int64)
+	if servers, serr := h.repo.ListRemoteServers(ctx); serr == nil {
+		for _, s := range servers {
+			nameToID[s.Name] = s.ID
+		}
+	}
+	// (b) routed 节点 id → inbound_tag:用来把 routed 流量归到父物理入站 (server_id, inbound_tag)。
+	routedInboundTagByNodeID := make(map[int64]string, len(nodes))
+	for _, n := range nodes {
+		if n.NodeType == "routed" {
+			routedInboundTagByNodeID[n.ID] = n.InboundTag
+		}
+	}
+
+	// (c) 第一趟:email 归因。routed 节点直接落地(现状口径正确);
+	//     物理节点这一趟只记 email 结果作 fallback,并累加"被路由出去"的量供扣除。
+	fallbackByNode := make(map[int64]*item)                      // 物理节点的 email 归因结果(仅无 node_traffic 时用)
+	routedByInbound := make(map[string]struct{ up, down int64 }) // "<sid>|<tag>" → 该物理入站下 routed 出去的量
 	for _, uet := range allEmailTraffic {
 		at := attr.Classify(uet.Email, uet.ServerID)
 		if at.Username == "" {
@@ -346,20 +369,111 @@ func (h *TrafficHandler) handleNodeTotals(w http.ResponseWriter, r *http.Request
 		emailSumByServer[uet.ServerID] += e.Uplink + e.Downlink
 		for _, ns := range at.Shares {
 			s := storage.ScaledEmailTraffic(e, ns.Scale)
-			it, ok := byNode[ns.NodeID]
-			if !ok {
-				it = &item{NodeID: ns.NodeID, NodeName: ns.NodeName, ServerName: ns.ServerName, NodeType: nodeTypeByID[ns.NodeID]}
-				byNode[ns.NodeID] = it
+			if at.Routed {
+				// routed 节点:直接计入结果(email 是唯一能区分落地机的维度)。
+				it, ok := byNode[ns.NodeID]
+				if !ok {
+					it = &item{NodeID: ns.NodeID, NodeName: ns.NodeName, ServerName: ns.ServerName, NodeType: nodeTypeByID[ns.NodeID]}
+					byNode[ns.NodeID] = it
+				}
+				it.Uplink += s.Uplink
+				it.Downlink += s.Downlink
+				it.LastUplink += s.LastUplink
+				it.LastDownlink += s.LastDownlink
+				// 同时累加到父物理入站,供物理节点扣除。父入站 = (uet.ServerID, routed 节点的 inbound_tag)。
+				if tag := routedInboundTagByNodeID[ns.NodeID]; tag != "" {
+					k := strconv.FormatInt(uet.ServerID, 10) + "|" + tag
+					agg := routedByInbound[k]
+					agg.up += s.Uplink
+					agg.down += s.Downlink
+					routedByInbound[k] = agg
+				}
+			} else {
+				// 物理节点:先攒着当 fallback,后面优先用 node_traffic。
+				it, ok := fallbackByNode[ns.NodeID]
+				if !ok {
+					it = &item{NodeID: ns.NodeID, NodeName: ns.NodeName, ServerName: ns.ServerName, NodeType: nodeTypeByID[ns.NodeID]}
+					fallbackByNode[ns.NodeID] = it
+				}
+				it.Uplink += s.Uplink
+				it.Downlink += s.Downlink
+				it.LastUplink += s.LastUplink
+				it.LastDownlink += s.LastDownlink
 			}
-			it.Uplink += s.Uplink
-			it.Downlink += s.Downlink
-			it.LastUplink += s.LastUplink
-			it.LastDownlink += s.LastDownlink
 		}
 	}
 
-	// 对账参照(仅未选日期=全周期 cycle-delta 时,口径与 node_traffic 一致才有意义):
-	// Σ归因 email 应 ≈ Σnode_traffic 入站(routed+非routed 都源自入站)。漂移过大 → xray 有未按 user 计数的流量。
+	// (d) node_traffic(inbound-tag 维度)建图,减 date baseline。
+	nodeBase := h.nodeTrafficBaseline(ctx, date)
+	ntByKey := make(map[string]struct{ up, down int64 }) // "<sid>|<tag>" → 入站流量(已减 baseline)
+	if nts, e2 := h.repo.GetAllNodeTraffic(ctx); e2 == nil {
+		for _, nt := range nts {
+			if nt.Type != "inbound" {
+				continue
+			}
+			up, down := subNodeBaseline(nt.ServerID, nt.Tag, nt.Uplink, nt.Downlink, nodeBase)
+			ntByKey[strconv.FormatInt(nt.ServerID, 10)+"|"+nt.Tag] = struct{ up, down int64 }{up, down}
+		}
+	}
+
+	// (e) 第二趟:物理节点。优先 node_traffic[tag] − routed;查不到 key(空 tag/无上报)则 fallback email。
+	//     同 (sid,tag) 多个物理节点时,node_traffic 一份无法区分 —— pickNode 选套餐优先/最小 ID 的主节点拿全部,
+	//     其余记 0(不再均分)。
+	physByKey := make(map[string][]storage.Node) // "<sid>|<tag>" → 该键下的物理节点
+	for _, n := range nodes {
+		if n.NodeType == "routed" {
+			continue
+		}
+		sid, ok := nameToID[n.OriginalServer]
+		if !ok || n.InboundTag == "" {
+			continue // 无 server / 空 tag → 走 fallback
+		}
+		k := strconv.FormatInt(sid, 10) + "|" + n.InboundTag
+		physByKey[k] = append(physByKey[k], n)
+	}
+	primaryPhysNodeID := make(map[int64]bool) // 已用 node_traffic 分配的物理节点(不再走 fallback)
+	for k, group := range physByKey {
+		nt, hasNT := ntByKey[k]
+		if !hasNT {
+			continue // node_traffic 无此入站数据 → 组内各节点走 fallback
+		}
+		// 选主节点:同 tag 多节点时套餐优先/最小 ID(与 pickNode 一致的确定性)。单节点即它本身。
+		primary := group[0]
+		for _, n := range group[1:] {
+			if n.ID < primary.ID {
+				primary = n
+			}
+		}
+		routed := routedByInbound[k]
+		up := nt.up - routed.up
+		if up < 0 {
+			up = 0
+		}
+		down := nt.down - routed.down
+		if down < 0 {
+			down = 0
+		}
+		byNode[primary.ID] = &item{
+			NodeID: primary.ID, NodeName: primary.NodeName, ServerName: primary.OriginalServer,
+			NodeType: "physical", Uplink: up, Downlink: down,
+		}
+		for _, n := range group {
+			primaryPhysNodeID[n.ID] = true // 组内所有节点都已定,其余非主节点隐式为 0
+		}
+	}
+	// fallback:未被 node_traffic 覆盖的物理节点,用 email 归因结果。
+	for id, it := range fallbackByNode {
+		if primaryPhysNodeID[id] {
+			continue
+		}
+		if _, done := byNode[id]; done {
+			continue
+		}
+		byNode[id] = it
+	}
+
+	// 对账参照(仅全周期):Σemail 归因 ≈ Σnode_traffic 入站。物理节点现在直接用 node_traffic,
+	// 这个对账主要监控 email 侧(routed 归位 + fallback)是否与 xray 上报对得上;漂移过大 → 有未按 user 计数的流量。
 	if date == "" {
 		if nts, e2 := h.repo.GetAllNodeTraffic(ctx); e2 == nil {
 			inboundByServer := make(map[int64]int64)
@@ -424,6 +538,48 @@ func (h *TrafficHandler) emailBaseline(ctx context.Context, date string) (up, do
 }
 
 // subEmailBaseline 把 uet 的 cycle-delta(Uplink/Downlink)减去 date 时的 baseline → "自 date 起的增量"。
+// nodeTrafficBaseline 加载 <= date 的 node_traffic(inbound 型)baseline,key = "<server_id>|<tag>"。
+// date 为空 → nil,不做减法(全周期)。与 emailBaseline 完全对称。
+func (h *TrafficHandler) nodeTrafficBaseline(ctx context.Context, date string) map[string]struct{ up, down int64 } {
+	if date == "" {
+		return nil
+	}
+	snaps, err := h.repo.GetNodeTrafficSnapshots(ctx, date)
+	if err != nil {
+		log.Printf("[Traffic API] node baseline load failed: %v", err)
+		return nil
+	}
+	m := make(map[string]struct{ up, down int64 }, len(snaps))
+	for _, s := range snaps {
+		if s.Type != "inbound" {
+			continue // 只减 inbound baseline(与 server 视图口径一致,见 NodeTrafficSnapshot.Type 注释)
+		}
+		m[strconv.FormatInt(s.ServerID, 10)+"|"+s.Tag] = struct{ up, down int64 }{s.Uplink, s.Downlink}
+	}
+	return m
+}
+
+// subNodeBaseline 把 (serverID, tag) 的 up/down 减去 date baseline → "自 date 起增量",clamp 0。
+// base == nil(date 为空)原样返回。仿 subEmailBaseline。
+func subNodeBaseline(serverID int64, tag string, up, down int64, base map[string]struct{ up, down int64 }) (int64, int64) {
+	if base == nil {
+		return up, down
+	}
+	if b, ok := base[strconv.FormatInt(serverID, 10)+"|"+tag]; ok {
+		if up > b.up {
+			up -= b.up
+		} else {
+			up = 0
+		}
+		if down > b.down {
+			down -= b.down
+		} else {
+			down = 0
+		}
+	}
+	return up, down
+}
+
 // clamp 到 0 防 baseline > 当前(快照后 xray 重置等)。Last* 是 cumulative 参考值,不减。
 // up == nil(date 为空)直接原样返回。
 func subEmailBaseline(uet storage.UserEmailTraffic, up, down map[string]int64) storage.UserEmailTraffic {

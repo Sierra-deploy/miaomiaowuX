@@ -17,10 +17,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/MMWOrg/mmwX-plugins/proxyparser/substore"
 	"miaomiaowux/internal/auth"
 	"miaomiaowux/internal/scriptengine"
 	"miaomiaowux/internal/storage"
-	"github.com/MMWOrg/mmwX-plugins/proxyparser/substore"
 
 	"gopkg.in/yaml.v3"
 )
@@ -598,6 +598,7 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 
 	// 执行覆写脚本（post_fetch 钩子）
 	stepStart = time.Now()
+	overrideApplied := false
 	if username != "" && h.repo != nil {
 		if sysCfg, err := h.repo.GetSystemConfig(r.Context()); err == nil && sysCfg.EnableOverrideScripts {
 			// 该订阅选中的覆写脚本(空=全部启用的生效)。脚本本就按 username 隔离,不会混入管理员的。
@@ -616,10 +617,24 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 					continue
 				}
 				data = modified
+				overrideApplied = true
 			}
 		}
 	}
 	logger.Info("[⏱️ 耗时监测] 覆写脚本执行完成", "step", "override_script", "duration_ms", time.Since(stepStart).Milliseconds())
+
+	// 覆写脚本改的是 clash YAML(尤其 rules/rule-providers)。但下面把 clash 转成
+	// loon/surge/sing-box 等格式时,substore 各 producer **只搬 proxies/proxy-groups,不搬 rules**
+	// (仅 clash/clashmeta/stash 是同构 YAML、原样保留)。于是覆写对 rules 的修改在这些格式下被丢掉,
+	// 用户会以为"覆写没生效"甚至"被模板覆盖"——实际是格式转换的固有缺口,与模板无关。
+	//
+	// 这里不去补每个 producer 的 rules 翻译(工作量/风险都大,另议),而是在**确实会丢**时给个
+	// 明确信号:响应头 + WARN 日志,把"静默丢失"变成"知情"。
+	if overrideApplied && !clientKeepsClashRules(resolveClientType(r)) {
+		w.Header().Set("X-MMWX-Override-Warning", "override-rules-dropped-in-non-clash-format")
+		logger.Warn("[OverrideScript] 覆写脚本已执行,但当前客户端格式不保留 clash rules,规则类修改会丢失",
+			"user", username, "client_type", resolveClientType(r), "file", subscribeFile.Name)
+	}
 
 	// 格式转换
 	stepStart = time.Now()
@@ -1388,6 +1403,19 @@ func (h *SubscriptionHandler) serveTokenInvalidResponse(w http.ResponseWriter, r
 	logger.Info("[Token Invalid] 返回Token失效响应", "client_type", clientType)
 }
 
+// clientKeepsClashRules 判断某客户端格式是否**原样保留 clash rules/rule-providers**。
+//
+// 只有同构 YAML 的 clash 系会保留:clash / clashmeta(直出,不经转换)、stash(producer 搬 rules)。
+// loon/surge/qx/sing-box/egern/surfboard/shadowrocket 等 producer 只转 proxies,rules 一律丢弃。
+// 覆写脚本若改了 rules,在返回 false 的格式下修改会失效 —— 调用方据此提示用户。
+func clientKeepsClashRules(clientType string) bool {
+	switch strings.ToLower(strings.TrimSpace(clientType)) {
+	case "", "clash", "clashmeta", "stash":
+		return true
+	}
+	return false
+}
+
 func (h *SubscriptionHandler) runPostFetchScript(ctx context.Context, script string, yamlData []byte) ([]byte, error) {
 	var rootNode yaml.Node
 	if err := yaml.Unmarshal(yamlData, &rootNode); err != nil {
@@ -1415,6 +1443,7 @@ func (h *SubscriptionHandler) runPostFetchScript(ctx context.Context, script str
 // shadowrocketProducerFor 返回 shadowrocket 系列要用的 producer:
 //   - "shadowrocket"          → ShadowrocketProducer(节点转换)
 //   - "clash-to-shadowrocket" → ShadowrocketTemplateProducer(完整 clash→shadowrocket 配置)
+//
 // 二者在工厂里都以 "shadowrocket" 注册(template 覆盖了 plain),无法按类型区分,故显式实例化。
 // 其它类型返回 nil,交由调用方走工厂。
 func shadowrocketProducerFor(clientType string) substore.Producer {

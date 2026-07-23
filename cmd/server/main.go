@@ -692,6 +692,10 @@ func main() {
 	// tcping 连通性测试无数据修改，开放给普通用户（节点管理页的延迟测试按钮）
 	mux.Handle("/api/admin/tcping", auth.RequireToken(tokenStore, userRepo, handler.NewTCPingHandler()))
 	mux.Handle("/api/admin/tcping/batch", auth.RequireToken(tokenStore, userRepo, handler.NewTCPingBatchHandler()))
+	// 从**指定远程服务器**发起 tcping(上面两个是从主控本机发起的,回答的是不同问题)
+	mux.Handle("/api/admin/remote/tcping", auth.RequireAdmin(tokenStore, userRepo, handler.NewServerTCPingHandler(remoteManageHandler)))
+	// 「A 能否连到 B」:自动挑 B 上确定在监听的端口探测(链式隧道建链前逐跳预检用)
+	mux.Handle("/api/admin/remote/reachable", auth.RequireAdmin(tokenStore, userRepo, handler.NewServerReachabilityHandler(remoteManageHandler, repo)))
 
 	// 子服务器模式配置
 	// 确定我们是否处于儿童/远程模式：
