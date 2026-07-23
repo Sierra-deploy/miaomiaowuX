@@ -13,9 +13,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/MMWOrg/mmwX-plugins/proxyparser/substore"
 	"miaomiaowux/internal/auth"
 	"miaomiaowux/internal/storage"
-	"github.com/MMWOrg/mmwX-plugins/proxyparser/substore"
 
 	"gopkg.in/yaml.v3"
 )
@@ -86,6 +86,19 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 
 	// Load nodes from package
 	var proxies []map[string]any
+	// 链式代理(dialer-proxy)注入基础设施:边追加边记录每个节点的最终输出名 + 待注入引用,
+	// 三段追加(套餐物理 / 套餐 routed / 用户私有 routed)全部完成后再统一注入,
+	// 这样 dialer-proxy 能引用倍率改名后的最终名字,且只在目标真的出现在输出里时才注入。
+	finalNameByNodeID := make(map[int64]string)
+	var dialerRefs []dialerRef
+	noteProxy := func(node storage.Node, proxyConfig map[string]any) {
+		if nm, ok := proxyConfig["name"].(string); ok && nm != "" {
+			finalNameByNodeID[node.ID] = nm
+		}
+		if node.ChainProxyNodeID != nil {
+			dialerRefs = append(dialerRefs, dialerRef{proxy: proxyConfig, target: *node.ChainProxyNodeID})
+		}
+	}
 	for _, nodeID := range orderedNodeIDs {
 		node, err := h.repo.GetNodeByID(r.Context(), nodeID)
 		if err != nil || !node.Enabled {
@@ -95,6 +108,7 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		if node.NodeType == "routed" {
 			if proxyConfig, ok := buildRoutedProxyForUser(r.Context(), h.repo, node, username); ok {
 				recordRename(applyMultiplierPrefix(proxyConfig, node, pkg, &sysCfg))
+				noteProxy(node, proxyConfig)
 				proxies = append(proxies, proxyConfig)
 			}
 			continue
@@ -108,6 +122,7 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 		}
 		applyUserCredentials(proxyConfig, node, credMap)
 		recordRename(applyMultiplierPrefix(proxyConfig, node, pkg, &sysCfg))
+		noteProxy(node, proxyConfig)
 		proxies = append(proxies, proxyConfig)
 	}
 
@@ -121,10 +136,14 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 			}
 			if proxyConfig, ok := buildRoutedProxyForUser(r.Context(), h.repo, n.Node, username); ok {
 				recordRename(applyMultiplierPrefix(proxyConfig, n.Node, pkg, &sysCfg))
+				noteProxy(n.Node, proxyConfig)
 				proxies = append(proxies, proxyConfig)
 			}
 		}
 	}
+
+	// 所有节点已收齐 → 注入 dialer-proxy(引用倍率改名后的最终名,目标缺席则跳过不产生悬空引用)
+	injectDialerProxyRefs(dialerRefs, finalNameByNodeID)
 
 	if len(proxies) == 0 {
 		writeError(w, http.StatusNotFound, errors.New("套餐内无可用节点"))
@@ -218,7 +237,7 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 }
 
 // setSubscriptionName 让客户端显示套餐名作为订阅名。
-// Content-Disposition 用 RFC5987(filename*=UTF-8'')避免中文套餐名乱码;
+// Content-Disposition 用 RFC5987(filename*=UTF-8”)避免中文套餐名乱码;
 // 再附 profile-title(Surge/Loon/QX 优先认此头显示订阅名)。ext 为扩展名(可空)。
 func setSubscriptionName(w http.ResponseWriter, name, ext string) {
 	if strings.TrimSpace(name) == "" {
@@ -329,6 +348,8 @@ func (h *PackageSubscribeHandler) serveAllNodes(w http.ResponseWriter, r *http.R
 		return
 	}
 	var proxies []map[string]any
+	finalNameByNodeID := make(map[int64]string)
+	var dialerRefs []dialerRef
 	for _, node := range allNodes {
 		if !node.Enabled || node.ClashConfig == "" {
 			continue
@@ -337,8 +358,17 @@ func (h *PackageSubscribeHandler) serveAllNodes(w http.ResponseWriter, r *http.R
 		if err := json.Unmarshal([]byte(node.ClashConfig), &proxyConfig); err != nil {
 			continue
 		}
+		if nm, ok := proxyConfig["name"].(string); ok && nm != "" {
+			finalNameByNodeID[node.ID] = nm
+		} else {
+			finalNameByNodeID[node.ID] = node.NodeName
+		}
+		if node.ChainProxyNodeID != nil {
+			dialerRefs = append(dialerRefs, dialerRef{proxy: proxyConfig, target: *node.ChainProxyNodeID})
+		}
 		proxies = append(proxies, proxyConfig)
 	}
+	injectDialerProxyRefs(dialerRefs, finalNameByNodeID)
 	if len(proxies) == 0 {
 		writeError(w, http.StatusNotFound, errors.New("无可用节点"))
 		return
@@ -557,6 +587,23 @@ func rewriteProxyGroupRefs(data []byte, rename map[string]string) ([]byte, error
 		return data, err
 	}
 	return []byte(RemoveUnicodeEscapeQuotes(string(out))), nil
+}
+
+// dialerRef 记录一个待注入 dialer-proxy 的 proxy 及其链式目标节点 ID。
+type dialerRef struct {
+	proxy  map[string]any
+	target int64
+}
+
+// injectDialerProxyRefs 给链式代理节点注入 dialer-proxy,引用目标节点在本次输出里的**最终名字**
+// (套餐路径含倍率前缀 → 必须引用改名后的名字,否则 Mihomo 找不到该出口)。
+// 目标不在本次输出中(被过滤 / 未加入套餐 / 已停用)→ 跳过,绝不产生悬空引用。
+func injectDialerProxyRefs(refs []dialerRef, finalNameByNodeID map[int64]string) {
+	for _, ref := range refs {
+		if name, ok := finalNameByNodeID[ref.target]; ok && name != "" {
+			ref.proxy["dialer-proxy"] = name
+		}
+	}
 }
 
 // applyMultiplierPrefix 按系统开关给节点名加倍率前缀,效果 "「2」原节点名"。

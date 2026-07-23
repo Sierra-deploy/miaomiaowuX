@@ -1217,6 +1217,11 @@ CREATE TABLE IF NOT EXISTS users (
 	if err := r.ensureUserColumn("is_over_limit", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	// 流量 80% 预警去重标记:发过预警置 1,掉回阈值以下 / 月度重置后由 enforcer 清 0,
+	// 保证同一次越线只发一条(与 is_over_limit 的边沿语义对称,且跨进程重启不重复打扰)。
+	if err := r.ensureUserColumn("traffic_warned_80", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if err := r.ensureUserColumn("totp_secret", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
@@ -9372,6 +9377,23 @@ func (r *TrafficRepository) UpdateUserOverLimit(ctx context.Context, username st
 func (r *TrafficRepository) IsUserOverLimit(ctx context.Context, username string) (bool, error) {
 	var val int
 	err := r.db.QueryRowContext(ctx, `SELECT COALESCE(is_over_limit, 0) FROM users WHERE username = ?`, username).Scan(&val)
+	return val == 1, err
+}
+
+// UpdateUserTrafficWarned80 / IsUserTrafficWarned80 —— 80% 流量预警去重标记,
+// 与 is_over_limit 同款边沿语义,防止 enforcer 每个周期重复发同一条预警。
+func (r *TrafficRepository) UpdateUserTrafficWarned80(ctx context.Context, username string, warned bool) error {
+	val := 0
+	if warned {
+		val = 1
+	}
+	_, err := r.db.ExecContext(ctx, `UPDATE users SET traffic_warned_80 = ? WHERE username = ?`, val, username)
+	return err
+}
+
+func (r *TrafficRepository) IsUserTrafficWarned80(ctx context.Context, username string) (bool, error) {
+	var val int
+	err := r.db.QueryRowContext(ctx, `SELECT COALESCE(traffic_warned_80, 0) FROM users WHERE username = ?`, username).Scan(&val)
 	return val == 1, err
 }
 

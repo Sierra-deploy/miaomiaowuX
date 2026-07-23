@@ -21,10 +21,10 @@ import (
 // 数据隔离(普通用户只看自己创建的)在各资源 handler 里按 created_by/username 过滤,本文件只管"策略 + 配额校验"。
 
 const (
-	settingUserPeracmPages   = "user_perm_pages"        // JSON array, e.g. ["subscription","generator","templates","subscribe-files","custom-rules"]
-	settingUserQuotaTemplate = "user_quota_template"    // int 字符串, 0=不限
-	settingUserQuotaOverride = "user_quota_override"    // int
-	settingUserQuotaSubscribe = "user_quota_subscribe"  // int
+	settingUserPeracmPages    = "user_perm_pages"      // JSON array, e.g. ["subscription","generator","templates","subscribe-files","custom-rules"]
+	settingUserQuotaTemplate  = "user_quota_template"  // int 字符串, 0=不限
+	settingUserQuotaOverride  = "user_quota_override"  // int
+	settingUserQuotaSubscribe = "user_quota_subscribe" // int
 	// 路由出站(用户私有,routed_owner='user')开关 + 配额。
 	// settingUserRoutedOutboundEnabled: "1" = 开启,其它/未设置 = 关闭(默认关闭)
 	// settingUserQuotaRoutedOutbound: 未设置/0 = 默认 2;>0 = 具体上限。不支持"不限"。
@@ -49,8 +49,8 @@ var validUserPages = map[string]bool{
 
 // UserPermissionsConfig 是全局用户权限策略。
 type UserPermissionsConfig struct {
-	Pages          []string `json:"pages"`           // 普通用户可见页面
-	QuotaTemplate  int      `json:"quota_template"`  // 0 = 不限
+	Pages          []string `json:"pages"`          // 普通用户可见页面
+	QuotaTemplate  int      `json:"quota_template"` // 0 = 不限
 	QuotaOverride  int      `json:"quota_override"`
 	QuotaSubscribe int      `json:"quota_subscribe"`
 	// 路由出站(用户私有):必须先开启才能创建;未开启时 quota 字段无意义。
@@ -112,6 +112,12 @@ func loadUserPermConfig(ctx context.Context, repo *storage.TrafficRepository) Us
 func userIsAdmin(ctx context.Context, repo *storage.TrafficRepository, username string) bool {
 	if username == "" {
 		return false
+	}
+	// 全局 API token 经 auth.RequireToken 解析出的虚拟用户名 "api-token-admin" 不是真实用户,
+	// GetUser 查不到会误判为非管理员(如 /api/admin/nodes 因此返回空列表)。它由全局 API token
+	// 授予,与 RequireAdmin 同源,这里统一放行,避免各 handler 各自 special-case。
+	if username == "api-token-admin" {
+		return true
 	}
 	u, err := repo.GetUser(ctx, username)
 	return err == nil && u.Role == storage.RoleAdmin
@@ -226,9 +232,9 @@ func (h *UserPermissionsHandler) UserGet(w http.ResponseWriter, r *http.Request)
 	usedRouted, _ := h.repo.CountUserRoutedOutbounds(ctx, username)
 
 	writeJSONResp(w, http.StatusOK, map[string]any{
-		"success":  true,
-		"is_admin": isAdmin,
-		"pages":    cfg.Pages,
+		"success":                 true,
+		"is_admin":                isAdmin,
+		"pages":                   cfg.Pages,
 		"routed_outbound_enabled": cfg.RoutedOutboundEnabled,
 		"quota": map[string]any{
 			"template":        map[string]int{"used": usedTpl, "max": cfg.QuotaTemplate},
