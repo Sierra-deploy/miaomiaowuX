@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/MMWOrg/mmwX-plugins/proxyparser/substore"
 	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
-	"github.com/MMWOrg/mmwX-plugins/proxyparser/substore"
 
 	"github.com/google/uuid"
 )
@@ -91,7 +91,7 @@ type createPackageRequest struct {
 	IsReset          bool                         `json:"is_reset"`
 	ResetDay         int                          `json:"reset_day"`
 	Nodes            []int64                      `json:"nodes"`
-	NodeMultipliers  map[int64]float64            `json:"node_multipliers"` // node_id → 倍率
+	NodeMultipliers  map[int64]float64            `json:"node_multipliers"`   // node_id → 倍率
 	NodeSpeedLimits  map[int64]float64            `json:"node_speed_limits"`  // 套餐 per-node 限速覆盖 (Mbps);0=显式不限速,缺省=继承 SpeedLimitMbps
 	NodeDeviceLimits map[int64]int                `json:"node_device_limits"` // 套餐 per-node 客户端数覆盖;0=显式不限,缺省=继承 DeviceLimit
 	SpeedLimitMbps   float64                      `json:"speed_limit_mbps"`
@@ -238,7 +238,7 @@ type updatePackageRequest struct {
 	IsReset          *bool                        `json:"is_reset"`  // 指针:请求未携带时保留库中旧值,不按零值覆盖
 	ResetDay         *int                         `json:"reset_day"` // 同上
 	Nodes            []int64                      `json:"nodes"`
-	NodeMultipliers  map[int64]float64            `json:"node_multipliers"` // node_id → 倍率
+	NodeMultipliers  map[int64]float64            `json:"node_multipliers"`   // node_id → 倍率
 	NodeSpeedLimits  map[int64]float64            `json:"node_speed_limits"`  // 套餐 per-node 限速覆盖 (Mbps);0=显式不限速,缺省=继承 SpeedLimitMbps
 	NodeDeviceLimits map[int64]int                `json:"node_device_limits"` // 套餐 per-node 客户端数覆盖;0=显式不限,缺省=继承 DeviceLimit
 	SpeedLimitMbps   float64                      `json:"speed_limit_mbps"`
@@ -1564,6 +1564,13 @@ func generateCredential(protocol string, user storage.User, method, inboundTag s
 		cred["psk"] = uuid.New().String()
 		cred["email"] = email
 		cred["level"] = 0
+	case "mieru":
+		// mieru 多用户 = 每用户 username(取面板用户名,inbound 内唯一)+ 独立 password。
+		// 服务端按 username 派生 userTag 定位用户;username+password 派生加密密钥。
+		cred["username"] = user.Username
+		cred["password"] = uuid.New().String()
+		cred["email"] = email
+		cred["level"] = 0
 	case "hysteria":
 		// HY2 客户端凭据:auth(密码) + email(用于 per-user 流量统计,接入套餐限额)。
 		cred["auth"] = uuid.New().String()
@@ -1612,6 +1619,8 @@ func matchCredential(a, b map[string]interface{}, protocol string) bool {
 		return fmt.Sprint(a["password"]) == fmt.Sprint(b["password"])
 	case "snell":
 		return fmt.Sprint(a["psk"]) == fmt.Sprint(b["psk"])
+	case "mieru":
+		return fmt.Sprint(a["username"]) == fmt.Sprint(b["username"])
 	case "hysteria":
 		return fmt.Sprint(a["auth"]) == fmt.Sprint(b["auth"])
 	case "shadowsocks":

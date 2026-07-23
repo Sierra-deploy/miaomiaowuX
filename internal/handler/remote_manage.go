@@ -1890,7 +1890,7 @@ func inboundCredentialKey(protocol string) string {
 	switch strings.ToLower(protocol) {
 	case "socks", "socks5", "http":
 		return "accounts"
-	case "anytls", "snell":
+	case "anytls", "snell", "mieru":
 		return "users"
 	default: // vless/vmess/trojan/shadowsocks/hysteria/hysteria2...
 		return "clients"
@@ -2085,12 +2085,12 @@ func (h *RemoteManageHandler) HandleInbounds(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
-	// anytls 入站只有内嵌 xray(fork)支持,官方外置 xray 无此协议 → 会以 "unknown config id: anytls" 启动失败。
+	// anytls/snell/mieru 入站只有内嵌 xray(fork)支持,官方外置 xray 无此协议 → 会以 "unknown config id: xxx" 启动失败。
 	// 外置模式直接拒绝(前端也会禁用该选项,这里是绕过前端直连 API 的兜底)。
 	if r.Method == http.MethodPost && inboundReq != nil {
 		if action, _ := inboundReq["action"].(string); action == "" || strings.ToLower(action) == "add" {
 			if inbound, ok := inboundReq["inbound"].(map[string]interface{}); ok {
-				if proto, _ := inbound["protocol"].(string); strings.ToLower(proto) == "anytls" || strings.ToLower(proto) == "snell" {
+				if proto, _ := inbound["protocol"].(string); strings.ToLower(proto) == "anytls" || strings.ToLower(proto) == "snell" || strings.ToLower(proto) == "mieru" {
 					if server, err := h.repo.GetRemoteServer(r.Context(), id); err == nil && server != nil && server.XrayMode == "external" {
 						remoteWriteError(w, http.StatusBadRequest, strings.ToLower(proto)+" 协议需要内嵌 xray,请先将该服务器切换为内嵌模式")
 						return
@@ -3815,6 +3815,24 @@ func (h *RemoteManageHandler) inboundToClashProxy(inbound map[string]interface{}
 		// 注意:tfo(TCP Fast Open)不在此写入存储配置 —— 它只对 Surge 客户端有意义,
 		// 写进 Clash 存储配置会泄漏到所有客户端。tfo=true 由 Surge producer 在输出时按需补(见 surge.go snell())。
 		proxy["reuse"] = true
+
+	case "mieru":
+		// mihomo/clash mieru:type:mieru, server, port, transport(TCP/UDP), username, password。
+		// 字段来自 settings.users[] 条目(username/password)。仅 mihomo(Clash.Meta)/官方 mieru 客户端支持,
+		// 其余订阅格式(surge/loon/qx/sing-box/裸 clash)不支持 → 由 clash_snell_filter 范式过滤,producer 跳过。
+		// 服务端 TCP+UDP 都监听;transport 由 inbound.settings.transport 决定订阅下发给客户端用哪个(默认 TCP)。
+		proxy["type"] = "mieru"
+		transport := "TCP"
+		if t, ok := settings["transport"].(string); ok && strings.ToUpper(t) == "UDP" {
+			transport = "UDP"
+		}
+		proxy["transport"] = transport
+		if username, ok := client["username"].(string); ok {
+			proxy["username"] = username
+		}
+		if password, ok := client["password"].(string); ok {
+			proxy["password"] = password
+		}
 
 	default:
 		return nil, fmt.Errorf("unsupported protocol: %s", protocol)

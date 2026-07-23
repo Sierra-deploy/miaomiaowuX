@@ -695,6 +695,14 @@ func applyCredToProxy(proxy map[string]any, protocol string, cred map[string]any
 		if psk, ok := cred["psk"].(string); ok && psk != "" {
 			proxy["psk"] = psk
 		}
+	case "mieru":
+		// mieru:每用户 username+password → clash mieru 节点(逐用户独立凭据)。
+		if username, ok := cred["username"].(string); ok && username != "" {
+			proxy["username"] = username
+		}
+		if password, ok := cred["password"].(string); ok && password != "" {
+			proxy["password"] = password
+		}
 	case "hysteria2", "hysteria", "hy2":
 		// HY2 客户端凭据 auth → clash hysteria2 节点的 password 字段。
 		if auth, ok := cred["auth"].(string); ok && auth != "" {

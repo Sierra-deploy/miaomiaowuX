@@ -111,8 +111,12 @@ func fetchSubscriptionContent(sub *storage.ExternalSubscription) ([]byte, error)
 
 	logger.Info("[SubscriptionCache] 缓存未命中，正在拉取", "url", sub.URL)
 
+	// SSRF 防护:sub.URL 来自 DB(用户创建的外部订阅),拉取前校验并用安全客户端拒绝内网/云元数据地址。
+	if verr := validateFetchURL(sub.URL); verr != nil {
+		return nil, verr
+	}
 	// 拉取订阅内容
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := newSSRFSafeHTTPClient(30 * time.Second)
 	req, err := http.NewRequest(http.MethodGet, sub.URL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
@@ -392,4 +396,3 @@ func checkFilterMatches(sub *storage.ExternalSubscription, filter, excludeFilter
 	logger.Info("[checkFilterMatches] 匹配结果", "filter", filter, "geo_ip_filter", geoIPFilter, "match_count", matchCount)
 	return matchCount, nil
 }
-

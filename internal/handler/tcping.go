@@ -86,11 +86,19 @@ func NewTCPingHandler() http.Handler {
 // pingOne 是单次探测的公共路径,根据 req.Protocol 自动选 TCP / UDP 探测。
 // 单节点 handler + 批量 handler 共用,保证语义一致。
 func pingOne(ctx context.Context, req TCPingRequest, timeout time.Duration) TCPingResponse {
+	// SSRF 防护:tcping 开放给普通用户(节点延迟测试),必须拒绝探测内网/保留地址,
+	// 否则任意登录用户能拿 host:port 的通/不通+延迟当**内网端口扫描器**(探 127.0.0.1:6379、
+	// 云元数据等)。解析并校验目标 IP;TCP 直接连已校验 IP,关闭 DNS-rebinding。
+	ip, verr := firstNonInternalIP(ctx, req.Host)
+	if verr != nil {
+		return TCPingResponse{Success: false, Error: verr.Error()}
+	}
 	address := net.JoinHostPort(req.Host, fmt.Sprintf("%d", req.Port))
 
 	// QUIC-based UDP 协议:走 udping(发 QUIC VN trigger 等响应)。
 	// TCP DialTimeout 对 hysteria/hysteria2/hy2/tuic 端口永远 fail(没 TCP 套接字)— 这是历史 bug。
 	if probe.IsUDPProtocol(req.Protocol) {
+		// host 已确认非内网;保留 hostname 以便 QUIC SNI。
 		rtt, err := probe.UDPProbe(ctx, req.Host, req.Port, req.Protocol, timeout)
 		if err != nil {
 			log.Printf("[UDPing] %s (%s) failed: %v", address, req.Protocol, err)
@@ -101,9 +109,9 @@ func pingOne(ctx context.Context, req TCPingRequest, timeout time.Duration) TCPi
 		return TCPingResponse{Success: true, Latency: latency}
 	}
 
-	// TCP 路径(向后兼容 — protocol 不传或非 UDP 协议都走这里)
+	// TCP 路径(向后兼容 — protocol 不传或非 UDP 协议都走这里)。连已校验的 IP,防 rebinding。
 	start := time.Now()
-	conn, err := net.DialTimeout("tcp", address, timeout)
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip.String(), fmt.Sprintf("%d", req.Port)), timeout)
 	latency := float64(time.Since(start).Microseconds()) / 1000.0
 	if err != nil {
 		log.Printf("[TCPing] %s failed: %v", address, err)

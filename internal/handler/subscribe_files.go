@@ -215,19 +215,19 @@ func (h *subscribeFilesHandler) handleCreate(w http.ResponseWriter, r *http.Requ
 	}
 
 	file := storage.SubscribeFile{
-		Name:             req.Name,
-		Description:      req.Description,
-		URL:              req.URL,
-		Type:             req.Type,
-		Filename:         req.Filename,
-		TemplateFilename: req.TemplateFilename,
-		SelectedTags:     req.SelectedTags,
-		SelectedNodeIDs:  req.SelectedNodeIDs,
+		Name:                      req.Name,
+		Description:               req.Description,
+		URL:                       req.URL,
+		Type:                      req.Type,
+		Filename:                  req.Filename,
+		TemplateFilename:          req.TemplateFilename,
+		SelectedTags:              req.SelectedTags,
+		SelectedNodeIDs:           req.SelectedNodeIDs,
 		SelectedCustomRuleIDs:     req.SelectedCustomRuleIDs,
 		SelectedOverrideScriptIDs: req.SelectedOverrideScriptIDs,
-		StatsServerIDs:   req.StatsServerIDs,
-		TrafficLimit:     req.TrafficLimit,
-		CreatedBy:        username,
+		StatsServerIDs:            req.StatsServerIDs,
+		TrafficLimit:              req.TrafficLimit,
+		CreatedBy:                 username,
 	}
 	if req.RawOutput != nil {
 		file.RawOutput = *req.RawOutput
@@ -283,10 +283,15 @@ func (h *subscribeFilesHandler) handleImport(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// 创建HTTP客户端并获取订阅内容
-	client := &http.Client{
-		Timeout: 30 * time.Second,
+	// SSRF 防护:仅允许 http/https;抓取时校验实际连接的 IP,拒绝内网/云元数据地址。
+	// 否则任意登录用户都能让主控 GET http://127.0.0.1:PORT/... 或 169.254.169.254 拿内网内容/云凭据。
+	if err := validateFetchURL(req.URL); err != nil {
+		writeBadRequest(w, err.Error())
+		return
 	}
+
+	// 创建 SSRF 安全的 HTTP 客户端并获取订阅内容
+	client := newSSRFSafeHTTPClient(30 * time.Second)
 
 	httpReq, err := http.NewRequest("GET", req.URL, nil)
 	if err != nil {
@@ -309,8 +314,8 @@ func (h *subscribeFilesHandler) handleImport(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// 读取响应内容
-	body, err := io.ReadAll(resp.Body)
+	// 读取响应内容(限制大小,防超大响应 OOM)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchBodyBytes))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, errors.New("读取订阅内容失败"))
 		return
@@ -926,49 +931,49 @@ func parseFilenameFromContentDisposition(header string) string {
 }
 
 type subscribeFileRequest struct {
-	Name                string   `json:"name"`
-	Description         string   `json:"description"`
-	URL                 string   `json:"url"`
-	Type                string   `json:"type"`
-	Filename            string   `json:"filename"`
-	AutoSyncCustomRules *bool    `json:"auto_sync_custom_rules,omitempty"`
-	TemplateFilename    string   `json:"template_filename"`
-	SelectedTags        []string `json:"selected_tags"`
-	SelectedNodeIDs     []int64  `json:"selected_node_ids"`
-	SelectedCustomRuleIDs     []int64 `json:"selected_custom_rule_ids"`
-	SelectedOverrideScriptIDs []int64 `json:"selected_override_script_ids"`
-	StatsServerIDs      string   `json:"stats_server_ids"`
-	TrafficLimit        *float64 `json:"traffic_limit"`
+	Name                      string   `json:"name"`
+	Description               string   `json:"description"`
+	URL                       string   `json:"url"`
+	Type                      string   `json:"type"`
+	Filename                  string   `json:"filename"`
+	AutoSyncCustomRules       *bool    `json:"auto_sync_custom_rules,omitempty"`
+	TemplateFilename          string   `json:"template_filename"`
+	SelectedTags              []string `json:"selected_tags"`
+	SelectedNodeIDs           []int64  `json:"selected_node_ids"`
+	SelectedCustomRuleIDs     []int64  `json:"selected_custom_rule_ids"`
+	SelectedOverrideScriptIDs []int64  `json:"selected_override_script_ids"`
+	StatsServerIDs            string   `json:"stats_server_ids"`
+	TrafficLimit              *float64 `json:"traffic_limit"`
 	// 必须用指针以区分"前端没传"vs"前端想清空":
 	// 内联更新(只发 template_filename)时 CustomShortCode 字段缺省,
 	// 旧 string 零值会被误判为"想把短码清空"→ 触发"只有管理员可以编辑短码"。
-	CustomShortCode     *string  `json:"custom_short_code,omitempty"`
-	RawOutput           *bool    `json:"raw_output,omitempty"`
-	SortOrder           *int     `json:"sort_order,omitempty"`
+	CustomShortCode *string `json:"custom_short_code,omitempty"`
+	RawOutput       *bool   `json:"raw_output,omitempty"`
+	SortOrder       *int    `json:"sort_order,omitempty"`
 }
 
 type subscribeFileDTO struct {
-	ID                  int64      `json:"id"`
-	Name                string     `json:"name"`
-	Description         string     `json:"description"`
-	Type                string     `json:"type"`
-	Filename            string     `json:"filename"`
-	FileShortCode       string     `json:"file_short_code"`
-	CustomShortCode     string     `json:"custom_short_code"`
-	AutoSyncCustomRules bool       `json:"auto_sync_custom_rules"`
-	TemplateFilename    string     `json:"template_filename"`
-	SelectedTags        []string   `json:"selected_tags"`
-	SelectedNodeIDs     []int64    `json:"selected_node_ids"`
-	SelectedCustomRuleIDs     []int64 `json:"selected_custom_rule_ids"`
-	SelectedOverrideScriptIDs []int64 `json:"selected_override_script_ids"`
-	StatsServerIDs      string     `json:"stats_server_ids"`
-	TrafficLimit        *float64   `json:"traffic_limit"`
-	SortOrder           int        `json:"sort_order"`
-	RawOutput           bool       `json:"raw_output"`
-	CreatedBy           string     `json:"created_by"`
-	CreatedAt           time.Time  `json:"created_at"`
-	UpdatedAt           time.Time  `json:"updated_at"`
-	LatestVersion       int64      `json:"latest_version,omitempty"`
+	ID                        int64     `json:"id"`
+	Name                      string    `json:"name"`
+	Description               string    `json:"description"`
+	Type                      string    `json:"type"`
+	Filename                  string    `json:"filename"`
+	FileShortCode             string    `json:"file_short_code"`
+	CustomShortCode           string    `json:"custom_short_code"`
+	AutoSyncCustomRules       bool      `json:"auto_sync_custom_rules"`
+	TemplateFilename          string    `json:"template_filename"`
+	SelectedTags              []string  `json:"selected_tags"`
+	SelectedNodeIDs           []int64   `json:"selected_node_ids"`
+	SelectedCustomRuleIDs     []int64   `json:"selected_custom_rule_ids"`
+	SelectedOverrideScriptIDs []int64   `json:"selected_override_script_ids"`
+	StatsServerIDs            string    `json:"stats_server_ids"`
+	TrafficLimit              *float64  `json:"traffic_limit"`
+	SortOrder                 int       `json:"sort_order"`
+	RawOutput                 bool      `json:"raw_output"`
+	CreatedBy                 string    `json:"created_by"`
+	CreatedAt                 time.Time `json:"created_at"`
+	UpdatedAt                 time.Time `json:"updated_at"`
+	LatestVersion             int64     `json:"latest_version,omitempty"`
 }
 
 func convertSubscribeFile(file storage.SubscribeFile) subscribeFileDTO {
@@ -990,26 +995,26 @@ func convertSubscribeFile(file storage.SubscribeFile) subscribeFileDTO {
 		scriptIDs = []int64{}
 	}
 	return subscribeFileDTO{
-		ID:                  file.ID,
-		Name:                file.Name,
-		Description:         file.Description,
-		Type:                file.Type,
-		Filename:            file.Filename,
-		FileShortCode:       file.FileShortCode,
-		CustomShortCode:     file.CustomShortCode,
-		AutoSyncCustomRules: file.AutoSyncCustomRules,
-		TemplateFilename:    file.TemplateFilename,
-		SelectedTags:        tags,
-		SelectedNodeIDs:     nodeIDs,
+		ID:                        file.ID,
+		Name:                      file.Name,
+		Description:               file.Description,
+		Type:                      file.Type,
+		Filename:                  file.Filename,
+		FileShortCode:             file.FileShortCode,
+		CustomShortCode:           file.CustomShortCode,
+		AutoSyncCustomRules:       file.AutoSyncCustomRules,
+		TemplateFilename:          file.TemplateFilename,
+		SelectedTags:              tags,
+		SelectedNodeIDs:           nodeIDs,
 		SelectedCustomRuleIDs:     ruleIDs,
 		SelectedOverrideScriptIDs: scriptIDs,
-		StatsServerIDs:      file.StatsServerIDs,
-		TrafficLimit:        file.TrafficLimit,
-		SortOrder:           file.SortOrder,
-		RawOutput:           file.RawOutput,
-		CreatedBy:           file.CreatedBy,
-		CreatedAt:           file.CreatedAt,
-		UpdatedAt:           file.UpdatedAt,
+		StatsServerIDs:            file.StatsServerIDs,
+		TrafficLimit:              file.TrafficLimit,
+		SortOrder:                 file.SortOrder,
+		RawOutput:                 file.RawOutput,
+		CreatedBy:                 file.CreatedBy,
+		CreatedAt:                 file.CreatedAt,
+		UpdatedAt:                 file.UpdatedAt,
 	}
 }
 
@@ -1484,7 +1489,6 @@ func (h *subscribeFilesHandler) initializeCustomRuleApplications(ctx context.Con
 
 	logger.Info("[Subscribe] 记录自定义规则应用状态完成", "rule_count", len(rules), "file_id", fileID)
 }
-
 
 // handleGetSubscriptionUsers GET /api/admin/subscribe-files/{id}/users
 // 返回该订阅文件分配给哪些用户 + 各自的 user_short_code / custom_user_short_code(同步自 mmw v0.7.3)

@@ -402,6 +402,7 @@ func buildUserCredMapForCreator(ctx context.Context, repo *storage.TrafficReposi
 // substituteNodesForUser 把节点列表里的 clash_config 替换成该用户视角的版本。
 //   - 普通节点:applyUserCredentials 改 uuid / password 等
 //   - routed 节点:buildRoutedProxyForUser 用 user_subaccounts 凭据重建(没子账号即 drop)
+//
 // 替换/重建失败的节点保留 admin 凭据 → 这种情况是数据异常(凭据没建好),为了不让用户彻底看不到节点,
 // 退而求其次返回原样;但更典型场景(用户从未绑过该节点)已经被 ListNodes 的 username 过滤掉了。
 // collectUserVisibleNodes 收集某用户可见的节点:自己导入的 + 套餐 pkg.Nodes + 套餐内 shared routed 子节点(去重)。
@@ -570,15 +571,15 @@ func (h *nodesHandler) handleCreate(w http.ResponseWriter, r *http.Request) {
 	req.ParsedConfig = ensureUDPDefault(req.ParsedConfig)
 
 	node := storage.Node{
-		Username:     username,
-		RawURL:       req.RawURL,
-		NodeName:     req.NodeName,
-		Protocol:     req.Protocol,
-		ParsedConfig: req.ParsedConfig,
-		ClashConfig:  req.ClashConfig,
-		Enabled:      req.Enabled,
-		Tag:          req.Tag,
-		Tags:         req.Tags,
+		Username:         username,
+		RawURL:           req.RawURL,
+		NodeName:         req.NodeName,
+		Protocol:         req.Protocol,
+		ParsedConfig:     req.ParsedConfig,
+		ClashConfig:      req.ClashConfig,
+		Enabled:          req.Enabled,
+		Tag:              req.Tag,
+		Tags:             req.Tags,
 		InboundTag:       req.InboundTag,
 		ChainProxyNodeID: req.ChainProxyNodeID,
 	}
@@ -1958,13 +1959,13 @@ func (h *nodesHandler) handleBatchRename(w http.ResponseWriter, r *http.Request)
 }
 
 type nodeRequest struct {
-	RawURL              string          `json:"raw_url"`
-	NodeName            string          `json:"node_name"`
-	Protocol            string          `json:"protocol"`
-	ParsedConfig        string          `json:"parsed_config"`
-	ClashConfig         string          `json:"clash_config"`
-	Enabled             bool            `json:"enabled"`
-	Tag                 string          `json:"tag"`
+	RawURL       string `json:"raw_url"`
+	NodeName     string `json:"node_name"`
+	Protocol     string `json:"protocol"`
+	ParsedConfig string `json:"parsed_config"`
+	ClashConfig  string `json:"clash_config"`
+	Enabled      bool   `json:"enabled"`
+	Tag          string `json:"tag"`
 	// Tags 多标签数组 — 前端 multi-select 输出。storage.serializeNodeTags 会自动把 Tag 与 Tags 同步,
 	// 任一字段为空都会用另一个兜底,所以老前端只发 Tag 也能正常工作。
 	Tags                []string        `json:"tags,omitempty"`
@@ -1972,8 +1973,8 @@ type nodeRequest struct {
 	ChainProxyNodeID    *int64          `json:"-"`
 	RawChainProxyNodeID json.RawMessage `json:"chain_proxy_node_id"`
 	// 中转(relay):创建时若填写中转服务器,后端把 clash/parsed 的 server/port 换成中转地址,原值记到 relay_orig_*。
-	RelayServer         string          `json:"relay_server"`
-	RelayPort           int             `json:"relay_port"`
+	RelayServer string `json:"relay_server"`
+	RelayPort   int    `json:"relay_port"`
 }
 
 func (r *nodeRequest) hasChainProxyNodeID() bool {
@@ -1992,36 +1993,36 @@ func (r *nodeRequest) parseChainProxyNodeID() {
 }
 
 type nodeDTO struct {
-	ID               int64     `json:"id"`
-	RawURL           string    `json:"raw_url"`
-	NodeName         string    `json:"node_name"`
-	Protocol         string    `json:"protocol"`
-	ParsedConfig     string    `json:"parsed_config"`
-	ClashConfig      string    `json:"clash_config"`
-	Enabled          bool      `json:"enabled"`
+	ID           int64  `json:"id"`
+	RawURL       string `json:"raw_url"`
+	NodeName     string `json:"node_name"`
+	Protocol     string `json:"protocol"`
+	ParsedConfig string `json:"parsed_config"`
+	ClashConfig  string `json:"clash_config"`
+	Enabled      bool   `json:"enabled"`
 	// Tag 是用户自定义分类标签(VIP / Asia / 测试),前端节点页用它做过滤、分组显示、批量更新。
 	// 必须下发,否则前端改了 tag 拉回来缺字段,显示永远是原状态,等同"修改不起作用"。
-	Tag              string    `json:"tag"`
+	Tag string `json:"tag"`
 	// Tags 多标签数组;Tag 是 Tags[0] 的别名(向后兼容)。前端优先读 tags,fallback 用 tag。
-	Tags             []string  `json:"tags,omitempty"`
-	OriginalServer   string    `json:"original_server"`
-	OriginalDomain   string    `json:"original_domain"`
-	InboundTag       string    `json:"inbound_tag"`
-	ChainProxyNodeID *int64    `json:"chain_proxy_node_id"`
-	NodeType           string    `json:"node_type"`             // 'physical' | 'routed'
-	ParentNodeID       *int64    `json:"parent_node_id"`        // routed 节点指向其父物理节点
-	RoutedOutboundTag  string    `json:"routed_outbound_tag"`   // routed 节点专用:绑定的出站 tag(便于 UI 直接展示)
-	RoutedOwner        string    `json:"routed_owner,omitempty"` // routed 节点专用:'shared'(admin 套餐分配) | 'user'(用户私有)
-	CreatedBy          string    `json:"created_by,omitempty"`   // routed 节点专用:创建者用户名(user 视角下用于鉴别"是不是我创建的")
+	Tags              []string `json:"tags,omitempty"`
+	OriginalServer    string   `json:"original_server"`
+	OriginalDomain    string   `json:"original_domain"`
+	InboundTag        string   `json:"inbound_tag"`
+	ChainProxyNodeID  *int64   `json:"chain_proxy_node_id"`
+	NodeType          string   `json:"node_type"`              // 'physical' | 'routed'
+	ParentNodeID      *int64   `json:"parent_node_id"`         // routed 节点指向其父物理节点
+	RoutedOutboundTag string   `json:"routed_outbound_tag"`    // routed 节点专用:绑定的出站 tag(便于 UI 直接展示)
+	RoutedOwner       string   `json:"routed_owner,omitempty"` // routed 节点专用:'shared'(admin 套餐分配) | 'user'(用户私有)
+	CreatedBy         string   `json:"created_by,omitempty"`   // routed 节点专用:创建者用户名(user 视角下用于鉴别"是不是我创建的")
 	// Multiplier 仅在普通用户视角(其绑定套餐内有 NodeMultipliers 配置)下注入。admin 视角省略字段
 	// (一个节点可能在多个套餐里有不同倍率,无法单值显示);== 1 时也省略,前端按"未设置"对待。
-	Multiplier         float64   `json:"multiplier,omitempty"`
+	Multiplier float64 `json:"multiplier,omitempty"`
 	// 中转(relay):relay_orig_server 非空表示该节点已配置中转 —— clash server/port 是中转地址,
 	// 这两个字段是被中转替换掉的原服务器地址/端口,前端在「服务器地址」下方显示 + 用于编辑/取消中转。
-	RelayOrigServer    string    `json:"relay_orig_server,omitempty"`
-	RelayOrigPort      int       `json:"relay_orig_port,omitempty"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	RelayOrigServer string    `json:"relay_orig_server,omitempty"`
+	RelayOrigPort   int       `json:"relay_orig_port,omitempty"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 // NewNodeURIsHandler GET /api/admin/node-uris(admin):返回 每个用户 × 其可见节点 的成品分享 URI。
@@ -2139,16 +2140,20 @@ func (h *nodesHandler) handleFetchSubscription(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// SSRF 防护:用户可控 URL,须限 http/https 且抓取时拒绝内网/云元数据地址。
+	if verr := validateFetchURL(req.URL); verr != nil {
+		writeBadRequest(w, verr.Error())
+		return
+	}
+
 	// 如果没有提供 User-Agent，使用默认值
 	userAgent := req.UserAgent
 	if userAgent == "" {
 		userAgent = "clash-meta/2.4.0"
 	}
 
-	// 创建HTTP客户端并获取订阅内容
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-	}
+	// 创建 SSRF 安全的 HTTP 客户端并获取订阅内容
+	client := newSSRFSafeHTTPClient(30 * time.Second)
 
 	httpReq, err := http.NewRequest("GET", req.URL, nil)
 	if err != nil {
@@ -2176,8 +2181,8 @@ func (h *nodesHandler) handleFetchSubscription(w http.ResponseWriter, r *http.Re
 		"content_type", resp.Header.Get("Content-Type"),
 		"content_length", resp.ContentLength)
 
-	// 读取响应内容（无论成功还是失败都需要读取以便记录日志）
-	body, err := io.ReadAll(resp.Body)
+	// 读取响应内容（无论成功还是失败都需要读取以便记录日志）；限制大小防超大响应 OOM。
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxFetchBodyBytes))
 	if err != nil {
 		logger.Info("[订阅获取] 读取响应体失败", "url", req.URL, "error", err)
 		writeError(w, http.StatusInternalServerError, errors.New("读取订阅内容失败"))
@@ -2305,7 +2310,8 @@ func (h *nodesHandler) handleParseURIs(w http.ResponseWriter, r *http.Request) {
 
 // parsePastedProxies 识别并解析"手动粘贴"的节点文本,返回 clash proxy 列表(map)。
 // 顺序:①整份 Clash 配置 / base64 / URI 列表(复用订阅拉取同款 preprocess+yaml 管线)
-//       ②裸 `- name:` 列表(无 proxies: 头) ③单条 {name:...} ④proxyparser 兜底(URI/Surge INI)。
+//
+//	②裸 `- name:` 列表(无 proxies: 头) ③单条 {name:...} ④proxyparser 兜底(URI/Surge INI)。
 func parsePastedProxies(content string) []map[string]any {
 	// ① preprocess 会把 base64 / URI 列表转成 proxies-YAML,整份 Clash 配置原样透传。
 	body := []byte(content)

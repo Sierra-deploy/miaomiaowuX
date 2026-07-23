@@ -168,7 +168,13 @@ func handleCreateExternalSubscription(w http.ResponseWriter, r *http.Request, re
 		userAgent = "clash-meta/2.4.0"
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	// SSRF 防护:同订阅导入 —— 用户可控 URL,须限 http/https 且拒绝内网/云元数据地址。
+	if verr := validateFetchURL(url); verr != nil {
+		writeError(w, http.StatusBadRequest, verr)
+		return
+	}
+
+	client := newSSRFSafeHTTPClient(30 * time.Second)
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, url, nil)
 	if err != nil {
 		logger.Info("[外部订阅] 创建请求失败", "name", name, "error", err)
