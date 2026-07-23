@@ -216,6 +216,8 @@ func (h *PackageSubscribeHandler) ServeHTTP(w http.ResponseWriter, r *http.Reque
 	// Format conversion
 	clientType := resolveClientType(r)
 	if clientType == "" || clientType == "clash" || clientType == "clashmeta" {
+		// 原样 YAML 输出(不经 producer)→ 过滤 snell v6(mihomo 只支持 v1–v5,v6 会整份拒载)
+		result = string(filterSnellV6FromClashYAML([]byte(result)))
 		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
 		// 显式带 t=clash/clashmeta 通常是浏览器/调试预览,不想被强制下载;只有完全不带 t(典型 Clash 客户端拉取)才下发 attachment
 		setSubscriptionName(w, pkg.Name, ".yaml")
@@ -402,6 +404,8 @@ func (h *PackageSubscribeHandler) serveAllNodes(w http.ResponseWriter, r *http.R
 	}
 	clientType := resolveClientType(r)
 	if clientType == "" || clientType == "clash" || clientType == "clashmeta" {
+		// 同主路径:原样 YAML 输出前过滤 snell v6,防 mihomo 整份拒载
+		result = string(filterSnellV6FromClashYAML([]byte(result)))
 		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
 		if clientType == "" {
 			w.Header().Set("Content-Disposition", `attachment; filename="all-nodes.yaml"`)

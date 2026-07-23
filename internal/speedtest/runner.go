@@ -1,6 +1,7 @@
 package speedtest
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -56,11 +57,11 @@ type Options struct {
 
 // 测速 buffer / 线程的取值边界。峰值内存 ≈ BufSize × Threads,maxTotalMem 防家用测速端 OOM。
 const (
-	defaultBufSize    = 1 << 20   // 1MB(= 历史固定值,向后兼容)
-	minBufSize        = 64 << 10  // 64KB
-	maxBufSize        = 16 << 20  // 16MB
-	maxSpeedThreads   = 64        // 并发下载线程上限
-	maxSpeedTotalMem  = 256 << 20 // BufSize×Threads 上限:超了缩 BufSize
+	defaultBufSize   = 1 << 20   // 1MB(= 历史固定值,向后兼容)
+	minBufSize       = 64 << 10  // 64KB
+	maxBufSize       = 16 << 20  // 16MB
+	maxSpeedThreads  = 64        // 并发下载线程上限
+	maxSpeedTotalMem = 256 << 20 // BufSize×Threads 上限:超了缩 BufSize
 )
 
 // clampSpeedTestParams 归一 bufSize(字节)与 threads,并把 bufSize×threads 峰值内存收敛到 maxSpeedTotalMem 内。
@@ -123,6 +124,13 @@ func RunNodeTest(ctx context.Context, mihomoBin, clashConfigJSON string, opts Op
 		proxy["name"] = name
 	}
 
+	// snell v6:mihomo 上游只支持 v1–v5(遇 v6 整份配置 fatal 拒载),改用 sing-box 内核测
+	// (sing-box ≥1.14.0-alpha.38 有 snell 支持,与 fork 服务端已实测互通)。
+	// mixed 入站同 mixedPort,后续 measureLatency/downloadTimed 等代理测量逻辑完全复用。
+	if isSnellV6Proxy(proxy) {
+		return runNodeTestSingbox(ctx, proxy, opts, testURL)
+	}
+
 	mini := map[string]any{
 		"mixed-port":          mixedPort,
 		"allow-lan":           false,
@@ -147,6 +155,12 @@ func RunNodeTest(ctx context.Context, mihomoBin, clashConfigJSON string, opts Op
 	}
 	defer func() { stop(); os.RemoveAll(workdir) }()
 
+	return measureViaMixedPort(ctx, opts, testURL)
+}
+
+// measureViaMixedPort 经已就绪的本地 mixedPort 代理跑测量(出口 IP / 延迟 / 下行吞吐),
+// mihomo 与 sing-box 两条内核路径共用。
+func measureViaMixedPort(ctx context.Context, opts Options, testURL string) (Result, error) {
 	egressIP := measureEgressIP(ctx)
 
 	// LatencyOnly:只测真连接延迟(多采样 Cloudflare 204,取最快 3 个均值),不跑大文件下载
@@ -178,19 +192,53 @@ func startMihomo(bin, workdir string, cfg []byte) (func(), error) {
 		return nil, err
 	}
 	cmd := exec.Command(bin, "-d", workdir, "-f", cfgPath)
+	return startProxyCore(cmd, "mihomo")
+}
+
+// startSingbox 起 sing-box 内核(mixed inbound 同 mixedPort)。用于 mihomo 不支持的协议
+// (目前:snell v6)。配置为 sing-box JSON。
+func startSingbox(bin, workdir string, cfg []byte) (func(), error) {
+	if err := os.MkdirAll(workdir, 0755); err != nil {
+		return nil, err
+	}
+	cfgPath := filepath.Join(workdir, "config.json")
+	if err := os.WriteFile(cfgPath, cfg, 0644); err != nil {
+		return nil, err
+	}
+	// -D 会先 chdir 到 workdir,-c 必须用相对 workdir 的文件名(绝对/启动 cwd 相对路径都会解析不到)
+	cmd := exec.Command(bin, "run", "-D", workdir, "-c", "config.json")
+	return startProxyCore(cmd, "sing-box")
+}
+
+// startProxyCore 启动代理内核进程并等 mixedPort 就绪,mihomo/sing-box 共用。
+// 捕获内核输出:配置含不支持的协议/参数(如 mihomo 遇 snell v6)时内核 fatal 秒退,
+// 之前只报"启动超时(15s)",真实原因("Parse config error: proxy 0: snell version error: 6")
+// 全被吞掉,误导排查方向(实测:面板测速 snell v6 节点报的就是这条超时)。
+func startProxyCore(cmd *exec.Cmd, coreName string) (func(), error) {
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
+	// cmd.Wait 只能调一次:统一由这个 goroutine 调,进程退出信号经 waitCh 分发给
+	// 下面的秒退检测与 stop() 两处消费方。
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
 	addr := fmt.Sprintf("127.0.0.1:%d", mixedPort)
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
+		select {
+		case <-waitCh:
+			// 进程已退出(坏配置 fatal)→ 快速失败并透出内核的真实报错,不再干等 15s
+			return nil, fmt.Errorf("%s 启动失败: %s", coreName, coreErrTail(out.String()))
+		default:
+		}
 		if c, derr := (&net.Dialer{Timeout: 500 * time.Millisecond}).Dial("tcp", addr); derr == nil {
 			c.Close()
 			var once sync.Once
 			return func() {
 				once.Do(func() {
-					done := make(chan error, 1)
-					go func() { done <- cmd.Wait() }()
 					// Windows 不支持向子进程发 SIGTERM,直接 Kill;其它平台先优雅 SIGTERM 再兜底 Kill。
 					if runtime.GOOS == "windows" {
 						_ = cmd.Process.Kill()
@@ -198,10 +246,10 @@ func startMihomo(bin, workdir string, cfg []byte) (func(), error) {
 						_ = cmd.Process.Signal(syscall.SIGTERM)
 					}
 					select {
-					case <-done:
+					case <-waitCh:
 					case <-time.After(3 * time.Second):
 						_ = cmd.Process.Kill()
-						<-done
+						<-waitCh
 					}
 				})
 			}, nil
@@ -209,8 +257,26 @@ func startMihomo(bin, workdir string, cfg []byte) (func(), error) {
 		time.Sleep(200 * time.Millisecond)
 	}
 	_ = cmd.Process.Kill()
-	_ = cmd.Wait()
-	return nil, fmt.Errorf("mihomo 启动超时(端口 %d 15s 内未就绪)", mixedPort)
+	<-waitCh
+	return nil, fmt.Errorf("%s 启动超时(端口 %d 15s 内未就绪): %s", coreName, mixedPort, coreErrTail(out.String()))
+}
+
+// coreErrTail 从内核输出中提取最有价值的一行(最后一条 error/fatal;没有则取末行),
+// 用于把"为什么起不来"直接呈现给用户。兼容 mihomo(logrus level=fatal)与
+// sing-box(FATAL[0000]/ERROR[0000])两种日志格式。
+func coreErrTail(s string) string {
+	lines := strings.Split(strings.TrimSpace(s), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		l := strings.TrimSpace(lines[i])
+		if strings.Contains(l, "level=fatal") || strings.Contains(l, "level=error") ||
+			strings.Contains(l, "FATAL[") || strings.Contains(l, "ERROR[") {
+			return l
+		}
+	}
+	if l := strings.TrimSpace(lines[len(lines)-1]); l != "" {
+		return l
+	}
+	return "(无输出)"
 }
 
 // proxyClient 经 mihomo mixed-port 走代理的 HTTP 客户端。

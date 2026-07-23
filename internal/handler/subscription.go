@@ -651,7 +651,11 @@ func (h *SubscriptionHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	if fromSurgeTemplate {
 		contentType = "text/plain; charset=utf-8"
 		ext = ".conf"
-	} else if clientType != "" && clientType != "clash" && clientType != "clashmeta" {
+	} else if clientType == "" || clientType == "clash" || clientType == "clashmeta" {
+		// 原样 YAML 输出(不经 producer)→ 过滤 snell v6:mihomo 只支持 v1–v5,
+		// 保留 v6 节点会让整份配置 fatal 拒载(所有节点全没)。Surge/sing-box 等 v6 可用格式走下面转换分支不受影响。
+		data = filterSnellV6FromClashYAML(data)
+	} else {
 		// clash 和 clashmeta 类型直接输出源文件, 不需要转换
 		// 使用子商店生产者转换订阅
 		convertedData, err := h.convertSubscription(r.Context(), data, clientType)
