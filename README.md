@@ -170,6 +170,19 @@ connection_mode: "auto"   # auto | websocket | http | pull
 <details>
 <summary>更新日志</summary>
 
+### v0.3.6 (2026-07-23)
+- 🌈 增加auto类型订阅客户端
+- 🌈 编辑订阅支持调整可用节点比例
+- 🌈 隧道和转发支持连通性探测
+- 🛠️ fix: docker配置缺少订阅目录
+- 🛠️ fix: 一堆bug
+- 🛠️ fix: 已有倍率的节点流量回填错误
+- 🛠️ fix: 支持服务器可用性探测
+- 🛠️ fix: 服务器地址输入IP时没有同步节点配置
+- 🛠️ fix: 真*wal*占用磁盘问题修复
+- 🛠️ fix: 覆写功能被模板覆盖
+- 🛠️ fix: 订阅文件重名覆盖
+- 🛠️ fix: 许可证到期限速配置无法解除
 ### v0.3.5 (2026-07-21)
 - Change license to Miaomiaowu X Source Available License
 - 🌈 tg通知支持配置文本
