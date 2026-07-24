@@ -40,6 +40,24 @@ func TestApplyUserCredentialsExactMatchStillWorks(t *testing.T) {
 	}
 }
 
+// 复现并回归「socks5 节点绑套餐后订阅仍下发 admin 账号」bug:socks/http 入站的 per-user 凭据存
+// {user,pass}(generateCredential),clash 节点字段是 username/password。applyCredToProxy 缺 socks 分支时,
+// 订阅保留节点自带的基础(创建者/admin)账号 → 用户拿到 admin 凭据(流量算 admin、删号后仍可连)。
+func TestApplyUserCredentialsSocks5PerUserAccount(t *testing.T) {
+	credMap := map[credKey]string{
+		{serverName: "🇺🇸 美国 Akko SJC", inboundTag: "socks5-tls-20010"}: `{"user":"shadowd","pass":"50fe331b-68e3-47"}`,
+	}
+	// 节点自带基础账号 = admin(danxing);期望订阅套用用户自己的 shadowd 账号。
+	node := storage.Node{OriginalServer: "🇺🇸 美国 Akko SJC", InboundTag: "socks5-tls-20010", Protocol: "socks"}
+	proxy := map[string]any{"type": "socks5", "username": "danxing", "password": "D#!BU6Av^I*pS6aW"}
+
+	applyUserCredentials(proxy, node, credMap)
+
+	if proxy["username"] != "shadowd" || proxy["password"] != "50fe331b-68e3-47" {
+		t.Fatalf("socks5 应套用 per-user 账号,实际 username=%v password=%v(仍是 admin 基础账号=bug 未修)", proxy["username"], proxy["password"])
+	}
+}
+
 // 同一 inbound_tag 分布在多台服务器 → tag 兜底有歧义,不应乱套(保持基础凭据);
 // 但 OriginalServer 指定时精确匹配仍按服务器区分。
 func TestApplyUserCredentialsAmbiguousTagNoGuess(t *testing.T) {

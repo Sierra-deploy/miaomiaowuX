@@ -734,6 +734,16 @@ func applyCredToProxy(proxy map[string]any, protocol string, cred map[string]any
 		if auth, ok := cred["auth"].(string); ok && auth != "" {
 			proxy["password"] = auth
 		}
+	case "socks", "http":
+		// socks5/http 入站每用户独立账号:credential_json 存 {user,pass}(见 generateCredential),
+		// clash socks5/http 节点字段是 username/password(见 inboundToClashProxy)。
+		// 缺这一分支时,订阅会保留节点自带的基础(创建者/admin)账号 → 用户拿到的是 admin 凭据。
+		if user, ok := cred["user"].(string); ok && user != "" {
+			proxy["username"] = user
+		}
+		if pass, ok := cred["pass"].(string); ok && pass != "" {
+			proxy["password"] = pass
+		}
 	}
 }
 

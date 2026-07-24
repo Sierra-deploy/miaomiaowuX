@@ -147,7 +147,7 @@ func (h *LicenseHandler) GetUsage(w http.ResponseWriter, r *http.Request) {
 const LicenseBadgeDisplayKey = "license_badge_display"
 
 // 合法位置。前端传 pos 时必须命中其一,否则一律不返回名字。
-var licenseBadgePositions = []string{"login", "about", "probe_login", "probe_footer"}
+var licenseBadgePositions = []string{"login", "about", "probe_login", "probe_footer", "probe_header"}
 
 func defaultLicenseBadgeDisplay() map[string]bool {
 	return map[string]bool{
@@ -155,6 +155,7 @@ func defaultLicenseBadgeDisplay() map[string]bool {
 		"about":        true,
 		"probe_login":  false, // 伪装页,默认不暴露
 		"probe_footer": false, // 同上
+		"probe_header": false, // 探针页标题后方,同为伪装页,默认关闭
 	}
 }
 
