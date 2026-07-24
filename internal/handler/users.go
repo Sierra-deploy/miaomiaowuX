@@ -48,6 +48,10 @@ type userEntry struct {
 	// 前端用 user_short_code 显示"当前生效",custom_user_short_code 作为编辑输入框的回填值。
 	UserShortCode       string `json:"user_short_code"`
 	CustomUserShortCode string `json:"custom_user_short_code"`
+	// TG 绑定信息:让直接添加、事后绑 TG 的用户也能在用户管理里看出对应哪个 Telegram 账号。
+	// 0 / 空 = 未绑定。
+	TelegramID       int64  `json:"telegram_id,omitempty"`
+	TelegramUsername string `json:"telegram_username,omitempty"`
 }
 
 type userStatusRequest struct {
@@ -105,6 +109,9 @@ func NewUserListHandler(repo *storage.TrafficRepository) http.Handler {
 		// 一次性查所有用户短码,避免列表循环里逐个 query(N+1)。
 		shortCodeMap, _ := repo.ListUserShortCodeInfo(r.Context())
 
+		// 一次性查所有用户的 TG 绑定,供列表展示(避免 N+1)。
+		tgMap, _ := repo.ListUserTelegramBindings(r.Context())
+
 		entries := make([]userEntry, 0, len(users))
 		for _, user := range users {
 			scInfo := shortCodeMap[user.Username]
@@ -118,6 +125,10 @@ func NewUserListHandler(repo *storage.TrafficRepository) http.Handler {
 				Remark:              user.Remark,
 				UserShortCode:       scInfo.UserShortCode,
 				CustomUserShortCode: scInfo.CustomUserShortCode,
+			}
+			if tg, ok := tgMap[user.Username]; ok {
+				entry.TelegramID = tg.TelegramID
+				entry.TelegramUsername = tg.TelegramUsername
 			}
 			entry.SpeedLimitOverride = user.SpeedLimitOverride
 			entry.DeviceLimitOverride = user.DeviceLimitOverride

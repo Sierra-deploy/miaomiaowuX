@@ -101,6 +101,38 @@ func (r *TrafficRepository) GetTelegramIDByUsername(ctx context.Context, usernam
 	return 0
 }
 
+// TelegramBinding 用户的 TG 绑定信息。
+type TelegramBinding struct {
+	TelegramID       int64
+	TelegramUsername string
+}
+
+// ListUserTelegramBindings 批量取所有已绑 TG 的用户(username → 绑定信息),
+// 供用户管理列表一次性展示(避免逐个 query)。让直接添加、事后绑 TG 的用户也能看出对应哪个 Telegram 账号。
+func (r *TrafficRepository) ListUserTelegramBindings(ctx context.Context) (map[string]TelegramBinding, error) {
+	out := make(map[string]TelegramBinding)
+	if r == nil || r.db == nil {
+		return out, nil
+	}
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT username, telegram_id, COALESCE(telegram_username, '')
+		   FROM users
+		  WHERE telegram_id IS NOT NULL AND telegram_id != 0`)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var username, tgUsername string
+		var tgID int64
+		if err := rows.Scan(&username, &tgID, &tgUsername); err != nil {
+			return out, err
+		}
+		out[username] = TelegramBinding{TelegramID: tgID, TelegramUsername: tgUsername}
+	}
+	return out, rows.Err()
+}
+
 // UnbindTelegram 解绑(置 NULL)。
 func (r *TrafficRepository) UnbindTelegram(ctx context.Context, username string) error {
 	if username == "" {
