@@ -13156,17 +13156,36 @@ func (r *TrafficRepository) UpsertTrafficBatch(ctx context.Context, serverID int
 		return nil
 	}
 
-	tx, err := r.db.BeginTx(ctx, nil)
+	// 用 BEGIN IMMEDIATE 而不是默认 BeginTx(deferred):
+	// deferred 事务以「读快照」开始,首个 SELECT 取快照后再 UPDATE 升级写锁 —— 若期间别的连接
+	// (共 sqliteMaxOpenConns 个)提交了写,升级就报 SQLITE_BUSY_SNAPSHOT(517)。而 busy_timeout
+	// **对 517 无效**(它只让纯 SQLITE_BUSY 忙等),于是采集热路径持续刷 "database is locked (517)"。
+	// IMMEDIATE 在事务开头就拿写锁:① 没有"读快照后升级"→ 根除 517;② 写锁被占时按 busy_timeout
+	// (5s)等待而非立刻失败 → 也压掉 5 号 SQLITE_BUSY。多 writer 天然串行化(SQLite 单写),符合预期。
+	// 手动 BEGIN/COMMIT 必须钉在同一条 conn 上(事务是连接级的),故用 db.Conn 取独占连接。
+	conn, err := r.db.Conn(ctx)
 	if err != nil {
-		return fmt.Errorf("begin traffic batch: %w", err)
+		return fmt.Errorf("acquire conn for traffic batch: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }() // 已 Commit 后再 Rollback 是 no-op
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("begin immediate traffic batch: %w", err)
+	}
+	committed := false
+	// 未提交则回滚,保证 conn 归还连接池前是干净状态(否则下个使用者会继承未结事务)。
+	// 用 Background:即便 ctx 已取消,ROLLBACK 也要跑完。
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
 
 	for _, e := range emails {
 		if e.Email == "" {
 			continue
 		}
-		if err := upsertUserEmailTrafficOn(ctx, tx, serverID, e.Email, e.Uplink, e.Downlink, isXrayRestarted, e.Weight, e.AttributedUsername); err != nil {
+		if err := upsertUserEmailTrafficOn(ctx, conn, serverID, e.Email, e.Uplink, e.Downlink, isXrayRestarted, e.Weight, e.AttributedUsername); err != nil {
 			return fmt.Errorf("batch upsert user email traffic (%s): %w", e.Email, err)
 		}
 	}
@@ -13174,13 +13193,14 @@ func (r *TrafficRepository) UpsertTrafficBatch(ctx context.Context, serverID int
 		if u.Username == "" {
 			continue
 		}
-		if err := upsertUserTrafficOn(ctx, tx, serverID, u.Username, u.Uplink, u.Downlink, isXrayRestarted); err != nil {
+		if err := upsertUserTrafficOn(ctx, conn, serverID, u.Username, u.Uplink, u.Downlink, isXrayRestarted); err != nil {
 			return fmt.Errorf("batch upsert user traffic (%s): %w", u.Username, err)
 		}
 	}
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit traffic batch: %w", err)
 	}
+	committed = true
 	return nil
 }
 
