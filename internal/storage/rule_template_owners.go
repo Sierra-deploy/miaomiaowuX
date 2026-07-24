@@ -71,6 +71,19 @@ func (r *TrafficRepository) DeleteRuleTemplateOwner(ctx context.Context, filenam
 	return err
 }
 
+// CountUserRuleTemplates 统计某用户拥有的规则模板数(供 per-user 配额校验)。
+func (r *TrafficRepository) CountUserRuleTemplates(ctx context.Context, username string) (int, error) {
+	if r == nil || r.db == nil {
+		return 0, nil
+	}
+	if err := r.ensureRuleTemplateOwnersTable(ctx); err != nil {
+		return 0, err
+	}
+	var n int
+	err := r.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM rule_template_owners WHERE created_by = ?`, username).Scan(&n)
+	return n, err
+}
+
 // ListRuleTemplateOwners 返回 filename→created_by 映射(供列表标注归属)。
 func (r *TrafficRepository) ListRuleTemplateOwners(ctx context.Context) (map[string]string, error) {
 	result := make(map[string]string)

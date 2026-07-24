@@ -425,7 +425,16 @@ func (h *RuleTemplatesHandler) handleUploadTemplate(w http.ResponseWriter, r *ht
 		return
 	}
 
-	// 数量上限
+	// per-user 配额:普通用户上传规则模板受管理员配的「模板数量限制」约束(admin 不限)。
+	// 原先此路径只有下面的全局上限,不查 per-user 配额 —— 导致「模板管理」的数量限制形同虚设。
+	if err := checkUserQuota(r.Context(), h.repo, auth.UsernameFromContext(r.Context()), "template"); err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error()})
+		return
+	}
+
+	// 数量上限(全局)
 	if countRuleTemplates(templatesDir) >= ruleTemplateMaxCount {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)

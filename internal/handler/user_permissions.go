@@ -132,7 +132,11 @@ func checkUserQuota(ctx context.Context, repo *storage.TrafficRepository, userna
 	var used, max int
 	switch resource {
 	case "template":
-		used, _ = repo.CountUserTemplates(ctx, username)
+		// 「模板」= 旧 DB 模板(templates) + 规则模板(rule_templates,即「模板管理」页面)之和。
+		// rule-templates 是文件型模板,原先只有全局上限、不受 per-user 配额约束 —— 这里一并纳入。
+		tpl, _ := repo.CountUserTemplates(ctx, username)
+		rt, _ := repo.CountUserRuleTemplates(ctx, username)
+		used = tpl + rt
 		max = cfg.QuotaTemplate
 	case "override":
 		// 「覆写」= 覆写脚本(override_scripts) + 覆写规则(custom_rules) 之和
@@ -224,7 +228,9 @@ func (h *UserPermissionsHandler) UserGet(w http.ResponseWriter, r *http.Request)
 	// admin 看全部页面(不受策略限制),配额不适用。
 	isAdmin := userIsAdmin(ctx, h.repo, username)
 
-	usedTpl, _ := h.repo.CountUserTemplates(ctx, username)
+	usedTplDB, _ := h.repo.CountUserTemplates(ctx, username)
+	usedTplRule, _ := h.repo.CountUserRuleTemplates(ctx, username)
+	usedTpl := usedTplDB + usedTplRule // 模板配额 = DB 模板 + 规则模板(与 checkUserQuota 口径一致)
 	ovrScripts, _ := h.repo.CountUserOverrideScripts(ctx, username)
 	ovrRules, _ := h.repo.CountUserCustomRules(ctx, username)
 	usedOvr := ovrScripts + ovrRules // 覆写 = 脚本 + 规则
