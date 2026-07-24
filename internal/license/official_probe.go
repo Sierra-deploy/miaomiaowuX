@@ -5,6 +5,11 @@ import (
 	"errors"
 )
 
+// FeatureCustomBranding 是自定义品牌(站点标题 / 左上角标题 / logo)的 PRO 特性名,
+// 与许可证服务器套餐 features 里配置的字符串必须完全一致。开启后自定义品牌才生效,
+// 且 HasFeature 校验的是 license 服务签发的签名 token(改数据库无法伪造)。
+const FeatureCustomBranding = "custom_branding"
+
 // FeatureSpeedTest 是测速端能力的 PRO 特性名。
 //
 // 官方探测(由许可证服务派发到作者部署在国内家庭网络的探测端)属于测速端能力的延伸,

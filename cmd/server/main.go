@@ -569,6 +569,13 @@ func main() {
 	mux.Handle("/api/admin/packages/", auth.RequireAdmin(tokenStore, userRepo, handler.NewPackageDeleteHandler(repo, remoteManageHandler, limiterPusher)))
 	// 服务器分享(PRO):拥有方生成/管理分享令牌
 	mux.Handle("/api/admin/server-share/", auth.RequireAdmin(tokenStore, userRepo, handler.NewServerShareHandler(repo, licenseManager)))
+	// 自定义品牌(PRO):管理员设置站点标题/左上角标题/logo;是否生效由 license.FeatureCustomBranding 门控。
+	brandingHandler := handler.NewBrandingHandler(repo, licenseManager)
+	mux.Handle("/api/admin/system-settings/branding", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(brandingHandler.Admin)))
+	mux.Handle("/api/admin/system-settings/branding/logo", auth.RequireAdmin(tokenStore, userRepo, http.HandlerFunc(brandingHandler.UploadLogo)))
+	// 公开读取(无鉴权:登录页也要能拿品牌);门控在 handler 内 —— 无 PRO 一律返回空/404。
+	mux.HandleFunc("/api/branding", brandingHandler.PublicGet)
+	mux.HandleFunc("/api/branding/logo", brandingHandler.ServeLogo)
 	speedTesterWS := handler.NewSpeedTesterWSHandler(repo)
 	speedTesterWS.SetLicenseManager(licenseManager)
 	mux.Handle("/api/speedtest/tester/ws", speedTesterWS) // 家用测速端反向连入(token 认证,无 JWT)
