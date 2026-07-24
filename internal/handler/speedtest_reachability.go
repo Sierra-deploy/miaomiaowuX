@@ -130,3 +130,28 @@ func (h *SpeedTesterWSHandler) ProbeCapableTesterIDs(ctx context.Context, want [
 	}
 	return out
 }
+
+// ProbeV6CapableTesterIDs 从给定测速端里筛出「在线 且 声明了 probe6(能拨通公网 IPv6)」的那些。
+// 用于判断本轮有没有能可靠探测 v6 节点的观测点 —— 一个都没有时,v6 节点判「无法探测」而非被墙。
+func (h *SpeedTesterWSHandler) ProbeV6CapableTesterIDs(ctx context.Context, want []int64) []int64 {
+	if len(want) == 0 {
+		return nil
+	}
+	testers, err := h.repo.ListSpeedTesters(ctx)
+	if err != nil {
+		return nil
+	}
+	v6capable := map[int64]bool{}
+	for _, t := range testers {
+		if t.HasCap(storage.CapProbe) && t.HasCap(storage.CapProbeV6) {
+			v6capable[t.ID] = true
+		}
+	}
+	out := make([]int64, 0, len(want))
+	for _, id := range want {
+		if v6capable[id] && h.Online(id) {
+			out = append(out, id)
+		}
+	}
+	return out
+}

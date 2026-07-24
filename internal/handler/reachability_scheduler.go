@@ -100,7 +100,42 @@ func runReachabilityCycle(ctx context.Context, repo *storage.TrafficRepository, 
 	}
 	now := time.Now().Format("2006-01-02 15:04")
 
+	// v6 误判防护:只有能拨通公网 IPv6 的探测源(hello 声明 probe6)才有资格判 v6 节点。
+	// 家用测速端多在国内家庭网络,可能没有 v6 出口 —— 那样它对所有 v6 节点(clash server 为字面 IPv6)
+	// 都 network unreachable,会把 v6 节点全误报「被墙」。
+	// 判据:本轮既没有任何在线 probe6 探测源、也没有任何 v6 目标被判可达(官方探测等)→ 无从判定 v6 →
+	// 所有 v6 节点判「无法探测」跳过。有 probe6 源在线 / 有任一 v6 可达 → 确有 v6 视角 → 正常判定
+	//(个别 v6 真被墙仍能报出)。这样即使全部节点都是 v6(无 v4 基准)也不误报。
+	v6Inconclusive := false
+	{
+		hasV6Prober := st != nil && len(st.ProbeV6CapableTesterIDs(ctx, ah.probeTesterIDs(ctx))) > 0
+		var hasV6, anyV6OK bool
+		for tgt, ok := range reachable {
+			if isV6Target(tgt) {
+				hasV6 = true
+				if ok {
+					anyV6OK = true
+				}
+			}
+		}
+		if hasV6 && !hasV6Prober && !anyV6OK {
+			v6Inconclusive = true
+			log.Printf("[reachability] 本轮无在线 probe6(有公网 IPv6 的)探测源且无任何 v6 可达 → 跳过所有 v6 节点(避免误报被墙)")
+		}
+	}
+
 	for nodeID, tgt := range nodeTarget {
+		if v6Inconclusive && isV6Target(tgt) {
+			// 探测源疑似无 IPv6 → 无法判定该 v6 节点。清掉可能已有的误报被墙,重置为未判定,
+			// 不计失败、不发公告。仅在确有残留状态时才写库,避免每轮空转。
+			if prev, _, _ := repo.GetNodeReachability(ctx, nodeID); prev.AnnouncedBlocked || prev.ConsecutiveFail > 0 {
+				if prev.AnnouncedBlocked {
+					_ = repo.DeleteAnnouncementsByNode(ctx, nodeID, AnnounceTypeNodeBlocked)
+				}
+				_ = repo.SetNodeReachability(ctx, storage.NodeReachability{NodeID: nodeID, Reachable: true, ConsecutiveFail: 0, AnnouncedBlocked: false})
+			}
+			continue
+		}
 		ok := reachable[tgt]
 		prev, _, _ := repo.GetNodeReachability(ctx, nodeID)
 		if ok {
@@ -229,4 +264,16 @@ func parseNodeTarget(clashJSON string) string {
 		return ""
 	}
 	return net.JoinHostPort(server, strconv.Itoa(port))
+}
+
+// isV6Target 判断探测目标(host:port)的 host 是否为字面 IPv6 地址。
+// mmwX 的「v6 节点」clash server 就是字面 IPv6(见 RefreshNodesServerAddressV6:server 含 ':'),
+// 故据此识别;域名目标无法从字符串判定地址族,一律当非 v6(不影响本 bug —— 报修的是字面 v6 节点)。
+func isV6Target(hostport string) bool {
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = hostport
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.To4() == nil
 }

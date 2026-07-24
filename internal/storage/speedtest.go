@@ -26,6 +26,10 @@ type SpeedTester struct {
 // CapProbe 是「可承担可达性探测」的能力标识,与测速端客户端 hello 里上报的字符串一致。
 const CapProbe = "probe"
 
+// CapProbeV6 表示该测速端能拨通【公网 IPv6】,可承担 v6 节点的可达性探测。
+// 客户端只在实测能连通公网 v6 时才上报,避免没有 v6 的测速端把 v6 节点误报被墙。
+const CapProbeV6 = "probe6"
+
 // HasCap 判断测速端是否具备某能力。
 func (t SpeedTester) HasCap(cap string) bool {
 	for _, c := range t.Caps {
