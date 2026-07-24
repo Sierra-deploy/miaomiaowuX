@@ -648,18 +648,44 @@ func applyMultiplierPrefix(proxy map[string]any, node storage.Node, pkg *storage
 }
 
 func applyUserCredentials(proxy map[string]any, node storage.Node, credMap map[credKey]string) {
-	if credMap == nil || node.OriginalServer == "" || node.InboundTag == "" {
+	if credMap == nil || node.InboundTag == "" {
 		return
 	}
 	credJSON, ok := credMap[credKey{node.OriginalServer, node.InboundTag}]
 	if !ok {
-		return
+		// OriginalServer 为空或与凭据所在服务器名不一致时(常见于外部中转 / 手动创建、host 未命中
+		// 已注册服务器的节点 → enforceLicenseIfNodeHostMatchesServer 不 claim → OriginalServer 留空),
+		// 按 inbound_tag 唯一匹配兜底 —— 与 provisioning(resolveNodeServer 的 inbound_tag 兜底)对齐。
+		// 否则订阅静默回退到节点自带的基础凭据(创建者/admin),导致 per-user 统计/限速失效、
+		// 删号/解绑套餐后仍可连(用户订阅里用的根本不是自己的凭据,而是入站 base user 的)。
+		credJSON, ok = credByInboundTagUnique(credMap, node.InboundTag)
+		if !ok {
+			return
+		}
 	}
 	var cred map[string]any
 	if err := json.Unmarshal([]byte(credJSON), &cred); err != nil {
 		return
 	}
 	applyCredToProxy(proxy, node.Protocol, cred)
+}
+
+// credByInboundTagUnique 按 inbound_tag 在(某用户的)credMap 里兜底查凭据:恰好命中一个条目才返回。
+// credMap 是 per-user 的,故命中即该用户在某服务器该入站的凭据;命中多个(同 tag 分布在多台服务器,
+// 歧义)则放弃兜底,交由 {server,tag} 精确匹配处理,绝不乱套到别的服务器凭据。
+func credByInboundTagUnique(credMap map[credKey]string, inboundTag string) (string, bool) {
+	var found string
+	n := 0
+	for k, v := range credMap {
+		if k.inboundTag == inboundTag {
+			found = v
+			n++
+			if n > 1 {
+				return "", false
+			}
+		}
+	}
+	return found, n == 1
 }
 
 // applyCredToProxy 按协议把用户凭据(cred = credential_json 解析结果)写进 clash proxy 的对应字段。
