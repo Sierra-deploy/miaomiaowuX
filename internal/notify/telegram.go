@@ -3,6 +3,7 @@ package notify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -26,15 +27,19 @@ func sendTelegram(ctx context.Context, botToken, chatID, text string) error {
 		"parse_mode": {"Markdown"},
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	// 参数放进 POST body(而非 query string):否则 chat_id、通知正文(含用户名/IP)会进 URL,
+	// 一旦请求失败,*url.Error 会把整条 URL 打进日志 → 泄漏 chat_id / 正文 / 用户 IP。
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(params.Encode()))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
-	req.URL.RawQuery = params.Encode()
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("send telegram: %w", err)
+		// *url.Error.Error() 会带完整请求 URL(URL path 里仍含 bot token)。脱敏后只保留操作名与
+		// 底层原因(如 context canceled / connection refused),避免 token 落进日志。
+		return fmt.Errorf("send telegram: %w", redactURLError(err))
 	}
 	defer resp.Body.Close()
 
@@ -48,6 +53,17 @@ func sendTelegram(ctx context.Context, botToken, chatID, text string) error {
 	}
 
 	return nil
+}
+
+// redactURLError 把 *url.Error 里的敏感 URL 去掉。net/http 的传输错误是 *url.Error,
+// 其 Error() 会拼上完整请求 URL(含 bot token,历史上还含 chat_id/正文/IP)。URL 对排障价值有限,
+// 但会泄漏 token,故整体替换成固定主机名,只保留操作名(Post)与底层原因。非 *url.Error 原样返回。
+func redactURLError(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return fmt.Errorf("%s https://api.telegram.org: %w", ue.Op, ue.Err)
+	}
+	return err
 }
 
 // markdownEscaper 转义 Telegram legacy Markdown 的特殊字符。

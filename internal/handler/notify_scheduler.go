@@ -79,8 +79,13 @@ func notifyAsync(ctx context.Context, t notify.EventType, title, msg string) {
 		logNotifyReasonThrottled(t, string(reason))
 		return
 	}
+	// 异步 send 必须脱离请求生命周期:调用方多为 HTTP handler(如订阅获取),响应写完后
+	// r.Context() 立即被取消,继续用它会让 goroutine 里的 TG 请求以 "context canceled" 失败
+	// (订阅本身已 200,通知却报错)。WithoutCancel 保留 ctx 上的值、只剥离取消与 deadline,
+	// 实际超时由 httpClient.Timeout(10s)兜底。
+	sendCtx := context.WithoutCancel(ctx)
 	go func() {
-		if err := n.Send(ctx, notify.Event{Type: t, Title: title, Message: msg}); err != nil {
+		if err := n.Send(sendCtx, notify.Event{Type: t, Title: title, Message: msg}); err != nil {
 			log.Printf("[Notify] send failed event=%s: %v", t, err)
 		}
 	}()
