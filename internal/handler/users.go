@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"miaomiaowux/internal/auth"
 	"miaomiaowux/internal/license"
 	"miaomiaowux/internal/storage"
 )
@@ -40,13 +41,13 @@ type userEntry struct {
 	DeviceLimitOverride *int     `json:"device_limit_override"`
 	// 用户级流量上限覆写(GB)。指针必需:0(显式不限流量)与 null(继承套餐)语义不同。
 	// 注意 TrafficLimitGB/TrafficLimit 给的是**有效值**(已含覆写),这个字段只供弹窗回填 + 标记"已覆写"。
-	TrafficLimitOverrideGB *float64 `json:"traffic_limit_override_gb"`
+	TrafficLimitOverrideGB   *float64          `json:"traffic_limit_override_gb"`
 	NodeSpeedLimitOverrides  map[int64]float64 `json:"node_speed_limit_overrides,omitempty"`
 	NodeDeviceLimitOverrides map[int64]int     `json:"node_device_limit_overrides,omitempty"`
 	// 短码:user_short_code 是系统自动生成的;custom_user_short_code 非空时优先生效。
 	// 前端用 user_short_code 显示"当前生效",custom_user_short_code 作为编辑输入框的回填值。
-	UserShortCode       string   `json:"user_short_code"`
-	CustomUserShortCode string   `json:"custom_user_short_code"`
+	UserShortCode       string `json:"user_short_code"`
+	CustomUserShortCode string `json:"custom_user_short_code"`
 }
 
 type userStatusRequest struct {
@@ -181,7 +182,7 @@ func NewUserListHandler(repo *storage.TrafficRepository) http.Handler {
 //
 // 跟 user delete 路径区别:本接口 **保留** user_inbound_configs 行 (credential 留着),
 // 启用时能精确还原原 uuid/password,客户端订阅无需重新生成。
-func NewUserStatusHandler(repo *storage.TrafficRepository, remoteManage *RemoteManageHandler, pusher *LimiterConfigPusher) http.Handler {
+func NewUserStatusHandler(repo *storage.TrafficRepository, remoteManage *RemoteManageHandler, pusher *LimiterConfigPusher, tokens *auth.TokenStore) http.Handler {
 	if repo == nil {
 		panic("user status handler requires repository")
 	}
@@ -229,6 +230,18 @@ func NewUserStatusHandler(repo *storage.TrafficRepository, remoteManage *RemoteM
 			}
 			writeError(w, http.StatusInternalServerError, err)
 			return
+		}
+
+		// 禁用 → 立即踢出该用户当前登录会话。RequireToken 命中内存 token 即放行、不重查
+		// is_active,不踢的话被禁用户的面板会话到期(最长 30 天)前一直有效。
+		// 内存 + DB 双清(DB 会话主控重启会 LoadSessions 重新加载,只清内存不彻底)。
+		if !payload.IsActive {
+			if tokens != nil {
+				tokens.RevokeUser(username)
+			}
+			if err := repo.DeleteUserSessions(ctx, username); err != nil {
+				log.Printf("[UserStatus] disable: delete persisted sessions for %s failed: %v", username, err)
+			}
 		}
 
 		// 状态切换后,同步 xray inbound clients。
@@ -569,7 +582,8 @@ var reservedShortCodes = map[string]bool{
 //   - 命中保留字            → 400(防 /x/admin 之类的钓鱼)
 //   - 撞其他用户的 username  → 409
 //   - 撞其他用户的有效短码    → 409(custom_user_short_code 列的 UNIQUE 索引只防"custom 撞 custom",
-//                              并不阻止"custom 撞别人的自动 user_short_code")
+//     并不阻止"custom 撞别人的自动 user_short_code")
+//
 // targetUsername 是被设置短码的"目标用户";同名跳过(允许重置成自己当前的值)。
 func validateCustomUserShortCode(ctx context.Context, repo *storage.TrafficRepository, code, targetUsername string) error {
 	code = strings.TrimSpace(code)

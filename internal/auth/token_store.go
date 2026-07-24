@@ -130,6 +130,22 @@ func (s *TokenStore) RevokeAll() {
 	s.mu.Unlock()
 }
 
+// RevokeUser 踢出某用户的全部内存会话(禁用用户 / 强制下线时用)。
+// 只清内存;DB 侧持久化会话需调用方另配 repo.DeleteUserSessions,否则主控重启会从 DB 重新加载。
+func (s *TokenStore) RevokeUser(username string) {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return
+	}
+	s.mu.Lock()
+	for token, sess := range s.tokens {
+		if sess.username == username {
+			delete(s.tokens, token)
+		}
+	}
+	s.mu.Unlock()
+}
+
 // 将会话添加到内存存储中。用于在启动时从数据库恢复会话。
 func (s *TokenStore) LoadSession(token, username string, expiry time.Time) {
 	token = strings.TrimSpace(token)
