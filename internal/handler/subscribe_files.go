@@ -1527,15 +1527,21 @@ func filterAdminVisibleSubscribeFiles(ctx context.Context, repo *storage.Traffic
 			creators[f.CreatedBy] = struct{}{}
 		}
 	}
-	adminCreators := make(map[string]bool, len(creators))
+	// adminVisible:归属为「其他 admin」或「本实例已不存在的用户」的订阅,都让当前 admin 可见。
+	// 后者是跨实例迁移/恢复留下的孤儿订阅(created_by 是源实例用户名,本实例查不到)——
+	// 否则 admin 既看不到也删不掉,只能卡在列表外。规则用户(存在的非 admin)的私有订阅仍隐藏。
+	adminVisible := make(map[string]bool, len(creators))
 	for c := range creators {
-		if u, err := repo.GetUser(ctx, c); err == nil && u.Role == storage.RoleAdmin {
-			adminCreators[c] = true
+		u, err := repo.GetUser(ctx, c)
+		if err != nil {
+			adminVisible[c] = true // 归属用户不存在 → 孤儿订阅,admin 可管理/清理
+		} else if u.Role == storage.RoleAdmin {
+			adminVisible[c] = true
 		}
 	}
 	out := make([]storage.SubscribeFile, 0, len(files))
 	for _, f := range files {
-		if f.CreatedBy == "" || f.CreatedBy == self || adminCreators[f.CreatedBy] {
+		if f.CreatedBy == "" || f.CreatedBy == self || adminVisible[f.CreatedBy] {
 			out = append(out, f)
 		}
 	}
