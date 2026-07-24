@@ -370,7 +370,7 @@ func protocolEquivalent(clashType, xrayProtocol string) bool {
 	return norm(a) == norm(b)
 }
 
-// tryClaimExternalNode 扫所有"外部节点"(original_server='' 且 inbound_tag=''),
+// tryClaimExternalNode 扫所有"外部节点"(original_server=” 且 inbound_tag=”),
 // 看是否有节点的 clash_config 指向 (server 的 IP/Domain/PullAddress 之一) + 同 port + 同 protocol,
 // 命中即把该节点 UPDATE 为受管节点(填上 original_server + inbound_tag),返回 true。
 // 这避免迁移场景下:mmw 原有节点 + agent 扫描新创建节点 → 重复 2 条节点的问题。
@@ -471,6 +471,16 @@ func (l *NodeSyncListener) handleUpdated(ctx context.Context, event InboundEvent
 		return
 	}
 
+	// 中转:该 (server,tag) 下若存在中转节点 —— 本次编辑新填了中转地址,或节点本就配了中转 ——
+	// 必须把重生成的配置改写成中转地址(而非源站 host)后全量更新。否则:
+	//   1. 编辑时新增中转不生效(节点仍是源站配置)—— 用户报告的问题;
+	//   2. 编辑已配中转的节点(改协议/安全,中转字段空)会把中转地址冲回源站。
+	// 下面基于 chooseClashServerHost 的 v4/v6 更新只对「非中转」节点生效。
+	if l.applyRelayNodesOnUpdate(ctx, server.Name, event, clashConfig) {
+		log.Printf("[NodeSync] Updated relay node(s) for inbound: %s/%s", server.Name, event.Tag)
+		return
+	}
+
 	// v4/域名节点:用 base 配置(server = chooseClashServerHost)更新。
 	// 订阅生成时 proxy 名取 node_name 列(subscription.go:988),clash_config 内的 name 仅内部用,无需特意保留。
 	if err := l.repo.UpdateNodeByInboundTag(ctx, server.Name, event.Tag, clashConfig, "v4"); err != nil {
@@ -491,4 +501,78 @@ func (l *NodeSyncListener) handleUpdated(ctx context.Context, event InboundEvent
 		}
 	}
 	log.Printf("[NodeSync] Updated node(s) for inbound: %s/%s", server.Name, event.Tag)
+}
+
+// applyRelayNodesOnUpdate 处理「编辑入站时的中转节点」:该 (serverName, tag) 下若有中转节点
+// (event 本次新填了 RelayServer,或节点已有 relay_orig_server),就用重生成的入站配置
+// (协议/传输/安全已更新)但把 server/port 改写成中转地址、把源服务器地址记回 relay_orig_*,
+// 逐节点全量更新。返回 true 表示已按中转处理完(调用方 return,不再走普通 v4/v6 更新)。
+//
+// 走全量 UpdateNode 而非 UpdateNodeByInboundTag,是因为后者只改 clash/parsed_config、不写 relay_orig_*。
+func (l *NodeSyncListener) applyRelayNodesOnUpdate(ctx context.Context, serverName string, event InboundEvent, regenClash string) bool {
+	newRelay := strings.TrimSpace(event.RelayServer)
+
+	// regenClash 的 server/port 就是 inboundToClash 用 chooseClashServerHost 填的源站地址。
+	var m map[string]any
+	if json.Unmarshal([]byte(regenClash), &m) != nil {
+		return false
+	}
+	origHost, _ := m["server"].(string)
+	origPort := clashPortOf(m)
+
+	sysOwner := l.repo.GetSystemNodeOwner(ctx)
+	nodes, err := l.repo.ListNodes(ctx, sysOwner)
+	if err != nil {
+		return false
+	}
+
+	handled := false
+	for _, n := range nodes {
+		if n.OriginalServer != serverName || n.InboundTag != event.Tag {
+			continue
+		}
+		if newRelay == "" && strings.TrimSpace(n.RelayOrigServer) == "" {
+			continue // 该节点不是中转,交给普通 v4/v6 更新
+		}
+
+		// 中转地址:优先本次新填;否则沿用节点当前的中转(其当前 clash server/port 即中转地址)。
+		relayHost := newRelay
+		relayPort := event.RelayPort
+		if relayHost == "" {
+			if s, p, ok := clashServerPortOf(n.ClashConfig); ok {
+				relayHost, relayPort = s, p
+			}
+		}
+		if relayPort <= 0 {
+			relayPort = origPort // 端口默认填源站(节点)端口
+		}
+
+		cfg, cerr := cloneClashWithServerPort(m, n.NodeName, relayHost, relayPort)
+		if cerr != nil {
+			continue
+		}
+		n.ClashConfig = cfg
+		n.ParsedConfig = cfg
+		n.RelayOrigServer = origHost
+		n.RelayOrigPort = origPort
+		if _, uerr := l.repo.UpdateNode(ctx, n); uerr != nil {
+			log.Printf("[NodeSync] Failed to update relay node %s: %v", n.NodeName, uerr)
+			continue
+		}
+		handled = true
+	}
+	return handled
+}
+
+// clashServerPortOf 从 clash proxy JSON 读出顶层 server 与 port,取不到 server 返回 ok=false。
+func clashServerPortOf(cfgJSON string) (string, int, bool) {
+	var m map[string]any
+	if json.Unmarshal([]byte(cfgJSON), &m) != nil {
+		return "", 0, false
+	}
+	s, ok := m["server"].(string)
+	if !ok || strings.TrimSpace(s) == "" {
+		return "", 0, false
+	}
+	return s, clashPortOf(m), true
 }
